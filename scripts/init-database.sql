@@ -302,7 +302,7 @@ CREATE TABLE IF NOT EXISTS upload_jobs (
 -- Table: upload_job_logs
 -- =====================================================
 -- Detailed logs for upload jobs
--- NOTE: metadata is TEXT NOT NULL (not JSON) for ClickHouse MaterializedMySQL compatibility
+-- NOTE: metadata stored as TEXT for JSON content
 CREATE TABLE IF NOT EXISTS upload_job_logs (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     job_id VARCHAR(50) NOT NULL,

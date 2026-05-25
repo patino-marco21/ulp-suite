@@ -1,164 +1,68 @@
 networks:
   default:
-    name: bronvault_network
+    name: ulpvault_network
     driver: bridge
 
 services:
-  # -----------------------------------------------------------
-  # 1. DATABASE (MySQL 8.0)
-  # -----------------------------------------------------------
-  mysql:
-    image: mysql:8.0
-    container_name: bronvault_mysql
-    restart: always
-    hostname: mysql_host
-    # Network alias to ensure hostname mysql_host can be resolved
-    # by other containers (especially ClickHouse for MaterializedMySQL)
-    networks:
-      default:
-        aliases:
-          - mysql_host
-          - mysql  # Can also be accessed via service name
-    # Command for MySQL 8.0 - configuration for MaterializedMySQL replication
-    command: >
-      --log-bin=mysql-bin 
-      --binlog-format=ROW
-      --server-id=1
-      --gtid-mode=ON
-      --enforce-gtid-consistency=ON
-      --default-authentication-plugin=mysql_native_password
-    environment:
-      TZ: Asia/Jakarta
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
-      MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-    volumes:
-      - ./mysql-data:/var/lib/mysql
-      # Auto-import SQL schema
-      - ./scripts/init-database.sql:/docker-entrypoint-initdb.d/init.sql
-    ports:
-      - "3306:3306"
-    healthcheck:
-      # Healthcheck for MySQL 8.0
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-
-  # -----------------------------------------------------------
-  # 2. ANALYTICS (ClickHouse)
-  # -----------------------------------------------------------
+  # ─── ClickHouse (primary credential data store) ───────────────────────────
   clickhouse:
-    image: clickhouse/clickhouse-server:24.3
-    container_name: bronvault_clickhouse
+    image: clickhouse/clickhouse-server:26.3
+    container_name: ulpvault_clickhouse
     restart: always
     ports:
       - "8123:8123"
       - "9000:9000"
     environment:
-      TZ: Asia/Jakarta
-      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-ulp}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     ulimits:
       nofile:
         soft: 262144
         hard: 262144
     volumes:
-      - ./clickhouse-data:/var/lib/clickhouse
-    # Note: ClickHouse will connect to MySQL using hostname "mysql_host"
-    # MySQL container hostname is set as "mysql_host", so it can be resolved
-    # by other containers in the same network
-    depends_on:
-      mysql:
-        condition: service_healthy
+      - clickhouse_data:/var/lib/clickhouse
+      - ./docker/clickhouse/init:/docker-entrypoint-initdb.d/
+      - ./docker/clickhouse/config:/etc/clickhouse-server/config.d/
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
-  # -----------------------------------------------------------
-  # 3. MAIN APP (Next.js) 
-  # -----------------------------------------------------------
+  # ─── App (Next.js — SQLite for metadata, ClickHouse for credentials) ──────
   app:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: bronvault_app
-    restart: on-failure # SECURITY: Don't restart infinitely on crash loops (LOW-09)
+    container_name: ulpvault_app
+    restart: on-failure
     ports:
       - "3000:3000"
     environment:
-      # Timezone
-      TZ: Asia/Jakarta
-      # Database Connection - MySQL
-      MYSQL_HOST: mysql
-      MYSQL_PORT: 3306
-      MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
-      DATABASE_URL: "mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE}"
-      # Database Connection - ClickHouse
-      CLICKHOUSE_HOST: "http://clickhouse:8123"
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
-      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB}
-      JWT_SECRET: "${JWT_SECRET:-super_secret_random_string_at_least_32_chars_long}"
       NODE_ENV: production
+      # ClickHouse — credential data store
+      CLICKHOUSE_HOST: "http://clickhouse:8123"
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB:-ulp}
+      # SQLite — app metadata (users, API keys, monitors, audit logs)
+      SQLITE_PATH: /app/data/ulp.db
+      # Auth
+      JWT_SECRET: ${JWT_SECRET}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      # Default admin (seeded on first startup if no users exist)
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@ulp.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
     volumes:
-       - ./uploads:/app/uploads
+      - ./uploads:/app/uploads
+      - ./data:/app/data
     depends_on:
-      mysql:
-        condition: service_healthy
       clickhouse:
-        condition: service_started
-      setup:
-        condition: service_completed_successfully
-
-  # -----------------------------------------------------------
-  # 4. OBJECT STORAGE (MinIO - S3 Compatible)
-  # -----------------------------------------------------------
-  minio:
-    image: minio/minio:latest
-    container_name: bronvault_minio
-    restart: always
-    ports:
-      - "9001:9000"      # S3 API
-      - "9002:9001"      # MinIO Console (Web UI)
-    environment:
-      TZ: Asia/Jakarta
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
-    volumes:
-      - ./minio-data:/data
-    command: server /data --console-address ":9001"
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
-  # -----------------------------------------------------------
-  # 5. SETUP WORKER (Run Once for Configuration)
-  # -----------------------------------------------------------
-  setup:
-    build:
-      context: .
-      dockerfile: Dockerfile.setup
-    container_name: bronvault_setup
-    # Docker will load all variables from .env into the setup container
-    # Make sure the .env file contains all required variables:
-    # MYSQL_ROOT_PASSWORD, MYSQL_DATABASE, MYSQL_USER, MYSQL_PASSWORD,
-    # CLICKHOUSE_USER, CLICKHOUSE_PASSWORD, CLICKHOUSE_DB,
-    # SYNC_USER, SYNC_PASSWORD
-    environment:
-      TZ: Asia/Jakarta
-    env_file:
-      - .env
-    depends_on:
-      mysql:
         condition: service_healthy
-      clickhouse:
-        condition: service_started
-    # This service will exit automatically after completion (exit 0)
-    restart: "no"
+
+volumes:
+  clickhouse_data:
+    driver: local

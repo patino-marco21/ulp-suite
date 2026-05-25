@@ -1,458 +1,164 @@
-import { NextRequest, NextResponse } from "next/server"
-import { pool } from "@/lib/mysql"
-import bcrypt from "bcryptjs"
-import type { RowDataPacket, ResultSetHeader } from "mysql2"
-import { validateRequest, requireAdminRole, UserRole } from "@/lib/auth"
-import { logUserAction } from "@/lib/audit-log"
+import { NextRequest, NextResponse } from 'next/server'
+import { dbGet, dbQuery, dbRun } from '@/lib/sqlite'
+import bcrypt from 'bcryptjs'
+import { validateRequest, requireAdminRole, UserRole } from '@/lib/auth'
+import { logUserAction } from '@/lib/audit-log'
 
-// Force dynamic rendering
 export const dynamic = 'force-dynamic'
 
-/**
- * GET /api/users
- * Get all users (admin only)
- */
 export async function GET(request: NextRequest) {
-  // Validate authentication
   const user = await validateRequest(request)
-  if (!user) {
-    return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
-  }
-
-  // Check admin role
+  if (!user) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
   const roleError = requireAdminRole(user)
-  if (roleError) {
-    return roleError
-  }
+  if (roleError) return roleError
 
-  try {
-    const [users] = await pool.query<RowDataPacket[]>(
-      "SELECT id, email, name, role, is_active, created_at, updated_at FROM users ORDER BY created_at DESC"
-    )
-
-    return NextResponse.json({
-      success: true,
-      users: users || []
-    })
-  } catch (err) {
-    console.error("Get users error:", err)
-    return NextResponse.json({ success: false, error: "Failed to fetch users" }, { status: 500 })
-  }
+  const users = dbQuery('SELECT id, email, name, role, is_active, created_at, updated_at FROM users ORDER BY created_at DESC')
+  return NextResponse.json({ success: true, users })
 }
 
-/**
- * POST /api/users
- * Create a new user (admin only)
- */
 export async function POST(request: NextRequest) {
-  // Validate authentication
   const user = await validateRequest(request)
-  if (!user) {
-    return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
-  }
-
-  // Check admin role
+  if (!user) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
   const roleError = requireAdminRole(user)
-  if (roleError) {
-    return roleError
-  }
+  if (roleError) return roleError
 
   try {
     const { email, password, name, role } = await request.json()
-
-    // Validate input
     if (!email || !password || !name) {
-      return NextResponse.json({ 
-        success: false, 
-        error: "Email, password, and name are required" 
-      }, { status: 400 })
+      return NextResponse.json({ success: false, error: 'Email, password, and name are required' }, { status: 400 })
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return NextResponse.json({ success: false, error: 'Invalid email format' }, { status: 400 })
+    }
+    if (password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/[0-9]/.test(password)) {
+      return NextResponse.json({ success: false, error: 'Password must be 8+ chars with upper, lower, and digit' }, { status: 400 })
     }
 
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-    if (!emailRegex.test(email)) {
-      return NextResponse.json({ 
-        success: false, 
-        error: "Invalid email format" 
-      }, { status: 400 })
-    }
-
-    // Validate password strength - matches validation.ts requirements
-    if (password.length < 8) {
-      return NextResponse.json({ 
-        success: false, 
-        error: "Password must be at least 8 characters long" 
-      }, { status: 400 })
-    }
-    
-    // SECURITY: Check password complexity
-    if (!/[A-Z]/.test(password)) {
-      return NextResponse.json({ 
-        success: false, 
-        error: "Password must contain at least one uppercase letter" 
-      }, { status: 400 })
-    }
-    if (!/[a-z]/.test(password)) {
-      return NextResponse.json({ 
-        success: false, 
-        error: "Password must contain at least one lowercase letter" 
-      }, { status: 400 })
-    }
-    if (!/[0-9]/.test(password)) {
-      return NextResponse.json({ 
-        success: false, 
-        error: "Password must contain at least one number" 
-      }, { status: 400 })
-    }
-
-    // Validate role
     const validRoles: UserRole[] = ['admin', 'analyst']
     const userRole: UserRole = validRoles.includes(role) ? role : 'analyst'
 
-    // Check if email already exists
-    const [existingUsers] = await pool.query<RowDataPacket[]>(
-      "SELECT id FROM users WHERE email = ? LIMIT 1",
-      [email]
-    )
+    const existing = dbGet('SELECT id FROM users WHERE email = ?', [email])
+    if (existing) return NextResponse.json({ success: false, error: 'Email already exists' }, { status: 400 })
 
-    if (Array.isArray(existingUsers) && existingUsers.length > 0) {
-      return NextResponse.json({ 
-        success: false, 
-        error: "Email already exists" 
-      }, { status: 400 })
-    }
+    const hash = await bcrypt.hash(password, 12)
+    const { lastId } = dbRun('INSERT INTO users (email, password_hash, name, role) VALUES (?, ?, ?, ?)',
+      [email, hash, name, userRole])
 
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 12)
+    await logUserAction('user.create', { id: Number(user.userId), email: user.email || null }, lastId,
+      { email, name, role: userRole }, request)
 
-    // Create user
-    const [result] = await pool.query<ResultSetHeader>(
-      "INSERT INTO users (email, password_hash, name, role) VALUES (?, ?, ?, ?)",
-      [email, hashedPassword, name, userRole]
-    )
-
-    console.log("✅ User created successfully:", email, "with role:", userRole)
-
-    // Log the user creation in audit log
-    await logUserAction(
-      'user.create',
-      { id: Number(user.userId), email: user.email || null },
-      result.insertId,
-      { email, name, role: userRole },
-      request
-    )
-
-    return NextResponse.json({ 
-      success: true, 
-      message: "User created successfully",
-      user: {
-        id: result.insertId,
-        email,
-        name,
-        role: userRole
-      }
-    })
+    return NextResponse.json({ success: true, message: 'User created successfully', user: { id: lastId, email, name, role: userRole } })
   } catch (err) {
-    console.error("Create user error:", err)
-    return NextResponse.json({ success: false, error: "Failed to create user" }, { status: 500 })
+    console.error('Create user error:', err)
+    return NextResponse.json({ success: false, error: 'Failed to create user' }, { status: 500 })
   }
 }
 
-/**
- * PUT /api/users
- * Update a user (admin only)
- */
 export async function PUT(request: NextRequest) {
-  // Validate authentication
   const user = await validateRequest(request)
-  if (!user) {
-    return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
-  }
-
-  // Check admin role
+  if (!user) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
   const roleError = requireAdminRole(user)
-  if (roleError) {
-    return roleError
-  }
+  if (roleError) return roleError
 
   try {
     const { id, email, name, role, password, is_active } = await request.json()
+    if (!id) return NextResponse.json({ success: false, error: 'User ID is required' }, { status: 400 })
 
-    if (!id) {
-      return NextResponse.json({ 
-        success: false, 
-        error: "User ID is required" 
-      }, { status: 400 })
+    if (!dbGet('SELECT id FROM users WHERE id = ?', [id])) {
+      return NextResponse.json({ success: false, error: 'User not found' }, { status: 404 })
     }
 
-    // Check if user exists
-    const [existingUsers] = await pool.query<RowDataPacket[]>(
-      "SELECT id FROM users WHERE id = ? LIMIT 1",
-      [id]
-    )
-
-    if (!Array.isArray(existingUsers) || existingUsers.length === 0) {
-      return NextResponse.json({ 
-        success: false, 
-        error: "User not found" 
-      }, { status: 404 })
-    }
-
-    // Build update query dynamically
-    const updates: string[] = []
-    const values: any[] = []
+    const parts: string[] = []
+    const params: unknown[] = []
 
     if (email) {
-      // Validate email format
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-      if (!emailRegex.test(email)) {
-        return NextResponse.json({ 
-          success: false, 
-          error: "Invalid email format" 
-        }, { status: 400 })
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return NextResponse.json({ success: false, error: 'Invalid email format' }, { status: 400 })
       }
-
-      // Check if email is used by another user
-      const [emailCheck] = await pool.query<RowDataPacket[]>(
-        "SELECT id FROM users WHERE email = ? AND id != ? LIMIT 1",
-        [email, id]
-      )
-      if (Array.isArray(emailCheck) && emailCheck.length > 0) {
-        return NextResponse.json({ 
-          success: false, 
-          error: "Email already in use by another user" 
-        }, { status: 400 })
+      if (dbGet('SELECT id FROM users WHERE email = ? AND id != ?', [email, id])) {
+        return NextResponse.json({ success: false, error: 'Email already in use' }, { status: 400 })
       }
-
-      updates.push("email = ?")
-      values.push(email)
+      parts.push('email = ?'); params.push(email)
     }
-
-    if (name) {
-      updates.push("name = ?")
-      values.push(name)
-    }
-
+    if (name) { parts.push('name = ?'); params.push(name) }
     if (role) {
-      const validRoles: UserRole[] = ['admin', 'analyst']
-      if (!validRoles.includes(role)) {
-        return NextResponse.json({ 
-          success: false, 
-          error: "Invalid role. Must be 'admin' or 'analyst'" 
-        }, { status: 400 })
+      if (!['admin', 'analyst'].includes(role)) {
+        return NextResponse.json({ success: false, error: 'Invalid role' }, { status: 400 })
       }
-      updates.push("role = ?")
-      values.push(role)
+      parts.push('role = ?'); params.push(role)
     }
-
     if (password) {
-      // SECURITY: Validate password complexity - matches validation.ts requirements
-      if (password.length < 8) {
-        return NextResponse.json({ 
-          success: false, 
-          error: "Password must be at least 8 characters long" 
-        }, { status: 400 })
+      if (password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/[0-9]/.test(password)) {
+        return NextResponse.json({ success: false, error: 'Password too weak' }, { status: 400 })
       }
-      if (!/[A-Z]/.test(password)) {
-        return NextResponse.json({ 
-          success: false, 
-          error: "Password must contain at least one uppercase letter" 
-        }, { status: 400 })
-      }
-      if (!/[a-z]/.test(password)) {
-        return NextResponse.json({ 
-          success: false, 
-          error: "Password must contain at least one lowercase letter" 
-        }, { status: 400 })
-      }
-      if (!/[0-9]/.test(password)) {
-        return NextResponse.json({ 
-          success: false, 
-          error: "Password must contain at least one number" 
-        }, { status: 400 })
-      }
-      const hashedPassword = await bcrypt.hash(password, 12)
-      updates.push("password_hash = ?")
-      values.push(hashedPassword)
+      parts.push('password_hash = ?'); params.push(await bcrypt.hash(password, 12))
     }
-
-    // Handle is_active toggle
     if (typeof is_active === 'boolean') {
-      // Prevent deactivating your own account
-      if (String(id) === user.userId && is_active === false) {
-        return NextResponse.json({ 
-          success: false, 
-          error: "You cannot deactivate your own account" 
-        }, { status: 400 })
+      if (String(id) === user.userId && !is_active) {
+        return NextResponse.json({ success: false, error: 'Cannot deactivate your own account' }, { status: 400 })
       }
-      
-      // Prevent deactivating the last active admin
-      if (is_active === false) {
-        const [adminCount] = await pool.query<RowDataPacket[]>(
-          "SELECT COUNT(*) as count FROM users WHERE role = 'admin' AND is_active = true"
-        )
-        const [userToUpdate] = await pool.query<RowDataPacket[]>(
-          "SELECT role, is_active FROM users WHERE id = ? LIMIT 1",
-          [id]
-        )
-        
-        if (
-          Array.isArray(adminCount) && adminCount.length > 0 && 
-          adminCount[0].count <= 1 &&
-          Array.isArray(userToUpdate) && userToUpdate.length > 0 &&
-          userToUpdate[0].role === 'admin' &&
-          userToUpdate[0].is_active === 1
-        ) {
-          return NextResponse.json({ 
-            success: false, 
-            error: "Cannot deactivate the last active admin user" 
-          }, { status: 400 })
+      if (!is_active) {
+        const target = dbGet('SELECT role, is_active FROM users WHERE id = ?', [id]) as { role: string; is_active: number } | undefined
+        const adminCount = (dbGet('SELECT COUNT(*) as c FROM users WHERE role = "admin" AND is_active = 1') as { c: number }).c
+        if (adminCount <= 1 && target?.role === 'admin' && target?.is_active) {
+          return NextResponse.json({ success: false, error: 'Cannot deactivate the last active admin' }, { status: 400 })
         }
       }
-      
-      updates.push("is_active = ?")
-      values.push(is_active)
+      parts.push('is_active = ?'); params.push(is_active ? 1 : 0)
     }
 
-    if (updates.length === 0) {
-      return NextResponse.json({ 
-        success: false, 
-        error: "No fields to update" 
-      }, { status: 400 })
-    }
+    if (parts.length === 0) return NextResponse.json({ success: false, error: 'No fields to update' }, { status: 400 })
 
-    values.push(id)
-    await pool.query(
-      `UPDATE users SET ${updates.join(", ")} WHERE id = ?`,
-      values
-    )
+    parts.push("updated_at = datetime('now')")
+    params.push(id)
+    dbRun(`UPDATE users SET ${parts.join(', ')} WHERE id = ?`, params)
 
-    console.log("✅ User updated successfully:", id)
-
-    // Log the user update in audit log
     const updateDetails: Record<string, unknown> = {}
     if (email) updateDetails.email = email
     if (name) updateDetails.name = name
     if (role) updateDetails.role = role
     if (password) updateDetails.password_changed = true
     if (typeof is_active === 'boolean') updateDetails.is_active = is_active
-    
+
     await logUserAction(
       password ? 'user.password.change' : 'user.update',
-      { id: Number(user.userId), email: user.email || null },
-      id,
-      updateDetails,
-      request
+      { id: Number(user.userId), email: user.email || null }, id, updateDetails, request
     )
 
-    return NextResponse.json({ 
-      success: true, 
-      message: "User updated successfully"
-    })
+    return NextResponse.json({ success: true, message: 'User updated successfully' })
   } catch (err) {
-    console.error("Update user error:", err)
-    return NextResponse.json({ success: false, error: "Failed to update user" }, { status: 500 })
+    console.error('Update user error:', err)
+    return NextResponse.json({ success: false, error: 'Failed to update user' }, { status: 500 })
   }
 }
 
-/**
- * DELETE /api/users
- * Delete a user (admin only)
- */
 export async function DELETE(request: NextRequest) {
-  // Validate authentication
   const user = await validateRequest(request)
-  if (!user) {
-    return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
-  }
-
-  // Check admin role
+  if (!user) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
   const roleError = requireAdminRole(user)
-  if (roleError) {
-    return roleError
-  }
+  if (roleError) return roleError
 
   try {
-    const { searchParams } = new URL(request.url)
-    const id = searchParams.get("id")
+    const id = new URL(request.url).searchParams.get('id')
+    if (!id) return NextResponse.json({ success: false, error: 'User ID is required' }, { status: 400 })
+    if (id === user.userId) return NextResponse.json({ success: false, error: 'Cannot delete your own account' }, { status: 400 })
 
-    if (!id) {
-      return NextResponse.json({ 
-        success: false, 
-        error: "User ID is required" 
-      }, { status: 400 })
+    const target = dbGet('SELECT id, email, name, role FROM users WHERE id = ?', [id]) as
+      | { id: number; email: string; name: string; role: string } | undefined
+    if (!target) return NextResponse.json({ success: false, error: 'User not found' }, { status: 404 })
+
+    const adminCount = (dbGet('SELECT COUNT(*) as c FROM users WHERE role = "admin"') as { c: number }).c
+    if (adminCount <= 1 && target.role === 'admin') {
+      return NextResponse.json({ success: false, error: 'Cannot delete the last admin user' }, { status: 400 })
     }
 
-    // Prevent self-deletion
-    if (String(id) === user.userId) {
-      return NextResponse.json({ 
-        success: false, 
-        error: "You cannot delete your own account" 
-      }, { status: 400 })
-    }
+    dbRun('DELETE FROM users WHERE id = ?', [id])
+    await logUserAction('user.delete', { id: Number(user.userId), email: user.email || null }, id,
+      { deleted_user_email: target.email, deleted_user_role: target.role }, request)
 
-    // Check if user exists
-    const [existingUsers] = await pool.query<RowDataPacket[]>(
-      "SELECT id FROM users WHERE id = ? LIMIT 1",
-      [id]
-    )
-
-    if (!Array.isArray(existingUsers) || existingUsers.length === 0) {
-      return NextResponse.json({ 
-        success: false, 
-        error: "User not found" 
-      }, { status: 404 })
-    }
-
-    // Check if this is the last admin
-    const [adminCount] = await pool.query<RowDataPacket[]>(
-      "SELECT COUNT(*) as count FROM users WHERE role = 'admin'"
-    )
-    
-    const [userToDelete] = await pool.query<RowDataPacket[]>(
-      "SELECT id, email, name, role FROM users WHERE id = ? LIMIT 1",
-      [id]
-    )
-
-    if (
-      Array.isArray(adminCount) && adminCount.length > 0 && 
-      adminCount[0].count <= 1 &&
-      Array.isArray(userToDelete) && userToDelete.length > 0 &&
-      userToDelete[0].role === 'admin'
-    ) {
-      return NextResponse.json({ 
-        success: false, 
-        error: "Cannot delete the last admin user" 
-      }, { status: 400 })
-    }
-
-    // Capture user info before deletion
-    const deletedUserInfo = userToDelete[0]
-
-    // Delete user
-    await pool.query("DELETE FROM users WHERE id = ?", [id])
-
-    console.log("✅ User deleted successfully:", id)
-
-    // Log the user deletion in audit log
-    await logUserAction(
-      'user.delete',
-      { id: Number(user.userId), email: user.email || null },
-      id,
-      { 
-        deleted_user_email: deletedUserInfo?.email,
-        deleted_user_name: deletedUserInfo?.name,
-        deleted_user_role: deletedUserInfo?.role
-      },
-      request
-    )
-
-    return NextResponse.json({ 
-      success: true, 
-      message: "User deleted successfully"
-    })
+    return NextResponse.json({ success: true, message: 'User deleted successfully' })
   } catch (err) {
-    console.error("Delete user error:", err)
-    return NextResponse.json({ success: false, error: "Failed to delete user" }, { status: 500 })
+    console.error('Delete user error:', err)
+    return NextResponse.json({ success: false, error: 'Failed to delete user' }, { status: 500 })
   }
 }

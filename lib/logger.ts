@@ -73,23 +73,10 @@ class Logger {
   }
 
   // API-specific logging with broadcast capability
-  apiLog(message: string, level: LogLevel = 'info', sessionId?: string) {
+  apiLog(message: string, level: LogLevel = 'info', _sessionId?: string) {
     this.logToConsole(this.formatMessage(level, message, undefined, 'API'))
     
-    // If sessionId provided, broadcast to client (for upload logs)
-    if (sessionId && this.isServer) {
-      try {
-        // Dynamic import to avoid circular dependencies
-        import('./upload-connections').then(({ broadcastLogToSession }) => {
-          const logType = level === 'debug' ? 'info' : level === 'warn' ? 'warning' : level
-          broadcastLogToSession(sessionId, message, logType as "info" | "success" | "warning" | "error")
-        }).catch(() => {
-          // Silently fail if broadcast is not available
-        })
-      } catch {
-        // Silently fail if broadcast is not available
-      }
-    }
+    // sessionId broadcast is no longer used in ULP mode
   }
 }
 

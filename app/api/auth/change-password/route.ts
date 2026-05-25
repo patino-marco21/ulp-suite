@@ -1,60 +1,37 @@
-import { NextRequest, NextResponse } from "next/server";
-import { pool } from "@/lib/mysql";
-import bcrypt from "bcryptjs";
-import type { RowDataPacket } from "mysql2";
-import { validateRequest } from "@/lib/auth";
-import { passwordSchema } from "@/lib/validation";
+import { NextRequest, NextResponse } from 'next/server'
+import { dbGet, dbRun } from '@/lib/sqlite'
+import bcrypt from 'bcryptjs'
+import { validateRequest } from '@/lib/auth'
+import { passwordSchema } from '@/lib/validation'
+
+export const dynamic = 'force-dynamic'
 
 export async function POST(request: NextRequest) {
-  const { currentPassword, newPassword } = await request.json();
+  const user = await validateRequest(request)
+  if (!user) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
 
-  // Use JWT validation instead of direct cookie access
-  const user = await validateRequest(request);
+  const { currentPassword, newPassword } = await request.json()
 
-  if (!user) {
-    return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
-  }
-
-  // SECURITY: Validate new password strength (MED-01)
-  const passwordValidation = passwordSchema.safeParse(newPassword);
-  if (!passwordValidation.success) {
-    return NextResponse.json(
-      { success: false, error: passwordValidation.error.errors.map(e => e.message).join(", ") },
-      { status: 400 }
-    );
+  const validation = passwordSchema.safeParse(newPassword)
+  if (!validation.success) {
+    return NextResponse.json({ success: false, error: validation.error.errors.map(e => e.message).join(', ') }, { status: 400 })
   }
 
   try {
-    // Get current user data
-    const [users] = await pool.query<RowDataPacket[]>(
-      "SELECT id, password_hash FROM users WHERE id = ? LIMIT 1",
-      [user.userId]
-    );
+    const row = dbGet('SELECT id, password_hash FROM users WHERE id = ?', [user.userId]) as
+      | { id: number; password_hash: string } | undefined
 
-    if (!Array.isArray(users) || users.length === 0) {
-      return NextResponse.json({ success: false, error: "User not found" }, { status: 404 });
-    }
+    if (!row) return NextResponse.json({ success: false, error: 'User not found' }, { status: 404 })
 
-    const userData = users[0];
+    const valid = await bcrypt.compare(currentPassword, row.password_hash)
+    if (!valid) return NextResponse.json({ success: false, error: 'Current password is incorrect' }, { status: 400 })
 
-    // Verify current password
-    const isCurrentPasswordValid = await bcrypt.compare(currentPassword, userData.password_hash);
-    if (!isCurrentPasswordValid) {
-      return NextResponse.json({ success: false, error: "Current password is incorrect" }, { status: 400 });
-    }
+    const hash = await bcrypt.hash(newPassword, 12)
+    dbRun(`UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?`, [hash, user.userId])
 
-    // Hash new password
-    const newPasswordHash = await bcrypt.hash(newPassword, 12);
-
-    // Update password
-    await pool.query(
-      "UPDATE users SET password_hash = ? WHERE id = ?",
-      [newPasswordHash, user.userId]
-    );
-
-    return NextResponse.json({ success: true, message: "Password updated successfully" });
+    return NextResponse.json({ success: true, message: 'Password updated successfully' })
   } catch (err) {
-    console.error("Change password error:", err);
-    return NextResponse.json({ success: false, error: "Internal server error" }, { status: 500 });
+    console.error('Change password error:', err)
+    return NextResponse.json({ success: false, error: 'Internal server error' }, { status: 500 })
   }
-} 
+}

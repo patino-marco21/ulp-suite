@@ -1,468 +1,301 @@
-import { NextRequest, NextResponse } from "next/server"
-import { executeQuery as executeMySQLQuery } from "@/lib/mysql"
-import { executeQuery as executeClickHouseQuery } from "@/lib/clickhouse"
-import { logInfo, logError } from "@/lib/logger"
+import { type NextRequest, NextResponse } from "next/server"
+import { executeQuery } from "@/lib/clickhouse"
 import { validateRequest } from "@/lib/auth"
 import {
-  parseDateFilterFromRequest,
-  buildDeviceDateFilter,
-  buildSystemInfoDateFilter,
-} from "@/lib/date-filter-utils"
+  type StatsResult,
+  getStatsCache,
+  setStatsCache,
+  invalidateStatsCache,
+} from "@/lib/stats-cache"
+
+export const dynamic = 'force-dynamic'
 
 export async function GET(request: NextRequest) {
-  // Validate authentication
   const user = await validateRequest(request)
   if (!user) {
     return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
   }
 
+  const bust = new URL(request.url).searchParams.has('bust')
+  if (bust) invalidateStatsCache()
+
+  const cached = getStatsCache()
+  if (cached && cached.expires > Date.now()) {
+    return NextResponse.json(cached.data)
+  }
+
   try {
-    // Parse date filter params
-    const searchParams = request.nextUrl.searchParams
-    const dateFilter = parseDateFilterFromRequest(searchParams)
-    const hasDateFilter = !!(dateFilter.startDate || dateFilter.endDate)
-
-    console.log("📊 Loading stats...", hasDateFilter ? `(with date filter: ${dateFilter.startDate} to ${dateFilter.endDate})` : "(all time)")
-    console.log("📊 Raw search params:", Object.fromEntries(searchParams.entries()))
-
-    // Build date filter WHERE clause
-    const { whereClause: deviceDateFilter, hasFilter } = buildDeviceDateFilter(dateFilter)
-    
-    // CRITICAL: Ensure hasFilter matches hasDateFilter
-    if (hasDateFilter && !hasFilter) {
-      console.error("❌ CRITICAL: hasDateFilter is true but hasFilter is false! Date filter may not be applied correctly.")
-      console.error("❌ Date filter params:", dateFilter)
-    }
-    
-    if (!hasDateFilter && hasFilter) {
-      console.warn("⚠️ WARNING: hasDateFilter is false but hasFilter is true. This should not happen.")
-    }
-
-    // Only use cache if no date filter is applied (cache is for "all time" only)
-    let cacheResult: any[] = []
-    if (!hasDateFilter && !hasFilter) {
-      console.log("📊 No date filter - checking cache...")
-      // Check cache first (analytics_cache remains in MySQL - operational table)
-      cacheResult = (await executeMySQLQuery(
-        "SELECT cache_data FROM analytics_cache WHERE cache_key = 'stats_main' AND expires_at > NOW()",
-      )) as any[]
-      console.log("📊 Cache check result:", cacheResult.length > 0 ? "Found cached data" : "No cache found")
-    } else {
-      console.log("📊 Date filter detected - skipping cache")
-    }
-
-    if (cacheResult.length > 0) {
-      console.log("📊 Using cached stats")
-      const cached = cacheResult[0].cache_data
-      let parsed: any = null
-
-      try {
-        if (typeof cached === "string") {
-          parsed = JSON.parse(cached)
-        } else if (typeof cached === "object" && cached !== null) {
-          parsed = cached
-        } else {
-          throw new Error("Unsupported cached format")
-        }
-      } catch (e) {
-        console.warn("📊 Cached stats parse failed, will recalc. Error:", e)
-        parsed = null
-      }
-
-      // VALIDATION: Ensure cached data has correct structure
-      // If totalDevices or totalFiles is missing, null, or not a number, recalculate
-      if (parsed && parsed.stats) {
-        const hasValidData = 
-          parsed.stats.totalDevices !== undefined && 
-          parsed.stats.totalDevices !== null &&
-          typeof parsed.stats.totalDevices === 'number' &&
-          parsed.stats.totalFiles !== undefined && 
-          parsed.stats.totalFiles !== null &&
-          typeof parsed.stats.totalFiles === 'number'
-        
-        if (hasValidData) {
-          console.log("📊 Cache valid, returning cached data")
-          console.log(`📊 Cached stats - Total devices: ${parsed.stats.totalDevices}, Total files: ${parsed.stats.totalFiles}`)
-        return NextResponse.json(parsed)
-        } else {
-          console.log("📊 Cache data incomplete or invalid (missing/invalid totalDevices or totalFiles), recalculating...")
-          console.log("📊 Cache stats structure:", JSON.stringify(parsed.stats))
-          // Invalidate cache by deleting it
-          await executeMySQLQuery(
-            "DELETE FROM analytics_cache WHERE cache_key = 'stats_main'"
-          )
-        }
-      } else {
-        console.log("📊 Cache corrupted or invalid structure, continuing to recompute stats")
-      }
-    }
-
-    console.log("📊 Calculating fresh stats...")
-    console.log("📊 Date filter params:", JSON.stringify(dateFilter))
-    console.log("📊 Has date filter (from params):", hasDateFilter)
-    console.log("📊 Device date filter WHERE clause:", deviceDateFilter)
-    console.log("📊 Has filter (from buildDeviceDateFilter):", hasFilter)
-    
-    // Debug: Log actual query that will be executed
-    if (hasFilter) {
-      const sampleQuery = `SELECT count() as total_devices FROM devices ${deviceDateFilter}`
-      console.log("📊 Sample query with filter:", sampleQuery)
-      
-      // Test query to verify filter works
-      try {
-        const testResult = await executeClickHouseQuery(sampleQuery) as any[]
-        console.log("📊 Test query result:", testResult)
-        if (testResult && testResult.length > 0) {
-          console.log("📊 Test query - Total devices with filter:", testResult[0].total_devices)
-        }
-      } catch (testError) {
-        console.error("📊 Test query error:", testError)
-      }
-    } else {
-      console.log("📊 WARNING: No date filter applied! Query will return all data.")
-    }
-
-    // Build device filter for password_stats and files (need device_id subquery)
-    // For ClickHouse, we'll use a different approach - get device_ids first, then use them
-    let passwordDeviceFilter = ""
-    let filesDeviceFilter = ""
-    let deviceIds: string[] = []
-    
-    if (hasFilter) {
-      const { whereClause: systemInfoDateFilter } = buildSystemInfoDateFilter(dateFilter)
-      console.log("📊 System info date filter WHERE clause:", systemInfoDateFilter)
-      
-      // Get device_ids that match date range from both tables
-      const deviceIdsQuery1 = `SELECT DISTINCT device_id FROM devices ${deviceDateFilter}`
-      const deviceIdsQuery2 = `SELECT DISTINCT device_id FROM systeminformation ${systemInfoDateFilter}`
-      
-      console.log("📊 Device IDs query 1:", deviceIdsQuery1)
-      console.log("📊 Device IDs query 2:", deviceIdsQuery2)
-      
-      const [deviceIdsFromDevices, deviceIdsFromSystemInfo] = await Promise.all([
-        executeClickHouseQuery(deviceIdsQuery1) as Promise<any[]>,
-        executeClickHouseQuery(deviceIdsQuery2) as Promise<any[]>
-      ])
-      
-      console.log("📊 Device IDs from devices table:", deviceIdsFromDevices.length)
-      console.log("📊 Device IDs from systeminformation table:", deviceIdsFromSystemInfo.length)
-      
-      // Combine and deduplicate
-      const allDeviceIds = new Set<string>()
-      deviceIdsFromDevices.forEach((r: any) => {
-        if (r.device_id) allDeviceIds.add(String(r.device_id))
-      })
-      deviceIdsFromSystemInfo.forEach((r: any) => {
-        if (r.device_id) allDeviceIds.add(String(r.device_id))
-      })
-      
-      deviceIds = Array.from(allDeviceIds)
-      console.log("📊 Total unique device IDs:", deviceIds.length)
-      
-      if (deviceIds.length > 0) {
-        // SECURITY: Use parameterized array for ClickHouse IN clause (CRIT-09)
-        passwordDeviceFilter = `AND device_id IN {filterDeviceIds:Array(String)}`
-        filesDeviceFilter = `AND device_id IN {filterDeviceIds:Array(String)}`
-        console.log("📊 Device filter applied to password_stats and files")
-      } else {
-        // No devices match - return empty results early
-        console.log("📊 No devices match date range, returning empty results")
-        return NextResponse.json({
-          stats: {
-            totalDevices: 0,
-            uniqueDeviceNames: 0,
-            duplicateDeviceNames: 0,
-            totalFiles: 0,
-            totalCredentials: 0,
-            totalDomains: 0,
-            totalUrls: 0,
-          },
-          topPasswords: [],
-          devices: [],
-          batches: [],
-        })
-      }
-    }
-
-    // Run all queries in parallel for maximum speed
-    // NOTE: All queries to ClickHouse except analytics_cache (remains MySQL)
-    // OPTIMIZED: Combine device queries to reduce network round-trips
-    // IMPORTANT: Use Promise.allSettled to prevent one failing query from breaking everything
-    let deviceStatsResult: any[] = []
-    let fileCountResult: any[] = []
-    let aggregatedStatsResult: any[] = []
-    let topPasswordsResult: any[] = []
-    let recentDevicesResult: any[] = []
-    let batchStatsResult: any[] = []
-
-    try {
-      const queryResults = await Promise.allSettled([
-        // ClickHouse: Combine device queries (count + uniq) for optimization
-        // IMPORTANT: deviceDateFilter already includes "WHERE" keyword, so we use it directly
-        executeClickHouseQuery(`
-          SELECT 
-            count() as total_devices,
-            uniq(device_name_hash) as unique_devices
-          FROM devices
-          ${deviceDateFilter || ""}
-        `),
-        // ClickHouse: COUNT with WHERE
-        // Note: Files are linked to devices, so we need to filter via device_id
-        executeClickHouseQuery(hasFilter 
-          ? `SELECT count() as count 
-             FROM files
-             WHERE is_directory = 0 ${filesDeviceFilter}`
-          : "SELECT count() as count FROM files WHERE is_directory = 0",
-          hasFilter && deviceIds.length > 0 ? { filterDeviceIds: deviceIds } : {}
-        ),
-        // ClickHouse: SUM aggregations
-        executeClickHouseQuery(`
-        SELECT 
-            sum(total_credentials) as total_credentials,
-            sum(total_domains) as total_domains,
-            sum(total_urls) as total_urls
-        FROM devices
-        ${deviceDateFilter || ""}
+    const [
+      totalCount,
+      credAggStats,
+      sourceStats,
+      topDomains,
+      topPasswords,
+      topTlds,
+      passwordLengths,
+      passwordPatterns,
+      countryTierDist,
+      loginTypeDist,
+      urlSchemeDist,
+      topEmailDomains,
+      topBreaches,
+      reuseStats,
+      corporateStats,
+      entropyBandDist,
+      importTimeline,
+      topSources,
+      topUrlHosts,
+    ] = await Promise.all([
+      // ── Instant total row count from partition metadata (no data scan) ──────
+      // system.parts stores per-part row counts maintained by MergeTree.
+      // Summing active parts gives an exact total in microseconds vs seconds.
+      executeQuery(`
+        SELECT sum(rows) AS total_credentials
+        FROM system.parts
+        WHERE database = 'ulp' AND table = 'credentials' AND active = 1
       `),
-        // ClickHouse: Top passwords query
-        // Convert: LENGTH(TRIM(password)) -> length(trimBoth(password))
-        // Convert: TRIM(password) REGEXP -> match(trimBoth(password), ...)
-        // Convert: COUNT(DISTINCT device_id) -> uniq(device_id)
-        // Add date filter via device_id subquery
-        executeClickHouseQuery(`
-          SELECT password, uniq(device_id) as total_count
-        FROM password_stats
-        WHERE password IS NOT NULL 
-            AND length(trimBoth(password)) > 2
-          AND password NOT IN ('', ' ', 'null', 'undefined', 'N/A', 'n/a', 'none', 'None', 'NONE', 'blank', 'Blank', 'BLANK', 'empty', 'Empty', 'EMPTY', '[NOT_SAVED]')
-          AND password NOT LIKE '%[NOT_SAVED]%'
-            AND match(trimBoth(password), '^[^[:space:]]+$')
-            ${passwordDeviceFilter}
+      // ── Aggregate stats (HyperLogLog approximate distinct counts) ───────────
+      // uniq() is ~5× faster than count(DISTINCT …) at the cost of <1% error.
+      // Separated from total_count so it can run in parallel without blocking
+      // the cheap metadata query above.
+      executeQuery(`
+        SELECT
+          uniq(domain)     AS unique_domains,
+          uniq(email)      AS unique_emails,
+          max(imported_at) AS last_import
+        FROM ulp.credentials
+        SETTINGS max_execution_time = 60
+      `),
+      executeQuery(`
+        SELECT count() AS total_sources, sum(line_count) AS total_lines
+        FROM ulp.sources
+      `),
+      // domain is the first column in the primary key → GROUP BY domain is index-aligned
+      executeQuery(`
+        SELECT domain, count() AS count
+        FROM ulp.credentials
+        WHERE domain != ''
+        GROUP BY domain
+        ORDER BY count DESC
+        LIMIT 15
+        SETTINGS max_execution_time = 30
+      `),
+      // Standard GROUP BY — fast for current scale (< 100 M rows).
+      // At 100 B+ rows, ClickHouse will use the skip index on password and
+      // the 30-second cap (max_execution_time) returns partial results rather
+      // than hanging. SAMPLE BY requires schema-level SAMPLE BY clause;
+      // since the table doesn't define one we use plain GROUP BY here.
+      executeQuery(`
+        SELECT password, count() AS count
+        FROM ulp.credentials
+        WHERE length(password) > 0
         GROUP BY password
-        ORDER BY total_count DESC, password ASC
-        LIMIT 5
-      `, hasFilter && deviceIds.length > 0 ? { filterDeviceIds: deviceIds } : {}),
-        // ClickHouse: Recent devices
-        executeClickHouseQuery(`
-        SELECT device_id, device_name, upload_batch, upload_date, total_files, total_credentials, total_domains, total_urls
-        FROM devices 
-        ${deviceDateFilter || ""}
-        ORDER BY upload_date DESC 
-        LIMIT 10
+        ORDER BY count DESC
+        LIMIT 50
+        SETTINGS max_execution_time = 30
       `),
-        // ClickHouse: Batch stats
-        // IMPORTANT: In ClickHouse, after GROUP BY, ORDER BY must use aggregate function directly, not alias
-        // Use subquery approach to allow ORDER BY with alias
-        executeClickHouseQuery(`
-        SELECT 
-          upload_batch,
-          devices_count,
-          batch_credentials,
-          batch_domains,
-          batch_urls,
-          max_upload_date
-        FROM (
-          SELECT 
-            upload_batch,
-            count() as devices_count,
-            sum(total_credentials) as batch_credentials,
-            sum(total_domains) as batch_domains,
-            sum(total_urls) as batch_urls,
-            max(upload_date) as max_upload_date
-          FROM devices 
-          ${deviceDateFilter || ""}
-          GROUP BY upload_batch
-        )
-        ORDER BY max_upload_date DESC 
+      executeQuery(`
+        SELECT tld, count() AS count
+        FROM ulp.credentials
+        WHERE tld != ''
+        GROUP BY tld
+        ORDER BY count DESC
         LIMIT 10
-      `)
-      ])
+        SETTINGS max_execution_time = 30
+      `),
+      // Password length in fine-grained buckets
+      executeQuery(`
+        SELECT
+          CASE
+            WHEN password_length = 0   THEN '0 (empty)'
+            WHEN password_length <= 4  THEN '1-4'
+            WHEN password_length <= 6  THEN '5-6'
+            WHEN password_length <= 8  THEN '7-8'
+            WHEN password_length <= 10 THEN '9-10'
+            WHEN password_length <= 12 THEN '11-12'
+            WHEN password_length <= 16 THEN '13-16'
+            WHEN password_length <= 20 THEN '17-20'
+            ELSE                            '21+'
+          END AS bucket,
+          count() AS count
+        FROM ulp.credentials
+        GROUP BY bucket
+        ORDER BY min(password_length)
+      `),
+      // password_mask is a LowCardinality column — cardinality ≤ 5; very fast GROUP BY
+      executeQuery(`
+        SELECT password_mask AS mask, count() AS count
+        FROM ulp.credentials
+        GROUP BY mask
+        ORDER BY count DESC
+        SETTINGS max_execution_time = 30
+      `),
+      // country_tier is LowCardinality (≤ ~10 values) — fast GROUP BY
+      executeQuery(`
+        SELECT country_tier AS tier, count() AS count
+        FROM ulp.credentials
+        GROUP BY tier
+        ORDER BY count DESC
+        SETTINGS max_execution_time = 30
+      `),
+      // login_type is LowCardinality (≤ 4 values) — near-instant GROUP BY
+      executeQuery(`
+        SELECT login_type AS type, count() AS count
+        FROM ulp.credentials
+        GROUP BY type
+        ORDER BY count DESC
+        SETTINGS max_execution_time = 30
+      `),
+      // url_scheme is LowCardinality (http / https / '') — near-instant GROUP BY
+      executeQuery(`
+        SELECT url_scheme AS scheme, count() AS count
+        FROM ulp.credentials
+        WHERE url_scheme != ''
+        GROUP BY scheme
+        ORDER BY count DESC
+        SETTINGS max_execution_time = 30
+      `),
+      // Top email domains — unindexed but bounded by login_type = 'email' pre-filter
+      executeQuery(`
+        SELECT email_domain AS domain, count() AS count
+        FROM ulp.credentials
+        WHERE login_type = 'email' AND email_domain != ''
+        GROUP BY domain
+        ORDER BY count DESC
+        LIMIT 15
+        SETTINGS max_execution_time = 30
+      `),
+      // Top breaches — breach_name cardinality is typically low (hundreds)
+      executeQuery(`
+        SELECT breach_name, count() AS count
+        FROM ulp.credentials
+        WHERE breach_name != ''
+        GROUP BY breach_name
+        ORDER BY count DESC
+        LIMIT 15
+        SETTINGS max_execution_time = 30
+      `),
+      // Password reuse rate — most expensive query: double GROUP BY.
+      // uniq(domain) instead of count(DISTINCT domain) is ~5× faster (HyperLogLog).
+      // LIMIT on inner query caps it at 5 M unique pairs — sufficient for a rate estimate.
+      executeQuery(`
+        SELECT
+          countIf(domain_count > 1) AS reused_pairs,
+          count()                   AS total_pairs
+        FROM (
+          SELECT email, password, uniq(domain) AS domain_count
+          FROM ulp.credentials
+          WHERE login_type = 'email' AND length(password) > 0
+          GROUP BY email, password
+          LIMIT 5000000
+        )
+        SETTINGS max_execution_time = 60
+      `),
+      // Corporate vs consumer — two countIf on a LowCardinality column → fast
+      executeQuery(`
+        SELECT
+          countIf(is_corporate_email = 1) AS corporate,
+          countIf(is_corporate_email = 0) AS consumer
+        FROM ulp.credentials
+        WHERE login_type = 'email'
+        SETTINGS max_execution_time = 30
+      `),
+      // password_entropy_band is LowCardinality (5 values) → near-instant GROUP BY
+      executeQuery(`
+        SELECT password_entropy_band AS band, count() AS count
+        FROM ulp.credentials
+        WHERE length(password) > 0
+        GROUP BY band
+        ORDER BY count DESC
+        SETTINGS max_execution_time = 30
+      `).catch(() => [] as any[]),
+      // Import timeline — imported_at has a minmax skip index; 90-day range is selective
+      executeQuery(`
+        SELECT
+          toDate(imported_at) AS day,
+          count()             AS count
+        FROM ulp.credentials
+        WHERE imported_at >= now() - INTERVAL 90 DAY
+        GROUP BY day
+        ORDER BY day ASC
+        SETTINGS max_execution_time = 30
+      `).catch(() => [] as any[]),
+      // Top source files — source_file cardinality is low (hundreds of files at most)
+      executeQuery(`
+        SELECT source_file, count() AS count
+        FROM ulp.credentials
+        WHERE source_file != ''
+        GROUP BY source_file
+        ORDER BY count DESC
+        LIMIT 20
+        SETTINGS max_execution_time = 30
+      `).catch(() => [] as any[]),
+      // Top URL hosts — url_host has a bloom_filter skip index
+      executeQuery(`
+        SELECT
+          if(url_host != '', url_host, domain) AS host,
+          count()                               AS count
+        FROM ulp.credentials
+        WHERE (url_host != '' OR domain != '')
+        GROUP BY host
+        ORDER BY count DESC
+        LIMIT 15
+        SETTINGS max_execution_time = 30
+      `).catch(() => [] as any[]),
+    ])
 
-      // Process results - handle both fulfilled and rejected promises
-      queryResults.forEach((result, index) => {
-        if (result.status === 'fulfilled') {
-          switch (index) {
-            case 0:
-              deviceStatsResult = result.value as any[]
-              break
-            case 1:
-              fileCountResult = result.value as any[]
-              break
-            case 2:
-              aggregatedStatsResult = result.value as any[]
-              break
-            case 3:
-              topPasswordsResult = result.value as any[]
-              break
-            case 4:
-              recentDevicesResult = result.value as any[]
-              break
-            case 5:
-              batchStatsResult = result.value as any[]
-              break
-          }
-        } else {
-          console.error(`❌ Query ${index} failed:`, result.reason)
-          // Set default empty array for failed queries
-          switch (index) {
-            case 0:
-              deviceStatsResult = []
-              break
-            case 1:
-              fileCountResult = []
-              break
-            case 2:
-              aggregatedStatsResult = []
-              break
-            case 3:
-              topPasswordsResult = []
-              break
-            case 4:
-              recentDevicesResult = []
-              break
-            case 5:
-              batchStatsResult = []
-              break
-          }
-        }
-      })
+    const reuseRow = (reuseStats as any[])[0] || {}
+    const reusedPairs = Number(reuseRow.reused_pairs || 0)
+    const totalPairs  = Number(reuseRow.total_pairs  || 1)
 
-      // Debug: Log raw results for troubleshooting
-      console.log("🔍 DEBUG: deviceStatsResult:", JSON.stringify(deviceStatsResult))
-      console.log("🔍 DEBUG: fileCountResult:", JSON.stringify(fileCountResult))
-      console.log("🔍 DEBUG: aggregatedStatsResult:", JSON.stringify(aggregatedStatsResult))
-      
-      // Log actual values to see if filtering is working
-      if (deviceStatsResult && deviceStatsResult.length > 0) {
-        console.log("📊 Query result - Total devices:", deviceStatsResult[0].total_devices)
-        console.log("📊 Query result - Unique devices:", deviceStatsResult[0].unique_devices)
-      }
-      if (fileCountResult && fileCountResult.length > 0) {
-        console.log("📊 Query result - Total files:", fileCountResult[0].count)
-      }
-      if (aggregatedStatsResult && aggregatedStatsResult.length > 0) {
-        console.log("📊 Query result - Total credentials:", aggregatedStatsResult[0].total_credentials)
-        console.log("📊 Query result - Total domains:", aggregatedStatsResult[0].total_domains)
-        console.log("📊 Query result - Total URLs:", aggregatedStatsResult[0].total_urls)
-      }
-    } catch (error) {
-      console.error("❌ Error executing ClickHouse queries:", error)
-      console.error("❌ Error details:", error instanceof Error ? error.message : String(error))
-      console.error("❌ Error stack:", error instanceof Error ? error.stack : "No stack trace")
-      throw error
-    }
+    const corpRow = (corporateStats as any[])[0] || {}
+    const corporate = Number(corpRow.corporate || 0)
+    const consumer  = Number(corpRow.consumer  || 0)
 
-    // Extract from optimized query result with SAFETY CHECK & NUMBER CASTING
-    // IMPORTANT: ClickHouse count() and uniq() return UInt64 (String in JSON), must cast to Number
-    console.log("🔍 DEBUG: deviceStatsResult type:", typeof deviceStatsResult, Array.isArray(deviceStatsResult))
-    console.log("🔍 DEBUG: deviceStatsResult length:", deviceStatsResult?.length)
-    
-    if (!Array.isArray(deviceStatsResult) || deviceStatsResult.length === 0) {
-      console.error("❌ ERROR: deviceStatsResult is not a valid array or is empty")
-      throw new Error("Invalid deviceStatsResult from ClickHouse")
-    }
+    const aggRow = (credAggStats as any[])[0] || {}
 
-    const deviceStats = deviceStatsResult[0] || {}
-    console.log("🔍 DEBUG: deviceStats object:", JSON.stringify(deviceStats))
-    console.log("🔍 DEBUG: deviceStats keys:", Object.keys(deviceStats))
-    console.log("🔍 DEBUG: deviceStats.total_devices raw:", deviceStats.total_devices, typeof deviceStats.total_devices)
-    console.log("🔍 DEBUG: deviceStats.unique_devices raw:", deviceStats.unique_devices, typeof deviceStats.unique_devices)
-    
-    const totalDevices = Number(deviceStats.total_devices) || 0
-    const uniqueDeviceNames = Number(deviceStats.unique_devices) || 0
-    
-    console.log(`📊 Total devices: ${totalDevices}`)
-    console.log(`📊 Unique device names: ${uniqueDeviceNames}`)
-
-    // Calculate duplicates: total - unique (much faster than subquery)
-    // IMPORTANT: Ensure both values are Number before subtraction
-    const duplicateDeviceNames = Math.max(0, totalDevices - uniqueDeviceNames)
-    console.log(`📊 Duplicate device names: ${duplicateDeviceNames}`)
-
-    // IMPORTANT: Cast file count as well (ClickHouse returns String)
-    console.log("🔍 DEBUG: fileCountResult type:", typeof fileCountResult, Array.isArray(fileCountResult))
-    console.log("🔍 DEBUG: fileCountResult length:", fileCountResult?.length)
-    
-    if (!Array.isArray(fileCountResult) || fileCountResult.length === 0) {
-      console.error("❌ ERROR: fileCountResult is not a valid array or is empty")
-      throw new Error("Invalid fileCountResult from ClickHouse")
-    }
-
-    const fileStats = fileCountResult[0] || {}
-    console.log("🔍 DEBUG: fileStats object:", JSON.stringify(fileStats))
-    console.log("🔍 DEBUG: fileStats.count raw:", fileStats.count, typeof fileStats.count)
-    
-    const totalFiles = Number(fileStats.count) || 0
-    console.log(`📊 Total files: ${totalFiles}`)
-
-    // IMPORTANT: Cast aggregated stats as well
-    const aggStats = (aggregatedStatsResult as any[])[0] || {}
-    console.log(`📊 Aggregated stats:`, aggStats)
-
-    // IMPORTANT: Cast topPasswords total_count to Number (ClickHouse uniq() returns String)
-    const topPasswordsArray = (topPasswordsResult as any[]).map((pw: any) => ({
-      ...pw,
-      total_count: Number(pw.total_count) || 0,
-    }))
-    logInfo(`Top passwords: ${topPasswordsArray.length} found`, undefined, 'Stats API')
-
-    const recentDevices = recentDevicesResult as any[]
-    
-    // IMPORTANT: Cast batch stats as well (count() returns String)
-    // Note: upload_date field is now max_upload_date
-    const batchStats = (batchStatsResult as any[]).map((batch: any) => ({
-      ...batch,
-      devices_count: Number(batch.devices_count) || 0,
-      batch_credentials: Number(batch.batch_credentials) || 0,
-      batch_domains: Number(batch.batch_domains) || 0,
-      batch_urls: Number(batch.batch_urls) || 0,
-      upload_date: batch.max_upload_date || batch.upload_date, // Support both field names for backward compatibility
-    }))
-
-    const result = {
-      stats: {
-        totalDevices,
-        uniqueDeviceNames,
-        duplicateDeviceNames,
-        totalFiles,
-        totalCredentials: Number(aggStats.total_credentials) || 0,
-        totalDomains: Number(aggStats.total_domains) || 0,
-        totalUrls: Number(aggStats.total_urls) || 0,
+    const result: StatsResult = {
+      success: true,
+      credentials: {
+        total:          Number((totalCount as any[])[0]?.total_credentials || 0),
+        unique_domains: Number(aggRow.unique_domains || 0),
+        unique_emails:  Number(aggRow.unique_emails  || 0),
+        last_import:    (aggRow.last_import as string) || null,
       },
-      topPasswords: topPasswordsArray,
-      devices: recentDevices,
-      batches: batchStats,
+      sources: {
+        total:       Number((sourceStats as any[])[0]?.total_sources || 0),
+        total_lines: Number((sourceStats as any[])[0]?.total_lines   || 0),
+      },
+      top_domains:      (topDomains as any[]).map(r => ({ domain: String(r.domain), count: Number(r.count) })),
+      top_passwords:    (topPasswords as any[]).map(r => ({ password: String(r.password), count: Number(r.count) })),
+      top_tlds:         (topTlds as any[]).map(r => ({ tld: String(r.tld), count: Number(r.count) })),
+      password_lengths: (passwordLengths as any[]).map(r => ({ bucket: String(r.bucket), count: Number(r.count) })),
+      password_patterns:   (passwordPatterns as any[]).map(r => ({ mask: String(r.mask), count: Number(r.count) })),
+      country_tier_dist:   (countryTierDist as any[]).map(r => ({ tier: String(r.tier), count: Number(r.count) })),
+      login_type_dist:     (loginTypeDist as any[]).map(r => ({ type: String(r.type), count: Number(r.count) })),
+      url_scheme_dist:     (urlSchemeDist as any[]).map(r => ({ scheme: String(r.scheme), count: Number(r.count) })),
+      top_email_domains:   (topEmailDomains as any[]).map(r => ({ domain: String(r.domain), count: Number(r.count) })),
+      top_breaches:        (topBreaches as any[]).map(r => ({ breach_name: String(r.breach_name), count: Number(r.count) })),
+      reuse_stats: {
+        reused_pairs: reusedPairs,
+        total_pairs:  totalPairs,
+        reuse_pct:    Math.round(reusedPairs / totalPairs * 1000) / 10,
+      },
+      corporate_stats: {
+        corporate,
+        consumer,
+        total_emails: corporate + consumer,
+      },
+      entropy_band_dist: (entropyBandDist as any[]).map(r => ({ band: String(r.band), count: Number(r.count) })),
+      import_timeline:   (importTimeline as any[]).map(r => ({ day: String(r.day), count: Number(r.count) })),
+      top_sources:       (topSources as any[]).map(r => ({ source_file: String(r.source_file), count: Number(r.count) })),
+      top_url_hosts:     (topUrlHosts as any[]).map(r => ({ host: String(r.host), count: Number(r.count) })),
     }
 
-    logInfo(`Final stats result`, result.stats, 'Stats API')
-
-    // Only cache if no date filter is applied (cache is for "all time" only)
-    if (!hasDateFilter) {
-      // Cache for 30 minutes (longer cache for better performance)
-      // analytics_cache remains in MySQL (operational table)
-      await executeMySQLQuery(
-        "INSERT INTO analytics_cache (cache_key, cache_data, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 30 MINUTE)) ON DUPLICATE KEY UPDATE cache_data = VALUES(cache_data), expires_at = VALUES(expires_at)",
-        ["stats_main", JSON.stringify(result)],
-      )
-    }
-
+    setStatsCache(result)
     return NextResponse.json(result)
   } catch (error) {
-    console.error("❌ Stats API Error:", error)
-    console.error("❌ Error type:", typeof error)
-    console.error("❌ Error message:", error instanceof Error ? error.message : String(error))
-    console.error("❌ Error stack:", error instanceof Error ? error.stack : "No stack trace")
-    
-    logError("Stats error", error, 'Stats API')
-    
-    // Return detailed error for debugging
-    return NextResponse.json(
-      {
-        error: "Failed to get stats",
-        details: error instanceof Error ? error.message : "Unknown error",
-        errorType: error instanceof Error ? error.constructor.name : typeof error,
-      },
-      { status: 500 },
-    )
+    console.error('Stats error:', error)
+    return NextResponse.json({ success: false, error: 'Failed to fetch stats' }, { status: 500 })
   }
 }

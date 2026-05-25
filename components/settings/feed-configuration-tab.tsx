@@ -8,17 +8,37 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { useToast } from "@/hooks/use-toast"
 
+interface FeedCategory {
+  id: number
+  name: string
+  slug: string
+  created_at: string
+  updated_at: string
+}
+
+interface FeedSource {
+  id: number
+  category_id: number
+  name: string
+  rss_url: string
+  last_fetched_at: string | null
+  created_at: string
+  updated_at: string
+  category_name?: string
+  category_slug?: string
+}
+
 export function FeedConfigurationTab() {
   const { toast } = useToast()
-  
+
   // States
   const [loading, setLoading] = useState(true)
   const [savingInterval, setSavingInterval] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [interval, setSyncInterval] = useState(60)
-  
-  const [categories, setCategories] = useState<any[]>([])
-  const [sources, setSources] = useState<any[]>([])
+
+  const [categories, setCategories] = useState<FeedCategory[]>([])
+  const [sources, setSources] = useState<FeedSource[]>([])
   
   // Form states
   const [newCatName, setNewCatName] = useState("")
@@ -64,7 +84,7 @@ export function FeedConfigurationTab() {
           setSelectedCatId(forceSelectCatId)
         } else if (fetchedCats.length > 0) {
           setSelectedCatId(prev => {
-            if (!prev || !fetchedCats.find((c: any) => c.id === prev)) {
+            if (!prev || !fetchedCats.find((c: FeedCategory) => c.id === prev)) {
               return fetchedCats[0].id
             }
             return prev
@@ -141,7 +161,7 @@ export function FeedConfigurationTab() {
         setNewCatSlug("")
         toast({ title: "Success", description: "Category created" })
         loadData(data.id)
-        setTimeout(() => window.location.reload(), 500)
+        // state already updated by loadData()
       } else {
         const data = await res.json()
         throw new Error(data.error)
@@ -163,7 +183,7 @@ export function FeedConfigurationTab() {
         setEditingCatId(null)
         toast({ title: "Success", description: "Category updated" })
         loadData(id)
-        setTimeout(() => window.location.reload(), 500)
+        // state already updated by loadData()
       } else {
         const data = await res.json()
         throw new Error(data.error)
@@ -180,7 +200,7 @@ export function FeedConfigurationTab() {
       if (res.ok) {
         toast({ title: "Success", description: "Category deleted" })
         loadData()
-        setTimeout(() => window.location.reload(), 500)
+        // state already updated by loadData()
       }
     } catch (_error) {
       toast({ title: "Error", description: "Failed to delete", variant: "destructive" })
@@ -200,7 +220,7 @@ export function FeedConfigurationTab() {
         setNewSourceUrl("")
         toast({ title: "Success", description: "Feed source added" })
         loadData()
-        setTimeout(() => window.location.reload(), 500)
+        // state already updated by loadData()
       } else {
         const data = await res.json()
         throw new Error(data.error)
@@ -222,7 +242,7 @@ export function FeedConfigurationTab() {
         setEditingSourceId(null)
         toast({ title: "Success", description: "Source updated" })
         loadData()
-        setTimeout(() => window.location.reload(), 500)
+        // state already updated by loadData()
       } else {
         const data = await res.json()
         throw new Error(data.error)
@@ -239,7 +259,7 @@ export function FeedConfigurationTab() {
       if (res.ok) {
         toast({ title: "Success", description: "Source deleted" })
         loadData()
-        setTimeout(() => window.location.reload(), 500)
+        // state already updated by loadData()
       }
     } catch (_error) {
       toast({ title: "Error", description: "Failed to delete", variant: "destructive" })
@@ -460,7 +480,7 @@ export function FeedConfigurationTab() {
                               <span className={`relative inline-flex rounded-full h-2 w-2 ${isStale ? "bg-amber-500" : "bg-emerald-500"}`}></span>
                             </span>
                             <span className="text-[11px] font-medium text-muted-foreground">
-                              {isStale ? "Pending first intelligent fetch" : `Last pulled: ${new Date(src.last_fetched_at).toLocaleString()}`}
+                              {isStale ? "Pending first intelligent fetch" : `Last pulled: ${new Date(src.last_fetched_at!).toLocaleString()}`}
                             </span>
                           </div>
                         </div>

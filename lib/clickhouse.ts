@@ -19,8 +19,9 @@ function validateEnvVars() {
   }
 
   // Check if all required variables are set
+  // Note: password is intentionally allowed to be empty (ClickHouse default user has no password)
   const missingVars = Object.entries(requiredEnvVars)
-    .filter(([_key, value]) => !value)
+    .filter(([key, value]) => key !== 'CLICKHOUSE_PASSWORD' && (value === undefined || value === null || value === ''))
     .map(([key]) => key)
 
   if (missingVars.length > 0) {
@@ -37,7 +38,7 @@ function validateEnvVars() {
   return {
     host: requiredEnvVars.CLICKHOUSE_HOST!,
     username: requiredEnvVars.CLICKHOUSE_USER!,
-    password: requiredEnvVars.CLICKHOUSE_PASSWORD!,
+    password: requiredEnvVars.CLICKHOUSE_PASSWORD ?? '',
     database: requiredEnvVars.CLICKHOUSE_DATABASE!,
   }
 }
@@ -85,17 +86,41 @@ function getClickHouseClient(): ClickHouseClient {
   // Create new client using URL (new recommended way)
   const client = createClient({
     url: clickhouseUrl,
+
+    // ── HTTP-level timeout ──────────────────────────────────────────────────
+    // 1 hour: large batch inserts (100 M rows) can legitimately take minutes.
+    // SELECT queries are capped separately via max_execution_time below.
+    request_timeout: 3_600_000,
+
+    // ── Keep-alive: reuse TCP connections across requests ──────────────────
+    keep_alive: {
+      enabled: true,
+      idle_socket_ttl: 2_500,  // recycle before ClickHouse server-side timeout
+    },
+
+    // ── Server-side settings applied to every request ──────────────────────
     clickhouse_settings: {
-      // Optional: Timeout settings to prevent hanging
-      receive_timeout: 30000,
+      // Cap SELECT queries at 5 minutes — prevents runaway analytics from
+      // blocking the server.  INSERT/DDL are not affected by this setting.
+      max_execution_time: 300,
+
+      // Ask ClickHouse to ZSTD-compress HTTP responses.
+      // The client decompresses automatically (see compression.response below).
+      enable_http_compression: 1,
+    },
+
+    // ── Transport-level compression ────────────────────────────────────────
+    compression: {
+      // Compress INSERT request bodies → 3–5× less network traffic for bulk uploads
+      request: true,
+      // Decompress compressed responses from ClickHouse
+      response: true,
     },
   })
 
-  // Store in global for development (hot-reload protection)
-  // In production, Next.js doesn't hot-reload, so not needed
-  if (process.env.NODE_ENV !== 'production') {
-    globalForClickHouse.clickhouse = client
-  }
+  // Always store in global so the same client is reused across requests in the
+  // same process (important in production where the module isn't reloaded per request).
+  globalForClickHouse.clickhouse = client
 
   return client
 }

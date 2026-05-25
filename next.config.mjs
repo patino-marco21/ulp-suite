@@ -7,6 +7,8 @@ const nextConfig = {
   // Enable instrumentation hook for global error handlers
   experimental: {
     instrumentationHook: true,
+    // Tell Next.js not to bundle better-sqlite3 (native addon — must be required at runtime)
+    serverComponentsExternalPackages: ['better-sqlite3'],
     // Disabled: worker process duplicates memory; single-process build uses less RAM (avoids OOM on large apps)
     webpackBuildWorker: false,
     // Exclude large data folders from output file tracing (fixes slow builds)
@@ -14,7 +16,7 @@ const nextConfig = {
       '*': [
         './uploads/**',
         './clickhouse-data/**',
-        './mysql-data/**',
+        './data/**',
         './.devtasks/**',
       ],
     },
@@ -24,7 +26,7 @@ const nextConfig = {
     // Ignore data directories from file watching
     config.watchOptions = {
       ...config.watchOptions,
-      ignored: ['**/uploads/**', '**/clickhouse-data/**', '**/mysql-data/**', '**/node_modules/**'],
+      ignored: ['**/uploads/**', '**/clickhouse-data/**', '**/data/**', '**/node_modules/**'],
     };
     
     // Add rule to completely ignore data folders from module bundling
@@ -33,7 +35,7 @@ const nextConfig = {
       exclude: [
         path.resolve('./uploads'),
         path.resolve('./clickhouse-data'),
-        path.resolve('./mysql-data'),
+        path.resolve('./data'),
       ],
     });
 

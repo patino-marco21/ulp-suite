@@ -6,6 +6,7 @@ tsconfig.tsbuildinfo
 .vscode
 uploads/*
 error.log
+server.log
 clickhouse-data
 mysql-data
 minio-data
@@ -13,3 +14,6 @@ tmp
 .DS_Store
 .devtasks
 docs
+test-data/
+data/
+uploads/

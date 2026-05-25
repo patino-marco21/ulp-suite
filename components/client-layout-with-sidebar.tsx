@@ -24,8 +24,8 @@ export default function ClientLayoutWithSidebar({ children, initialUserRole }: C
   else if (pathname === "/upload") title = "Broń Vault - Upload";
   else if (pathname === "/debug-zip") title = "Broń Vault - Debug ZIP";
 
-  // Don't render sidebar/header if on login or db-sync page
-  if (pathname === "/login" || pathname === "/db-sync") {
+  // Don't render sidebar/header for standalone pages (login, db-sync, public check portal)
+  if (pathname === "/login" || pathname === "/db-sync" || pathname === "/check") {
     return (
       <main className="flex-1 bg-background">{children}</main>
     );

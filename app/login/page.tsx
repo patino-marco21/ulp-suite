@@ -129,8 +129,6 @@ export default function LoginPage() {
           return;
         }
         
-        console.log("Login successful, showing toast...");
-
         // Show success toast
         toast({
           title: "Login Success! 🎉",
@@ -138,16 +136,13 @@ export default function LoginPage() {
           variant: "default",
         });
 
-        console.log("Toast triggered, waiting before redirect...");
-
         // Redirect to dashboard or redirect param
         const redirect = searchParams.get("redirect") || "/dashboard";
 
-        // Force a longer delay to ensure toast is shown before redirect
+        // Short delay so the toast is visible before navigation
         setTimeout(() => {
-          console.log("Redirecting to:", redirect);
           window.location.replace(redirect);
-        }, 3000); // Increased delay to see toast
+        }, 3000);
       } else {
         // Show error toast instead of setting error state
         toast({

@@ -1,161 +1,62 @@
-import { NextRequest, NextResponse } from "next/server"
-import { validateRequest, requireAdminRole } from "@/lib/auth"
-import { executeQuery } from "@/lib/mysql"
+import { NextRequest, NextResponse } from 'next/server'
+import { dbGet, dbRun } from '@/lib/sqlite'
+import { validateRequest, requireAdminRole } from '@/lib/auth'
 
-// Define the user preferences interface
-export interface UserPreferences {
+export const dynamic = 'force-dynamic'
+
+interface UserPreferences {
   stream_enabled?: boolean
-  feed_compact_order?: Record<string, string[]> // key = categorySlug, value = ordered source names
 }
 
-// Default preferences
-const DEFAULT_PREFERENCES: UserPreferences = {
-  stream_enabled: true,
-}
-
-// Fields that only admins can modify
+const DEFAULTS: UserPreferences = { stream_enabled: true }
 const ADMIN_ONLY_KEYS: (keyof UserPreferences)[] = ['stream_enabled']
 
-interface UserRow {
-  preferences: string | null
-}
-
-/**
- * GET /api/user/preferences
- * Get current user's preferences
- */
 export async function GET(request: NextRequest) {
-  // Validate authentication
   const user = await validateRequest(request)
-  if (!user) {
-    return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
-  }
-
-  // Preferences are available to all authenticated users
+  if (!user) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
 
   try {
-    const userId = user.userId
-    if (!userId) {
-      return NextResponse.json({ success: false, error: "User ID not found" }, { status: 400 })
+    const row = dbGet('SELECT preferences FROM users WHERE id = ?', [user.userId]) as { preferences: string | null } | undefined
+    if (!row) return NextResponse.json({ success: false, error: 'User not found' }, { status: 404 })
+
+    let prefs: UserPreferences = { ...DEFAULTS }
+    if (row.preferences) {
+      try { prefs = { ...DEFAULTS, ...JSON.parse(row.preferences) } } catch { /**/ }
     }
-
-    // Get user preferences from database
-    const result = await executeQuery(
-      "SELECT preferences FROM users WHERE id = ?",
-      [userId]
-    ) as UserRow[]
-
-    if (!result || result.length === 0) {
-      return NextResponse.json({ success: false, error: "User not found" }, { status: 404 })
-    }
-
-    // Parse preferences JSON or use defaults
-    let preferences: UserPreferences = { ...DEFAULT_PREFERENCES }
-    if (result[0].preferences) {
-      try {
-        const savedPreferences = typeof result[0].preferences === 'string' 
-          ? JSON.parse(result[0].preferences) 
-          : result[0].preferences
-        preferences = { ...DEFAULT_PREFERENCES, ...savedPreferences }
-      } catch {
-        console.error("Error parsing user preferences, using defaults")
-      }
-    }
-
-    return NextResponse.json({
-      success: true,
-      preferences,
-    })
-  } catch (error) {
-    console.error("Error getting user preferences:", error)
-    return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : "Failed to get preferences",
-      },
-      { status: 500 }
-    )
+    return NextResponse.json({ success: true, preferences: prefs })
+  } catch (err) {
+    console.error('Get preferences error:', err)
+    return NextResponse.json({ success: false, error: 'Failed to get preferences' }, { status: 500 })
   }
 }
 
-/**
- * POST /api/user/preferences
- * Update current user's preferences
- */
 export async function POST(request: NextRequest) {
-  // Validate authentication
   const user = await validateRequest(request)
-  if (!user) {
-    return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
-  }
-
-  // Preferences are available to all authenticated users
+  if (!user) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
 
   try {
-    const userId = user.userId
-    if (!userId) {
-      return NextResponse.json({ success: false, error: "User ID not found" }, { status: 400 })
-    }
-
     const body = await request.json()
-    const newPreferences: Partial<UserPreferences> = body.preferences || body
+    const newPrefs: Partial<UserPreferences> = body.preferences || body
 
-    // Block non-admin users from modifying admin-only fields
-    const attemptedAdminKeys = ADMIN_ONLY_KEYS.filter(key => key in newPreferences)
-    if (attemptedAdminKeys.length > 0) {
+    const adminKeys = ADMIN_ONLY_KEYS.filter(k => k in newPrefs)
+    if (adminKeys.length > 0) {
       const roleError = requireAdminRole(user)
-      if (roleError) {
-        return NextResponse.json(
-          { success: false, error: `Fields [${attemptedAdminKeys.join(', ')}] require admin role` },
-          { status: 403 }
-        )
-      }
+      if (roleError) return NextResponse.json({ success: false, error: `Fields [${adminKeys.join(', ')}] require admin role` }, { status: 403 })
     }
 
-    // Get current preferences
-    const result = await executeQuery(
-      "SELECT preferences FROM users WHERE id = ?",
-      [userId]
-    ) as UserRow[]
+    const row = dbGet('SELECT preferences FROM users WHERE id = ?', [user.userId]) as { preferences: string | null } | undefined
+    if (!row) return NextResponse.json({ success: false, error: 'User not found' }, { status: 404 })
 
-    if (!result || result.length === 0) {
-      return NextResponse.json({ success: false, error: "User not found" }, { status: 404 })
+    let current: UserPreferences = { ...DEFAULTS }
+    if (row.preferences) {
+      try { current = { ...DEFAULTS, ...JSON.parse(row.preferences) } } catch { /**/ }
     }
+    const updated = { ...current, ...newPrefs }
+    dbRun(`UPDATE users SET preferences = ?, updated_at = datetime('now') WHERE id = ?`, [JSON.stringify(updated), user.userId])
 
-    // Merge with existing preferences
-    let currentPreferences: UserPreferences = { ...DEFAULT_PREFERENCES }
-    if (result[0].preferences) {
-      try {
-        const savedPreferences = typeof result[0].preferences === 'string' 
-          ? JSON.parse(result[0].preferences) 
-          : result[0].preferences
-        currentPreferences = { ...DEFAULT_PREFERENCES, ...savedPreferences }
-      } catch {
-        console.error("Error parsing existing preferences, starting fresh")
-      }
-    }
-
-    const updatedPreferences = { ...currentPreferences, ...newPreferences }
-
-    // Update preferences in database
-    await executeQuery(
-      "UPDATE users SET preferences = ? WHERE id = ?",
-      [JSON.stringify(updatedPreferences), userId]
-    )
-
-    return NextResponse.json({
-      success: true,
-      message: "Preferences updated successfully",
-      preferences: updatedPreferences,
-    })
-  } catch (error) {
-    console.error("Error updating user preferences:", error)
-    return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : "Failed to update preferences",
-      },
-      { status: 500 }
-    )
+    return NextResponse.json({ success: true, message: 'Preferences updated', preferences: updated })
+  } catch (err) {
+    console.error('Update preferences error:', err)
+    return NextResponse.json({ success: false, error: 'Failed to update preferences' }, { status: 500 })
   }
 }

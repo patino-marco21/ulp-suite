@@ -117,10 +117,11 @@ export default function DocsPage() {
     { id: "search-credentials", label: "Search Credentials", icon: Search, method: "POST" },
     { id: "search-domain", label: "Search Domain", icon: Search, method: "POST" },
     { id: "lookup", label: "Lookup", icon: Database, method: "GET" },
+    { id: "batch-lookup", label: "Batch Lookup", icon: Database, method: "POST" },
     { id: "summary", label: "Summary", icon: BarChart3, method: "GET" },
-    { id: "device", label: "Device", icon: Monitor, method: "GET" },
     { id: "upload", label: "Upload", icon: Upload, method: "POST" },
     { id: "api-keys", label: "API Keys", icon: Key, method: "CRUD" },
+    { id: "check-portal", label: "Check Portal", icon: Shield, method: "GET" },
   ]
 
   const scrollContainerRef = useRef<HTMLDivElement>(null)
@@ -636,50 +637,17 @@ export default function DocsPage() {
                     code={`{
   "success": true,
   "stats": {
-    "totalDevices": 15420,
-    "uniqueDeviceNames": 12350,
-    "duplicateDeviceNames": 3070,
-    "totalFiles": 892450,
-    "totalCredentials": 2450000,
-    "totalDomains": 185000,
-    "totalUrls": 3200000
+    "credentials": 48200000,
+    "unique_domains": 182000,
+    "unique_emails": 15400000,
+    "sources": 127
   },
-  "topTLDs": [
-    { "tld": "com", "count": 1250000, "affected_devices": 14200 },
-    { "tld": "org", "count": 85000, "affected_devices": 8500 },
-    // ... up to 50 TLDs
-  ],
-  "countryStats": {
-    "summary": {
-      "totalDevices": 14800,
-      "totalCredentials": 2380000,
-      "affectedCountries": 95
-    },
-    "topCountries": [
-      {
-        "rank": 1,
-        "country": "US",
-        "countryName": "United States",
-        "totalDevices": 3200,
-        "totalCredentials": 520000
-      }
-      // ... up to 10 countries
-    ],
-    "countries": [
-      {
-        "country": "US",
-        "countryName": "United States",
-        "totalDevices": 3200,
-        "totalCredentials": 520000
-      }
-      // ... all countries
-    ],
-    "alpha2ToAlpha3Map": {
-      "US": "USA",
-      "GB": "GBR"
-      // ... mapping for all countries
-    }
-  }
+  "top_domains": [
+    { "domain": "gmail.com",   "count": 9200000 },
+    { "domain": "yahoo.com",   "count": 3100000 },
+    { "domain": "hotmail.com", "count": 2800000 }
+    // ... up to 20 domains
+  ]
 }`}
                   />
                 </div>
@@ -690,19 +658,11 @@ export default function DocsPage() {
                   <div className="grid gap-2">
                     <div className="flex items-center gap-2 text-sm text-muted-foreground">
                       <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                      Overall statistics (devices, credentials, files, domains, URLs)
+                      Total credential count, unique domains, unique emails, and source file count
                     </div>
                     <div className="flex items-center gap-2 text-sm text-muted-foreground">
                       <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                      Top 50 TLDs with credential count and affected devices
-                    </div>
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                      Country statistics with geographic distribution
-                    </div>
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                      Alpha-2 to Alpha-3 country code mapping
+                      Top 20 domains by credential volume
                     </div>
                   </div>
                 </div>
@@ -711,50 +671,36 @@ export default function DocsPage() {
           </div>
         )}
 
-        {/* Device Section */}
-        {activeSection === "device" && (
+        {/* Batch Lookup Section */}
+        {activeSection === "batch-lookup" && (
           <div className="space-y-6">
             <Card className="glass-card border-border/50">
               <CardHeader>
                 <div className="flex items-center gap-3">
-                  <Badge className="bg-emerald-500/10 text-emerald-500 border-emerald-500/30 font-mono">GET</Badge>
-                  <code className="text-lg font-mono text-foreground">/api/v1/device/:deviceId</code>
+                  <Badge className="bg-blue-500/10 text-blue-400 border-blue-500/30 font-mono">POST</Badge>
+                  <code className="text-lg font-mono text-foreground">/api/v1/lookup/batch</code>
                 </div>
                 <CardDescription className="text-muted-foreground mt-2">
-                  Get detailed information about a specific device including summary stats, host/system information, top passwords, top domains, browser distribution, and file statistics. Optionally include all compromised credentials, software list, and file tree.
+                  Submit up to 100 email and/or domain queries in a single API call. Returns a results map keyed by query string. Each email lookup uses the bloom-filter skip index for fast exact matching.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
-                {/* Path Parameters */}
+                {/* Body Parameters */}
                 <div>
-                  <h4 className="font-semibold mb-3 text-foreground">Path Parameters</h4>
+                  <h4 className="font-semibold mb-3 text-foreground">JSON Body</h4>
                   <ParameterTable params={[
-                    { name: "deviceId", type: "string", required: true, description: "The unique device identifier" },
+                    { name: "emails", type: "string[]", required: false, description: "Array of email addresses to look up (exact match). Max 100 total queries." },
+                    { name: "domains", type: "string[]", required: false, description: "Array of domains to look up (exact match). Max 100 total queries." },
                   ]} />
                 </div>
 
-                {/* Query Parameters */}
+                {/* Example Request */}
                 <div>
-                  <h4 className="font-semibold mb-3 text-foreground">Query Parameters</h4>
-                  <ParameterTable params={[
-                    { name: "include", type: "string", required: false, description: "Comma-separated list of data to include: 'credentials', 'software', 'files'. Example: include=credentials,software" },
-                    { name: "page", type: "number", required: false, description: "Page number for credentials pagination", default: "1" },
-                    { name: "limit", type: "number", required: false, description: "Number of credentials per page (max 1000)", default: "100" },
-                  ]} />
-                </div>
-
-                {/* Example Request - Summary */}
-                <div>
-                  <h4 className="font-semibold mb-3 text-foreground">Example Request (Summary Only)</h4>
-                  <CodeBlock code={`curl "${baseUrl}/api/v1/device/abc123-device-id" \\
-  -H "X-API-Key: bv_your_api_key"`} />
-                </div>
-
-                {/* Example Request - With Credentials */}
-                <div>
-                  <h4 className="font-semibold mb-3 text-foreground">Example Request (With All Data)</h4>
-                  <CodeBlock code={`curl "${baseUrl}/api/v1/device/abc123-device-id?include=credentials,software,files&page=1&limit=50" \\
-  -H "X-API-Key: bv_your_api_key"`} />
+                  <h4 className="font-semibold mb-3 text-foreground">Example Request</h4>
+                  <CodeBlock code={`curl -X POST "${baseUrl}/api/v1/lookup/batch" \\
+  -H "X-API-Key: bv_your_api_key" \\
+  -H "Content-Type: application/json" \\
+  -d '{"emails":["alice@example.com","bob@test.org"],"domains":["github.com"]}'`} />
                 </div>
 
                 {/* Response */}
@@ -768,106 +714,48 @@ export default function DocsPage() {
                     language="json"
                     code={`{
   "success": true,
-  "device": {
-    "deviceId": "abc123-device-id",
-    "deviceName": "DESKTOP-ABC123",
-    "uploadBatch": "batch_2024_01",
-    "uploadDate": "2024-01-15T10:30:00Z"
-  },
-  "hostInfo": {
-    "os": "Windows 10 Pro",
-    "computerName": "DESKTOP-ABC123",
-    "ipAddress": "203.0.113.45",
-    "country": "US",
-    "username": "john",
-    "cpu": "Intel Core i7-12700K",
-    "ram": "32 GB",
-    "gpu": "NVIDIA RTX 3080",
-    "stealerType": "RedLine",
-    "logDate": "2024-01-15",
-    "hwid": "ABC123DEF456",
-    "filePath": "C:/Users/john/AppData",
-    "antivirus": "Windows Defender",
-    "sourceFile": "system_info.txt",
-    "createdAt": "2024-01-15T10:30:00Z"
-  },
-  "summary": {
-    "totalCredentials": 1250,
-    "totalSoftware": 85,
-    "totalFiles": 340,
-    "totalDomains": 420,
-    "totalUrls": 1100
-  },
-  "topPasswords": [
-    { "password": "password123", "count": 15 },
-    { "password": "admin", "count": 8 }
-  ],
-  "topDomains": [
-    { "domain": "facebook.com", "count": 45 },
-    { "domain": "google.com", "count": 38 }
-  ],
-  "browserDistribution": [
-    { "browser": "Chrome", "count": 850 },
-    { "browser": "Firefox", "count": 300 }
-  ],
-  "fileStatistics": {
-    "totalFiles": 340,
-    "totalDirectories": 25,
-    "totalTxtFiles": 180,
-    "totalOtherFiles": 135,
-    "bySize": [
-      { "category": "< 1 KB", "count": 120 },
-      { "category": "1 KB - 10 KB", "count": 95 }
-    ]
-  },
-  // Optional includes (via ?include=credentials,software,files):
-  "credentials": { "data": [...], "pagination": {...} },
-  "software": [{ "name": "Chrome", "version": "120.0", "sourceFile": "" }],
-  "files": [{ "filePath": "/passwords.txt", "fileName": "passwords.txt", "parentPath": "/", "isDirectory": false, "fileSize": 1024, "hasContent": true }]
+  "queried": 3,
+  "found": 2,
+  "results": {
+    "alice@example.com": {
+      "found": true,
+      "count": 3,
+      "results": [
+        {
+          "email": "alice@example.com",
+          "url": "https://example.com/login",
+          "domain": "example.com",
+          "source_file": "dump_2024.txt",
+          "breach_name": "Example2024",
+          "imported_at": "2024-03-15 09:22:00"
+        }
+        // ... up to 50 results per query
+      ]
+    },
+    "bob@test.org": { "found": false, "count": 0, "results": [] },
+    "github.com": {
+      "found": true,
+      "count": 50,
+      "results": [ /* ... */ ]
+    }
+  }
 }`}
                   />
                 </div>
 
-                {/* Data Included */}
-                <div>
-                  <h4 className="font-semibold mb-3 text-foreground">Data Included</h4>
-                  <div className="grid gap-2">
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                      Device info (ID, name, upload date, batch)
-                    </div>
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                      Host/system information (OS, IP, country, CPU, RAM, GPU, stealer type, HWID, antivirus, log date, etc.)
-                    </div>
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                      Summary statistics (credentials, software, files, domains, URLs)
-                    </div>
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                      Top 10 passwords with usage count
-                    </div>
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                      Top 10 domains and browser distribution
-                    </div>
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                      File statistics (size distribution, directories, txt files)
-                    </div>
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                      All compromised credentials with pagination (optional: include=credentials)
-                    </div>
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                      Installed software list (optional: include=software)
-                    </div>
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                      Full file tree with metadata (optional: include=files)
-                    </div>
+                {/* Notes */}
+                <div className="grid gap-2">
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    Maximum 100 total queries per request (emails + domains combined)
+                  </div>
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    Results capped at 50 rows per individual query
+                  </div>
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    Email addresses are lowercased automatically before matching
                   </div>
                 </div>
               </CardContent>
@@ -899,7 +787,7 @@ export default function DocsPage() {
                   <code className="text-lg font-mono text-foreground">/api/v1/upload</code>
                 </div>
                 <CardDescription className="text-muted-foreground mt-2">
-                  Upload stealer logs in ZIP format. The file will be processed asynchronously.
+                  Upload a credential file (.txt, .csv, or .zip). The file is processed synchronously and returns import statistics when complete. Admin API key required.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
@@ -907,7 +795,7 @@ export default function DocsPage() {
                 <div>
                   <h4 className="font-semibold mb-3 text-foreground">Form Data Parameters</h4>
                   <ParameterTable params={[
-                    { name: "file", type: "file", required: true, description: "ZIP file containing stealer logs" },
+                    { name: "file", type: "file", required: true, description: "Credential file in .txt, .csv, or .zip format. ZIP archives may contain multiple .txt/.csv files." },
                   ]} />
                 </div>
 
@@ -926,20 +814,22 @@ export default function DocsPage() {
                     Success Response
                     <Badge variant="outline" className="text-xs">200 OK</Badge>
                   </h4>
-                  <CodeBlock 
+                  <CodeBlock
                     language="json"
                     code={`{
   "success": true,
-  "message": "Upload processed successfully",
-  "data": {
-    "jobId": "job_abc123",
-    "status": "completed",
-    "stats": {
-      "totalDevices": 10,
-      "totalCredentials": 5000,
-      "totalFiles": 150,
-      "processingTime": 12500
-    }
+  "filename": "credentials.txt",
+  "imported": 45230,
+  "skipped": 4770,
+  "errors": 0,
+  "import_pct": 90.5,
+  "breach_name": "AutoDetected2024",
+  "rejection_breakdown": {
+    "blank": 1200,
+    "no_login": 890,
+    "pass_too_short": 680,
+    "dedup": 540,
+    "no_fields": 1460
   }
 }`}
                   />
@@ -947,66 +837,27 @@ export default function DocsPage() {
               </CardContent>
             </Card>
 
-            {/* Upload Jobs */}
+            {/* Upload form data note */}
             <Card className="glass-card border-border/50">
-              <CardHeader>
-                <div className="flex items-center gap-3">
-                  <Badge className="bg-emerald-500/10 text-emerald-500 border-emerald-500/30 font-mono">GET</Badge>
-                  <code className="text-lg font-mono text-foreground">/api/v1/upload/jobs</code>
-                </div>
-                <CardDescription className="text-muted-foreground mt-2">
-                  List all upload jobs with their status and statistics.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                {/* Example Request */}
-                <div>
-                  <h4 className="font-semibold mb-3 text-foreground">Example Request</h4>
-                  <CodeBlock code={`curl "${baseUrl}/api/v1/upload/jobs" \\
-  -H "X-API-Key: bv_admin_api_key"`} />
-                </div>
-
-                {/* Job Statuses */}
-                <div>
-                  <h4 className="font-semibold mb-3 text-foreground flex items-center gap-2">
-                    <Clock className="h-4 w-4 text-primary" />
-                    Job Status Values
-                  </h4>
-                  <div className="flex flex-wrap gap-2">
-                    <Badge className="bg-amber-500/10 text-amber-500 border-amber-500/30">pending</Badge>
-                    <Badge className="bg-blue-500/10 text-blue-400 border-blue-500/30">processing</Badge>
-                    <Badge className="bg-emerald-500/10 text-emerald-500 border-emerald-500/30">completed</Badge>
-                    <Badge className="bg-red-500/10 text-red-400 border-red-500/30">failed</Badge>
+              <CardContent className="p-4">
+                <div className="flex items-start gap-3">
+                  <div className="p-2 rounded-lg bg-blue-500/10 shrink-0">
+                    <Zap className="h-4 w-4 text-blue-400" />
                   </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Upload Status by Job ID */}
-            <Card className="glass-card border-border/50">
-              <CardHeader>
-                <div className="flex items-center gap-3">
-                  <Badge className="bg-emerald-500/10 text-emerald-500 border-emerald-500/30 font-mono">GET</Badge>
-                  <code className="text-lg font-mono text-foreground">/api/v1/upload/status/:jobId</code>
-                </div>
-                <CardDescription className="text-muted-foreground mt-2">
-                  Get detailed status of a specific upload job.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                {/* Parameters */}
-                <div>
-                  <h4 className="font-semibold mb-3 text-foreground">Path Parameters</h4>
-                  <ParameterTable params={[
-                    { name: "jobId", type: "string", required: true, description: "The unique job identifier" },
-                  ]} />
-                </div>
-
-                {/* Example Request */}
-                <div>
-                  <h4 className="font-semibold mb-3 text-foreground">Example Request</h4>
-                  <CodeBlock code={`curl "${baseUrl}/api/v1/upload/status/job_abc123" \\
-  -H "X-API-Key: bv_admin_api_key"`} />
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-foreground">Supported file formats</p>
+                    <p className="text-sm text-muted-foreground">
+                      The upload endpoint accepts <code className="text-xs bg-muted px-1 rounded">.txt</code>,{" "}
+                      <code className="text-xs bg-muted px-1 rounded">.csv</code>, and{" "}
+                      <code className="text-xs bg-muted px-1 rounded">.zip</code> archives containing multiple credential files.
+                      Breach tagging, duplicate detection, and domain extraction happen automatically at ingest time.
+                    </p>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      To preview how a file will parse without storing anything, use the{" "}
+                      <code className="text-xs bg-muted px-1 rounded">POST /api/admin/parse-sample</code> diagnostic endpoint
+                      (admin only, plain-text body, max 10,000 lines).
+                    </p>
+                  </div>
                 </div>
               </CardContent>
             </Card>
@@ -1220,6 +1071,99 @@ export default function DocsPage() {
   -H "X-API-Key: bv_your_api_key" \\
   -H "Content-Type: application/json" \\
   -d '{"isActive": false}'`} />
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
+        {/* ── Check Portal ── */}
+        {activeSection === "check-portal" && (
+          <div className="space-y-6" id="check-portal">
+            <Card className="glass-card border-border/50">
+              <CardHeader>
+                <div className="flex items-center gap-3">
+                  <Badge className="bg-emerald-500/10 text-emerald-400 border-emerald-500/30 font-mono">GET</Badge>
+                  <code className="text-lg font-mono text-foreground">/api/check</code>
+                  <Badge variant="outline" className="text-xs text-green-500 border-green-500/40">No API key required</Badge>
+                </div>
+                <CardDescription className="text-muted-foreground mt-2">
+                  Self-service email breach check. Returns breach names only — <strong>passwords are never exposed</strong>.
+                  Designed for end-user self-lookup (HIBP-style). Rate-limited per IP and per email address.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div>
+                  <h4 className="font-semibold mb-3 text-foreground">Query Parameters</h4>
+                  <ParameterTable params={[
+                    { name: "email", type: "string", required: true, description: "The email address to check. Must be a valid email containing @." },
+                  ]} />
+                </div>
+
+                <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-4 space-y-1">
+                  <p className="text-sm font-medium text-amber-400 flex items-center gap-2">
+                    <Clock className="h-4 w-4" />Rate Limits
+                  </p>
+                  <ul className="text-sm text-muted-foreground space-y-1 ml-6 list-disc">
+                    <li>10 requests per IP per minute</li>
+                    <li>50 lookups per email address per hour (prevents enumeration of a specific target)</li>
+                    <li>Returns <code className="bg-muted/30 px-1 rounded">429</code> with <code className="bg-muted/30 px-1 rounded">Retry-After</code> header when exceeded</li>
+                  </ul>
+                </div>
+
+                <div>
+                  <h4 className="font-semibold mb-3 text-foreground">Example Request</h4>
+                  <CodeBlock code={`curl "${baseUrl}/api/check?email=alice%40example.com"`} />
+                </div>
+
+                <div>
+                  <h4 className="font-semibold mb-3 text-foreground flex items-center gap-2">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    Found Response
+                    <Badge variant="outline" className="text-xs">200 OK</Badge>
+                  </h4>
+                  <CodeBlock language="json" code={`{
+  "success": true,
+  "email": "alice@example.com",
+  "found": true,
+  "breach_count": 2,
+  "breaches": [
+    {
+      "name": "ExampleBreach2024",
+      "domains": ["example.com", "shop.example.com"],
+      "first_seen": "2024-03-15T00:00:00Z"
+    },
+    {
+      "name": "ComboList2023",
+      "domains": ["example.com"],
+      "first_seen": "2023-11-01T00:00:00Z"
+    }
+  ]
+}`} />
+                </div>
+
+                <div>
+                  <h4 className="font-semibold mb-3 text-foreground flex items-center gap-2">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    Clean Response
+                    <Badge variant="outline" className="text-xs">200 OK</Badge>
+                  </h4>
+                  <CodeBlock language="json" code={`{
+  "success": true,
+  "email": "clean@example.com",
+  "found": false,
+  "breach_count": 0,
+  "breaches": []
+}`} />
+                </div>
+
+                <div className="rounded-lg border border-border/50 bg-muted/10 p-4 space-y-2">
+                  <p className="text-sm font-medium text-foreground">Security notes</p>
+                  <ul className="text-sm text-muted-foreground space-y-1 ml-4 list-disc">
+                    <li>Passwords are <strong>never</strong> returned by this endpoint — breach names and domains only</li>
+                    <li>Responses carry <code className="bg-muted/30 px-1 rounded">Cache-Control: private, no-store</code></li>
+                    <li>A browser-friendly UI is available at <Link href="/check" className="text-primary hover:underline">/check</Link></li>
+                  </ul>
                 </div>
               </CardContent>
             </Card>

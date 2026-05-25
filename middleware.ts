@@ -4,6 +4,8 @@ import { validateRequest } from "@/lib/auth"
 const PUBLIC_PATHS = [
   "/login",
   "/db-sync",
+  "/check",       // self-service email check portal (unauthenticated)
+  "/api/check",   // self-service check API (rate-limited, no credentials exposed)
   "/api/auth/login",
   "/api/auth/verify-totp",
   "/api/auth/check-users",

@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from "next/server"
 import { validateRequest, requireAdminRole } from "@/lib/auth"
-import { executeQuery } from "@/lib/mysql"
+import { dbQuery, dbGet, dbRun } from "@/lib/sqlite"
 
+export const dynamic = "force-dynamic"
+
+/**
+ * GET /api/feeds/categories
+ * Returns all feed categories ordered by name.
+ */
 export async function GET(request: NextRequest) {
   const user = await validateRequest(request)
   if (!user) {
@@ -9,114 +15,149 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const categories = await executeQuery(`SELECT * FROM feed_categories ORDER BY display_order ASC, name ASC`)
+    const categories = dbQuery(
+      `SELECT id, name, slug, created_at, updated_at
+       FROM feed_categories
+       ORDER BY name ASC`
+    )
     return NextResponse.json({ success: true, categories })
   } catch (error) {
-    console.error("[NewsFeed] Error getting categories:", error)
-    return NextResponse.json({ success: false, error: "Failed to get categories" }, { status: 500 })
+    console.error("GET /api/feeds/categories error:", error)
+    return NextResponse.json(
+      { success: false, error: error instanceof Error ? error.message : "Failed to load categories" },
+      { status: 500 }
+    )
   }
 }
 
+/**
+ * POST /api/feeds/categories
+ * Body: { name: string, slug: string }
+ * Creates a new feed category.
+ */
 export async function POST(request: NextRequest) {
   const user = await validateRequest(request)
   if (!user) {
     return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
   }
-
   const roleError = requireAdminRole(user)
   if (roleError) return roleError
 
   try {
     const body = await request.json()
-    const { name, slug, display_order = 0 } = body
+    const name = (body.name ?? "").trim()
+    const slug = (body.slug ?? "").trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-")
 
     if (!name || !slug) {
-      return NextResponse.json({ success: false, error: "Name and slug are required" }, { status: 400 })
+      return NextResponse.json({ success: false, error: "name and slug are required" }, { status: 400 })
     }
 
-    const result = await executeQuery(
-      `INSERT INTO feed_categories (name, slug, display_order) VALUES (?, ?, ?)`,
-      [name, slug, display_order]
+    // Check slug uniqueness
+    const existing = dbGet(`SELECT id FROM feed_categories WHERE slug = ?`, [slug])
+    if (existing) {
+      return NextResponse.json({ success: false, error: "A category with that slug already exists" }, { status: 409 })
+    }
+
+    const { lastId } = dbRun(
+      `INSERT INTO feed_categories (name, slug) VALUES (?, ?)`,
+      [name, slug]
     )
 
-    return NextResponse.json({ 
-      success: true, 
-      message: "Category created", 
-      id: (result as any).insertId 
-    })
-  } catch (error: any) {
-    console.error("[NewsFeed] Error creating category:", error)
-    if (error.code === 'ER_DUP_ENTRY') {
-      return NextResponse.json({ success: false, error: "A category with this slug already exists" }, { status: 400 })
-    }
-    return NextResponse.json({ success: false, error: "Failed to create category" }, { status: 500 })
+    const created = dbGet(`SELECT id, name, slug, created_at FROM feed_categories WHERE id = ?`, [lastId])
+    return NextResponse.json({ success: true, ...(created as object) }, { status: 201 })
+  } catch (error) {
+    console.error("POST /api/feeds/categories error:", error)
+    return NextResponse.json(
+      { success: false, error: error instanceof Error ? error.message : "Failed to create category" },
+      { status: 500 }
+    )
   }
 }
 
+/**
+ * PUT /api/feeds/categories
+ * Body: { id: number, name: string, slug: string }
+ * Updates an existing feed category.
+ */
 export async function PUT(request: NextRequest) {
   const user = await validateRequest(request)
   if (!user) {
     return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
   }
-
   const roleError = requireAdminRole(user)
   if (roleError) return roleError
 
   try {
     const body = await request.json()
-    const { id, name, slug, display_order } = body
+    const id   = Number(body.id)
+    const name = (body.name ?? "").trim()
+    const slug = (body.slug ?? "").trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-")
 
-    if (!id || (!name && !slug && display_order === undefined)) {
-      return NextResponse.json({ success: false, error: "ID and at least one field to update are required" }, { status: 400 })
+    if (!id || !name || !slug) {
+      return NextResponse.json({ success: false, error: "id, name and slug are required" }, { status: 400 })
     }
 
-    // Build dynamic update
-    const updates: string[] = []
-    const values: any[] = []
+    // Check target exists
+    const existing = dbGet(`SELECT id FROM feed_categories WHERE id = ?`, [id])
+    if (!existing) {
+      return NextResponse.json({ success: false, error: "Category not found" }, { status: 404 })
+    }
 
-    if (name) { updates.push('name = ?'); values.push(name) }
-    if (slug) { updates.push('slug = ?'); values.push(slug) }
-    if (display_order !== undefined) { updates.push('display_order = ?'); values.push(display_order) }
+    // Check slug conflict (other rows)
+    const slugConflict = dbGet(
+      `SELECT id FROM feed_categories WHERE slug = ? AND id != ?`,
+      [slug, id]
+    )
+    if (slugConflict) {
+      return NextResponse.json({ success: false, error: "Slug already used by another category" }, { status: 409 })
+    }
 
-    values.push(id)
-
-    await executeQuery(
-      `UPDATE feed_categories SET ${updates.join(', ')} WHERE id = ?`,
-      values
+    dbRun(
+      `UPDATE feed_categories SET name = ?, slug = ?, updated_at = datetime('now') WHERE id = ?`,
+      [name, slug, id]
     )
 
-    return NextResponse.json({ success: true, message: "Category updated" })
-  } catch (error: any) {
-    console.error("[NewsFeed] Error updating category:", error)
-    if (error.code === 'ER_DUP_ENTRY') {
-      return NextResponse.json({ success: false, error: "A category with this slug already exists" }, { status: 400 })
-    }
-    return NextResponse.json({ success: false, error: "Failed to update category" }, { status: 500 })
+    const updated = dbGet(`SELECT id, name, slug, updated_at FROM feed_categories WHERE id = ?`, [id])
+    return NextResponse.json({ success: true, category: updated })
+  } catch (error) {
+    console.error("PUT /api/feeds/categories error:", error)
+    return NextResponse.json(
+      { success: false, error: error instanceof Error ? error.message : "Failed to update category" },
+      { status: 500 }
+    )
   }
 }
 
+/**
+ * DELETE /api/feeds/categories?id=N
+ * Deletes a category and (via ON DELETE CASCADE) all its sources.
+ */
 export async function DELETE(request: NextRequest) {
   const user = await validateRequest(request)
   if (!user) {
     return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
   }
-
   const roleError = requireAdminRole(user)
   if (roleError) return roleError
 
   try {
-    const { searchParams } = new URL(request.url)
-    const id = searchParams.get('id')
-
+    const id = Number(new URL(request.url).searchParams.get("id"))
     if (!id) {
-      return NextResponse.json({ success: false, error: "ID is required" }, { status: 400 })
+      return NextResponse.json({ success: false, error: "id query parameter is required" }, { status: 400 })
     }
 
-    await executeQuery(`DELETE FROM feed_categories WHERE id = ?`, [id])
+    const existing = dbGet(`SELECT id FROM feed_categories WHERE id = ?`, [id])
+    if (!existing) {
+      return NextResponse.json({ success: false, error: "Category not found" }, { status: 404 })
+    }
 
-    return NextResponse.json({ success: true, message: "Category deleted" })
+    const { changes } = dbRun(`DELETE FROM feed_categories WHERE id = ?`, [id])
+    return NextResponse.json({ success: true, deleted: changes })
   } catch (error) {
-    console.error("[NewsFeed] Error deleting category:", error)
-    return NextResponse.json({ success: false, error: "Failed to delete category" }, { status: 500 })
+    console.error("DELETE /api/feeds/categories error:", error)
+    return NextResponse.json(
+      { success: false, error: error instanceof Error ? error.message : "Failed to delete category" },
+      { status: 500 }
+    )
   }
 }

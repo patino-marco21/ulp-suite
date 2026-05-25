@@ -1,216 +1,148 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { executeQuery as executeClickHouseQuery } from "@/lib/clickhouse"
+import { executeQuery } from "@/lib/clickhouse"
 import { validateRequest } from "@/lib/auth"
-import { parseSearchQuery } from "@/lib/query-parser"
-import { buildSearchCondition, buildDeviceIdSubquery } from "@/lib/search-query-builder"
+import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-search"
+import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
+import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
+import { NORM_COLS } from "@/lib/ulp-normalize"
 
-export async function POST(request: NextRequest) {
-  // Validate authentication
+export const dynamic = 'force-dynamic'
+
+const SELECT = `${NORM_COLS},
+                source_file, breach_name,
+                country_tier, login_type, password_length, password_mask,
+                url_scheme, is_corporate_email, email_domain,
+                url_host, password_entropy_band, imported_at`
+
+// Valid password mask values — used to sanitize the pw_mask query param so it
+// can be safely interpolated into SQL without a parameterised placeholder.
+const VALID_MASKS = new Set(['alpha', 'numeric', 'alphanumeric', 'mixed', 'empty'])
+
+// Allowed ORDER BY expressions (whitelist to prevent injection)
+const SORT_MAP: Record<string, string> = {
+  'imported_desc': 'imported_at DESC',
+  'imported_asc':  'imported_at ASC',
+  'domain_asc':    'domain ASC, imported_at DESC',
+  'domain_desc':   'domain DESC, imported_at DESC',
+  'email_asc':     'email ASC',
+  'pw_len_desc':   'password_length DESC',
+  'pw_len_asc':    'password_length ASC',
+}
+
+export async function GET(request: NextRequest) {
   const user = await validateRequest(request)
   if (!user) {
     return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
   }
 
+  const { searchParams } = new URL(request.url)
+  const q           = searchParams.get('q')           || ''
+  const breach      = searchParams.get('breach')      || ''
+  const tierInclude = searchParams.get('tier_include') || ''
+  const tierExclude = searchParams.get('tier_exclude') || ''
+  const loginType   = searchParams.get('login_type')  || ''
+  const page        = Math.max(1, parseInt(searchParams.get('page')  || '1'))
+  const limit       = Math.min(1000, Math.max(1, parseInt(searchParams.get('limit') || '50')))
+  const offset      = (page - 1) * limit
+
+  // Filters
+  const pwMaskRaw   = searchParams.get('pw_mask')      || ''
+  const urlScheme   = searchParams.get('url_scheme')   || ''
+  const isCorporate = searchParams.get('is_corporate') || ''
+  const pwLenMin    = searchParams.get('pw_len_min') ? parseInt(searchParams.get('pw_len_min')!) : null
+  const pwLenMax    = searchParams.get('pw_len_max') ? parseInt(searchParams.get('pw_len_max')!) : null
+  const dateFrom    = searchParams.get('date_from') || ''
+  const dateTo      = searchParams.get('date_to')   || ''
+  const emailDomain = searchParams.get('email_domain') || ''
+  const sourceFile  = searchParams.get('source_file')  || ''
+  const regexMode   = searchParams.get('regex') === '1'
+
+  // Sort: whitelist-validated to prevent injection
+  const sortKey     = searchParams.get('sort') || 'imported_desc'
+  const orderBy     = SORT_MAP[sortKey] ?? SORT_MAP['imported_desc']
+
+  // Sanitise password mask — only allow known values
+  const pwMasks = pwMaskRaw
+    .split(',')
+    .map(m => m.trim())
+    .filter(m => VALID_MASKS.has(m))
+
+  // Require at least one filter
+  const hasFilter = q.trim() || breach || tierInclude || tierExclude || loginType ||
+                    pwMasks.length || urlScheme || isCorporate || pwLenMin !== null ||
+                    pwLenMax !== null || dateFrom || dateTo || emailDomain || sourceFile
+  if (!hasFilter) {
+    return NextResponse.json({ success: true, results: [], total: 0, page: 1, pages: 0, query: '' })
+  }
+
+  const { include: incTiers, exclude: excTiers } = parseTierParams(tierInclude, tierExclude)
+  const loginTypes = parseLoginTypeParam(loginType)
+
+  // Core search clause
+  const tokens = parseULPQuery(q)
+  const { clause, params: baseParams } = regexMode
+    ? buildULPWhereRegex(tokens)
+    : buildULPWhere(tokens)
+
+  // Extra WHERE fragments
+  const extras: string[] = []
+  const mergedParams: Record<string, unknown> = { ...baseParams, limit, offset }
+
+  if (breach)      { extras.push(' AND breach_name = {breachFilter:String}');   mergedParams.breachFilter = breach }
+  if (emailDomain) { extras.push(' AND email_domain = {emailDomain:String}');   mergedParams.emailDomain = emailDomain.toLowerCase() }
+  if (urlScheme)   { extras.push(' AND url_scheme = {urlScheme:String}');        mergedParams.urlScheme = urlScheme }
+  if (sourceFile)  { extras.push(' AND source_file = {sourceFile:String}');      mergedParams.sourceFile = sourceFile }
+  if (isCorporate === '1') extras.push(' AND is_corporate_email = 1')
+  if (pwLenMin !== null) { extras.push(' AND password_length >= {pwLenMin:UInt8}'); mergedParams.pwLenMin = pwLenMin }
+  if (pwLenMax !== null) { extras.push(' AND password_length <= {pwLenMax:UInt8}'); mergedParams.pwLenMax = pwLenMax }
+  if (dateFrom) { extras.push(' AND imported_at >= {dateFrom:DateTime}'); mergedParams.dateFrom = `${dateFrom} 00:00:00` }
+  if (dateTo)   { extras.push(' AND imported_at <= {dateTo:DateTime}');   mergedParams.dateTo   = `${dateTo} 23:59:59` }
+
+  // Password mask: already sanitised to known values — safe to interpolate
+  if (pwMasks.length) {
+    extras.push(` AND password_mask IN (${pwMasks.map(m => `'${m}'`).join(',')})`)
+  }
+
+  const tierExtra      = tierWhereMulti(incTiers, excTiers)
+  const loginTypeExtra = loginTypeWhere(loginTypes)
+  const allExtras      = extras.join('') + tierExtra + loginTypeExtra
+
   try {
-    const { query, type, page = 1, limit = 50 } = await request.json()
+    const t0 = Date.now()
+    const [countResult, rows] = await Promise.all([
+      executeQuery(
+        `SELECT count() AS total FROM ulp.credentials WHERE ${clause}${allExtras}`,
+        mergedParams
+      ),
+      executeQuery(
+        `SELECT ${SELECT}
+         FROM ulp.credentials
+         WHERE ${clause}${allExtras}
+         ORDER BY ${orderBy}
+         LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
+        mergedParams
+      ),
+    ])
+    const query_ms = Date.now() - t0
+    const total = Number(countResult[0]?.total || 0)
 
-    if (!query || !type) {
-      return NextResponse.json({ error: "Query and type are required" }, { status: 400 })
-    }
-
-    console.log(`🔍 Searching for: "${query}" by ${type} (page: ${page}, limit: ${limit})`)
-
-    // Parse query for operators (OR, NOT, wildcard, exact, field prefix, AND)
-    const parsed = parseSearchQuery(query)
-    const { condition: searchCondition, params: searchParams } = buildSearchCondition(parsed, type)
-    const { condition: deviceSubquery, params: subqueryParams } = buildDeviceIdSubquery(parsed, type)
-    
-    console.log(`🔎 Parsed ${parsed.terms.length} search term(s)${parsed.hasAndGroups ? ' (AND mode)' : ''}`, parsed.terms.map(t => 
-      `${t.operator === 'exclude' ? '-' : ''}${t.field ? t.field + ':' : ''}${t.value} (${t.matchType})`
-    ))
-
-    if (type === "email") {
-      // Email search: Use parsed query with operator support (AND-aware)
-      // SECURITY: Validate and sanitize pagination parameters
-      const pageNum = Math.max(1, Math.floor(Number(page)) || 1)
-      const limitNum = Math.min(1000, Math.max(1, Math.floor(Number(limit)) || 50))
-      const offset = Math.max(0, (pageNum - 1) * limitNum)
-      
-      // Get total count (uses HAVING-based subquery for AND groups)
-      const totalCountResult = await executeClickHouseQuery(
-        `SELECT count() as total FROM (${deviceSubquery})`,
-        subqueryParams,
-      ) as any[]
-      
-      const total = totalCountResult[0]?.total || 0
-      
-      // Get devices with pagination (uses subquery for AND-aware device matching)
-      // SECURITY: Use parameterized LIMIT/OFFSET
-      const devicesResult = await executeClickHouseQuery(
-        `
-        SELECT DISTINCT d.device_id, d.device_name, d.upload_batch, d.upload_date
-        FROM devices d
-        WHERE d.device_id IN (${deviceSubquery})
-        ORDER BY d.upload_date DESC, d.device_name
-        LIMIT {limitNum:UInt32} OFFSET {offset:UInt32}
-        `,
-        { ...subqueryParams, limitNum, offset },
-      ) as any[]
-      
-      // OPTIMIZED: Get file count and system info in batch queries instead of N+1
-      // Extract all device IDs for batch query
-      const deviceIds = devicesResult.map(r => r.device_id)
-      
-      // Batch query for file counts
-      const fileCountsResult = deviceIds.length > 0 ? await executeClickHouseQuery(
-        `SELECT device_id, count() as total 
-         FROM files 
-         WHERE device_id IN ({deviceIds:Array(String)})
-         GROUP BY device_id`,
-        { deviceIds },
-      ) as any[] : []
-      
-      // Batch query for system info
-      const systemInfoResult = deviceIds.length > 0 ? await executeClickHouseQuery(
-        `SELECT device_id, log_date 
-         FROM systeminformation 
-         WHERE device_id IN ({deviceIds:Array(String)})`,
-        { deviceIds },
-      ) as any[] : []
-      
-      // Create lookup maps for O(1) access
-      const fileCountMap = new Map<string, number>()
-      for (const row of fileCountsResult) {
-        fileCountMap.set(row.device_id, Number(row.total) || 0)
-      }
-      
-      const systemInfoMap = new Map<string, string>()
-      for (const row of systemInfoResult) {
-        if (!systemInfoMap.has(row.device_id)) {
-          systemInfoMap.set(row.device_id, row.log_date)
-        }
-      }
-      
-      // Build response using lookup maps
-      const devices = devicesResult.map((row: any) => ({
-        deviceId: row.device_id,
-        deviceName: row.device_name,
-        uploadBatch: row.upload_batch,
-        uploadDate: row.upload_date,
-        matchingFiles: [],
-        matchedContent: [],
-        files: [],
-        totalFiles: fileCountMap.get(row.device_id) || 0,
-        credentials: [],
-        logDate: systemInfoMap.get(row.device_id) || undefined,
-      }))
-      
-      return NextResponse.json({
-        devices,
-        pagination: {
-          page: pageNum,
-          limit: limitNum,
-          total,
-          totalPages: Math.ceil(total / limitNum),
-          hasMore: pageNum * limitNum < total,
-        },
-      })
-      
-    } else if (type === "domain") {
-      // Domain search: Use parsed query with operator support
-      const pageNum = Math.max(1, Number.parseInt(String(page)) || 1)
-      const limitNum = Math.max(1, Math.min(100, Number.parseInt(String(limit)) || 50)) // Limit between 1-100
-      const offset = Math.max(0, (pageNum - 1) * limitNum)
-      
-      // Get total count (uses HAVING-based subquery for AND groups)
-      const totalCountResult = await executeClickHouseQuery(
-        `SELECT count() as total FROM (${deviceSubquery})`,
-        subqueryParams,
-      ) as any[]
-      
-      const total = totalCountResult[0]?.total || 0
-      
-      // Get devices with pagination (uses subquery for AND-aware device matching)
-      // SECURITY: Use parameterized LIMIT/OFFSET
-      const devicesResult = await executeClickHouseQuery(
-        `SELECT DISTINCT d.device_id, d.device_name, d.upload_batch, d.upload_date
-         FROM devices d
-         WHERE d.device_id IN (${deviceSubquery})
-         ORDER BY d.upload_date DESC, d.device_name
-         LIMIT {limitNum:UInt32} OFFSET {offset:UInt32}`,
-        { ...subqueryParams, limitNum, offset },
-      ) as any[]
-      
-      console.log(`📊 Found ${devicesResult.length} devices (page ${pageNum}, total: ${total})`)
-      
-      // OPTIMIZED: Batch queries to avoid N+1 pattern
-      const deviceIds = devicesResult.map((r: any) => r.device_id)
-      
-      // Batch query: Get file counts for all devices at once
-      const fileCountsResult = deviceIds.length > 0 ? await executeClickHouseQuery(
-        `SELECT device_id, count() as total FROM files WHERE device_id IN ({deviceIds:Array(String)}) GROUP BY device_id`,
-        { deviceIds },
-      ) as any[] : []
-      const fileCountsMap = new Map(fileCountsResult.map((r: any) => [r.device_id, r.total]))
-      
-      // Batch query: Get matching files for all devices at once
-      const matchingFilesResult = deviceIds.length > 0 ? await executeClickHouseQuery(
-        `SELECT device_id, file_path
-         FROM credentials c
-         WHERE device_id IN ({deviceIds:Array(String)}) AND ${searchCondition} AND file_path IS NOT NULL`,
-        { ...searchParams, deviceIds },
-      ) as any[] : []
-      const matchingFilesMap = new Map<string, string[]>()
-      for (const row of matchingFilesResult) {
-        const files = matchingFilesMap.get(row.device_id) || []
-        if (row.file_path && !files.includes(row.file_path)) {
-          files.push(row.file_path)
-        }
-        matchingFilesMap.set(row.device_id, files)
-      }
-      
-      // Batch query: Get system info for all devices at once
-      const systemInfoResult = deviceIds.length > 0 ? await executeClickHouseQuery(
-        `SELECT device_id, log_date FROM systeminformation WHERE device_id IN ({deviceIds:Array(String)})`,
-        { deviceIds },
-      ) as any[] : []
-      const systemInfoMap = new Map(systemInfoResult.map((r: any) => [r.device_id, r.log_date]))
-      
-      // Build devices array using Maps for O(1) lookups
-      const devices = devicesResult.map((row: any) => ({
-        deviceId: row.device_id,
-        deviceName: row.device_name,
-        uploadBatch: row.upload_batch,
-        uploadDate: row.upload_date,
-        matchingFiles: matchingFilesMap.get(row.device_id) || [],
-        matchedContent: [], // Will be populated when device is clicked (lazy loading)
-        files: [],
-        totalFiles: fileCountsMap.get(row.device_id) || 0,
-        credentials: [], // Will be loaded when device is clicked (lazy loading)
-        logDate: systemInfoMap.get(row.device_id) || undefined,
-      }))
-      
-      return NextResponse.json({
-        devices,
-        pagination: {
-          page: pageNum,
-          limit: limitNum,
-          total,
-          totalPages: Math.ceil(total / limitNum),
-          hasMore: pageNum * limitNum < total,
-        },
-      })
-    } else {
-      return NextResponse.json({ error: "Invalid search type" }, { status: 400 })
-    }
+    return NextResponse.json({
+      success:          true,
+      results:          rows,
+      total,
+      page,
+      pages:            Math.ceil(total / limit),
+      query:            q,
+      query_ms,
+      sort:             sortKey,
+      breach_filter:    breach,
+      tier_include:     tierInclude,
+      tier_exclude:     tierExclude,
+      login_type_filter: loginType,
+      regex_mode:       regexMode,
+    })
   } catch (error) {
-    console.error("❌ Search error:", error)
-    return NextResponse.json(
-      {
-        error: "Search failed",
-        details: error instanceof Error ? error.message : "Unknown error",
-      },
-      { status: 500 },
-    )
+    console.error('Search error:', error)
+    return NextResponse.json({ success: false, error: 'Search failed' }, { status: 500 })
   }
 }

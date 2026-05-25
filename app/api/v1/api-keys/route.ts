@@ -156,7 +156,7 @@ export async function POST(request: NextRequest) {
       role: keyRole,
       rateLimit: finalRateLimit,
       rateLimitWindow: finalRateLimitWindow,
-      expiresAt: finalExpiresAt,
+      expiresAt: finalExpiresAt?.toISOString() ?? null,
     })
 
     // Log the API key creation in audit log
@@ -168,7 +168,7 @@ export async function POST(request: NextRequest) {
         name: record.name,
         role: record.role,
         key_prefix: record.key_prefix,
-        expires_at: record.expires_at?.toISOString() || null
+        expires_at: record.expires_at || null
       },
       request
     )
