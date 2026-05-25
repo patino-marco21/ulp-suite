@@ -58,7 +58,7 @@ export default function CheckPage() {
       {/* Nav bar */}
       <header className="border-b px-6 py-3 flex items-center gap-3">
         <Shield className="h-5 w-5 text-primary" />
-        <span className="font-semibold text-sm">broń Vault · Email Check</span>
+        <span className="font-semibold text-sm">ULP Suite · Email Check</span>
         <span className="ml-auto text-xs text-muted-foreground flex items-center gap-1">
           <Lock className="h-3 w-3" />
           Passwords are never exposed

@@ -1,6 +1,6 @@
 # Authors
 
-Broń Vault OSS Project was originally created by:
+ULP Suite was originally created by:
 
 - [YoKo Kho](https://x.com/YoKoAcc)
 - [Tomi Ashari](https://x.com/mastomii)

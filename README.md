@@ -1,4 +1,4 @@
-# Broń Vault
+# ULP Suite
 
 **ULP credential intelligence platform.** Ingest URL:Login:Password dumps at scale, search them instantly, monitor domains, and alert on new exposures — all self-hosted.
 
@@ -8,7 +8,7 @@
 
 ## What it is
 
-Broń Vault ingests stealer log ULP (URL:Login:Password) credential lines, stores them in ClickHouse, and exposes a fast search and monitoring interface. It is designed for **tens to hundreds of billions of credential lines** and runs entirely on your own infrastructure.
+ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores them in ClickHouse, and exposes a fast search and monitoring interface. It is designed for **tens to hundreds of billions of credential lines** and runs entirely on your own infrastructure.
 
 **Tech stack:** Next.js 14 · ClickHouse · SQLite · TypeScript · Docker
 
@@ -26,15 +26,15 @@ Broń Vault ingests stealer log ULP (URL:Login:Password) credential lines, store
 
 ### Upload & Ingestion
 - Upload `.txt` / `.csv` ULP files or `.zip` archives via drag-and-drop
-- **Live progress bar** — real-time import counter (lines imported, skipped, elapsed time) via Server-Sent Events; no more blank spinners on large files
-- RFC 3986-correct ULP parser — handles ports, IPv4, colons in passwords, tab/semicolon/colon separators; ~150 lines, zero regex in the hot path
-- CSV streaming insert into ClickHouse — peak heap ~2 MB per 500K-row batch (vs ~400 MB with JSON serialization)
+- **Live progress bar** — real-time import counter (lines imported, skipped, elapsed time) via Server-Sent Events
+- RFC 3986-correct ULP parser — handles ports, IPv4, colons in passwords, tab/semicolon/colon separators
+- CSV streaming insert into ClickHouse — peak heap ~2 MB per 500K-row batch (vs ~400 MB with JSON)
 - `async_insert = 1` server-side buffering for sustained high-throughput ingestion
 
 ### Domain Monitoring
 - Define monitors on one or more domains; match by credential, URL, or both
-- **Scheduled re-scans** — each monitor runs on a configurable interval (1–168 hours), independently of uploads
-- **Dedup mode** — alert only on credentials not previously seen (no repeat noise)
+- **Scheduled re-scans** — each monitor runs on a configurable interval (1–168 hours)
+- **Dedup mode** — alert only on credentials not previously seen
 - **Digest mode** — alert on all current matches every interval (periodic summary)
 - Webhook delivery to Slack, custom APIs, or any HTTP endpoint
 - Alert history and webhook delivery status visible in the UI
@@ -68,9 +68,9 @@ ClickHouse       SQLite
                   API keys, audit log)
 ```
 
-- **ClickHouse** — columnar store, MergeTree ORDER BY `(domain, email, imported_at)`, ZSTD(3) compression, monthly partitions, bloom filters on email/domain/url. All credential reads and aggregations hit ClickHouse.
-- **SQLite** — lightweight relational store for all metadata that does not need analytical queries. No MySQL, no replication setup required.
-- **Monitor cron** — 15-minute tick registered in `instrumentation.ts` (production only); runs in-process via `setInterval`, no external queue dependency.
+- **ClickHouse** — columnar store, MergeTree ORDER BY `(domain, email, imported_at)`, ZSTD(3) compression, monthly partitions, bloom filters on email/domain/url.
+- **SQLite** — lightweight relational store for all metadata. No MySQL, no replication setup required.
+- **Monitor cron** — 15-minute tick registered in `instrumentation.ts` (production only); runs in-process via `setInterval`.
 
 ---
 
@@ -86,8 +86,8 @@ ClickHouse       SQLite
 ### Quick Start
 
 ```bash
-git clone https://github.com/patino-marco21/bron-vault
-cd bron-vault
+git clone https://github.com/patino-marco21/ulp-suite
+cd ulp-suite
 
 cp .env.example .env
 # Edit .env — set strong passwords and a random JWT_SECRET
@@ -98,7 +98,7 @@ bash docker-start.sh
 Open [http://localhost:3000](http://localhost:3000).
 
 **Default credentials:**
-- Email: `admin@bronvault.local`
+- Email: `admin@ulpsuite.local`
 - Password: `admin`
 
 > Change the default password immediately after first login.
@@ -107,9 +107,13 @@ Open [http://localhost:3000](http://localhost:3000).
 
 | Service | URL |
 |---|---|
-| Broń Vault | http://localhost:3000 |
-| ClickHouse HTTP API | http://localhost:8123 |
-| ClickHouse Play UI | http://localhost:8123/play |
+| ULP Suite | http://localhost:3000 |
+
+ClickHouse is intentionally NOT exposed on the host — it is only reachable inside the Docker network. To query it directly:
+
+```bash
+docker exec -it ulpsuite_clickhouse clickhouse-client
+```
 
 ### Useful Commands
 
@@ -124,7 +128,7 @@ docker compose down
 docker compose restart
 
 # Check status
-./docker-status.sh
+bash docker-status.sh
 ```
 
 ### Development (hot reload)
@@ -133,14 +137,13 @@ Run ClickHouse in Docker, Next.js locally:
 
 ```bash
 # Start infrastructure only (no app container)
-bash docker-start-infra.sh
+docker compose up -d clickhouse
 
 # Configure local environment
 cp env.local.example .env.local
-# Set CLICKHOUSE_HOST=http://127.0.0.1:8123 in .env.local
 
-npm install
-npm run dev
+yarn install
+yarn dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000). Changes apply instantly without rebuilding Docker.

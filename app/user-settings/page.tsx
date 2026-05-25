@@ -612,12 +612,12 @@ function TwoFactorTab() {
                     size="sm"
                     onClick={() => {
                       const allCodes = setupData.backupCodes.map(code => `${code.slice(0, 4)}-${code.slice(4)}`).join('\n');
-                      const content = `BronVault 2FA Backup Codes\n${'='.repeat(30)}\n\nKeep these codes safe. Each code can only be used once.\n\n${allCodes}\n\nGenerated: ${new Date().toISOString()}`;
+                      const content = `ULP Suite 2FA Backup Codes\n${'='.repeat(30)}\n\nKeep these codes safe. Each code can only be used once.\n\n${allCodes}\n\nGenerated: ${new Date().toISOString()}`;
                       const blob = new Blob([content], { type: 'text/plain' });
                       const url = URL.createObjectURL(blob);
                       const a = document.createElement('a');
                       a.href = url;
-                      a.download = 'bronvault-backup-codes.txt';
+                      a.download = 'ulpsuite-backup-codes.txt';
                       document.body.appendChild(a);
                       a.click();
                       document.body.removeChild(a);

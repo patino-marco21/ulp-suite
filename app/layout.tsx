@@ -25,9 +25,9 @@ const outfit = Outfit({
 })
 
 export const metadata: Metadata = {
-  title: "broń Vault",
-  description: "Where stolen data meets structured investigation.",
-  generator: 'broń Vault Dashboard'
+  title: "ULP Suite",
+  description: "ULP credential intelligence platform — search, monitor, and investigate at scale.",
+  generator: 'ULP Suite Dashboard'
 }
 
 // Initialize cron jobs in production

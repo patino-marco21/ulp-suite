@@ -18,11 +18,11 @@ export default function ClientLayoutWithSidebar({ children, initialUserRole }: C
   }, [pathname]);
 
   // Determine page title based on pathname
-  let title = "Broń Vault";
-  if (pathname === "/dashboard") title = "Broń Vault - Dashboard";
-  else if (pathname === "/") title = "Broń Vault - Search";
-  else if (pathname === "/upload") title = "Broń Vault - Upload";
-  else if (pathname === "/debug-zip") title = "Broń Vault - Debug ZIP";
+  let title = "ULP Suite";
+  if (pathname === "/dashboard") title = "ULP Suite - Dashboard";
+  else if (pathname === "/") title = "ULP Suite - Search";
+  else if (pathname === "/upload") title = "ULP Suite - Upload";
+  else if (pathname === "/debug-zip") title = "ULP Suite - Debug ZIP";
 
   // Don't render sidebar/header for standalone pages (login, db-sync, public check portal)
   if (pathname === "/login" || pathname === "/db-sync" || pathname === "/check") {

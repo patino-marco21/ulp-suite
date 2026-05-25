@@ -1,16 +1,18 @@
+name: ulp-suite
+
 networks:
   default:
-    name: ulpvault_network
+    name: ulpsuite_network
     driver: bridge
 
 services:
   # ─── ClickHouse (primary credential data store) ───────────────────────────
   clickhouse:
     image: clickhouse/clickhouse-server:26.3
-    container_name: ulpvault_clickhouse
+    container_name: ulpsuite_clickhouse
     restart: always
     # Ports intentionally NOT exposed on host — app connects via internal Docker network.
-    # To query ClickHouse directly for debugging: docker exec -it ulpvault_clickhouse clickhouse-client
+    # To query ClickHouse directly for debugging: docker exec -it ulpsuite_clickhouse clickhouse-client
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-ulp}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
@@ -40,7 +42,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: ulpvault_app
+    container_name: ulpsuite_app
     restart: on-failure
     ports:
       - "3000:3000"

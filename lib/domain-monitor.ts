@@ -331,7 +331,7 @@ async function deliverWebhook(
   const MAX_RETRIES = 3
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'User-Agent': 'ULPVault-DomainMonitor/1.0',
+    'User-Agent': 'ULPSuite-DomainMonitor/1.0',
     ...(webhook.headers || {}),
   }
   if (webhook.secret) {
@@ -480,7 +480,7 @@ export async function testWebhook(webhookId: number): Promise<{ success: boolean
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'User-Agent': 'ULPVault-DomainMonitor/1.0',
+    'User-Agent': 'ULPSuite-DomainMonitor/1.0',
     'X-Webhook-Test': 'true',
     ...(webhook.headers || {}),
   }

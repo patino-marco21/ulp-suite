@@ -35,7 +35,7 @@ async function fetchAndCountItems(url: string): Promise<number> {
   try {
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: { "User-Agent": "BronVault-FeedSync/1.0" },
+      headers: { "User-Agent": "ULPSuite-FeedSync/1.0" },
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
 

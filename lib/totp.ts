@@ -15,7 +15,7 @@ import * as QRCode from 'qrcode'
 import crypto from 'crypto'
 
 // App name shown in authenticator apps
-const APP_NAME = 'BronVault'
+const APP_NAME = 'ULP Suite'
 
 /**
  * Generate a new TOTP secret

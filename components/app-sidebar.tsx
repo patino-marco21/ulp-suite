@@ -113,7 +113,7 @@ export function AppSidebar({ initialUserRole }: AppSidebarProps) {
       <SidebarHeader className="border-b-[2px] border-border p-6 pb-8">
         <div className="flex flex-col items-center">
           <div className="relative mb-2">
-            <img src={logoSrc} alt="ULP Vault" className="relative h-10 w-auto" />
+            <img src={logoSrc} alt="ULP Suite" className="relative h-10 w-auto" />
           </div>
           <p className="text-[11px] tracking-widest text-muted-foreground leading-tight text-center font-medium mt-2">
             Credential search engine

@@ -1,4 +1,4 @@
-<!-- ULP Vault — ClickHouse performance tuning for 100 B+ row credential tables.
+<!-- ULP Suite — ClickHouse performance tuning for 100 B+ row credential tables.
      Loaded automatically from /etc/clickhouse-server/config.d/ on startup.
      All settings are safe to change without data migration.                      -->
 <clickhouse>

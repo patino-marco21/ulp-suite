@@ -199,7 +199,7 @@ async function deliverWebhookSimple(
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'User-Agent': 'ULPVault-DomainMonitor/1.0',
+    'User-Agent': 'ULPSuite-DomainMonitor/1.0',
     ...parsedHeaders,
   }
   if (webhook.secret) {

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =====================================================
-# Bron Vault - Docker Status & URLs
+# ULP Suite - Docker Status & URLs
 # =====================================================
 # Script to display service status and access URLs
 # =====================================================
@@ -15,7 +15,7 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${CYAN}📊 Bron Vault Service Status${NC}"
+echo -e "${CYAN}📊 ULP Suite Service Status${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
@@ -26,7 +26,7 @@ echo ""
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${GREEN}📍 Access URLs:${NC}"
 echo ""
-echo -e "  🌐 ${YELLOW}Bron Vault App:${NC}    http://localhost:3000"
+echo -e "  🌐 ${YELLOW}ULP Suite App:${NC}     http://localhost:3000"
 echo -e "  📊 ${YELLOW}ClickHouse Play:${NC}     http://localhost:8123/play"
 echo -e "  🗄️  ${YELLOW}MySQL:${NC}              localhost:3306"
 echo -e "  📈 ${YELLOW}ClickHouse HTTP:${NC}      http://localhost:8123"
@@ -34,7 +34,7 @@ echo ""
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${GREEN}🔐 Default Login Credentials:${NC}"
 echo ""
-echo -e "  ${YELLOW}Email:${NC}    admin@bronvault.local"
+echo -e "  ${YELLOW}Email:${NC}    admin@ulpsuite.local"
 echo -e "  ${YELLOW}Password:${NC} admin"
 echo ""
 echo -e "  ${BLUE}ℹ️  Please change the password after first login for security.${NC}"

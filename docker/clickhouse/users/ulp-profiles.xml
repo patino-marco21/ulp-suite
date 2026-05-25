@@ -1,4 +1,4 @@
-<!-- ULP Vault — ClickHouse user-level profile defaults.
+<!-- ULP Suite — ClickHouse user-level profile defaults.
      Loaded automatically from /etc/clickhouse-server/users.d/ on startup.
      These are per-user (query-level) settings that cannot live in config.d/.  -->
 <clickhouse>

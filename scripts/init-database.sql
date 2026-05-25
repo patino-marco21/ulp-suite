@@ -213,7 +213,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- Default password: "admin" (bcrypt hash with salt rounds 12)
 -- User dapat mengganti password ini setelah login pertama kali
 INSERT INTO users (email, password_hash, name, role) VALUES 
-    ('admin@bronvault.local', '$2b$12$V3YGoZlvgABmhIbt7H0ZyeygLONKnSe1TKuvp8OwEvc4u7nFWUUd.', 'Admin', 'admin')
+    ('admin@ulpsuite.local', '$2b$12$V3YGoZlvgABmhIbt7H0ZyeygLONKnSe1TKuvp8OwEvc4u7nFWUUd.', 'Admin', 'admin')
 ON DUPLICATE KEY UPDATE email=email;
 
 -- =====================================================

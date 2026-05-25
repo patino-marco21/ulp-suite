@@ -266,7 +266,7 @@ export default function LoginPage() {
               {/* Header */}
               <div className="text-center mb-8">
                 <div className="mx-auto mb-4">
-                  <img src="/images/logo.png" alt="Broń Vault Logo" className="h-16 w-auto mx-auto drop-shadow-[0_0_10px_rgba(239,68,68,0.4)]" />
+                  <img src="/images/logo.png" alt="ULP Suite Logo" className="h-16 w-auto mx-auto drop-shadow-[0_0_10px_rgba(239,68,68,0.4)]" />
                 </div>
                 <h2 className="text-2xl font-bold text-white mb-2">Two-Factor Authentication</h2>
                 <p className="text-white/50 text-sm">
@@ -378,7 +378,7 @@ export default function LoginPage() {
               <div className="absolute -inset-4 bg-red-500/20 rounded-full blur-2xl animate-pulse" />
               <img
                 src="/images/logo.png"
-                alt="broń Vault Logo"
+                alt="ULP Suite Logo"
                 className="relative w-24 h-auto drop-shadow-[0_0_25px_rgba(239,68,68,0.4)]"
               />
             </div>
@@ -422,7 +422,7 @@ export default function LoginPage() {
               <div className="absolute -inset-2 bg-red-500/20 rounded-full blur-xl animate-pulse" />
               <img
                 src="/images/logo.png"
-                alt="broń Vault Logo"
+                alt="ULP Suite Logo"
                 className="relative w-16 h-auto drop-shadow-[0_0_15px_rgba(239,68,68,0.4)]"
               />
             </div>
@@ -494,7 +494,7 @@ export default function LoginPage() {
                       value={email}
                       onChange={e => setEmail(e.target.value)}
                       className="w-full h-12 px-4 bg-white/5 border-white/10 text-white placeholder:text-white/30 rounded-xl focus:border-red-500/50 focus:ring-2 focus:ring-red-500/20 transition-all"
-                      placeholder="admin@bronvault.local"
+                      placeholder="admin@ulpsuite.local"
                       required
                     />
                     <div className="absolute inset-0 rounded-xl bg-gradient-to-r from-red-500/0 via-red-500/5 to-red-500/0 opacity-0 group-focus-within:opacity-100 transition-opacity pointer-events-none" />
@@ -570,7 +570,7 @@ export default function LoginPage() {
         {/* Bottom Attribution */}
         <div className="mt-8 text-center space-y-1">
           <p className="text-white/30 text-xs">
-            © 2025 Broń Vault. Licensed under the Apache License, Version 2.0.
+            © 2025 ULP Suite. Licensed under the Apache License, Version 2.0.
           </p>
         </div>
       </div>

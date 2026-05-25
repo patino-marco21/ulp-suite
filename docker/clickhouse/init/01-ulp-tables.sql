@@ -1,4 +1,4 @@
--- ULP Vault — ClickHouse Schema
+-- ULP Suite — ClickHouse Schema
 -- Optimised for 100 B+ row credential tables.
 -- Requires ClickHouse 25.1+.
 --

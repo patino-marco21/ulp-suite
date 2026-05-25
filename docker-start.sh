@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =====================================================
-# Bron Vault - Docker Start Script with Summary
+# ULP Suite - Docker Start Script with Summary
 # =====================================================
 # Wrapper for: docker compose up -d --build
 # =====================================================
@@ -118,7 +118,7 @@ else
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${GREEN}🔐 Default Login Credentials:${NC}"
     echo ""
-    echo -e "  ${YELLOW}Email:${NC}    admin@bronvault.local"
+    echo -e "  ${YELLOW}Email:${NC}    admin@ulpsuite.local"
     echo -e "  ${YELLOW}Password:${NC} admin"
     echo ""
     echo -e "  ${BLUE}ℹ️  Please change the password after first login for security.${NC}"

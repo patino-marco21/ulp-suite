@@ -38,7 +38,7 @@ export async function POST(request: NextRequest) {
   const apiKey = body.api_key || request.headers.get('hibp-api-key') || ''
 
   const headers: Record<string, string> = {
-    'User-Agent': 'ULPVault/1.0 (breach-sync)',
+    'User-Agent': 'ULPSuite/1.0 (breach-sync)',
     'Accept': 'application/json',
   }
   if (apiKey) headers['hibp-api-key'] = apiKey
