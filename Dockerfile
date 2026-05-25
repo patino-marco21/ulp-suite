@@ -31,8 +31,9 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-# Ensure better-sqlite3 native binary is available in standalone output
-# (Next.js standalone copies server-side node_modules automatically)
+# Next.js 14.2.x standalone output-tracing omits some internal lib modules
+# (get-metadata-route, etc.) that are required at runtime.  Copy them explicitly.
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/next/dist/lib ./node_modules/next/dist/lib
 
 RUN chown -R nextjs:nodejs /app 2>/dev/null || true
 
