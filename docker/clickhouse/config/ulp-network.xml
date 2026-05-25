@@ -1,0 +1,9 @@
+<!-- ULP Suite — ClickHouse network binding.
+     ClickHouse 26.3 defaults to listening on ::1 / 127.0.0.1 only.
+     In Docker, the app container reaches ClickHouse via the bridge network,
+     so we must bind to all interfaces.                                        -->
+<clickhouse>
+    <!-- Bind to all IPv4 interfaces so the app container can reach us.
+         Using 0.0.0.0 instead of :: for Windows Docker Desktop compatibility. -->
+    <listen_host replace="true">0.0.0.0</listen_host>
+</clickhouse>
