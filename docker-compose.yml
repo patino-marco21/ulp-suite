@@ -9,9 +9,8 @@ services:
     image: clickhouse/clickhouse-server:26.3
     container_name: ulpvault_clickhouse
     restart: always
-    ports:
-      - "8123:8123"
-      - "9000:9000"
+    # Ports intentionally NOT exposed on host — app connects via internal Docker network.
+    # To query ClickHouse directly for debugging: docker exec -it ulpvault_clickhouse clickhouse-client
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-ulp}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
