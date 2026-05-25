@@ -8,6 +8,7 @@ import { matchBreach } from "@/lib/breach-matcher"
 import { runClickHouseMigrations } from "@/lib/clickhouse-migrations"
 import { invalidateStatsCache } from "@/lib/stats-cache"
 import JSZip from "jszip"
+import { createJob, getJob, updateJob, pushEvent } from "@/lib/upload-jobs"
 
 export const dynamic = 'force-dynamic'
 
@@ -83,10 +84,14 @@ async function recordSource(filename: string, lineCount: number): Promise<void> 
  * Reads the file as a ReadableStream<Uint8Array> and parses it line by line
  * in 500 K-row batches.  Peak RAM is proportional to batch size (~200 MB),
  * not file size — so a 50 GB dump uses the same memory as a 50 MB one.
+ *
+ * If jobId is provided, calls updateJob after each batch so the SSE endpoint
+ * can push live progress to the browser.
  */
 async function processTextStream(
   stream: ReadableStream<Uint8Array>,
   filename: string,
+  jobId?: string,
 ): Promise<{ imported: number; skipped: number; errors: number; filename: string; breach_name: string; rejection_breakdown: Record<RejectionReason, number> }> {
   const breach_name = matchBreach(filename)
   let imported = 0
@@ -96,6 +101,7 @@ async function processTextStream(
   for await (const batch of parseULPStream(stream, filename, 500_000)) {
     await insertBatch(batch, breach_name)
     imported += batch.length
+    if (jobId) updateJob(jobId, { imported, skipped })
   }
 
   if (imported > 0) {
@@ -107,6 +113,42 @@ async function processTextStream(
   }
 
   return { imported, skipped, errors: 0, filename, breach_name, rejection_breakdown }
+}
+
+/**
+ * Wrap the upload processing to push SSE progress events during ingestion.
+ * Events are pushed every 2 seconds AND on done/error.
+ */
+async function runWithProgress(
+  jobId: string,
+  fn: () => Promise<{ imported: number; skipped: number; errors: number; filename: string; breach_name: string; rejection_breakdown: Record<string, number> }>
+): Promise<void> {
+  // Push progress every 2 seconds
+  const interval = setInterval(async () => {
+    const j = getJob(jobId)
+    if (j) await pushEvent(j).catch(() => {})
+  }, 2000)
+
+  try {
+    const result = await fn()
+    updateJob(jobId, {
+      status:              'done',
+      imported:            result.imported,
+      skipped:             result.skipped,
+      rejection_breakdown: result.rejection_breakdown,
+    })
+    const j = getJob(jobId)
+    if (j) await pushEvent(j)
+  } catch (err) {
+    updateJob(jobId, {
+      status: 'error',
+      error:  err instanceof Error ? err.message : 'Upload failed',
+    })
+    const j = getJob(jobId)
+    if (j) await pushEvent(j)
+  } finally {
+    clearInterval(interval)
+  }
 }
 
 /**
@@ -161,14 +203,21 @@ export async function POST(request: NextRequest) {
   const filename = file.name.toLowerCase()
 
   try {
-    // Plain-text or CSV — stream line by line; never loads full file into RAM
+    // Plain-text or CSV — stream line by line; never loads full file into RAM.
+    // Fire-and-forget: return jobId immediately; SSE stream delivers progress.
     if (filename.endsWith('.txt') || filename.endsWith('.csv')) {
-      const result = await processTextStream(file.stream(), file.name)
-      const total  = result.imported + result.skipped
+      const jobId = crypto.randomUUID()
+      const totalLines = contentLength ? Math.floor(parseInt(contentLength) / 60) : 0
+      const breach_name = matchBreach(file.name)
+      createJob(jobId, totalLines, breach_name)
+
+      // Fire without await — runs in background while SSE streams progress
+      runWithProgress(jobId, () => processTextStream(file.stream(), file.name, jobId)).catch(console.error)
+
       return NextResponse.json({
-        success: true,
-        ...result,
-        import_pct: total > 0 ? Math.round(result.imported / total * 1000) / 10 : 0,
+        success:   true,
+        jobId,
+        streamUrl: `/api/upload/progress/${jobId}`,
       })
     }
 
