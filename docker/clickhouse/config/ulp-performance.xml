@@ -9,13 +9,9 @@
     <background_merges_mutations_concurrency_ratio>3</background_merges_mutations_concurrency_ratio>
     <background_merges_mutations_scheduling_policy>shortest_task_first</background_merges_mutations_scheduling_policy>
 
-    <!-- ── Async INSERT (server-side insert buffering) ────────────────────── -->
-    <!-- Combines many small concurrent inserts into fewer, larger parts.
-         Dramatically reduces WAL pressure and merge amplification at bulk scale. -->
-    <async_insert_max_data_size>104857600</async_insert_max_data_size>   <!-- 100 MB buffer per user -->
-    <async_insert_max_query_number>1000</async_insert_max_query_number>
-    <async_insert_busy_timeout_ms>500</async_insert_busy_timeout_ms>     <!-- flush after 500 ms idle -->
-    <async_insert_stale_timeout_ms>0</async_insert_stale_timeout_ms>    <!-- no stale eviction -->
+    <!-- ── Async INSERT ────────────────────────────────────────────────────── -->
+    <!-- async_insert_* are user-level settings in ClickHouse 26.3+.
+         See users.d/ulp-profiles.xml for the default profile overrides. -->
 
     <!-- ── HTTP layer ─────────────────────────────────────────────────────── -->
     <!-- enable_http_compression is a user-level setting — see users.d/ulp-profiles.xml -->
@@ -34,11 +30,9 @@
 
         <!-- How many rows are read per I/O block during compaction -->
         <merge_max_block_size>65536</merge_max_block_size>
-
-        <!-- Allow ClickHouse to use more memory during GROUP BY before spilling to disk -->
-        <max_bytes_before_external_group_by>10737418240</max_bytes_before_external_group_by>
-        <max_bytes_before_external_sort>10737418240</max_bytes_before_external_sort>
     </merge_tree>
+    <!-- max_bytes_before_external_group_by / external_sort are user-level query settings
+         in ClickHouse 26.3 — see users.d/ulp-profiles.xml. -->
 
     <!-- Query resource limits (max_execution_time, timeout_overflow_mode) are user-level
          settings — see users.d/ulp-profiles.xml for the default profile overrides. -->

@@ -7,6 +7,18 @@
             <!-- Compress HTTP responses automatically (gzip) -->
             <enable_http_compression>1</enable_http_compression>
 
+            <!-- Async INSERT buffering — combines many small inserts into larger parts.
+                 Dramatically reduces WAL pressure and merge amplification at bulk scale. -->
+            <async_insert>1</async_insert>
+            <async_insert_max_data_size>104857600</async_insert_max_data_size>   <!-- 100 MB -->
+            <async_insert_max_query_number>1000</async_insert_max_query_number>
+            <async_insert_busy_timeout_ms>500</async_insert_busy_timeout_ms>     <!-- flush 500 ms idle -->
+            <async_insert_stale_timeout_ms>0</async_insert_stale_timeout_ms>     <!-- no stale eviction -->
+
+            <!-- Allow more memory for GROUP BY and ORDER BY before spilling to disk -->
+            <max_bytes_before_external_group_by>10737418240</max_bytes_before_external_group_by>
+            <max_bytes_before_external_sort>10737418240</max_bytes_before_external_sort>
+
             <!-- Prevent runaway stats / analytics queries from blocking the server -->
             <max_execution_time>300</max_execution_time>        <!-- 5 min hard cap -->
             <timeout_overflow_mode>break</timeout_overflow_mode> <!-- return partial results -->
