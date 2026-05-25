@@ -25,9 +25,10 @@ services:
       - ./docker/clickhouse/init:/docker-entrypoint-initdb.d/
       - ./docker/clickhouse/config:/etc/clickhouse-server/config.d/
     healthcheck:
-      # /ping returns "Ok." with HTTP 200 when ClickHouse is ready — no auth required.
-      # More reliable than clickhouse-client which fails if CLICKHOUSE_PASSWORD is set.
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q 'Ok' || exit 1"]
+      # clickhouse-client is always present in the official image.
+      # Passes $CLICKHOUSE_USER/$CLICKHOUSE_PASSWORD from the container env so
+      # the check works regardless of whether a password is configured.
+      test: ["CMD-SHELL", "clickhouse-client --host localhost --user $CLICKHOUSE_USER --password $CLICKHOUSE_PASSWORD --query 'SELECT 1'"]
       interval: 10s
       timeout: 5s
       retries: 30

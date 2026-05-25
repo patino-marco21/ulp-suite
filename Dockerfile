@@ -31,9 +31,10 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-# Next.js 14.2.x standalone output-tracing omits some internal lib modules
-# (get-metadata-route, etc.) that are required at runtime.  Copy them explicitly.
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/next/dist/lib ./node_modules/next/dist/lib
+# Next.js 14.2.x standalone output-tracing omits several internal subdirectories
+# (next/dist/lib/, next/dist/shared/, etc.) that are required at runtime.
+# Copy the entire next/dist from the builder to fill all gaps reliably.
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/next/dist ./node_modules/next/dist
 
 RUN chown -R nextjs:nodejs /app 2>/dev/null || true
 
