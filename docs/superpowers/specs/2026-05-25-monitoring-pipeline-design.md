@@ -92,9 +92,17 @@ File stream
 
 ### Key changes
 
-**`parseULPStream`**: yield individual credentials, not pre-assembled arrays. The generator is truly line-by-line.
+**`parseULPStream`**: interface unchanged — still yields `ULPCredential[]` batches of `batchSize` rows. The internal accumulation loop is simplified by the leaner parser (fewer branches per line).
 
-**`insertBatch`**: accept an `AsyncIterable<ULPCredential>` + count, not a flat array. Build a `Readable` stream of tab-separated rows and pass directly to `client.insert()` with `format: 'TabSeparated'`.
+**`insertBatch`**: signature unchanged externally, but internally builds a Node.js `Readable` of CSV rows and passes it directly to `client.insert()` with `format: 'CSV'` (confirmed faster than TabSeparated for streaming bulk inserts per ClickHouse JS docs). The 500K array is streamed out to ClickHouse row-by-row rather than `JSON.stringify`-d in one shot.
+
+```typescript
+// pattern: stream array as CSV to ClickHouse
+const readable = Readable.from(credentials.map(c =>
+  `"${esc(c.url)}","${esc(c.email)}","${esc(c.password)}","${esc(c.domain)}","${esc(c.source_file)}","${breach_name}"\n`
+))
+await client.insert({ table: 'ulp.credentials', values: readable, format: 'CSV' })
+```
 
 **Batch size**: remains 500K rows. With `async_insert = 1` the server buffers and merges — correct at this scale.
 
@@ -143,6 +151,18 @@ interface UploadJob {
 
 const jobs = new Map<string, UploadJob>()
 // Jobs expire after 10 minutes (GC via setInterval)
+```
+
+### SSE implementation constraint
+Next.js App Router buffers the entire response body until the route handler returns. The SSE route **must** use a `TransformStream` whose writer is passed into the upload job, written to during ingestion, and closed on completion. The route handler returns `new Response(readable, { headers })` immediately — the upload runs asynchronously and pushes events through the stream writer.
+
+```typescript
+// GET /api/upload/progress/:jobId
+const { readable, writable } = new TransformStream()
+job.writer = writable.getWriter()  // stored on the job; upload pipeline writes to it
+return new Response(readable, {
+  headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' }
+})
 ```
 
 ### Frontend changes (`app/upload/page.tsx`)
@@ -225,6 +245,13 @@ Two new fields on the create/edit monitor form:
 - Redis / BullMQ queue (single-process setInterval is sufficient)
 - ClickHouse schema changes (existing schema already optimised for 100B+ rows)
 - Parser dedup (move to query layer, not parse layer)
+- Block-format log parsing (`URL:\nUsername:\nPassword:`) — user confirmed format is `url:login:password`; block logs imported manually if needed
+
+## Future features (tracked, not in scope)
+
+- **Session token / cookie monitoring** — 2025–2026 differentiator across SpyCloud, Hudson Rock, Intel 471. Requires storing cookie/session fields from infostealer logs, not just ULP triples.
+- **APT-to-infostealer attribution** — link credential dumps to specific malware families / threat actors.
+- **Email notifications for monitors** — deferred pending SMTP infrastructure decision.
 
 ---
 
