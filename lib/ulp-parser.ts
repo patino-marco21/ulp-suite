@@ -154,11 +154,11 @@ export function parseLine(
   // Rule 2: separator detection (\t beats ; beats :)
   let url = '', login = '', password = ''
   if (clean.includes('\t')) {
-    const parts = clean.split('\t', 3)
+    const parts = clean.split('\t')
     if (parts.length >= 3) {
       url      = parts[0].trim()
       login    = parts[1].trim()
-      password = parts.slice(2).join(':').trim()
+      password = parts.slice(2).join('\t').trim()
     } else if (parts.length === 2) {
       login    = parts[0].trim()
       password = parts[1].trim()
@@ -166,7 +166,7 @@ export function parseLine(
       return { credential: null, reason: 'no_fields' }
     }
   } else if (clean.includes(';')) {
-    const parts = clean.split(';', 4)
+    const parts = clean.split(';')
     if (parts.length >= 3) {
       url      = parts[0].trim()
       login    = parts[1].trim()

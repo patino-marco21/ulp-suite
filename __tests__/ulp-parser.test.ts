@@ -462,6 +462,21 @@ describe('parseLine — colons in password', () => {
     expect(c).not.toBeNull()
     expect(c!.password).toBe('p:a:s:s')
   })
+
+  test('semicolon-separated line with semicolons in password', () => {
+    const c = cred('https://site.com;user@email.com;p;a;s;s')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('p;a;s;s')
+  })
+
+  test('URL field value in no-path port case', () => {
+    const c = cred('https://site.com:443:user:pass')
+    expect(c).not.toBeNull()
+    expect(c!.email).toBe('user')
+    expect(c!.password).toBe('pass')
+    // URL field should contain the scheme+host (port absorbed into URL, not login)
+    expect(c!.url).toContain('site.com')
+  })
 })
 
 describe('parseLine — email:password only (no URL)', () => {
