@@ -30,13 +30,14 @@ export function startMonitorRescanCron(): void {
 
 // ─── Fingerprinting (mirrors lib/domain-monitor.ts) ─────────────────────────
 
-function credentialFingerprint(email: string, password: string, domain: string): number {
-  const hash = crypto.createHash('sha256')
+function credentialFingerprint(email: string, password: string, domain: string): string {
+  return crypto.createHash('sha256')
     .update(email).update('\0')
     .update(password).update('\0')
     .update(domain)
     .digest()
-  return hash.readUInt32BE(0)
+    .slice(0, 8)
+    .toString('hex')
 }
 
 // ─── Tick ────────────────────────────────────────────────────────────────────
@@ -109,7 +110,11 @@ async function runTick(): Promise<void> {
         matchedRows.push(...rows)
       }
 
-      if (matchedRows.length === 0) continue
+      if (matchedRows.length === 0) {
+        // No matches — still stamp last_triggered_at so we don't re-query every tick
+        dbRun(`UPDATE domain_monitors SET last_triggered_at = datetime('now') WHERE id = ?`, [monitorRow.id])
+        continue
+      }
 
       // Filter unseen credentials
       const unseenRows = matchedRows.filter(row => {
@@ -121,7 +126,11 @@ async function runTick(): Promise<void> {
         return seen.length === 0
       })
 
-      if (unseenRows.length === 0) continue
+      if (unseenRows.length === 0) {
+        // All already seen — still stamp last_triggered_at so we don't re-query every tick
+        dbRun(`UPDATE domain_monitors SET last_triggered_at = datetime('now') WHERE id = ?`, [monitorRow.id])
+        continue
+      }
 
       // Fetch active webhooks for this monitor
       const webhookRows = dbQuery(

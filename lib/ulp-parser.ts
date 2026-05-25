@@ -224,15 +224,31 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
   return { credentials, skipped, errors: 0, rejection_breakdown: breakdown }
 }
 
+export interface StreamBatch {
+  credentials: ULPCredential[]
+  rejected:    number
+  breakdown:   Record<RejectionReason, number>
+}
+
 export async function* parseULPStream(
   stream: ReadableStream<Uint8Array>,
   filename: string,
   batchSize: number,
-): AsyncGenerator<ULPCredential[]> {
+): AsyncGenerator<StreamBatch> {
   const reader  = stream.getReader()
   const decoder = new TextDecoder()
   let   buffer  = ''
   let   batch:  ULPCredential[] = []
+  let   batchRejected = 0
+  let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0 }
+
+  function flush(): StreamBatch {
+    const out: StreamBatch = { credentials: batch, rejected: batchRejected, breakdown: batchBreakdown }
+    batch = []
+    batchRejected = 0
+    batchBreakdown = { blank: 0, no_fields: 0, no_password: 0 }
+    return out
+  }
 
   try {
     while (true) {
@@ -243,22 +259,29 @@ export async function* parseULPStream(
       buffer = lines.pop() ?? ''
 
       for (const line of lines) {
-        const { credential } = parseLine(line, filename)
+        const { credential, reason } = parseLine(line, filename)
         if (credential) {
           batch.push(credential)
           if (batch.length >= batchSize) {
-            yield batch
-            batch = []
+            yield flush()
           }
+        } else {
+          batchRejected++
+          if (reason) batchBreakdown[reason]++
         }
       }
     }
     // Flush remaining buffer
     if (buffer) {
-      const { credential } = parseLine(buffer, filename)
-      if (credential) batch.push(credential)
+      const { credential, reason } = parseLine(buffer, filename)
+      if (credential) {
+        batch.push(credential)
+      } else {
+        batchRejected++
+        if (reason) batchBreakdown[reason]++
+      }
     }
-    if (batch.length > 0) yield batch
+    if (batch.length > 0 || batchRejected > 0) yield flush()
   } finally {
     reader.releaseLock()
   }

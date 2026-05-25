@@ -1,7 +1,7 @@
 import { Readable } from "stream"
 import { type NextRequest, NextResponse } from "next/server"
 import { validateRequest, requireAdminRole } from "@/lib/auth"
-import { parseULPContent, parseULPStream, makeRejectionMap, type ULPCredential, type RejectionReason } from "@/lib/ulp-parser"
+import { parseULPContent, parseULPStream, makeRejectionMap, type ULPCredential, type RejectionReason, type StreamBatch } from "@/lib/ulp-parser"
 import { getClient } from "@/lib/clickhouse"
 import { checkMonitorsForULPUpload } from "@/lib/domain-monitor"
 import { matchBreach } from "@/lib/breach-matcher"
@@ -95,12 +95,16 @@ async function processTextStream(
 ): Promise<{ imported: number; skipped: number; errors: number; filename: string; breach_name: string; rejection_breakdown: Record<RejectionReason, number> }> {
   const breach_name = matchBreach(filename)
   let imported = 0
-  const skipped  = 0
+  let skipped  = 0
   const rejection_breakdown = makeRejectionMap()
 
   for await (const batch of parseULPStream(stream, filename, 500_000)) {
-    await insertBatch(batch, breach_name)
-    imported += batch.length
+    await insertBatch(batch.credentials, breach_name)
+    imported += batch.credentials.length
+    skipped  += batch.rejected
+    for (const [k, v] of Object.entries(batch.breakdown)) {
+      rejection_breakdown[k as RejectionReason] = (rejection_breakdown[k as RejectionReason] ?? 0) + v
+    }
     if (jobId) updateJob(jobId, { imported, skipped })
   }
 

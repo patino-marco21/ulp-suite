@@ -5,17 +5,19 @@ import crypto from 'crypto'
 // ─── Fingerprinting ───────────────────────────────────────────────────────────
 
 /**
- * Compute a 32-bit fingerprint for a credential triple (email, password, domain).
- * Used to avoid re-alerting when the same credential appears in a later upload.
+ * Compute a 64-bit hex fingerprint for a credential triple (email, password, domain).
+ * Uses 8 bytes (16 hex chars) of SHA-256 — collision probability negligible even at
+ * billions of stored fingerprints (birthday bound ~2^32 with 4 bytes was dangerously low).
+ * Stored as TEXT in SQLite (holds up to 2^63-1 as INTEGER, but hex avoids signedness issues).
  */
-function credentialFingerprint(email: string, password: string, domain: string): number {
-  const hash = crypto.createHash('sha256')
+function credentialFingerprint(email: string, password: string, domain: string): string {
+  return crypto.createHash('sha256')
     .update(email).update('\0')
     .update(password).update('\0')
     .update(domain)
     .digest()
-  // First 4 bytes as unsigned 32-bit int — safe as a JS number (< 2^32 < MAX_SAFE_INTEGER)
-  return hash.readUInt32BE(0)
+    .slice(0, 8)
+    .toString('hex')
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────

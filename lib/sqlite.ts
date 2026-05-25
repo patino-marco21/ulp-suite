@@ -147,9 +147,10 @@ function initSchema(db: Database.Database): void {
 
     -- Tracks individual credential fingerprints that have already triggered alerts.
     -- Prevents duplicate webhook deliveries when the same credential appears in multiple uploads.
+    -- fingerprint is a 16-char hex string (first 8 bytes of SHA-256).
     CREATE TABLE IF NOT EXISTS monitor_credential_seen (
       monitor_id  INTEGER NOT NULL,
-      fingerprint INTEGER NOT NULL,
+      fingerprint TEXT NOT NULL,
       seen_at     TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (monitor_id, fingerprint)
     );
@@ -213,6 +214,25 @@ function initSchema(db: Database.Database): void {
   // Add rescan columns to existing databases (idempotent — catch swallows "duplicate column" errors)
   try { db.exec(`ALTER TABLE domain_monitors ADD COLUMN rescan_mode TEXT NOT NULL DEFAULT 'dedup' CHECK(rescan_mode IN ('dedup','digest'))`) } catch {}
   try { db.exec(`ALTER TABLE domain_monitors ADD COLUMN rescan_interval_hours INTEGER NOT NULL DEFAULT 24`) } catch {}
+
+  // Migrate monitor_credential_seen.fingerprint INTEGER → TEXT (v2 fingerprint is 16-char hex).
+  // SQLite doesn't support ALTER COLUMN, so we check the type and recreate if needed.
+  // Data loss is acceptable — fingerprints regenerate on next monitor scan (monitors re-alert once).
+  try {
+    const cols = db.prepare(`PRAGMA table_info(monitor_credential_seen)`).all() as Array<{ name: string; type: string }>
+    const fpCol = cols.find(c => c.name === 'fingerprint')
+    if (fpCol && fpCol.type.toUpperCase() === 'INTEGER') {
+      db.exec(`
+        DROP TABLE monitor_credential_seen;
+        CREATE TABLE IF NOT EXISTS monitor_credential_seen (
+          monitor_id  INTEGER NOT NULL,
+          fingerprint TEXT NOT NULL,
+          seen_at     TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (monitor_id, fingerprint)
+        );
+      `)
+    }
+  } catch {}
 
   // Default app settings
   const settingsInsert = db.prepare(

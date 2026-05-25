@@ -33,6 +33,10 @@ export async function GET(
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
   const writer = writable.getWriter()
 
+  // Close any previous writer (reconnect / duplicate tab) before replacing it
+  if (job.writer) {
+    try { await job.writer.close() } catch {}
+  }
   // Store writer on the job so the upload pipeline can push events
   job.writer = writer
 
