@@ -59,7 +59,7 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
       # Default admin (seeded on first startup if no users exist)
-      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@ulp.local}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@ulpsuite.local}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
     volumes:
       - ./uploads:/app/uploads

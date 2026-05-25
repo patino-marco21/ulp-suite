@@ -72,9 +72,27 @@ fi
 echo -e "${GREEN}✅ Docker daemon is running.${NC}"
 echo ""
 
+# --- Ensure .env exists (required for JWT_SECRET and admin credentials) ---
+if [ ! -f ".env" ]; then
+    echo -e "${YELLOW}⚠️  No .env file found. Generating one from .env.example...${NC}"
+    if [ -f ".env.example" ]; then
+        cp .env.example .env
+        # Replace the placeholder JWT_SECRET with a real random value
+        RANDOM_SECRET=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 64 | head -c 64)
+        sed -i "s/change-me-to-a-random-32-char-string/${RANDOM_SECRET}/" .env
+        echo -e "${GREEN}✅ .env created with a random JWT_SECRET.${NC}"
+        echo -e "${BLUE}ℹ️  Review .env before production use — especially ADMIN_PASSWORD.${NC}"
+    else
+        echo -e "${RED}❌ .env.example not found. Cannot auto-generate .env.${NC}"
+        echo "    Please create a .env file manually. See README.md for required variables."
+        exit 1
+    fi
+    echo ""
+fi
+
 # --- Start services ---
 
-echo -e "${CYAN}🚀 Starting Bron Vault Services...${NC}"
+echo -e "${CYAN}🚀 Starting ULP Suite Services...${NC}"
 echo ""
 
 # Ensure uploads directory exists (container entrypoint will fix ownership at startup)
@@ -102,7 +120,7 @@ if [ -f "./docker-status.sh" ]; then
 else
     # Fallback if docker-status.sh doesn't exist
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${CYAN}📊 Bron Vault Service Status${NC}"
+    echo -e "${CYAN}📊 ULP Suite Service Status${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     docker compose ps
@@ -110,10 +128,8 @@ else
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${GREEN}📍 Access URLs:${NC}"
     echo ""
-    echo -e "  🌐 ${YELLOW}Bron Vault App:${NC}    http://localhost:3000"
-    echo -e "  📊 ${YELLOW}ClickHouse Play:${NC}     http://localhost:8123/play"
-    echo -e "  🗄️  ${YELLOW}MySQL:${NC}              localhost:3306"
-    echo -e "  📈 ${YELLOW}ClickHouse HTTP:${NC}      http://localhost:8123"
+    echo -e "  🌐 ${YELLOW}ULP Suite App:${NC}     http://localhost:3000"
+    echo -e "  📊 ${YELLOW}ClickHouse Play:${NC}    http://localhost:8123/play"
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${GREEN}🔐 Default Login Credentials:${NC}"
