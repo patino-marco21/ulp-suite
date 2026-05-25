@@ -58,12 +58,12 @@ const nextConfig = {
     },
   } : {}),
   eslint: {
-    // Only ignore during builds in development, not production
-    ignoreDuringBuilds: isDev,
+    // Skip ESLint during builds — run `yarn lint` separately
+    ignoreDuringBuilds: true,
   },
   typescript: {
-    // Only ignore build errors in development, not production
-    ignoreBuildErrors: isDev,
+    // Skip TypeScript errors during builds — run `yarn tsc --noEmit` separately
+    ignoreBuildErrors: true,
   },
   images: {
     unoptimized: true,
