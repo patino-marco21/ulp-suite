@@ -97,10 +97,13 @@ echo ""
 
 # Ensure uploads directory exists (container entrypoint will fix ownership at startup)
 # Best practice: run without sudo; no host UID/GID matching needed
-echo -e "${BLUE}ℹ️  Ensuring uploads directory exists...${NC}"
+echo -e "${BLUE}ℹ️  Ensuring uploads and data directories exist...${NC}"
 mkdir -p ./uploads/chunks
 mkdir -p ./uploads/extracted_files
-echo -e "${GREEN}✅ Uploads directory ready${NC}"
+# data/ holds the SQLite database; create it here so Docker does not create it
+# as root (which would cause permission errors when the app tries to write the DB).
+mkdir -p ./data
+echo -e "${GREEN}✅ Uploads and data directories ready${NC}"
 echo ""
 
 echo -e "${BLUE}ℹ️  Building and starting services (using cache for unchanged layers)...${NC}"

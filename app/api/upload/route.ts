@@ -49,9 +49,13 @@ async function insertBatch(
       csvField(c.source_file),
       csvField(breach_name),
     ].join(',')
-  ).join('\n')
+  ).join('\n') + '\n'
 
-  const readable = Readable.from([csvRows])
+  // objectMode MUST be false for @clickhouse/client CSV format.
+  // Readable.from() defaults to objectMode:true (treats each element as an
+  // object), which the client rejects with "expected Readable Stream with
+  // disabled object mode".  Setting objectMode:false makes it a byte stream.
+  const readable = Readable.from([csvRows], { objectMode: false })
 
   await chClient.insert({
     table: 'ulp.credentials',
