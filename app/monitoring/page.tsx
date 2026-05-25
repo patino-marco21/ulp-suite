@@ -33,6 +33,8 @@ interface DomainMonitor {
   webhooks?: MonitorWebhookItem[]
   last_triggered_at: string | null
   total_alerts: number
+  rescan_mode?: "dedup" | "digest"
+  rescan_interval_hours?: number
   created_at: string
 }
 
@@ -96,6 +98,8 @@ export default function MonitoringPage() {
     match_mode: "both" as "credential" | "url" | "both",
     webhook_ids: [] as number[],
   })
+  const [rescanMode, setRescanMode] = useState<"dedup" | "digest">("dedup")
+  const [rescanIntervalHours, setRescanIntervalHours] = useState(24)
 
   // Webhooks state
   const [webhooks, setWebhooks] = useState<MonitorWebhookItem[]>([])
@@ -206,6 +210,8 @@ export default function MonitoringPage() {
   const openCreateMonitorDialog = () => {
     setEditingMonitor(null)
     setMonitorForm({ name: "", domains: "", match_mode: "both", webhook_ids: [] })
+    setRescanMode("dedup")
+    setRescanIntervalHours(24)
     setShowMonitorDialog(true)
   }
 
@@ -223,6 +229,8 @@ export default function MonitoringPage() {
           match_mode: m.match_mode,
           webhook_ids: m.webhooks?.map((w: MonitorWebhookItem) => w.id) || [],
         })
+        setRescanMode(m.rescan_mode ?? "dedup")
+        setRescanIntervalHours(m.rescan_interval_hours ?? 24)
         setShowMonitorDialog(true)
       }
     } catch (_error) {
@@ -251,6 +259,8 @@ export default function MonitoringPage() {
         domains,
         match_mode: monitorForm.match_mode,
         webhook_ids: monitorForm.webhook_ids,
+        rescan_mode: rescanMode,
+        rescan_interval_hours: rescanIntervalHours,
       }
 
       const url = editingMonitor
@@ -970,6 +980,52 @@ export default function MonitoringPage() {
               <p className="text-xs text-muted-foreground mt-1">
                 &quot;Email&quot; matches credentials where login email uses the domain. &quot;URL&quot; matches credentials where the URL targets the domain.
               </p>
+            </div>
+
+            {/* Re-scan mode */}
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Re-scan mode
+              </label>
+              <div className="flex gap-3">
+                {(["dedup", "digest"] as const).map(mode => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setRescanMode(mode)}
+                    className={`flex-1 rounded-lg border px-3 py-2 text-sm text-left transition-colors ${
+                      rescanMode === mode
+                        ? "border-primary bg-primary/10 text-primary font-medium"
+                        : "border-border text-muted-foreground hover:border-muted-foreground"
+                    }`}
+                  >
+                    <span className="font-medium capitalize">{mode}</span>
+                    <span className="block text-xs opacity-70 mt-0.5">
+                      {mode === "dedup"
+                        ? "Only new credentials (no duplicate alerts)"
+                        : "All current matches every interval"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Re-scan interval */}
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Re-scan every (hours)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={1}
+                  max={168}
+                  value={rescanIntervalHours}
+                  onChange={e => setRescanIntervalHours(Math.max(1, Math.min(168, parseInt(e.target.value) || 24)))}
+                  className="w-24 h-9 rounded-md border border-input bg-background px-3 text-sm"
+                />
+                <span className="text-sm text-muted-foreground">hours (1–168)</span>
+              </div>
             </div>
 
             <div>

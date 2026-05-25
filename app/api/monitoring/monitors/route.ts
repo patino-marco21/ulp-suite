@@ -47,7 +47,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json()
-    const { name, domains, match_mode, webhook_ids } = body
+    const { name, domains, match_mode, webhook_ids, rescan_mode, rescan_interval_hours } = body
 
     if (!name || typeof name !== "string" || name.trim().length === 0) {
       return NextResponse.json(
@@ -70,12 +70,25 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    if (rescan_mode !== undefined && !['dedup', 'digest'].includes(rescan_mode)) {
+      return NextResponse.json({ success: false, error: "rescan_mode must be 'dedup' or 'digest'" }, { status: 400 })
+    }
+
+    if (rescan_interval_hours !== undefined) {
+      const h = parseInt(String(rescan_interval_hours))
+      if (isNaN(h) || h < 1 || h > 168) {
+        return NextResponse.json({ success: false, error: "rescan_interval_hours must be 1–168" }, { status: 400 })
+      }
+    }
+
     const monitorId = await createMonitor({
       name: name.trim(),
       domains: domains.map((d: string) => d.trim().toLowerCase()),
       match_mode,
       webhook_ids: webhook_ids || [],
       created_by: user ? parseInt(user.userId) : undefined,
+      rescan_mode: rescan_mode ?? 'dedup',
+      rescan_interval_hours: rescan_interval_hours ? parseInt(String(rescan_interval_hours)) : 24,
     })
 
     return NextResponse.json({

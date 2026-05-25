@@ -87,6 +87,19 @@ export async function PUT(
     }
     if (body.is_active !== undefined) updates.is_active = body.is_active
     if (body.webhook_ids !== undefined) updates.webhook_ids = body.webhook_ids
+    if (body.rescan_mode !== undefined) {
+      if (!['dedup', 'digest'].includes(body.rescan_mode)) {
+        return NextResponse.json({ success: false, error: "rescan_mode must be 'dedup' or 'digest'" }, { status: 400 })
+      }
+      updates.rescan_mode = body.rescan_mode
+    }
+    if (body.rescan_interval_hours !== undefined) {
+      const h = parseInt(String(body.rescan_interval_hours))
+      if (isNaN(h) || h < 1 || h > 168) {
+        return NextResponse.json({ success: false, error: "rescan_interval_hours must be 1–168" }, { status: 400 })
+      }
+      updates.rescan_interval_hours = h
+    }
 
     await updateMonitor(monitorId, updates)
 
