@@ -1,270 +1,187 @@
 # Broń Vault
 
-Broń Vault is an open-source stealer logs dashboard designed to simplify the process of analyzing stealer log data. 
+**ULP credential intelligence platform.** Ingest URL:Login:Password dumps at scale, search them instantly, monitor domains, and alert on new exposures — all self-hosted.
 
-> 💡 If you're new to this concept, we recommend reading our introductory article on our blog: ['Stealer Logs: Perspectives on Attack and Defense in a Silent Epidemic, and How Broń Vault Automates the Parsing Process'](https://blog.intellibron.io/stealer-logs-perspectives-on-attack-and-defense-in-a-silent-epidemic-and-how-bron-vault-automates-the-parsing-process/).
+> ⚠️ **For authorized security research and internal threat intelligence only.** Do not deploy on public networks or use against systems you do not own or have explicit permission to test.
 
-Forget complex ad-hoc scripts. With Broń Vault, you can simply drag and drop `.zip` log files into the web interface. The application automatically parses the data and presents it in a structured format, ready for inspection.
+---
 
-Our goal is to support the day-to-day needs of security teams on the front lines by providing a practical alternative to manual scripting or overly complex platforms typically required for stealer log analysis. This project reflects our mission to democratize security, making foundational analysis capabilities accessible to everyone and allowing analysts to focus on critical decision-making instead of manual log parsing.
+## What it is
 
-> ⚠️ **Note:** This tool was developed as a side project and is not intended for production use. Please see the [Important Notice](#important-notice) section below.
+Broń Vault ingests stealer log ULP (URL:Login:Password) credential lines, stores them in ClickHouse, and exposes a fast search and monitoring interface. It is designed for **tens to hundreds of billions of credential lines** and runs entirely on your own infrastructure.
 
-![alt text](images/Bron-Vault-Dashboard.png "Bron Vault Dashboard")
+**Tech stack:** Next.js 14 · ClickHouse · SQLite · TypeScript · Docker
 
------
+---
 
-## Key Features
+## Features
 
-  * **File Upload & Processing**: Upload `.zip` files containing common stealer log formats with real-time upload progress tracking and detailed logging.
-    
-  * **Advanced Search**: Instantly find credentials and pivot to the full context of the breach.
-    - Search by specific email addresses or entire domains across all logs.
-    - Combine terms with **OR** (`,`), **AND** (`+`), or **NOT** (`-`) for more precise queries.
-    - A successful match reveals a "Supporting Files" tab with all data from the same device.
-    - Seamlessly explore correlated cookies, browser history, and system files in a single click.
+### Search & Discovery
+- **Credential search** — query by email, domain, URL, password, or breach name; combine terms with AND (`+`), OR (`,`), NOT (`-`)
+- **Batch lookup** — paste up to 100 emails and get all matches in one request; CSV export
+- **Similar passwords** — find accounts reusing passwords similar to a target credential
+- **Password reuse** — surface accounts sharing the same password across breaches
+- **Breach explorer** — browse all imported breach sources with credential counts and metadata
+- **Stats dashboard** — top domains, top emails, credential volume over time, TLD breakdown
 
-  * **Device Detail View**: Explore individual device information with comprehensive details.
-    - **Overview Tab**: Get an at-a-glance summary with engaging visualizations including:
-      - Summary cards showing total credentials, software, and files
-      - Device overview with key system information (OS, CPU, GPU, RAM, etc.)
-      - Top passwords visualization (polar area chart)
-      - Top domains distribution (horizontal bar chart)
-      - File size distribution analysis
-    - **Host Information Tab**: View detailed system information extracted from logs of multiple stealer families
-    - **User Credentials Tab**: Browse all credentials associated with the device
-    - **Software Installed Tab**: See all installed software detected on the device
-    - **Files Tab**: Explore the complete file structure with tree viewer
+### Upload & Ingestion
+- Upload `.txt` / `.csv` ULP files or `.zip` archives via drag-and-drop
+- **Live progress bar** — real-time import counter (lines imported, skipped, elapsed time) via Server-Sent Events; no more blank spinners on large files
+- RFC 3986-correct ULP parser — handles ports, IPv4, colons in passwords, tab/semicolon/colon separators; ~150 lines, zero regex in the hot path
+- CSV streaming insert into ClickHouse — peak heap ~2 MB per 500K-row batch (vs ~400 MB with JSON serialization)
+- `async_insert = 1` server-side buffering for sustained high-throughput ingestion
 
-  * **Asset Discovery**: Search for subdomains, paths, and associated credentials for any domain across all uploaded logs.
-    - Enter a `domain` or `keyword` to discover all related subdomains, paths, and exposed credentials.
-    - **Overview Tab**: 
-      - Timeline visualization showing when credentials were logged by stealers (log-date tracking).
-      - Top 10 most-used passwords observed for the queried domain or keyword.
-      - Top 10 subdomains by credential volume with horizontal bar charts.
-      - Top 10 paths by credential volume with horizontal bar charts.
-      - Summary statistics showing total subdomains, paths, credentials, and affected devices.
-    - **Subdomains Tab**: Browse all discovered subdomains with associated paths and credential counts. Includes deduplication feature that aggregates subdomains for clearer insights, automatically summing credential counts when multiple paths exist for the same subdomain.
-    - **Credentials Tab**: View all credentials associated with the domain, including URLs, usernames, passwords, log dates, and direct links to correlated devices.
+### Domain Monitoring
+- Define monitors on one or more domains; match by credential, URL, or both
+- **Scheduled re-scans** — each monitor runs on a configurable interval (1–168 hours), independently of uploads
+- **Dedup mode** — alert only on credentials not previously seen (no repeat noise)
+- **Digest mode** — alert on all current matches every interval (periodic summary)
+- Webhook delivery to Slack, custom APIs, or any HTTP endpoint
+- Alert history and webhook delivery status visible in the UI
 
-  * **Statistical Dashboard**: Get a strategic overview of the data through clear visualizations, including:
-      - Total domains and URLs (including IPs)
-      - Total credentials
-      - Total files extracted
-      - Top 5 most common passwords
-      - Top 10 TLDs
-      - Top 10 most affected browsers
-      - Top 10 most used software
-      - **Country heatmap**: World map showing compromised devices by country for geographic insight at a glance.
+### Self-Service Check Portal
+- Public endpoint (`/check`) — users enter an email address and see which breaches it appears in
+- Passwords are **never** exposed — breach names and domains only
+- Rate-limited (10 req/IP/min, 50 req/email/hr) with no authentication required
 
-  * **Domain Monitoring**: Watch domains of interest and get notified when new uploads contain matching credentials or URLs.
-    - Define monitors with one or more domains and match by credential (email/username), URL, or both.
-    - Attach webhook endpoints (e.g. Slack, custom APIs) to each monitor to receive alerts with device and match details.
-    - View alert history and webhook delivery status in the Domain Monitoring UI.
+### System
+- **Roles** — Admin (full access) and Analyst (read-only search)
+- **API keys** — role-scoped, rate-limited, optional expiry
+- **REST API v1** — credential search, domain search, batch lookup, upload
+- **Audit logs** — all admin actions logged with user, IP, and timestamp
+- **API docs** — built-in interactive documentation at `/docs`
 
-  * **S3-Compatible Object Storage**: Store uploaded files in object storage instead of the local filesystem.
-    - Supports **AWS S3**, **MinIO**, and any S3-compatible service; optional MinIO service is included in the Docker setup.
-    - Configure endpoint, bucket, and credentials in Settings → Storage; optionally migrate existing local files to S3 in one go.
+---
 
-  * **Debug-Zip Utility**: Perform a quick check on `.zip` files to analyze their internal structure, ensure they match supported formats, and flag directories missing a password file.
+## Architecture
 
-  * **Roles**: Two built-in roles for access control.
-    - **Admin**: Full access — upload data, manage settings, users, domain monitors and webhooks, audit logs, and API keys.
-    - **Analyst**: Read and search access — dashboard, search, device and domain discovery; cannot upload, change settings, or manage users/monitors.
+```
+Browser / API client
+       │
+  Next.js 14 (App Router)
+       │
+  ┌────┴────────────┐
+  │                 │
+ClickHouse       SQLite
+(credentials,    (users, sessions,
+ 100B+ rows)      monitors, webhooks,
+                  API keys, audit log)
+```
 
-  * **API (v1)**: REST API with API-key auth for search, lookup, and upload.
-    - Create and manage API keys in the API Keys page; each key has a role (admin or analyst) and optional rate limit and expiry.
-    - **Search**: `GET /api/v1/search/credentials` and `GET /api/v1/search/domain` for credential and domain/keyword search.
-    - **Upload**: `POST /api/v1/upload` (admin keys only) with async job tracking via `GET /api/v1/upload/status/{jobId}`.
-  
-![alt text](images/Bron-Vault-Search-1.png "Bron Vault Search 1")
+- **ClickHouse** — columnar store, MergeTree ORDER BY `(domain, email, imported_at)`, ZSTD(3) compression, monthly partitions, bloom filters on email/domain/url. All credential reads and aggregations hit ClickHouse.
+- **SQLite** — lightweight relational store for all metadata that does not need analytical queries. No MySQL, no replication setup required.
+- **Monitor cron** — 15-minute tick registered in `instrumentation.ts` (production only); runs in-process via `setInterval`, no external queue dependency.
 
-![alt text](images/Bron-Vault-Search-2.png "Bron Vault Search 2")
-
-![alt text](images/Bron-Vault-Search-3.png "Bron Vault Search 3")
-
-![alt text](images/Bron-Vault-Search-4.png "Bron Vault Search 4")
-
-![alt text](images/Bron-Vault-Host-Information.png "Bron Vault Host Information")
-
-![alt text](images/Bron-Vault-Device-Overview.png "Bron Vault Device Overview")
-
-![alt text](images/Bron-Vault-Domain-Keyword-Search.png "Bron Vault Device Overview")
-
------
-
-## Important Notice
-
-- This tool was built with a focus on functionality, not hardened security. Do **NOT** deploy this in production environment or expose it to public networks. Use it exclusively in a secure, **isolated** environment.
-- Broń Vault was developed by [Tomi Ashari](https://github.com/mastomii) and [YoKo Kho](https://github.com/yokokho) as a side project under the [ITSEC Asia](https://itsec.asia/) RnD Division, with support from AI-assisted tooling. It does not represent our commercial [IntelliBroń Threat Intelligence](https://intellibron.io/) platform, though it reflects some similar capabilities.
-
------
+---
 
 ## Getting Started
 
-### Architecture & Performance
-
-Broń Vault now features **ClickHouse integration** to dramatically accelerate analytics queries and domain searches. With ClickHouse's columnar storage and MaterializedMySQL replication, complex queries that previously took seconds now complete much faster, enabling real-time exploration of large datasets.
-
-**Automatic Data Synchronization:** ClickHouse automatically replicates data from MySQL through MaterializedMySQL. Once configured, every change in MySQL is synced to ClickHouse in real-time (no manual steps required). You can focus on analytics while the system handles all synchronization behind the scenes.
-
-> 💡 **And don't worry about the complexity!** We've created a complete Docker service setup that handles all the configuration automatically. Just run a single script, and everything -> MySQL, ClickHouse, MaterializedMySQL replication, and the Next.js application, will be set up and ready to use.
-
-Follow these steps to get Broń Vault up and running locally.
-
 ### Prerequisites
 
-  * **Docker** and **Docker Compose v2** installed and running
-    * Docker Desktop: [Download here](https://www.docker.com/products/docker-desktop)
-    * Linux (Ubuntu): Use `./install_docker.sh` or install: `docker-ce` + `docker-compose-plugin`
-  * Git (for cloning the repository)
+- Docker and Docker Compose v2
+  - [Docker Desktop](https://www.docker.com/products/docker-desktop) (Windows/macOS)
+  - Linux: `./install_docker.sh` or install `docker-ce` + `docker-compose-plugin`
+- Git
 
-### Tested Environments
+### Quick Start
 
-This application has been successfully tested on the following operating systems:
-
-  * Ubuntu 24.04 LTS (Desktop and Server)
-  * Kali Linux 2025.3
-  * macOS Sequoia
-
-### Installation & Running
-
-#### Quick Start (Recommended)
-
-1.  **Clone this repository:**
-
-    ```bash
-    git clone https://github.com/ITSEC-Research/bron-vault
-    cd bron-vault
-    ```
-
-2.  **Configure the Environment:**
-
-    ```bash
-    # Copy the example environment file
-    cp .env.example .env
-    
-    # Edit .env with your secure passwords
-    # IMPORTANT: Change all default passwords for security!
-    ```
-
-3.  **Start all services:**
-
-    **For Linux/macOS:**
-    Run the script with or without elevated privileges, depending on your Docker setup:
-
-    ```bash
-    bash docker-start.sh
-    ```
-
-    As a note, this script will:
-    - Build Docker images (only on the first run)
-    - Start MySQL, ClickHouse, and the Next.js application
-    - Run the setup script to configure MaterializedMySQL replication
-    - Display service status and access URLs
-
-4.  **Access the application:**
-
-    Open your browser and navigate to:
-    ```
-    http://localhost:3000
-    ```
-
-#### Default Login Credentials
-
-After the first startup, you can log in with:
-
-- **Email:** `admin@bronvault.local`
-- **Password:** `admin`
-
-> ⚠️ **Security Note:** Please change the default password immediately after first login!
-
-#### Service URLs
-
-Once all services are running, you can access:
-
-- **Bron Vault App:** http://localhost:3000
-- **ClickHouse Play:** http://localhost:8123/play
-- **MySQL:** localhost:3306
-- **ClickHouse HTTP API:** http://localhost:8123
-
-#### Useful Commands
-
-**Check service status:**
 ```bash
-# Linux/macOS
-./docker-status.sh
+git clone https://github.com/patino-marco21/bron-vault
+cd bron-vault
 
-# View logs:
+cp .env.example .env
+# Edit .env — set strong passwords and a random JWT_SECRET
+
+bash docker-start.sh
+```
+
+Open [http://localhost:3000](http://localhost:3000).
+
+**Default credentials:**
+- Email: `admin@bronvault.local`
+- Password: `admin`
+
+> Change the default password immediately after first login.
+
+### Service URLs
+
+| Service | URL |
+|---|---|
+| Broń Vault | http://localhost:3000 |
+| ClickHouse HTTP API | http://localhost:8123 |
+| ClickHouse Play UI | http://localhost:8123/play |
+
+### Useful Commands
+
+```bash
+# View logs
 docker compose logs -f
-```
 
-**Stop all services:**
-```bash
+# Stop
 docker compose down
-```
 
-**Restart services:**
-```bash
+# Restart
 docker compose restart
+
+# Check status
+./docker-status.sh
 ```
 
-### Initial Setup
+### Development (hot reload)
 
-The first time you start the services:
+Run ClickHouse in Docker, Next.js locally:
 
-1. The setup script will automatically:
-   - Create MySQL replication user for ClickHouse sync
-   - Configure MaterializedMySQL database in ClickHouse
-   - Initialize all database tables and indexes
+```bash
+# Start infrastructure only (no app container)
+bash docker-start-infra.sh
 
-2. Wait for all services to be ready (usually about 60 seconds)
+# Configure local environment
+cp env.local.example .env.local
+# Set CLICKHOUSE_HOST=http://127.0.0.1:8123 in .env.local
 
-3. Access the application at `http://localhost:3000` and log in with the default credentials above
+npm install
+npm run dev
+```
 
-4. **Important:** Change the default password immediately after first login
+Open [http://localhost:3000](http://localhost:3000). Changes apply instantly without rebuilding Docker.
 
-You are now ready to start using Broń Vault!
-Just upload the stealer logs, and it will automatically parse them.
+---
 
------
+## API
 
-### Development with hot reload (npm run dev)
+Authentication: `Authorization: Bearer <api-key>` header.
 
-If you want code changes to be reflected immediately without rebuilding Docker (as with `npm run dev`), run only the infrastructure in Docker and the Next.js app on your machine:
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/v1/search/credentials` | Search credentials by email, domain, URL, password, breach |
+| `GET` | `/api/v1/search/domain` | Domain/keyword search with subdomain and path aggregation |
+| `POST` | `/api/v1/lookup` | Batch lookup up to 100 emails |
+| `POST` | `/api/v1/upload` | Upload ULP file (admin keys only) |
+| `GET` | `/api/check` | Public self-service breach check (no key required) |
 
-1. **Start only MySQL, ClickHouse, MinIO, and setup** (no app container):
+Full interactive docs at `/docs` when the app is running.
 
-   ```bash
-   npm run docker:infra
-   ```
-   Or: `bash docker-start-infra.sh`
+---
 
-2. **Configure local env** so the app can reach the containers on localhost:
+## Performance
 
-   ```bash
-   cp env.local.example .env.local
-   ```
+Tested at tens of billions of credential lines:
 
-   * Edit `.env.local`: set `DATABASE_URL` and ensure `MYSQL_HOST=127.0.0.1`, `CLICKHOUSE_HOST=http://127.0.0.1:8123`.
-   * Use the same `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE` and other values as in your `.env`.
+| Metric | Value |
+|---|---|
+| Insert throughput | ~50–100K lines/sec per worker (single-process) |
+| Peak heap per 500K-row batch | ~2 MB (CSV streaming) |
+| Credential search P99 | <200 ms with ClickHouse bloom filters |
+| Monitor re-scan tick | 15 minutes, in-process, no external queue |
 
-4. **Install dependencies** (if not already done):
-
-   ```bash
-   npm install
-   ```
-
-5. **Run the app locally** (hot reload):
-
-   ```bash
-   npm run dev
-   ```
-
-   Open http://localhost:3000. MySQL (3306), ClickHouse (8123), and MinIO (S3 API 9001, Console 9002) stay in Docker; only the app runs locally so changes apply instantly.
-
------
+---
 
 ## Contributing
 
-If you'd like to improve the project, whether by contributing code or reporting issues and security findings, **your feedback is always welcome**.
+Issues, pull requests, and security reports are welcome. Please open an issue before submitting large changes.
+
+---
+
+## License
+
+Apache 2.0 — see [LICENSE](LICENSE).
