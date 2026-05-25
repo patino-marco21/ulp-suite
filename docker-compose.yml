@@ -24,6 +24,7 @@ services:
       - clickhouse_data:/var/lib/clickhouse
       - ./docker/clickhouse/init:/docker-entrypoint-initdb.d/
       - ./docker/clickhouse/config:/etc/clickhouse-server/config.d/
+      - ./docker/clickhouse/users:/etc/clickhouse-server/users.d/
     healthcheck:
       # clickhouse-client is always present in the official image.
       # Passes $CLICKHOUSE_USER/$CLICKHOUSE_PASSWORD from the container env so

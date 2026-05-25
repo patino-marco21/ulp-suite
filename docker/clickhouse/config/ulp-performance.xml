@@ -18,7 +18,7 @@
     <async_insert_stale_timeout_ms>0</async_insert_stale_timeout_ms>    <!-- no stale eviction -->
 
     <!-- ── HTTP layer ─────────────────────────────────────────────────────── -->
-    <enable_http_compression>1</enable_http_compression>
+    <!-- enable_http_compression is a user-level setting — see users.d/ulp-profiles.xml -->
     <http_max_request_size>10737418240</http_max_request_size>           <!-- 10 GB max HTTP body -->
 
     <!-- ── MergeTree defaults (apply to all tables) ───────────────────────── -->
@@ -40,9 +40,7 @@
         <max_bytes_before_external_sort>10737418240</max_bytes_before_external_sort>
     </merge_tree>
 
-    <!-- ── Query resource limits ──────────────────────────────────────────── -->
-    <!-- Prevent runaway stats / analytics queries from blocking the server     -->
-    <max_execution_time>300</max_execution_time>                         <!-- 5 min hard cap -->
-    <timeout_overflow_mode>break</timeout_overflow_mode>                 <!-- return partial results -->
+    <!-- Query resource limits (max_execution_time, timeout_overflow_mode) are user-level
+         settings — see users.d/ulp-profiles.xml for the default profile overrides. -->
 
 </clickhouse>

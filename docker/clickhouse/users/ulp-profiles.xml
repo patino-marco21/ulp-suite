@@ -1,0 +1,15 @@
+<!-- ULP Vault — ClickHouse user-level profile defaults.
+     Loaded automatically from /etc/clickhouse-server/users.d/ on startup.
+     These are per-user (query-level) settings that cannot live in config.d/.  -->
+<clickhouse>
+    <profiles>
+        <default>
+            <!-- Compress HTTP responses automatically (gzip) -->
+            <enable_http_compression>1</enable_http_compression>
+
+            <!-- Prevent runaway stats / analytics queries from blocking the server -->
+            <max_execution_time>300</max_execution_time>        <!-- 5 min hard cap -->
+            <timeout_overflow_mode>break</timeout_overflow_mode> <!-- return partial results -->
+        </default>
+    </profiles>
+</clickhouse>
