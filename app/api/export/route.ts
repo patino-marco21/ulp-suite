@@ -88,8 +88,12 @@ export async function POST(request: NextRequest) {
   if (source_file) { extras.push(' AND source_file = {sourceFile:String}');  mergedParams.sourceFile = source_file }
   if (url_scheme)  { extras.push(' AND url_scheme = {urlScheme:String}');     mergedParams.urlScheme = url_scheme }
   if (is_corporate === '1' || is_corporate === true) extras.push(' AND is_corporate_email = 1')
-  if (pw_len_min !== null) { extras.push(' AND password_length >= {pwLenMin:UInt8}'); mergedParams.pwLenMin = pw_len_min }
-  if (pw_len_max !== null) { extras.push(' AND password_length <= {pwLenMax:UInt8}'); mergedParams.pwLenMax = pw_len_max }
+  // Normalise pw_len values — frontend sends '' when the input is empty.
+  // Destructuring default (null) only fires for undefined, not ''; guard both.
+  const pwLenMinNum = pw_len_min !== null && pw_len_min !== '' ? parseInt(String(pw_len_min), 10) : null
+  const pwLenMaxNum = pw_len_max !== null && pw_len_max !== '' ? parseInt(String(pw_len_max), 10) : null
+  if (pwLenMinNum !== null && !isNaN(pwLenMinNum)) { extras.push(' AND password_length >= {pwLenMin:UInt8}'); mergedParams.pwLenMin = pwLenMinNum }
+  if (pwLenMaxNum !== null && !isNaN(pwLenMaxNum)) { extras.push(' AND password_length <= {pwLenMax:UInt8}'); mergedParams.pwLenMax = pwLenMaxNum }
   if (date_from) { extras.push(' AND imported_at >= {dateFrom:DateTime}'); mergedParams.dateFrom = `${date_from} 00:00:00` }
   if (date_to)   { extras.push(' AND imported_at <= {dateTo:DateTime}');   mergedParams.dateTo   = `${date_to} 23:59:59` }
   if (pw_mask) {

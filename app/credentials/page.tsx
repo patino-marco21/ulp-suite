@@ -734,12 +734,11 @@ export default function CredentialsPage() {
           sort:          sortKey,
           date_from:     dateFrom,
           date_to:       dateTo,
-          pw_len_min:    pwLenMin,
-          pw_len_max:    pwLenMax,
+          pw_len_min:    pwLenMin !== '' ? parseInt(pwLenMin, 10) : null,
+          pw_len_max:    pwLenMax !== '' ? parseInt(pwLenMax, 10) : null,
           email_domain:  emailDomainFilter,
           source_file:   sourceFileFilter,
-          url_host:      urlHostFilter,
-          regex:         regexMode ? '1' : '',
+          regex_mode:    regexMode,
         }),
       })
       if (!res.ok) throw new Error('Export failed')
