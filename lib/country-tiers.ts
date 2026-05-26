@@ -302,6 +302,11 @@ export function tierWhereMulti(include: string[], exclude: string[]): string {
  * e.g. parseTierParams('T1,T2', '') → { include: ['T1','T2'], exclude: [] }
  */
 export function parseTierParams(include: string, exclude: string) {
-  const parse = (s: string) => s.split(',').map(t => t.trim()).filter(t => VALID_TIERS.includes(t))
+  // Guard: empty string input → empty array.
+  // Without this, ''.split(',') returns [''] and the empty-string tier (untiered)
+  // inadvertently ends up in the include list, causing tierWhereMulti to emit
+  // `AND country_tier IN ('')` when the user only supplied a tier_exclude param.
+  const parse = (s: string) =>
+    s ? s.split(',').map(t => t.trim()).filter(t => VALID_TIERS.includes(t) && t !== '') : []
   return { include: parse(include), exclude: parse(exclude) }
 }

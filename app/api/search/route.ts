@@ -19,14 +19,19 @@ const SELECT = `${NORM_COLS},
 const VALID_MASKS = new Set(['alpha', 'numeric', 'alphanumeric', 'mixed', 'empty'])
 
 // Allowed ORDER BY expressions (whitelist to prevent injection)
+// Sort orders use a multi-column tiebreaker chain that terminates with (domain, email,
+// url, password) — the most discriminating per-row combination available without a
+// synthetic id column.  This ensures OFFSET pagination returns stable pages even when
+// many rows share the same primary sort value (e.g. imported_at from a bulk batch, or
+// empty email for username/phone logins).
 const SORT_MAP: Record<string, string> = {
-  'imported_desc': 'imported_at DESC',
-  'imported_asc':  'imported_at ASC',
-  'domain_asc':    'domain ASC, imported_at DESC',
-  'domain_desc':   'domain DESC, imported_at DESC',
-  'email_asc':     'email ASC',
-  'pw_len_desc':   'password_length DESC',
-  'pw_len_asc':    'password_length ASC',
+  'imported_desc': 'imported_at DESC, domain ASC, email ASC, url ASC, password ASC',
+  'imported_asc':  'imported_at ASC,  domain ASC, email ASC, url ASC, password ASC',
+  'domain_asc':    'domain ASC,  email ASC, imported_at ASC, url ASC, password ASC',
+  'domain_desc':   'domain DESC, email ASC, imported_at ASC, url ASC, password ASC',
+  'email_asc':     'email ASC,   domain ASC, imported_at ASC, url ASC, password ASC',
+  'pw_len_desc':   'password_length DESC, domain ASC, email ASC, imported_at ASC, url ASC',
+  'pw_len_asc':    'password_length ASC,  domain ASC, email ASC, imported_at ASC, url ASC',
 }
 
 export async function GET(request: NextRequest) {
