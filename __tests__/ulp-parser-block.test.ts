@@ -329,3 +329,85 @@ describe('§E parseBlockContent', () => {
     expect(result.credentials[0].password).toBe('hunter2pass')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §F  Extended label aliases (from milxss parser + Lexfo research)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§F Extended label aliases', () => {
+
+  describe('url aliases', () => {
+    test('UR1: (leet-obfuscated URL) → url field', () => {
+      expect(classifyBlockLabel('UR1: https://site.com')).toEqual({ field: 'url', value: 'https://site.com' })
+    })
+    test('Url: (mixed case) → url field', () => {
+      expect(classifyBlockLabel('Url: https://site.com')).toEqual({ field: 'url', value: 'https://site.com' })
+    })
+  })
+
+  describe('login aliases', () => {
+    test('Email: user@domain.com → login field', () => {
+      expect(classifyBlockLabel('Email: user@example.com')).toEqual({ field: 'login', value: 'user@example.com' })
+    })
+    test('E-mail: user@domain.com → login field', () => {
+      expect(classifyBlockLabel('E-mail: user@example.com')).toEqual({ field: 'login', value: 'user@example.com' })
+    })
+    test('USER LOGIN: admin → login field (multi-word label)', () => {
+      expect(classifyBlockLabel('USER LOGIN: admin')).toEqual({ field: 'login', value: 'admin' })
+    })
+  })
+
+  describe('password aliases', () => {
+    test('USER PASSWORD: secret → password field (multi-word label)', () => {
+      expect(classifyBlockLabel('USER PASSWORD: secret123')).toEqual({ field: 'password', value: 'secret123' })
+    })
+  })
+
+  describe('soft aliases', () => {
+    test('Storage: Chrome Default → soft field', () => {
+      expect(classifyBlockLabel('Storage: Chrome Default')).toEqual({ field: 'soft', value: 'Chrome Default' })
+    })
+  })
+
+  describe('full block with new aliases', () => {
+    test('SOFT/URL/USER/PASS (uppercase) block parses correctly', () => {
+      const content = [
+        'SOFT: Firefox ESR',
+        'URL: https://example.com/login',
+        'USER: john@example.com',
+        'PASS: hunter2pass',
+        '================',
+      ].join('\n')
+      const result = parseBlockContent(content, src)
+      expect(result.credentials).toHaveLength(1)
+      expect(result.credentials[0].url).toBe('https://example.com/login')
+      expect(result.credentials[0].email).toBe('john@example.com')
+      expect(result.credentials[0].password).toBe('hunter2pass')
+    })
+
+    test('Email: field as login alias in full block', () => {
+      const content = [
+        'Host: https://mail.google.com',
+        'Email: victim@gmail.com',
+        'Password: gmail_pass123',
+        '===',
+      ].join('\n')
+      const result = parseBlockContent(content, src)
+      expect(result.credentials).toHaveLength(1)
+      expect(result.credentials[0].email).toBe('victim@gmail.com')
+    })
+
+    test('USER LOGIN / USER PASSWORD multi-word block', () => {
+      const content = [
+        'HOST: https://corporate.com/login',
+        'USER LOGIN: jsmith',
+        'USER PASSWORD: Corp$ecret99',
+        '===',
+      ].join('\n')
+      const result = parseBlockContent(content, src)
+      expect(result.credentials).toHaveLength(1)
+      expect(result.credentials[0].email).toBe('jsmith')
+      expect(result.credentials[0].password).toBe('Corp$ecret99')
+    })
+  })
+})
