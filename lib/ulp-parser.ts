@@ -44,7 +44,7 @@ function stripPort(host: string): string {
  * Extract the domain/host from a URL string.
  * Strips www. prefix for consistency with the old parser.
  */
-function extractDomain(url: string): string {
+export function extractDomain(url: string): string {
   const schemeEnd = url.indexOf('://')
   if (schemeEnd !== -1) {
     const afterScheme = url.slice(schemeEnd + 3)
@@ -60,6 +60,188 @@ function extractDomain(url: string): string {
   }
   return ''
 }
+
+// ── Block-format parser (Raccoon / Stealc / Meta / Vidar style) ──────────────
+
+export type BlockField = 'url' | 'login' | 'password' | 'soft'
+
+export interface BlockState {
+  url:      string
+  login:    string
+  password: string
+}
+
+const BLOCK_URL_LABELS   = new Set(['host', 'url', 'hostname'])
+const BLOCK_LOGIN_LABELS = new Set(['login', 'username', 'user'])
+const BLOCK_PASS_LABELS  = new Set(['password', 'pass', 'pwd'])
+const BLOCK_SOFT_LABELS  = new Set(['soft', 'application', 'browser', 'app'])
+
+/**
+ * If `trimmed` is a labeled block field (e.g. "Host: https://..."), return its
+ * field type and value.  Matching is case-insensitive on the label.
+ * Returns null for non-labeled lines.
+ */
+export function classifyBlockLabel(
+  trimmed: string,
+): { field: BlockField; value: string } | null {
+  const colon = trimmed.indexOf(':')
+  if (colon === -1) return null
+  const label = trimmed.slice(0, colon).trim().toLowerCase()
+  const value = trimmed.slice(colon + 1).trim()
+  if (BLOCK_URL_LABELS.has(label))   return { field: 'url',      value }
+  if (BLOCK_LOGIN_LABELS.has(label)) return { field: 'login',    value }
+  if (BLOCK_PASS_LABELS.has(label))  return { field: 'password', value }
+  if (BLOCK_SOFT_LABELS.has(label))  return { field: 'soft',     value }
+  return null
+}
+
+/**
+ * Returns true if this line signals end-of-block:
+ * blank line, or a run of 3+ identical separator characters (=, -, >).
+ */
+export function isBlockSeparator(trimmed: string): boolean {
+  if (!trimmed) return true
+  return trimmed.length >= 3 && /^[=\->]{3,}$/.test(trimmed)
+}
+
+/** Returns a fresh empty BlockState. */
+export function makeBlockState(): BlockState {
+  return { url: '', login: '', password: '' }
+}
+
+/**
+ * Flush `state` into a ULPCredential if it satisfies validation rules.
+ * Returns null if login is empty, password is absent/too-short, or login===password.
+ */
+export function flushBlockState(
+  state: BlockState,
+  sourceFile: string,
+): ULPCredential | null {
+  const { url, login, password } = state
+  if (!login)                           return null
+  if (!password || password.length < 3) return null
+  if (login === password)               return null
+  const domain = url
+    ? extractDomain(url)
+    : (login.includes('@') ? login.split('@').pop()!.toLowerCase() : '')
+  return { url, email: login, password, domain, source_file: sourceFile }
+}
+
+/**
+ * Process one line against a mutable BlockState.
+ *
+ * - 'field'     — line was a labeled field; state has been updated.
+ * - 'separator' — line is a block separator; caller should flush state.
+ * - 'ignored'   — line was neither a label nor a separator.
+ */
+export function parseBlockLine(
+  line:  string,
+  state: BlockState,
+): 'field' | 'separator' | 'ignored' {
+  const trimmed = line.trim()
+  const labeled = classifyBlockLabel(trimmed)
+  if (labeled) {
+    if (labeled.field === 'url')      state.url      = labeled.value
+    if (labeled.field === 'login')    state.login    = labeled.value
+    if (labeled.field === 'password') state.password = labeled.value
+    // 'soft' is metadata — intentionally not stored
+    return 'field'
+  }
+  if (isBlockSeparator(trimmed)) return 'separator'
+  return 'ignored'
+}
+
+/** Parse a string of pure block-format content. */
+export function parseBlockContent(content: string, sourceFile: string): ParseResult {
+  const lines       = content.split('\n')
+  const credentials: ULPCredential[] = []
+  const breakdown   = makeRejectionMap()
+  let   skipped     = 0
+  let   state       = makeBlockState()
+
+  function tryFlush() {
+    const cred = flushBlockState(state, sourceFile)
+    if (cred) {
+      credentials.push(cred)
+    } else if (state.url || state.login || state.password) {
+      skipped++
+      if (!state.login || !state.password) breakdown.no_fields++
+      else breakdown.no_password++
+    }
+    state = makeBlockState()
+  }
+
+  for (const line of lines) {
+    const result = parseBlockLine(line, state)
+    if (result === 'separator') tryFlush()
+    // 'field' and 'ignored' — state already updated or line irrelevant
+  }
+  tryFlush()  // flush final block
+
+  return { credentials, skipped, errors: 0, rejection_breakdown: breakdown }
+}
+
+/** Streaming block-format parser — yields batches of credentials. */
+export async function* parseBlockStream(
+  stream:    ReadableStream<Uint8Array>,
+  filename:  string,
+  batchSize: number,
+): AsyncGenerator<StreamBatch> {
+  const reader  = stream.getReader()
+  const decoder = new TextDecoder()
+  let   buffer  = ''
+  let   batch:  ULPCredential[] = []
+  let   batchRejected = 0
+  let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0 }
+  let   state   = makeBlockState()
+
+  function flushBatch(): StreamBatch {
+    const out: StreamBatch = { credentials: batch, rejected: batchRejected, breakdown: batchBreakdown }
+    batch = []; batchRejected = 0
+    batchBreakdown = { blank: 0, no_fields: 0, no_password: 0 }
+    return out
+  }
+
+  function tryFlushBlock() {
+    const cred = flushBlockState(state, filename)
+    if (cred) {
+      batch.push(cred)
+    } else if (state.url || state.login || state.password) {
+      batchRejected++
+      if (!state.login || !state.password) batchBreakdown.no_fields++
+      else batchBreakdown.no_password++
+    }
+    state = makeBlockState()
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+
+      for (const line of lines) {
+        const result = parseBlockLine(line, state)
+        if (result === 'separator') {
+          tryFlushBlock()
+          if (batch.length >= batchSize) yield flushBatch()
+        }
+      }
+    }
+    if (buffer) {
+      const result = parseBlockLine(buffer, state)
+      if (result === 'separator') tryFlushBlock()
+    }
+    tryFlushBlock()  // flush final incomplete block
+    if (batch.length > 0 || batchRejected > 0) yield flushBatch()
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Split a colon-delimited ULP line into [url, login, password].
