@@ -332,12 +332,35 @@ export function parseLine(
     return { credential: null, reason: 'blank' }
   }
 
-  // Strip trailing pipe-separated noise (e.g. "url:login:pass|source|country")
-  const clean = trimmed.includes('|') && !trimmed.startsWith('|')
-    ? trimmed.split('|')[0].trim()
-    : trimmed
+  // Pipe separator detection:
+  // If the line already uses tab or semicolon as its primary separator, pipe is
+  // just noise (e.g. password field contains '|') — strip from first pipe.
+  // Otherwise, if the segment before the first '|' has <2 non-scheme colons,
+  // treat '|' as the primary field separator (combo-list: url|login|pass).
+  // If it has 2+ non-scheme colons the credential is already embedded before
+  // the pipe, so pipe marks trailing metadata — strip it.
+  let clean: string
+  if (trimmed.includes('|') && !trimmed.startsWith('|')) {
+    if (trimmed.includes('\t') || trimmed.includes(';')) {
+      // Tab or semicolon is primary separator → pipe is trailing noise
+      clean = trimmed.split('|')[0].trim()
+    } else {
+      const beforePipe = trimmed.slice(0, trimmed.indexOf('|'))
+      // Count colons that are NOT part of a '://' scheme
+      const nonSchemeColons = (beforePipe.replace('://', '  ').match(/:/g) ?? []).length
+      if (nonSchemeColons >= 2) {
+        // Has login:pass embedded before the pipe → trailing metadata, strip it
+        clean = beforePipe.trim()
+      } else {
+        // No embedded credential before the pipe → pipe IS the separator
+        clean = trimmed
+      }
+    }
+  } else {
+    clean = trimmed
+  }
 
-  // Rule 2: separator detection (\t beats ; beats :)
+  // Rule 2: separator detection (\t beats ; beats | beats :)
   let url = '', login = '', password = ''
   if (clean.includes('\t')) {
     const parts = clean.split('\t')
@@ -389,6 +412,19 @@ export function parseLine(
       url      = parts[0].trim()
       login    = parts[1].trim()
       password = parts.slice(2).join(';').trim()
+    } else if (parts.length === 2) {
+      login    = parts[0].trim()
+      password = parts[1].trim()
+    } else {
+      return { credential: null, reason: 'no_fields' }
+    }
+  } else if (clean.includes('|') && !clean.startsWith('|')) {
+    // Pipe primary separator (set by the clean-assignment logic above)
+    const parts = clean.split('|')
+    if (parts.length >= 3) {
+      url      = parts[0].trim()
+      login    = parts[1].trim()
+      password = parts.slice(2).join('|').trim()
     } else if (parts.length === 2) {
       login    = parts[0].trim()
       password = parts[1].trim()

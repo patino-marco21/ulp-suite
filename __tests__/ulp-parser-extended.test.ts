@@ -1088,3 +1088,76 @@ describe('§14 Monster-material blank-first-tab and URL-path rejection', () => {
     })
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §15  Pipe primary separator
+// Lines like "url|login|pass" use pipe as the primary field separator.
+// Trailing-metadata lines like "url:login:pass|RU|source" still strip the pipe.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§15 Pipe primary separator', () => {
+
+  test('https://site.com|user@email.com|pass123 → correct fields', () => {
+    const c = cred('https://roblox.com|player99@gmail.com|P@ssword!')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('https://roblox.com')
+    expect(c!.email).toBe('player99@gmail.com')
+    expect(c!.password).toBe('P@ssword!')
+    expect(c!.domain).toBe('roblox.com')
+  })
+
+  test('bare domain|user|pass → correct fields', () => {
+    const c = cred('steamcommunity.com|player123|steam_pass99')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('steamcommunity.com')
+    expect(c!.email).toBe('player123')
+    expect(c!.password).toBe('steam_pass99')
+    expect(c!.domain).toBe('steamcommunity.com')
+  })
+
+  test('2-field pipe: email|pass → url empty', () => {
+    const c = cred('user@gmail.com|mypassword99')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('')
+    expect(c!.email).toBe('user@gmail.com')
+    expect(c!.password).toBe('mypassword99')
+  })
+
+  test('3-field pipe with http URL', () => {
+    const c = cred('http://forum.example.com|alice|hunter2pass')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('http://forum.example.com')
+    expect(c!.email).toBe('alice')
+    expect(c!.password).toBe('hunter2pass')
+  })
+
+  test('URL-with-port|user|pass → pipe-primary', () => {
+    const c = cred('ftp://files.site.com:21|ftpuser|ftppass99')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('ftp://files.site.com:21')
+    expect(c!.email).toBe('ftpuser')
+    expect(c!.password).toBe('ftppass99')
+  })
+
+  test('pipe password with extra pipes: url|user|p|a|s → password gets extra pipes', () => {
+    const c = cred('https://site.com|user|p|a|s|s')
+    expect(c).not.toBeNull()
+    expect(c!.email).toBe('user')
+    expect(c!.password).toBe('p|a|s|s')
+  })
+
+  test('trailing-metadata still stripped: url:login:pass|RU|source', () => {
+    const c = cred('https://vk.com/login:vkuser:vkpass99|RU|source.txt')
+    expect(c).not.toBeNull()
+    expect(c!.email).toBe('vkuser')
+    expect(c!.password).toBe('vkpass99')
+  })
+
+  test('colon-credential with 1-segment pipe noise: site.com:user:pass|RU', () => {
+    const c = cred('site.com:user:pass123|RU')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('site.com')
+    expect(c!.email).toBe('user')
+    expect(c!.password).toBe('pass123')
+  })
+})
