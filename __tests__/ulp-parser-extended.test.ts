@@ -1161,3 +1161,48 @@ describe('§15 Pipe primary separator', () => {
     expect(c!.password).toBe('pass123')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §16  Percent-decode URL-encoded passwords
+// Stealers sometimes URL-encode the password field.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§16 Percent-decode URL-encoded passwords', () => {
+
+  test('%40 decoded to @: P%40ssw0rd → P@ssw0rd', () => {
+    const c = cred('https://example.com:user:P%40ssw0rd')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('P@ssw0rd')
+  })
+
+  test('%3A decoded to colon: pass%3Aword → pass:word', () => {
+    const c = cred('https://example.com:user:pass%3Aword')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('pass:word')
+  })
+
+  test('plain password without % unchanged', () => {
+    const c = cred('https://example.com:user:plainpassword')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('plainpassword')
+  })
+
+  test('malformed %ZZ sequence — kept as-is (no crash)', () => {
+    const c = cred('https://example.com:user:pass%ZZword')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('pass%ZZword')  // decodeURIComponent throws, fallback to original
+  })
+
+  test('%20 decoded to space', () => {
+    const c = cred('https://example.com:user:my%20password')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('my password')
+  })
+
+  test('fully encoded password still passes length check on decoded value', () => {
+    // '%61%62%63' = 'abc' (3 chars, exactly at boundary)
+    const c = cred('https://example.com:user:%61%62%63')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('abc')
+  })
+})

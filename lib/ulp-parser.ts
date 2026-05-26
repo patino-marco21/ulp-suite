@@ -437,6 +437,11 @@ export function parseLine(
     ;[url, login, password] = split
   }
 
+  // Percent-decode URL-encoded password (some stealers encode special chars)
+  if (password.includes('%')) {
+    try { password = decodeURIComponent(password) } catch { /* keep original if malformed */ }
+  }
+
   // Rule 3: validation
   if (!login)                           return { credential: null, reason: 'no_fields' }
   if (!password || password.length < 3) return { credential: null, reason: 'no_password' }
