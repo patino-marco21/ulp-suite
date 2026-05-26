@@ -27,7 +27,7 @@ echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━�
 echo -e "${GREEN}📍 Access URLs:${NC}"
 echo ""
 echo -e "  🌐 ${YELLOW}ULP Suite App:${NC}     http://localhost:3000"
-echo -e "  📊 ${YELLOW}ClickHouse Play:${NC}     http://localhost:8123/play"
+echo -e "  🗄️  ${YELLOW}ClickHouse SQL:${NC}    docker exec -it ulpsuite_clickhouse clickhouse-client"
 echo ""
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${GREEN}🔐 Default Login Credentials:${NC}"
