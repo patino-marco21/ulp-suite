@@ -940,3 +940,151 @@ describe('§13 parseULPContent batch counters', () => {
     expect(result.rejection_breakdown.no_password).toBe(1)
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §14  Monster-material blank-first-tab format & URL-path:username rejection
+//
+// Two parser fixes (v5 patch):
+//  A) Tab lines with empty first field (\t<URL>\t<credential>) are re-routed:
+//     url ← parts[1], credential split on first colon → login:password.
+//  B) 2-field colon lines where the left side contains '/' (URL-path:username)
+//     are rejected so the URL path doesn't land in the email column.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§14 Monster-material blank-first-tab and URL-path rejection', () => {
+
+  // ── Fix A: blank-first-tab re-routing ──────────────────────────────────────
+
+  describe('Fix A: blank-first-tab Monster material format', () => {
+
+    test('\\t<bare-URL>\\t<email:pass> → URL in url, email in email, pass in password', () => {
+      // Monster material: empty leading field, URL second, email:pass credential third
+      const c = cred('\twww.roblox.com/login\tusername@example.com:Roblox123!')
+      expect(c).not.toBeNull()
+      expect(c!.url).toBe('www.roblox.com/login')
+      expect(c!.email).toBe('username@example.com')
+      expect(c!.password).toBe('Roblox123!')
+      expect(c!.domain).toBe('roblox.com')
+    })
+
+    test('\\t<bare-URL>\\t<username:pass> (no email) → correct fields', () => {
+      const c = cred('\tbancoprovincia.com.ar/cuentaWeb/\tCamerajake:P@ssword123')
+      expect(c).not.toBeNull()
+      expect(c!.url).toBe('bancoprovincia.com.ar/cuentaWeb/')
+      expect(c!.email).toBe('Camerajake')
+      expect(c!.password).toBe('P@ssword123')
+      expect(c!.domain).toBe('bancoprovincia.com.ar')
+    })
+
+    test('\\t<https-URL>\\t<login:pass> → scheme URL placed correctly', () => {
+      const c = cred('\thttps://accounts.google.com/signin\tjohn@gmail.com:gPass99!')
+      expect(c).not.toBeNull()
+      expect(c!.url).toBe('https://accounts.google.com/signin')
+      expect(c!.email).toBe('john@gmail.com')
+      expect(c!.password).toBe('gPass99!')
+      expect(c!.domain).toBe('accounts.google.com')
+    })
+
+    test('\\t<URL>\\t<username:pass:extra> → password includes everything after first colon', () => {
+      // Credential split is on FIRST colon only; colons in the password are preserved
+      const c = cred('\tsteam.com/login\tplayer:p4ss:extra')
+      expect(c).not.toBeNull()
+      expect(c!.url).toBe('steam.com/login')
+      expect(c!.email).toBe('player')
+      expect(c!.password).toBe('p4ss:extra')
+    })
+
+    test('\\t<URL>\\t<plain-hash-no-colon> → rejected as no_fields (no login extractable)', () => {
+      // Credential has no colon → cannot split into login:pass → reject
+      const r = parseLine('\tbancoprovincia.com.ar/cuentaWeb/\tqGm93TXbzWyEm2bdiGhEbXr7swp5aiTc', src)
+      expect(r.credential).toBeNull()
+      expect(r.reason).toBe('no_fields')
+    })
+
+    test('\\t<URL>\\t<credLogin-with-slash:pass> → rejected (credLogin looks like URL)', () => {
+      // If the part before the first colon in the credential itself has '/', skip
+      const r = parseLine('\tsite.com/login\tpath/page:password123', src)
+      expect(r.credential).toBeNull()
+      expect(r.reason).toBe('no_fields')
+    })
+
+    test('normal 3-field tab (non-empty url) is unaffected by fix', () => {
+      // Fix only fires when parts[0] (url) is empty
+      const c = cred('https://site.com\tuser\tpassword123')
+      expect(c).not.toBeNull()
+      expect(c!.url).toBe('https://site.com')
+      expect(c!.email).toBe('user')
+      expect(c!.password).toBe('password123')
+    })
+
+    test('blank-first-tab where parts[1] has no slash (email, not URL) → fix not triggered', () => {
+      // parts[1] = 'user@email.com' has no '/' → url='' stays empty, normal validation runs
+      const c = cred('\tuser@example.com\tsecret123')
+      expect(c).not.toBeNull()
+      expect(c!.url).toBe('')
+      expect(c!.email).toBe('user@example.com')
+      expect(c!.password).toBe('secret123')
+    })
+
+    test('blank-first-tab where parts[1] has no slash (plain username) → fix not triggered', () => {
+      const c = cred('\tmyusername\tpassword456')
+      expect(c).not.toBeNull()
+      expect(c!.url).toBe('')
+      expect(c!.email).toBe('myusername')
+      expect(c!.password).toBe('password456')
+    })
+  })
+
+  // ── Fix B: URL-path:username 2-field colon rejection ──────────────────────
+
+  describe('Fix B: URL-path:username 2-field colon rejection', () => {
+
+    test('site.com/login:Username → rejected (URL-path in left, username in right)', () => {
+      // Without fix: login='site.com/login', password='Username' — URL in email column
+      // With fix: left='site.com/login' has '/' and c2=-1 → colonSplit returns null → no_fields
+      expect(cred('site.com/login:Camerajake')).toBeNull()
+      expect(why('site.com/login:Camerajake')).toBe('no_fields')
+    })
+
+    test('www.roblox.com/login:shortname → rejected', () => {
+      expect(cred('www.roblox.com/login:Camerajake')).toBeNull()
+      expect(why('www.roblox.com/login:Camerajake')).toBe('no_fields')
+    })
+
+    test('path/only:value → rejected', () => {
+      expect(cred('some/path:value123')).toBeNull()
+      expect(why('some/path:value123')).toBe('no_fields')
+    })
+
+    test('normal login:password (no slash in login) → still accepted', () => {
+      const c = cred('myusername:password123')
+      expect(c).not.toBeNull()
+      expect(c!.email).toBe('myusername')
+      expect(c!.password).toBe('password123')
+    })
+
+    test('bare-domain:password (domain has dot but no slash) → still accepted', () => {
+      // 'example.com' has no slash → fix does not reject
+      const c = cred('example.com:password123')
+      expect(c).not.toBeNull()
+      expect(c!.email).toBe('example.com')
+      expect(c!.password).toBe('password123')
+    })
+
+    test('email@domain.com:password → still accepted (@ check fires before slash check)', () => {
+      const c = cred('user@domain.com:password123')
+      expect(c).not.toBeNull()
+      expect(c!.email).toBe('user@domain.com')
+      expect(c!.password).toBe('password123')
+    })
+
+    test('3-field domain/path:login:pass → fix not triggered (c2 is found, not 2-field)', () => {
+      // Fix only applies when c2 === -1.  3-field colon line uses c2 found path → correct.
+      const c = cred('example.com/path:admin:password123')
+      expect(c).not.toBeNull()
+      expect(c!.url).toBe('example.com/path')
+      expect(c!.email).toBe('admin')
+      expect(c!.password).toBe('password123')
+    })
+  })
+})

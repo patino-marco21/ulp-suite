@@ -123,7 +123,11 @@ function colonSplit(line: string): [string, string, string] | null {
 
   const c2 = line.indexOf(':', c1 + 1)
   if (c2 === -1) {
-    // 2-field line: "login:password" — signal no-URL with empty string
+    // 2-field line: "login:password" — but if left contains '/' it is a
+    // URL-path:username pattern (e.g. "site.com/login:Camerajake"), not a
+    // credential.  Reject it so the URL doesn't land in the email column.
+    if (left.includes('/')) return null
+    // "login:password" — signal no-URL with empty string
     return ['', left, line.slice(c1 + 1)]
   }
   return [left, line.slice(c1 + 1, c2), line.slice(c2 + 1)]
@@ -159,9 +163,41 @@ export function parseLine(
       url      = parts[0].trim()
       login    = parts[1].trim()
       password = parts.slice(2).join('\t').trim()
+      // Monster-material blank-first-tab fix:
+      // These files use the format  \t<URL>\t<credential>  (empty leading field).
+      // The parser naively puts '' in url, the URL in login, and the raw
+      // credential string in password.  Detect by: url='' and login has '/'.
+      // Re-route: url ← login; split credential on its FIRST colon only
+      // (the credential is always login:password, never url:login:password).
+      if (url === '' && login.includes('/')) {
+        url = login
+        const colonPos = password.indexOf(':')
+        if (colonPos === -1) return { credential: null, reason: 'no_fields' }
+        const credLogin = password.slice(0, colonPos)
+        const credPass  = password.slice(colonPos + 1)
+        // If the extracted "login" is itself a URL path, the format is unrecognised → skip.
+        if (credLogin.includes('/')) return { credential: null, reason: 'no_fields' }
+        login    = credLogin
+        password = credPass
+      }
     } else if (parts.length === 2) {
       login    = parts[0].trim()
       password = parts[1].trim()
+      // Monster-material blank-first-tab fix (2-field variant):
+      // The leading \t is eaten by line.trim(), leaving a 2-field line where
+      // parts[0] is the URL and parts[1] is the raw credential string.
+      // Detect by: login contains '/' (URL path) and no '@' (not an email address).
+      // Re-route: url ← login; split credential on first colon → new login:password.
+      if (login.includes('/') && !login.includes('@')) {
+        url = login
+        const colonPos = password.indexOf(':')
+        if (colonPos === -1) return { credential: null, reason: 'no_fields' }
+        const credLogin = password.slice(0, colonPos)
+        const credPass  = password.slice(colonPos + 1)
+        if (credLogin.includes('/')) return { credential: null, reason: 'no_fields' }
+        login    = credLogin
+        password = credPass
+      }
     } else {
       return { credential: null, reason: 'no_fields' }
     }
