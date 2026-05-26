@@ -343,6 +343,9 @@ describe('§F Extended label aliases', () => {
     test('Url: (mixed case) → url field', () => {
       expect(classifyBlockLabel('Url: https://site.com')).toEqual({ field: 'url', value: 'https://site.com' })
     })
+    test('HOSTNAME: (all caps) → url field', () => {
+      expect(classifyBlockLabel('HOSTNAME: site.com')).toEqual({ field: 'url', value: 'site.com' })
+    })
   })
 
   describe('login aliases', () => {
@@ -351,6 +354,9 @@ describe('§F Extended label aliases', () => {
     })
     test('E-mail: user@domain.com → login field', () => {
       expect(classifyBlockLabel('E-mail: user@example.com')).toEqual({ field: 'login', value: 'user@example.com' })
+    })
+    test('U53RN4M3: (leet-obfuscated USERNAME) → login field', () => {
+      expect(classifyBlockLabel('U53RN4M3: hacker99')).toEqual({ field: 'login', value: 'hacker99' })
     })
     test('USER LOGIN: admin → login field (multi-word label)', () => {
       expect(classifyBlockLabel('USER LOGIN: admin')).toEqual({ field: 'login', value: 'admin' })

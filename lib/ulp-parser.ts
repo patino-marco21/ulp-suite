@@ -72,7 +72,7 @@ export interface BlockState {
 }
 
 const BLOCK_URL_LABELS   = new Set(['host', 'url', 'hostname', 'ur1', 'link', 'site'])
-const BLOCK_LOGIN_LABELS = new Set(['login', 'username', 'user', 'email', 'e-mail', 'user login'])
+const BLOCK_LOGIN_LABELS = new Set(['login', 'username', 'user', 'email', 'e-mail', 'user login', 'u53rn4m3'])
 const BLOCK_PASS_LABELS  = new Set(['password', 'pass', 'pwd', 'user password'])
 const BLOCK_SOFT_LABELS  = new Set(['soft', 'application', 'browser', 'app', 'storage'])
 
