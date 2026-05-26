@@ -40,22 +40,24 @@ async function insertBatch(
   if (credentials.length === 0) return
   const chClient = getClient()
 
-  const csvRows = credentials.map(c =>
-    [
-      csvField(c.url),
-      csvField(c.email),
-      csvField(c.password),
-      csvField(c.domain),
-      csvField(c.source_file),
-      csvField(breach_name),
-    ].join(',')
-  ).join('\n') + '\n'
-
-  // objectMode MUST be false for @clickhouse/client CSV format.
-  // Readable.from() defaults to objectMode:true (treats each element as an
-  // object), which the client rejects with "expected Readable Stream with
-  // disabled object mode".  Setting objectMode:false makes it a byte stream.
-  const readable = Readable.from([csvRows], { objectMode: false })
+  // Generator yields one CSV row at a time — no large string materialised.
+  // objectMode MUST be false: Readable.from() defaults to objectMode:true
+  // (treats each element as an object), rejected by the ClickHouse CSV reader.
+  const readable = Readable.from(
+    (function* () {
+      for (const c of credentials) {
+        yield [
+          csvField(c.url),
+          csvField(c.email),
+          csvField(c.password),
+          csvField(c.domain),
+          csvField(c.source_file),
+          csvField(breach_name),
+        ].join(',') + '\n'
+      }
+    })(),
+    { objectMode: false },
+  )
 
   await chClient.insert({
     table: 'ulp.credentials',
