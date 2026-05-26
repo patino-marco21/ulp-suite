@@ -427,9 +427,46 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
   const lines       = content.split('\n')
   const credentials: ULPCredential[] = []
   const breakdown   = makeRejectionMap()
-  let skipped       = 0
+  let   skipped     = 0
+  let   blockState  = makeBlockState()
+
+  function tryFlushBlock() {
+    const cred = flushBlockState(blockState, sourceFile)
+    if (cred) {
+      credentials.push(cred)
+    } else if (blockState.url || blockState.login || blockState.password) {
+      skipped++
+      if (!blockState.login || !blockState.password) breakdown.no_fields++
+      else breakdown.no_password++
+    }
+    blockState = makeBlockState()
+  }
 
   for (const line of lines) {
+    const trimmed = line.trim()
+
+    // Block labeled field — intercept before inline parseLine to prevent false positives
+    const labeled = classifyBlockLabel(trimmed)
+    if (labeled) {
+      if (labeled.field === 'url')      blockState.url      = labeled.value
+      if (labeled.field === 'login')    blockState.login    = labeled.value
+      if (labeled.field === 'password') blockState.password = labeled.value
+      continue
+    }
+
+    // Block separator — flush accumulated block state if any fields present
+    if (isBlockSeparator(trimmed)) {
+      if (blockState.url || blockState.login || blockState.password) {
+        tryFlushBlock()
+      } else {
+        // Plain blank line with no block state → count as inline blank
+        skipped++
+        breakdown.blank++
+      }
+      continue
+    }
+
+    // Inline parseLine (non-labeled, non-separator lines)
     const { credential, reason } = parseLine(line, sourceFile)
     if (credential) {
       credentials.push(credential)
@@ -438,6 +475,8 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
       if (reason && reason in breakdown) breakdown[reason]++
     }
   }
+
+  tryFlushBlock()  // flush any trailing incomplete block at EOF
 
   return { credentials, skipped, errors: 0, rejection_breakdown: breakdown }
 }
@@ -459,13 +498,55 @@ export async function* parseULPStream(
   let   batch:  ULPCredential[] = []
   let   batchRejected = 0
   let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0 }
+  let   blockState = makeBlockState()
 
-  function flush(): StreamBatch {
+  function flushBatch(): StreamBatch {
     const out: StreamBatch = { credentials: batch, rejected: batchRejected, breakdown: batchBreakdown }
-    batch = []
-    batchRejected = 0
+    batch = []; batchRejected = 0
     batchBreakdown = { blank: 0, no_fields: 0, no_password: 0 }
     return out
+  }
+
+  function tryFlushBlock() {
+    const cred = flushBlockState(blockState, filename)
+    if (cred) {
+      batch.push(cred)
+    } else if (blockState.url || blockState.login || blockState.password) {
+      batchRejected++
+      if (!blockState.login || !blockState.password) batchBreakdown.no_fields++
+      else batchBreakdown.no_password++
+    }
+    blockState = makeBlockState()
+  }
+
+  function processLine(line: string) {
+    const trimmed = line.trim()
+
+    const labeled = classifyBlockLabel(trimmed)
+    if (labeled) {
+      if (labeled.field === 'url')      blockState.url      = labeled.value
+      if (labeled.field === 'login')    blockState.login    = labeled.value
+      if (labeled.field === 'password') blockState.password = labeled.value
+      return
+    }
+
+    if (isBlockSeparator(trimmed)) {
+      if (blockState.url || blockState.login || blockState.password) {
+        tryFlushBlock()
+      } else {
+        batchRejected++
+        batchBreakdown.blank++
+      }
+      return
+    }
+
+    const { credential, reason } = parseLine(line, filename)
+    if (credential) {
+      batch.push(credential)
+    } else {
+      batchRejected++
+      if (reason) batchBreakdown[reason]++
+    }
   }
 
   try {
@@ -477,29 +558,13 @@ export async function* parseULPStream(
       buffer = lines.pop() ?? ''
 
       for (const line of lines) {
-        const { credential, reason } = parseLine(line, filename)
-        if (credential) {
-          batch.push(credential)
-          if (batch.length >= batchSize) {
-            yield flush()
-          }
-        } else {
-          batchRejected++
-          if (reason) batchBreakdown[reason]++
-        }
+        processLine(line)
+        if (batch.length >= batchSize) yield flushBatch()
       }
     }
-    // Flush remaining buffer
-    if (buffer) {
-      const { credential, reason } = parseLine(buffer, filename)
-      if (credential) {
-        batch.push(credential)
-      } else {
-        batchRejected++
-        if (reason) batchBreakdown[reason]++
-      }
-    }
-    if (batch.length > 0 || batchRejected > 0) yield flush()
+    if (buffer) processLine(buffer)
+    tryFlushBlock()  // flush trailing block at EOF
+    if (batch.length > 0 || batchRejected > 0) yield flushBatch()
   } finally {
     reader.releaseLock()
   }
