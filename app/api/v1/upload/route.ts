@@ -43,8 +43,8 @@ async function recordSource(filename: string, lineCount: number) {
 async function processStream(stream: ReadableStream<Uint8Array>, filename: string) {
   let imported = 0
   for await (const batch of parseULPStream(stream, filename, 500_000)) {
-    await insertBatch(batch)
-    imported += batch.length
+    await insertBatch(batch.credentials)
+    imported += batch.credentials.length
   }
   if (imported > 0) await recordSource(filename, imported)
   return { imported, skipped: 0, errors: 0, filename }

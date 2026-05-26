@@ -13,6 +13,7 @@
 
 import { dbQuery, dbRun } from '@/lib/sqlite'
 import { executeQuery as executeClickHouseQuery } from '@/lib/clickhouse'
+import { NORM_DOMAIN_EXPR } from '@/lib/ulp-normalize'
 import crypto from 'crypto'
 
 const TICK_MS = 15 * 60 * 1000  // 15 minutes
@@ -96,14 +97,15 @@ async function runTick(): Promise<void> {
         dbRun('DELETE FROM monitor_credential_seen WHERE monitor_id = ?', [monitorRow.id])
       }
 
-      // Query ClickHouse across ALL source files (not scoped to a single upload)
+      // Query ClickHouse using NORM_DOMAIN_EXPR so Cases A-D corrupted rows match
       const matchedRows: CredentialRow[] = []
       for (const domain of domains) {
         const d = domain.toLowerCase().trim()
         const rows = await executeClickHouseQuery(
-          `SELECT url, email, password, domain
+          `SELECT url, email, password, (${NORM_DOMAIN_EXPR}) AS domain
            FROM ulp.credentials
-           WHERE domain = {domain:String} OR endsWith(lower(email), {emailSuffix:String})
+           WHERE (${NORM_DOMAIN_EXPR}) = {domain:String}
+              OR endsWith(lower(${NORM_DOMAIN_EXPR}), {emailSuffix:String})
            LIMIT 100`,
           { domain: d, emailSuffix: `@${d}` }
         ) as CredentialRow[]
@@ -111,19 +113,28 @@ async function runTick(): Promise<void> {
       }
 
       if (matchedRows.length === 0) {
-        // No matches — still stamp last_triggered_at so we don't re-query every tick
         dbRun(`UPDATE domain_monitors SET last_triggered_at = datetime('now') WHERE id = ?`, [monitorRow.id])
         continue
       }
 
-      // Filter unseen credentials
+      // Batch N+1 fix: compute all fingerprints, query seen set in one call
+      const fingerprintMap = new Map(
+        matchedRows.map(row => [
+          credentialFingerprint(row.email, row.password, row.domain),
+          row,
+        ])
+      )
+      const fps = Array.from(fingerprintMap.keys())
+      const placeholders = fps.map(() => '?').join(',')
+      const seenRows = dbQuery(
+        `SELECT fingerprint FROM monitor_credential_seen WHERE monitor_id = ? AND fingerprint IN (${placeholders})`,
+        [monitorRow.id, ...fps]
+      ) as { fingerprint: string }[]
+      const seenSet = new Set(seenRows.map(r => r.fingerprint))
+
       const unseenRows = matchedRows.filter(row => {
         const fp = credentialFingerprint(row.email, row.password, row.domain)
-        const seen = dbQuery(
-          'SELECT 1 FROM monitor_credential_seen WHERE monitor_id = ? AND fingerprint = ?',
-          [monitorRow.id, fp]
-        )
-        return seen.length === 0
+        return !seenSet.has(fp)
       })
 
       if (unseenRows.length === 0) {
