@@ -188,11 +188,17 @@ export async function* parseBlockStream(
   batchSize: number,
 ): AsyncGenerator<StreamBatch> {
   const reader  = stream.getReader()
-  // latin1 maps all 256 byte values 1:1 to Unicode U+0000–U+00FF — never throws
-  // on any byte sequence.  Stealer logs are commonly Windows-1252, Latin-1, CP1251,
-  // or mixed-encoding; TextDecoder('utf-8') throws ERR_ENCODING_INVALID_ENCODED_DATA
-  // on non-UTF-8 bytes even in streaming mode (Node.js issue #26115).
-  const decoder = new TextDecoder('latin1')
+  // Use Buffer.from(chunk).toString('latin1') — NOT TextDecoder.
+  //
+  // TextDecoder('latin1') is a WHATWG alias for windows-1252.  Windows-1252 has
+  // 5 undefined byte positions (0x81, 0x8D, 0x8F, 0x90, 0x9D) that cause
+  // ERR_ENCODING_INVALID_ENCODED_DATA even with fatal:false in streaming mode
+  // (Node.js issues #26115, #56219, #59515).  Node.js also regressed
+  // windows-1252 decoding in v23.4.0+.
+  //
+  // Node.js Buffer.toString('latin1') uses true ISO-8859-1 — a direct bijective
+  // map of all 256 byte values to Unicode U+0000–U+00FF.  It never throws and
+  // never produces replacement characters regardless of the byte sequence.
   let   buffer  = ''
   let   batch:  ULPCredential[] = []
   let   batchRejected = 0
@@ -222,7 +228,7 @@ export async function* parseBlockStream(
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      buffer += decoder.decode(value, { stream: true })
+      buffer += Buffer.from(value).toString('latin1')
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
 
@@ -568,11 +574,17 @@ export async function* parseULPStream(
   batchSize: number,
 ): AsyncGenerator<StreamBatch> {
   const reader  = stream.getReader()
-  // latin1 maps all 256 byte values 1:1 to Unicode U+0000–U+00FF — never throws
-  // on any byte sequence.  Stealer logs are commonly Windows-1252, Latin-1, CP1251,
-  // or mixed-encoding; TextDecoder('utf-8') throws ERR_ENCODING_INVALID_ENCODED_DATA
-  // on non-UTF-8 bytes even in streaming mode (Node.js issue #26115).
-  const decoder = new TextDecoder('latin1')
+  // Use Buffer.from(chunk).toString('latin1') — NOT TextDecoder.
+  //
+  // TextDecoder('latin1') is a WHATWG alias for windows-1252.  Windows-1252 has
+  // 5 undefined byte positions (0x81, 0x8D, 0x8F, 0x90, 0x9D) that cause
+  // ERR_ENCODING_INVALID_ENCODED_DATA even with fatal:false in streaming mode
+  // (Node.js issues #26115, #56219, #59515).  Node.js also regressed
+  // windows-1252 decoding in v23.4.0+.
+  //
+  // Node.js Buffer.toString('latin1') uses true ISO-8859-1 — a direct bijective
+  // map of all 256 byte values to Unicode U+0000–U+00FF.  It never throws and
+  // never produces replacement characters regardless of the byte sequence.
   let   buffer  = ''
   let   batch:  ULPCredential[] = []
   let   batchRejected = 0
@@ -657,7 +669,7 @@ export async function* parseULPStream(
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      buffer += decoder.decode(value, { stream: true })
+      buffer += Buffer.from(value).toString('latin1')
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
 
