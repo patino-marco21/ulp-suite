@@ -600,7 +600,8 @@ export default function CredentialsPage() {
   const [pwMask, setPwMask]           = useState<string[]>([])
   const [isCorporate, setIsCorporate] = useState(false)
   const [urlScheme, setUrlScheme]     = useState('')
-  const [tierFilter, setTierFilter]   = useState('')
+  const [tierInclude, setTierInclude] = useState<string[]>([])
+  const [tierExclude, setTierExclude] = useState<string[]>([])
   const [tierOpen, setTierOpen]       = useState(false)
 
   // Advanced filters (hidden behind toggle)
@@ -628,9 +629,10 @@ export default function CredentialsPage() {
     if (breach)             ps.set('breach', breach)
     if (loginType)          ps.set('login_type', loginType)
     if (pwMask.length)      ps.set('pw_mask', pwMask.join(','))
-    if (isCorporate)        ps.set('is_corporate', '1')
-    if (urlScheme)          ps.set('url_scheme', urlScheme)
-    if (tierFilter)         ps.set('tier_include', tierFilter)
+    if (isCorporate)          ps.set('is_corporate', '1')
+    if (urlScheme)            ps.set('url_scheme', urlScheme)
+    if (tierInclude.length)   ps.set('tier_include', tierInclude.join(','))
+    if (tierExclude.length)   ps.set('tier_exclude', tierExclude.join(','))
     // Advanced
     if (dateFrom)           ps.set('date_from', dateFrom)
     if (dateTo)             ps.set('date_to', dateTo)
@@ -642,7 +644,7 @@ export default function CredentialsPage() {
     if (regexMode)          ps.set('regex', '1')
     return ps
   }, [
-    q, domain, breach, loginType, pwMask, isCorporate, urlScheme, tierFilter,
+    q, domain, breach, loginType, pwMask, isCorporate, urlScheme, tierInclude, tierExclude,
     dateFrom, dateTo, pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode,
     sortKey, limit,
   ])
@@ -671,7 +673,7 @@ export default function CredentialsPage() {
 
   const clearAll = () => {
     setQ(''); setDomain(''); setBreach(''); setLoginType(''); setPwMask([])
-    setIsCorporate(false); setUrlScheme(''); setTierFilter('')
+    setIsCorporate(false); setUrlScheme(''); setTierInclude([]); setTierExclude([])
     setDateFrom(''); setDateTo(''); setPwLenMin(''); setPwLenMax('')
     setEmailDomainFilter(''); setSourceFileFilter(''); setUrlHostFilter('')
     setRegexMode(false)
@@ -726,7 +728,8 @@ export default function CredentialsPage() {
           query:         q,
           domain,
           breach_name:   breach,
-          tier_include:  tierFilter,
+          tier_include:  tierInclude.join(','),
+          tier_exclude:  tierExclude.join(','),
           login_type:    loginType,
           pw_mask:       pwMask.join(','),
           url_scheme:    urlScheme,
@@ -760,7 +763,7 @@ export default function CredentialsPage() {
     } finally {
       setExportLoading(false)
     }
-  }, [q, domain, breach, tierFilter, loginType, pwMask, urlScheme, isCorporate, sortKey, exportFmt,
+  }, [q, domain, breach, tierInclude, tierExclude, loginType, pwMask, urlScheme, isCorporate, sortKey, exportFmt,
       dateFrom, dateTo, pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode,
       toast])
 
@@ -769,7 +772,7 @@ export default function CredentialsPage() {
     t === 'T2' ? 'bg-blue-500/10 text-blue-600 border-blue-500/20' :
     t === 'T3' ? 'bg-amber-500/10 text-amber-600 border-amber-500/20' : ''
 
-  const hasBasicFilters = !!(q || domain || breach || loginType || pwMask.length || isCorporate || urlScheme || tierFilter)
+  const hasBasicFilters = !!(q || domain || breach || loginType || pwMask.length || isCorporate || urlScheme || tierInclude.length || tierExclude.length)
   const hasAdvFilters   = !!(dateFrom || dateTo || pwLenMin || pwLenMax || emailDomainFilter || sourceFileFilter || urlHostFilter || regexMode)
   const hasFilters      = hasBasicFilters || hasAdvFilters
 
@@ -886,27 +889,93 @@ export default function CredentialsPage() {
 
         {/* ── Filter row 2: chip filters ───────────────────────────────────── */}
         <div className="flex flex-wrap gap-2 items-center">
-          {/* Tier popover */}
-          <Popover open={tierOpen} onOpenChange={setTierOpen}>
-            <PopoverTrigger asChild>
-              <button className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${tierFilter ? 'border-primary/30 bg-primary/10 text-primary' : 'border-border bg-muted/40 text-muted-foreground'}`}>
-                <Globe className="h-3 w-3" />
-                {tierFilter ? `Tier ${tierFilter}` : 'All tiers'}
-                <ChevronDown className="h-3 w-3" />
-              </button>
-            </PopoverTrigger>
-            <PopoverContent className="w-48 p-2" align="start">
-              {['', ...VALID_TIERS.filter(t => t)].map(t => (
-                <button
-                  key={t || 'all'}
-                  onClick={() => { setTierFilter(t); setTierOpen(false) }}
-                  className={`w-full text-left px-2 py-1.5 text-xs rounded hover:bg-muted transition-colors ${tierFilter === t ? 'bg-primary/10 text-primary font-medium' : ''}`}
-                >
-                  {t ? `${t} — ${TIER_LABELS[t]}` : 'All tiers'}
-                </button>
-              ))}
-            </PopoverContent>
-          </Popover>
+          {/* Tier multi-select popover */}
+          {(() => {
+            // Helpers for 3-way tier state
+            const getTierState = (t: string): 'include' | 'exclude' | 'off' =>
+              tierInclude.includes(t) ? 'include' : tierExclude.includes(t) ? 'exclude' : 'off'
+            const setTierToInclude = (t: string) => {
+              setTierInclude(p => p.includes(t) ? p : [...p, t])
+              setTierExclude(p => p.filter(x => x !== t))
+            }
+            const setTierToExclude = (t: string) => {
+              setTierExclude(p => p.includes(t) ? p : [...p, t])
+              setTierInclude(p => p.filter(x => x !== t))
+            }
+            const setTierOff = (t: string) => {
+              setTierInclude(p => p.filter(x => x !== t))
+              setTierExclude(p => p.filter(x => x !== t))
+            }
+            // Trigger label
+            const tierParts = [
+              ...tierInclude.map(t => t),
+              ...tierExclude.map(t => `−${t}`),
+            ]
+            const tierActive = tierInclude.length > 0 || tierExclude.length > 0
+            return (
+              <Popover open={tierOpen} onOpenChange={setTierOpen}>
+                <PopoverTrigger asChild>
+                  <button className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${tierActive ? 'border-primary/30 bg-primary/10 text-primary' : 'border-border bg-muted/40 text-muted-foreground'}`}>
+                    <Globe className="h-3 w-3" />
+                    {tierActive ? tierParts.join(' ') : 'All tiers'}
+                    <ChevronDown className="h-3 w-3" />
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent className="w-64 p-3" align="start">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2.5 font-medium">
+                    Country tier
+                  </p>
+                  <div className="space-y-2">
+                    {(['T1', 'T2', 'T3'] as const).map(t => {
+                      const state = getTierState(t)
+                      return (
+                        <div key={t} className="flex items-center gap-2">
+                          {/* Tier label */}
+                          <span className="flex-1 min-w-0 text-[11px] text-muted-foreground truncate">
+                            <span className="font-mono font-semibold text-foreground">{t}</span>
+                            {' — '}
+                            {t === 'T1' ? 'US / UK / CA / AU' : t === 'T2' ? 'W. Europe / JP / KR' : 'RU / CN / BR / LATAM'}
+                          </span>
+                          {/* 3-way toggle */}
+                          <div className="flex gap-0.5 shrink-0">
+                            <button
+                              onClick={() => setTierOff(t)}
+                              title="No filter (off)"
+                              className={`h-6 px-1.5 rounded text-[10px] border transition-colors ${state === 'off' ? 'bg-muted text-foreground border-border font-medium' : 'text-muted-foreground/50 border-transparent hover:border-border hover:text-muted-foreground'}`}
+                            >○</button>
+                            <button
+                              onClick={() => setTierToInclude(t)}
+                              title="Include — show only this tier"
+                              className={`h-6 px-1.5 rounded text-[10px] border transition-colors ${state === 'include' ? 'bg-emerald-500/15 text-emerald-600 border-emerald-500/30 font-semibold' : 'text-muted-foreground/50 border-transparent hover:border-emerald-500/30 hover:text-emerald-600'}`}
+                            >✓</button>
+                            <button
+                              onClick={() => setTierToExclude(t)}
+                              title="Exclude — hide this tier"
+                              className={`h-6 px-1.5 rounded text-[10px] border transition-colors ${state === 'exclude' ? 'bg-rose-500/15 text-rose-600 border-rose-500/30 font-semibold' : 'text-muted-foreground/50 border-transparent hover:border-rose-500/30 hover:text-rose-600'}`}
+                            >✗</button>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  {/* Legend */}
+                  <div className="mt-3 pt-2.5 border-t border-border/50 flex gap-3 text-[10px] text-muted-foreground">
+                    <span className="flex items-center gap-1"><span className="text-foreground/50">○</span> off</span>
+                    <span className="flex items-center gap-1"><span className="text-emerald-600 font-semibold">✓</span> include only</span>
+                    <span className="flex items-center gap-1"><span className="text-rose-600 font-semibold">✗</span> exclude</span>
+                  </div>
+                  {tierActive && (
+                    <button
+                      onClick={() => { setTierInclude([]); setTierExclude([]) }}
+                      className="mt-2 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      Reset to all tiers
+                    </button>
+                  )}
+                </PopoverContent>
+              </Popover>
+            )
+          })()}
 
           {/* Login type */}
           {LOGIN_TYPE_OPTIONS.map(lt => (
