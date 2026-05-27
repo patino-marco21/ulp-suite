@@ -6,7 +6,14 @@
  *   token      — pure alphanumeric/hyphen word
  *                → hasToken(url/email/password, value)
  *                   Uses tokenbf_v1 skip indexes on all three columns.
- *                   Skips entire 8 192-row granules that provably can't match.
+ *                   Skips entire 65 536-row granules that provably can't match.
+ *                → position(url_host, lower(value)) > 0
+ *                   Catches compound-domain substrings: "ledger" matches
+ *                   coinledger.com, ledgernano.com, etc.  url_host is a
+ *                   lowercased materialized column so this is a fast vectorised
+ *                   scan of short strings with no skip index overhead.
+ *                → position(email_domain, lower(value)) > 0
+ *                   Same logic for the email domain column.
  *
  *   email_full — full email e.g. john@gmail.com
  *                → email = lower(value)
@@ -93,10 +100,21 @@ export function buildULPWhere(tokens: ParsedToken[]): { clause: string; params: 
       match = `(email_domain = {${edp}:String} OR domain = {${edp}:String})`
 
     } else if (token.type === 'token') {
-      // Pure word: use hasToken() which leverages tokenbf_v1 skip index on url/email/password
+      // Pure word: hasToken() leverages the tokenbf_v1 skip index on url/email/password
+      // to prune entire granules that can't possibly match (e.g. searching "ledger" skips
+      // granules that contain no occurrence of the word "ledger" as a whole token).
+      //
+      // Compound-domain substring matching: "ledger" must ALSO match "coinledger.com",
+      // "ledgerwallet.com", etc. where "ledger" is embedded within a larger token.
+      // position(url_host, lower(value)) > 0 performs a case-insensitive substring scan
+      // of the pre-extracted, lowercased hostname column — fast because url_host is compact.
+      // email_domain gets the same treatment so "ledger" also surfaces credentials whose
+      // login email is from a compound domain like staff@coinledger.com.
       const p = `tok${i}`
-      params[p] = token.value
-      match = `(hasToken(url, {${p}:String}) OR hasToken(email, {${p}:String}) OR hasToken(password, {${p}:String}))`
+      const ph = `tokh${i}`  // lowercase copy for position() comparison
+      params[p]  = token.value
+      params[ph] = token.value.toLowerCase()
+      match = `(hasToken(url, {${p}:String}) OR hasToken(email, {${p}:String}) OR hasToken(password, {${p}:String}) OR position(url_host, {${ph}:String}) > 0 OR position(email_domain, {${ph}:String}) > 0)`
 
     } else {
       // LIKE fallback for tokens with special characters (no skip index)

@@ -369,10 +369,14 @@ describe('parseULPQuery + buildULPWhere integration', () => {
     expect(Object.values(params)[0]).toBe('example.com')
   })
 
-  test('three-term AND query generates three params', () => {
+  test('three-term AND query: token type uses 2 params (value + lowercase copy)', () => {
+    // @gmail.com → email_dom → 1 param
+    // hunter2   → token     → 2 params (raw + lowercase for position() comparison)
+    // alice@…   → email_full → 1 param
+    // Total: 4 params
     const tokens = parseULPQuery('@gmail.com, hunter2, alice@gmail.com')
     const { params } = buildULPWhere(tokens)
-    expect(Object.keys(params)).toHaveLength(3)
+    expect(Object.keys(params)).toHaveLength(4)
   })
 
   test('clause is valid ClickHouse-compatible SQL fragment', () => {
@@ -388,5 +392,32 @@ describe('parseULPQuery + buildULPWhere integration', () => {
     expect(clause).toMatch(/hasToken\(url, \{[a-z0-9]+:String\}\)/)
     expect(clause).toMatch(/hasToken\(email, \{[a-z0-9]+:String\}\)/)
     expect(clause).toMatch(/hasToken\(password, \{[a-z0-9]+:String\}\)/)
+  })
+
+  test('token type includes position(url_host) for compound-domain substring matching', () => {
+    // "ledger" must also match coinledger.com, ledgernano.com, etc.
+    const tokens = parseULPQuery('ledger')
+    const { clause, params } = buildULPWhere(tokens)
+    expect(clause).toContain('position(url_host,')
+    expect(clause).toContain('> 0')
+    // The lowercased copy of the term must be in params
+    const paramValues = Object.values(params)
+    expect(paramValues).toContain('ledger')
+  })
+
+  test('token type includes position(email_domain) for compound email-domain substring matching', () => {
+    const tokens = parseULPQuery('ledger')
+    const { clause } = buildULPWhere(tokens)
+    expect(clause).toContain('position(email_domain,')
+  })
+
+  test('token search lowercases the comparison value for position()', () => {
+    const tokens = parseULPQuery('Ledger')
+    const { params } = buildULPWhere(tokens)
+    const paramValues = Object.values(params)
+    // Raw value kept for hasToken (case-sensitive index)
+    expect(paramValues).toContain('Ledger')
+    // Lowercased copy for position() comparison on url_host/email_domain
+    expect(paramValues).toContain('ledger')
   })
 })
