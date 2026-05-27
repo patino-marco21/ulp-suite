@@ -188,7 +188,11 @@ export async function* parseBlockStream(
   batchSize: number,
 ): AsyncGenerator<StreamBatch> {
   const reader  = stream.getReader()
-  const decoder = new TextDecoder()
+  // latin1 maps all 256 byte values 1:1 to Unicode U+0000–U+00FF — never throws
+  // on any byte sequence.  Stealer logs are commonly Windows-1252, Latin-1, CP1251,
+  // or mixed-encoding; TextDecoder('utf-8') throws ERR_ENCODING_INVALID_ENCODED_DATA
+  // on non-UTF-8 bytes even in streaming mode (Node.js issue #26115).
+  const decoder = new TextDecoder('latin1')
   let   buffer  = ''
   let   batch:  ULPCredential[] = []
   let   batchRejected = 0
@@ -564,7 +568,11 @@ export async function* parseULPStream(
   batchSize: number,
 ): AsyncGenerator<StreamBatch> {
   const reader  = stream.getReader()
-  const decoder = new TextDecoder()
+  // latin1 maps all 256 byte values 1:1 to Unicode U+0000–U+00FF — never throws
+  // on any byte sequence.  Stealer logs are commonly Windows-1252, Latin-1, CP1251,
+  // or mixed-encoding; TextDecoder('utf-8') throws ERR_ENCODING_INVALID_ENCODED_DATA
+  // on non-UTF-8 bytes even in streaming mode (Node.js issue #26115).
+  const decoder = new TextDecoder('latin1')
   let   buffer  = ''
   let   batch:  ULPCredential[] = []
   let   batchRejected = 0
