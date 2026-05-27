@@ -4,7 +4,7 @@ import { validateRequest } from "@/lib/auth"
 import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-search"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
-import { NORM_COLS } from "@/lib/ulp-normalize"
+import { NORM_COLS, NORM_DOMAIN_EXPR, NORM_EMAIL_EXPR } from "@/lib/ulp-normalize"
 
 export const dynamic = 'force-dynamic'
 
@@ -25,13 +25,13 @@ const VALID_MASKS = new Set(['alpha', 'numeric', 'alphanumeric', 'mixed', 'empty
 // many rows share the same primary sort value (e.g. imported_at from a bulk batch, or
 // empty email for username/phone logins).
 const SORT_MAP: Record<string, string> = {
-  'imported_desc': 'imported_at DESC, domain ASC, email ASC, url ASC, password ASC',
-  'imported_asc':  'imported_at ASC,  domain ASC, email ASC, url ASC, password ASC',
-  'domain_asc':    'domain ASC,  email ASC, imported_at ASC, url ASC, password ASC',
-  'domain_desc':   'domain DESC, email ASC, imported_at ASC, url ASC, password ASC',
-  'email_asc':     'email ASC,   domain ASC, imported_at ASC, url ASC, password ASC',
-  'pw_len_desc':   'password_length DESC, domain ASC, email ASC, imported_at ASC, url ASC',
-  'pw_len_asc':    'password_length ASC,  domain ASC, email ASC, imported_at ASC, url ASC',
+  'imported_desc': `imported_at DESC, ${NORM_DOMAIN_EXPR} ASC, ${NORM_EMAIL_EXPR} ASC, url ASC, password ASC`,
+  'imported_asc':  `imported_at ASC,  ${NORM_DOMAIN_EXPR} ASC, ${NORM_EMAIL_EXPR} ASC, url ASC, password ASC`,
+  'domain_asc':    `(${NORM_DOMAIN_EXPR}='') ASC, ${NORM_DOMAIN_EXPR} ASC,  ${NORM_EMAIL_EXPR} ASC, imported_at ASC, url ASC, password ASC`,
+  'domain_desc':   `(${NORM_DOMAIN_EXPR}='') ASC, ${NORM_DOMAIN_EXPR} DESC, ${NORM_EMAIL_EXPR} ASC, imported_at ASC, url ASC, password ASC`,
+  'email_asc':     `${NORM_EMAIL_EXPR} ASC,  ${NORM_DOMAIN_EXPR} ASC, imported_at ASC, url ASC, password ASC`,
+  'pw_len_desc':   `password_length DESC, ${NORM_DOMAIN_EXPR} ASC, ${NORM_EMAIL_EXPR} ASC, imported_at ASC, url ASC`,
+  'pw_len_asc':    `password_length ASC,  ${NORM_DOMAIN_EXPR} ASC, ${NORM_EMAIL_EXPR} ASC, imported_at ASC, url ASC`,
 }
 
 export async function GET(request: NextRequest) {

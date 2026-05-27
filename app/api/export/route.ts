@@ -9,12 +9,15 @@ import { NORM_COLS, NORM_EMAIL_EXPR, NORM_DOMAIN_EXPR } from "@/lib/ulp-normaliz
 export const dynamic = 'force-dynamic'
 
 // Allowed ORDER BY expressions — mirrors search route whitelist
+// domain_asc/desc + email_asc/desc: use NORM_*_EXPR to sort by the
+// normalised value displayed in the UI, not the raw (potentially corrupted)
+// stored column.  Empty domains are pushed to the bottom of both directions.
 const SORT_MAP: Record<string, string> = {
   'imported_desc': 'imported_at DESC',
   'imported_asc':  'imported_at ASC',
-  'domain_asc':    'domain ASC, imported_at DESC',
-  'domain_desc':   'domain DESC, imported_at DESC',
-  'email_asc':     'email ASC',
+  'domain_asc':    `(${NORM_DOMAIN_EXPR}='') ASC, ${NORM_DOMAIN_EXPR} ASC, imported_at DESC`,
+  'domain_desc':   `(${NORM_DOMAIN_EXPR}='') ASC, ${NORM_DOMAIN_EXPR} DESC, imported_at DESC`,
+  'email_asc':     `${NORM_EMAIL_EXPR} ASC`,
   'pw_len_desc':   'password_length DESC',
   'pw_len_asc':    'password_length ASC',
 }

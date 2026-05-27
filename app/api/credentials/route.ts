@@ -4,7 +4,7 @@ import { validateRequest } from "@/lib/auth"
 import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-search"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
-import { NORM_COLS } from "@/lib/ulp-normalize"
+import { NORM_COLS, NORM_DOMAIN_EXPR, NORM_EMAIL_EXPR } from "@/lib/ulp-normalize"
 
 export const dynamic = 'force-dynamic'
 
@@ -12,13 +12,25 @@ export const dynamic = 'force-dynamic'
 const VALID_MASKS = new Set(['alpha', 'numeric', 'alphanumeric', 'mixed', 'empty'])
 
 // Allowed ORDER BY expressions — prevents SQL injection via sort param.
+//
+// domain_asc/desc: must use NORM_DOMAIN_EXPR rather than the raw `domain` column.
+//   ClickHouse resolves ORDER BY identifiers to the raw column first
+//   (prefer_column_name_to_alias = 1 by default), so `ORDER BY domain` sorts by
+//   the un-normalised stored value even though SELECT displays the NORM_COLS alias.
+//   Corrupted rows (Case A jsessionid, Case C scheme-split, Case D blank-tab)
+//   have wrong raw domain values (e.g. 'jsessionid', 'https', '').
+//
+//   The (expr='') ASC prefix pushes email-only credentials (no domain) to the
+//   bottom of BOTH sort directions so real domains fill the visible pages.
+//
+// email_asc/desc: same logic — sort by NORM_EMAIL_EXPR to handle corrupted rows.
 const SORT_MAP: Record<string, string> = {
   imported_desc: 'imported_at DESC',
   imported_asc:  'imported_at ASC',
-  domain_asc:    'domain ASC, imported_at DESC',
-  domain_desc:   'domain DESC, imported_at DESC',
-  email_asc:     'email ASC, imported_at DESC',
-  email_desc:    'email DESC, imported_at DESC',
+  domain_asc:    `(${NORM_DOMAIN_EXPR}='') ASC, ${NORM_DOMAIN_EXPR} ASC, imported_at DESC`,
+  domain_desc:   `(${NORM_DOMAIN_EXPR}='') ASC, ${NORM_DOMAIN_EXPR} DESC, imported_at DESC`,
+  email_asc:     `${NORM_EMAIL_EXPR} ASC, imported_at DESC`,
+  email_desc:    `${NORM_EMAIL_EXPR} DESC, imported_at DESC`,
   pw_len_desc:   'password_length DESC, imported_at DESC',
   pw_len_asc:    'password_length ASC, imported_at DESC',
 }
