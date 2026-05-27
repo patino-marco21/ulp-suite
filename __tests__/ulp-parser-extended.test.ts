@@ -17,6 +17,7 @@
  *  §11 Real-world stealer patterns     — Lumma, Vidar, RisePro, RedLine style
  *  §12 CRLF and whitespace handling
  *  §13 parseULPContent batch counters
+ *  §17 android:// credential parsing  — parsed since Rule 1 no longer blocks them
  */
 
 import { describe, test, expect } from 'vitest'
@@ -368,14 +369,16 @@ describe('§5 Scheme variety', () => {
     expect(c!.domain).toBe('backup.corp.com')
   })
 
-  test('android:// URL rejected (blank reason)', () => {
+  test('android:// with no login/password → no_fields (not blank)', () => {
+    // No colon after the package name → colonSplit returns null → no_fields.
+    // These are incomplete log lines with no credential data.
     expect(cred('android://HASH==@com.instagram.android')).toBeNull()
-    expect(why('android://HASH==@com.instagram.android')).toBe('blank')
+    expect(why('android://HASH==@com.instagram.android')).toBe('no_fields')
   })
 
-  test('android:// is case-insensitive rejection', () => {
+  test('Android:// mixed-case with no credentials → no_fields', () => {
     expect(cred('Android://HASH==@com.app')).toBeNull()
-    expect(why('Android://HASH==@com.app')).toBe('blank')
+    expect(why('Android://HASH==@com.app')).toBe('no_fields')
   })
 
   test('// prefix (without scheme) rejected as comment-like line', () => {
@@ -1205,4 +1208,67 @@ describe('§16 Percent-decode URL-encoded passwords', () => {
     expect(c).not.toBeNull()
     expect(c!.password).toBe('abc')
   })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §17  android:// credential parsing
+// android:// lines are no longer filtered by Rule 1 — they fall through to
+// colonSplit which treats android:// as a regular scheme and extracts the
+// three fields correctly.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§17 android:// credential parsing', () => {
+
+  test('full android credential: url, login, password all extracted', () => {
+    const c = cred('android://HASH==@com.google.android.gm:user@gmail.com:Hunter2!')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('android://HASH==@com.google.android.gm')
+    expect(c!.email).toBe('user@gmail.com')
+    expect(c!.password).toBe('Hunter2!')
+  })
+
+  test('android instagram credential parsed', () => {
+    const c = cred('android://abc123@com.instagram.android:john_doe:SecretPass99')
+    expect(c).not.toBeNull()
+    expect(c!.url).toContain('com.instagram.android')
+    expect(c!.email).toBe('john_doe')
+    expect(c!.password).toBe('SecretPass99')
+  })
+
+  test('Android:// mixed-case scheme parsed', () => {
+    const c = cred('Android://XYZ@com.example.app:alice@example.com:p@$$w0rd')
+    expect(c).not.toBeNull()
+    expect(c!.email).toBe('alice@example.com')
+    expect(c!.password).toBe('p@$$w0rd')
+  })
+
+  test('android credential domain extracted from email when no web URL', () => {
+    const c = cred('android://HASH@com.twitter.android:twitteruser@gmail.com:tw1tterp4ss')
+    expect(c).not.toBeNull()
+    // domain falls back to email domain since android:// is not a web URL
+    expect(c!.domain).toBeTruthy()
+  })
+
+  test('android:// with no login/pass fields → no_fields (not blank)', () => {
+    const c = cred('android://HASH==@com.package.name')
+    expect(c).toBeNull()
+    expect(why('android://HASH==@com.package.name')).toBe('no_fields')
+  })
+
+  test('android credential with short password → no_password', () => {
+    const c = cred('android://H@com.app:user@x.com:ab')
+    expect(c).toBeNull()
+    expect(why('android://H@com.app:user@x.com:ab')).toBe('no_password')
+  })
+
+  test('[section header] still rejected as blank (not affected by android change)', () => {
+    expect(cred('[Chrome Default]')).toBeNull()
+    expect(why('[Chrome Default]')).toBe('blank')
+  })
+
+  test('# comment still rejected as blank', () => {
+    expect(cred('# Soft: Chrome')).toBeNull()
+    expect(why('# Soft: Chrome')).toBe('blank')
+  })
+
 })

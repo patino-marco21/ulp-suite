@@ -138,7 +138,6 @@ describe('parseLine — rejection: blank', () => {
     ['whitespace only',   '   '],
     ['hash comment',      '# this is a comment'],
     ['// comment',        '// not a credential'],
-    ['android:// URL',   'android://HASH==@com.instagram.android'],
     ['section header',   '[Section Header]'],
   ])('%s → reason: blank', (_desc, line) => {
     expect(cred(line)).toBeNull()
@@ -154,6 +153,8 @@ describe('parseLine — rejection: no_fields', () => {
   test.each([
     ['single word no separator',   'justoneword'],
     ['no colon/semicolon/tab',     'somenonsense here nope'],
+    // android:// with no login/password fields → colonSplit returns null → no_fields
+    ['android:// no credentials',  'android://HASH==@com.instagram.android'],
     // URL: labels have a value after the colon → parsed as login:password in v5
     // Only lines with no separator at all → no_fields
   ])('%s → reason: no_fields', (_desc, line) => {

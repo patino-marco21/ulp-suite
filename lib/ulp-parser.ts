@@ -340,12 +340,15 @@ export function parseLine(
 ): { credential: ULPCredential | null; reason: RejectionReason | null } {
   const trimmed = line.trim()
 
-  // Rule 1: blank / comment / section header / android / // prefix
+  // Rule 1: blank / comment / section header / // prefix
+  // NOTE: android:// lines are intentionally NOT filtered here.  Android app
+  // credentials in stealer logs have the form:
+  //   android://hash@com.package.name:user@example.com:password
+  // colonSplit handles the :// scheme and extracts the three fields correctly.
   if (!trimmed ||
       trimmed.startsWith('#') ||
       trimmed.startsWith('[') ||
-      trimmed.startsWith('//') ||
-      /^android:\/\//i.test(trimmed)) {
+      trimmed.startsWith('//')) {
     return { credential: null, reason: 'blank' }
   }
 
