@@ -228,15 +228,22 @@ export async function* parseBlockStream(
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      buffer += Buffer.from(value).toString('latin1')
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
+      // Slice large chunks to stay under V8's 512 MB string limit.
+      // file.stream() on an in-memory File (from formData()) can yield the
+      // entire file as one Uint8Array; decoding >512 MB at once throws
+      // ERR_STRING_TOO_LONG.  4 MB slices keep each toString() call tiny.
+      const SLICE = 1 << 22 // 4 MB
+      for (let off = 0; off < value.length; off += SLICE) {
+        buffer += Buffer.from(value.subarray(off, Math.min(off + SLICE, value.length))).toString('latin1')
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
 
-      for (const line of lines) {
-        const result = parseBlockLine(line, state)
-        if (result === 'separator') {
-          tryFlushBlock()
-          if (batch.length >= batchSize) yield flushBatch()
+        for (const line of lines) {
+          const result = parseBlockLine(line, state)
+          if (result === 'separator') {
+            tryFlushBlock()
+            if (batch.length >= batchSize) yield flushBatch()
+          }
         }
       }
     }
@@ -669,13 +676,20 @@ export async function* parseULPStream(
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      buffer += Buffer.from(value).toString('latin1')
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
+      // Slice large chunks to stay under V8's 512 MB string limit.
+      // file.stream() on an in-memory File (from formData()) can yield the
+      // entire file as one Uint8Array; decoding >512 MB at once throws
+      // ERR_STRING_TOO_LONG.  4 MB slices keep each toString() call tiny.
+      const SLICE = 1 << 22 // 4 MB
+      for (let off = 0; off < value.length; off += SLICE) {
+        buffer += Buffer.from(value.subarray(off, Math.min(off + SLICE, value.length))).toString('latin1')
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
 
-      for (const line of lines) {
-        processLine(line)
-        if (batch.length >= batchSize) yield flushBatch()
+        for (const line of lines) {
+          processLine(line)
+          if (batch.length >= batchSize) yield flushBatch()
+        }
       }
     }
     if (buffer) processLine(buffer)
