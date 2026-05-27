@@ -11,6 +11,7 @@ import {
   flushBlockState,
   parseBlockLine,
   parseBlockContent,
+  parseULPContent,
   type BlockState,
 } from '@/lib/ulp-parser'
 
@@ -415,5 +416,291 @@ describe('§F Extended label aliases', () => {
       expect(result.credentials[0].email).toBe('jsmith')
       expect(result.credentials[0].password).toBe('Corp$ecret99')
     })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §G  Positional (label-free) 3-line stealer log format via parseULPContent
+//
+// Some stealers (e.g. purely positional Raccoon variants) write blocks like:
+//   https://site.com/login    ← URL (no prefix)
+//   user@email.com            ← login
+//   password123               ← password
+//   (blank line separates blocks)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§G Positional 3-line format (parseULPContent)', () => {
+
+  // ── §G1  Single block, blank-line separator ──────────────────────────────
+
+  test('§G1a single block emits one credential', () => {
+    const content = [
+      'https://example.com/login',
+      'user@example.com',
+      'hunter2',
+      '',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(1)
+    expect(result.credentials[0].url).toBe('https://example.com/login')
+    expect(result.credentials[0].email).toBe('user@example.com')
+    expect(result.credentials[0].password).toBe('hunter2')
+  })
+
+  test('§G1b domain extracted from positional URL', () => {
+    const content = [
+      'https://accounts.google.com/signin/v2',
+      'victim@gmail.com',
+      'Pa$$word99',
+      '',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(1)
+    expect(result.credentials[0].domain).toBe('accounts.google.com')
+  })
+
+  test('§G1c source_file set correctly', () => {
+    const content = [
+      'https://bank.com/login',
+      'john',
+      'secret123',
+      '',
+    ].join('\n')
+    const result = parseULPContent(content, 'stealer-dump.txt')
+    expect(result.credentials[0].source_file).toBe('stealer-dump.txt')
+  })
+
+  // ── §G2  Multiple blocks ──────────────────────────────────────────────────
+
+  test('§G2a two blocks separated by blank line → 2 credentials', () => {
+    const content = [
+      'https://site1.com/a',
+      'alice@site1.com',
+      'pass_alice',
+      '',
+      'https://site2.com/b',
+      'bob@site2.com',
+      'pass_bob',
+      '',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(2)
+    expect(result.credentials[0].email).toBe('alice@site1.com')
+    expect(result.credentials[1].email).toBe('bob@site2.com')
+  })
+
+  test('§G2b three blocks in a row → 3 credentials', () => {
+    const blocks: string[] = []
+    for (let i = 1; i <= 3; i++) {
+      blocks.push(`https://site${i}.com/login`, `user${i}@test.com`, `pass${i}xyz`, '')
+    }
+    const result = parseULPContent(blocks.join('\n'), src)
+    expect(result.credentials).toHaveLength(3)
+  })
+
+  test('§G2c === separator between blocks → 2 credentials', () => {
+    const content = [
+      'https://site1.com/login',
+      'alice',
+      'alicepass',
+      '===',
+      'https://site2.com/login',
+      'bob',
+      'bobpass',
+      '===',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(2)
+  })
+
+  test('§G2d 40-char dash separator between blocks → 2 credentials', () => {
+    const sep = '-'.repeat(40)
+    const content = [
+      'https://a.com/login', 'user1', 'pw1234', sep,
+      'https://b.com/login', 'user2', 'pw5678', sep,
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(2)
+  })
+
+  // ── §G3  Metadata lines mixed in ─────────────────────────────────────────
+
+  test('§G3a metadata lines before URL are skipped, credential still emitted', () => {
+    // Realistic stealer log metadata has NO colons — plain values, not "Key: Value".
+    // Lines without colons return no_fields from parseLine and are simply skipped.
+    const content = [
+      'United States',
+      '192.168.1.100',
+      '20240115-143022',
+      'https://example.com/login',
+      'user@example.com',
+      'mypassword',
+      '',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(1)
+    expect(result.credentials[0].email).toBe('user@example.com')
+  })
+
+  test('§G3b metadata lines after password are skipped, only 1 credential from the URL+login+pass triplet', () => {
+    // After emitting the positional credential, colon-free metadata lines fall
+    // to parseLine which rejects them (no colon → no_fields).
+    const content = [
+      'https://example.com/login',
+      'user@example.com',
+      'mypassword',
+      'Win11',
+      'Chrome120',
+      '',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(1)
+    expect(result.credentials[0].password).toBe('mypassword')
+  })
+
+  test('§G3c heavy metadata block (10 colon-free lines before cred) → 1 credential', () => {
+    // These metadata lines have no colons so parseLine rejects all of them.
+    const meta = [
+      'RU', '10.0.0.1', '20230601', 'v2.4.0',
+      'abc123', 'Win10', 'Firefox', 'default', 'no', 'no',
+    ]
+    const content = [
+      ...meta,
+      'https://target.com/auth',
+      'victim@target.com',
+      'T@rgetPass1',
+      '',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(1)
+    expect(result.credentials[0].url).toBe('https://target.com/auth')
+  })
+
+  // ── §G4  Incomplete blocks (should NOT emit) ──────────────────────────────
+
+  test('§G4a URL + login but no password (EOF) → 0 credentials', () => {
+    const content = [
+      'https://example.com/login',
+      'user@example.com',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(0)
+  })
+
+  test('§G4b URL only (separator before login) → 0 credentials', () => {
+    const content = [
+      'https://example.com/login',
+      '',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(0)
+  })
+
+  test('§G4c URL + login separated by === before password → 0 credentials', () => {
+    const content = [
+      'https://example.com/login',
+      'user@example.com',
+      '===',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(0)
+  })
+
+  // ── §G5  Interaction with inline ULP lines ───────────────────────────────
+
+  test('§G5a inline ULP line after positional block → both emitted', () => {
+    const content = [
+      'https://site.com/login',
+      'posuser@site.com',
+      'pospassword',
+      '',
+      'https://inline.com/path:inlineuser:inlinepass',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(2)
+    const emails = result.credentials.map(c => c.email)
+    expect(emails).toContain('posuser@site.com')
+    expect(emails).toContain('inlineuser')
+  })
+
+  test('§G5b inline ULP line before positional block → both emitted', () => {
+    const content = [
+      'https://inline.com/path:inlineuser:inlinepass',
+      '',
+      'https://site.com/login',
+      'posuser@site.com',
+      'pospassword',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(2)
+  })
+
+  // ── §G6  Labeled blocks still work alongside positional blocks ───────────
+
+  test('§G6a labeled block followed by positional block → 2 credentials', () => {
+    const content = [
+      'Host: https://labeled.com/login',
+      'Login: labeled_user',
+      'Password: labeled_pass',
+      '===',
+      'https://positional.com/login',
+      'pos_user@positional.com',
+      'pos_pass',
+      '',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(2)
+    const emails = result.credentials.map(c => c.email)
+    expect(emails).toContain('labeled_user')
+    expect(emails).toContain('pos_user@positional.com')
+  })
+
+  test('§G6b labeled line resets positional state (no cross-contamination)', () => {
+    // URL line followed immediately by a labeled field — the labeled line must
+    // discard the in-progress positional URL and switch to labeled mode.
+    const content = [
+      'https://positional-url-discarded.com/login',
+      'Host: https://correct.com/login',
+      'Login: correct_user',
+      'Password: correct_pass',
+      '===',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    // Only the labeled block should emit; the dangling positional URL is discarded
+    expect(result.credentials).toHaveLength(1)
+    expect(result.credentials[0].url).toBe('https://correct.com/login')
+    expect(result.credentials[0].email).toBe('correct_user')
+  })
+
+  // ── §G7  http:// URLs (not just https://) ────────────────────────────────
+
+  test('§G7 http:// URL triggers positional mode', () => {
+    const content = [
+      'http://legacy-site.com/login',
+      'legacy_user',
+      'legacy_pass99',
+      '',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(1)
+    expect(result.credentials[0].url).toBe('http://legacy-site.com/login')
+  })
+
+  // ── §G8  BLOCK_SOFT_LABELS includes 'software' ───────────────────────────
+
+  test('§G8 "software" label classified as soft field (not url/login/pass)', () => {
+    // A "Software: Google Chrome" line must be silently consumed (not mistaken
+    // for a URL/login/password labeled field).
+    const content = [
+      'Host: https://example.com/login',
+      'Software: Google Chrome 120',
+      'Login: soft_user',
+      'Password: soft_pass',
+      '===',
+    ].join('\n')
+    const result = parseULPContent(content, src)
+    expect(result.credentials).toHaveLength(1)
+    expect(result.credentials[0].email).toBe('soft_user')
+    expect(result.credentials[0].password).toBe('soft_pass')
   })
 })

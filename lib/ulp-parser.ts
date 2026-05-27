@@ -74,7 +74,7 @@ export interface BlockState {
 const BLOCK_URL_LABELS   = new Set(['host', 'url', 'hostname', 'ur1', 'link', 'site'])
 const BLOCK_LOGIN_LABELS = new Set(['login', 'username', 'user', 'email', 'e-mail', 'user login', 'u53rn4m3'])
 const BLOCK_PASS_LABELS  = new Set(['password', 'pass', 'pwd', 'user password'])
-const BLOCK_SOFT_LABELS  = new Set(['soft', 'application', 'browser', 'app', 'storage'])
+const BLOCK_SOFT_LABELS  = new Set(['soft', 'application', 'browser', 'app', 'storage', 'software'])
 
 /**
  * If `trimmed` is a labeled block field (e.g. "Host: https://..."), return its
@@ -470,6 +470,12 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
   const breakdown   = makeRejectionMap()
   let   skipped     = 0
   let   blockState  = makeBlockState()
+  // Positional (label-free) state: tracks URL and login for 3-line stealer log blocks
+  // e.g.  https://site.com/path  ← positionalUrl
+  //       user@email.com          ← positionalLogin
+  //       mypassword123           ← emit credential, reset
+  let   positionalUrl   = ''
+  let   positionalLogin = ''
 
   function tryFlushBlock() {
     const cred = flushBlockState(blockState, sourceFile)
@@ -486,38 +492,62 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
   for (const line of lines) {
     const trimmed = line.trim()
 
-    // Block labeled field — intercept before inline parseLine to prevent false positives
+    // Block labeled field — intercept before inline parseLine to prevent false positives.
+    // Entering labeled mode discards any in-progress positional state.
     const labeled = classifyBlockLabel(trimmed)
     if (labeled) {
+      positionalUrl = positionalLogin = ''
       if (labeled.field === 'url')      blockState.url      = labeled.value
       if (labeled.field === 'login')    blockState.login    = labeled.value
       if (labeled.field === 'password') blockState.password = labeled.value
       continue
     }
 
-    // Block separator — flush accumulated block state if any fields present
+    // Block separator — flush labeled block state if present; always reset positional state.
     if (isBlockSeparator(trimmed)) {
+      positionalUrl = positionalLogin = ''
       if (blockState.url || blockState.login || blockState.password) {
         tryFlushBlock()
       } else {
-        // Plain blank line with no block state → count as inline blank
+        // Plain blank/separator line with no accumulated state → count as blank
         skipped++
         breakdown.blank++
       }
       continue
     }
 
-    // Inline parseLine (non-labeled, non-separator lines)
+    // Positional password: URL + login already collected → emit credential
+    if (positionalUrl && positionalLogin) {
+      const domain = extractDomain(positionalUrl)
+      credentials.push({ url: positionalUrl, email: positionalLogin, password: trimmed, domain, source_file: sourceFile })
+      positionalUrl = positionalLogin = ''
+      continue
+    }
+
+    // Positional login: URL already collected, waiting for login on this line
+    if (positionalUrl) {
+      positionalLogin = trimmed
+      continue
+    }
+
+    // Inline parseLine (non-labeled, non-separator, non-positional lines)
     const { credential, reason } = parseLine(line, sourceFile)
     if (credential) {
       credentials.push(credential)
+    } else if (reason === 'no_fields' && trimmed.startsWith('http')) {
+      // Bare URL line → enter positional mode; next line is login, line after is password.
+      // Not counted as skipped — will be consumed by positional collection or discarded at separator/EOF.
+      positionalUrl   = trimmed
+      positionalLogin = ''
     } else {
       skipped++
       if (reason && reason in breakdown) breakdown[reason]++
     }
   }
 
-  tryFlushBlock()  // flush any trailing incomplete block at EOF
+  // Discard any trailing incomplete positional block at EOF
+  positionalUrl = positionalLogin = ''
+  tryFlushBlock()  // flush any trailing incomplete labeled block at EOF
 
   return { credentials, skipped, errors: 0, rejection_breakdown: breakdown }
 }
@@ -540,6 +570,9 @@ export async function* parseULPStream(
   let   batchRejected = 0
   let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0 }
   let   blockState = makeBlockState()
+  // Positional (label-free) state — mirrors the same logic in parseULPContent
+  let   positionalUrl   = ''
+  let   positionalLogin = ''
 
   function flushBatch(): StreamBatch {
     const out: StreamBatch = { credentials: batch, rejected: batchRejected, breakdown: batchBreakdown }
@@ -563,15 +596,19 @@ export async function* parseULPStream(
   function processLine(line: string) {
     const trimmed = line.trim()
 
+    // Labeled field — discard any in-progress positional state, enter labeled mode
     const labeled = classifyBlockLabel(trimmed)
     if (labeled) {
+      positionalUrl = positionalLogin = ''
       if (labeled.field === 'url')      blockState.url      = labeled.value
       if (labeled.field === 'login')    blockState.login    = labeled.value
       if (labeled.field === 'password') blockState.password = labeled.value
       return
     }
 
+    // Separator — flush labeled block if present; always reset positional state
     if (isBlockSeparator(trimmed)) {
+      positionalUrl = positionalLogin = ''
       if (blockState.url || blockState.login || blockState.password) {
         tryFlushBlock()
       } else {
@@ -581,9 +618,27 @@ export async function* parseULPStream(
       return
     }
 
+    // Positional password: URL + login collected → emit credential
+    if (positionalUrl && positionalLogin) {
+      const domain = extractDomain(positionalUrl)
+      batch.push({ url: positionalUrl, email: positionalLogin, password: trimmed, domain, source_file: filename })
+      positionalUrl = positionalLogin = ''
+      return
+    }
+
+    // Positional login: URL collected, waiting for login
+    if (positionalUrl) {
+      positionalLogin = trimmed
+      return
+    }
+
     const { credential, reason } = parseLine(line, filename)
     if (credential) {
       batch.push(credential)
+    } else if (reason === 'no_fields' && trimmed.startsWith('http')) {
+      // Bare URL → enter positional mode
+      positionalUrl   = trimmed
+      positionalLogin = ''
     } else {
       batchRejected++
       if (reason) batchBreakdown[reason]++
@@ -604,7 +659,8 @@ export async function* parseULPStream(
       }
     }
     if (buffer) processLine(buffer)
-    tryFlushBlock()  // flush trailing block at EOF
+    positionalUrl = positionalLogin = ''  // discard trailing incomplete positional block
+    tryFlushBlock()  // flush trailing labeled block at EOF
     if (batch.length > 0 || batchRejected > 0) yield flushBatch()
   } finally {
     reader.releaseLock()
