@@ -4,9 +4,12 @@
  * Token types and their index strategy:
  *
  *   token      — pure alphanumeric/hyphen word
- *                → hasToken(url/email/password, value)
+ *                → hasToken(url/email/password, lower(value))
  *                   Uses tokenbf_v1 skip indexes on all three columns.
  *                   Skips entire 65 536-row granules that provably can't match.
+ *                   Value is always lowercased: ULP data is mostly lowercase so
+ *                   the bloom filter stores lowercase tokens; passing uppercase
+ *                   would silently return 0 results even for 'GOOGLE'.
  *                → position(url_host, lower(value)) > 0
  *                   Catches compound-domain substrings: "ledger" matches
  *                   coinledger.com, ledgernano.com, etc.  url_host is a
@@ -104,17 +107,24 @@ export function buildULPWhere(tokens: ParsedToken[]): { clause: string; params: 
       // to prune entire granules that can't possibly match (e.g. searching "ledger" skips
       // granules that contain no occurrence of the word "ledger" as a whole token).
       //
+      // Always lowercase the search value because:
+      //   1. ULP data (URLs, emails) is almost entirely lowercase, so the tokenbf_v1
+      //      bloom filter stores lowercase tokens.  hasToken(url, 'GOOGLE') would return
+      //      0 rows even though google.com credentials exist — the token 'GOOGLE' is never
+      //      in the filter.  Lowercasing normalises the needle to match stored tokens.
+      //   2. url_host and email_domain are lower()-materialised columns, so position()
+      //      already required a lowercase needle.  Using one shared lowercase param avoids
+      //      sending duplicate data and keeps the param namespace tidy.
+      //
       // Compound-domain substring matching: "ledger" must ALSO match "coinledger.com",
       // "ledgerwallet.com", etc. where "ledger" is embedded within a larger token.
-      // position(url_host, lower(value)) > 0 performs a case-insensitive substring scan
-      // of the pre-extracted, lowercased hostname column — fast because url_host is compact.
+      // position(url_host, value) > 0 performs a substring scan of the pre-extracted,
+      // lowercased hostname column — fast because url_host is compact.
       // email_domain gets the same treatment so "ledger" also surfaces credentials whose
       // login email is from a compound domain like staff@coinledger.com.
       const p = `tok${i}`
-      const ph = `tokh${i}`  // lowercase copy for position() comparison
-      params[p]  = token.value
-      params[ph] = token.value.toLowerCase()
-      match = `(hasToken(url, {${p}:String}) OR hasToken(email, {${p}:String}) OR hasToken(password, {${p}:String}) OR position(url_host, {${ph}:String}) > 0 OR position(email_domain, {${ph}:String}) > 0)`
+      params[p] = token.value.toLowerCase()
+      match = `(hasToken(url, {${p}:String}) OR hasToken(email, {${p}:String}) OR hasToken(password, {${p}:String}) OR position(url_host, {${p}:String}) > 0 OR position(email_domain, {${p}:String}) > 0)`
 
     } else {
       // LIKE fallback for tokens with special characters (no skip index)

@@ -369,14 +369,14 @@ describe('parseULPQuery + buildULPWhere integration', () => {
     expect(Object.values(params)[0]).toBe('example.com')
   })
 
-  test('three-term AND query: token type uses 2 params (value + lowercase copy)', () => {
-    // @gmail.com → email_dom → 1 param
-    // hunter2   → token     → 2 params (raw + lowercase for position() comparison)
+  test('three-term AND query generates three params (one per term)', () => {
+    // @gmail.com → email_dom  → 1 param
+    // hunter2   → token      → 1 param (single lowercase value, shared by hasToken + position)
     // alice@…   → email_full → 1 param
-    // Total: 4 params
+    // Total: 3 params
     const tokens = parseULPQuery('@gmail.com, hunter2, alice@gmail.com')
     const { params } = buildULPWhere(tokens)
-    expect(Object.keys(params)).toHaveLength(4)
+    expect(Object.keys(params)).toHaveLength(3)
   })
 
   test('clause is valid ClickHouse-compatible SQL fragment', () => {
@@ -411,13 +411,15 @@ describe('parseULPQuery + buildULPWhere integration', () => {
     expect(clause).toContain('position(email_domain,')
   })
 
-  test('token search lowercases the comparison value for position()', () => {
+  test('token search always lowercases the value (case-insensitive for hasToken + position)', () => {
+    // ULP URLs/emails are stored lowercase so the tokenbf_v1 bloom filter contains
+    // lowercase tokens.  hasToken(url, 'GOOGLE') would return 0 rows even though
+    // google.com credentials exist.  We always lowercase so 'Google'→'google'.
     const tokens = parseULPQuery('Ledger')
     const { params } = buildULPWhere(tokens)
     const paramValues = Object.values(params)
-    // Raw value kept for hasToken (case-sensitive index)
-    expect(paramValues).toContain('Ledger')
-    // Lowercased copy for position() comparison on url_host/email_domain
+    // Only the lowercase form appears — shared by hasToken AND position()
     expect(paramValues).toContain('ledger')
+    expect(paramValues).not.toContain('Ledger')
   })
 })
