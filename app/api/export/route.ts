@@ -85,7 +85,7 @@ export async function POST(request: NextRequest) {
   const extras: string[] = []
   const mergedParams: Record<string, unknown> = { ...baseParams }
 
-  if (domain)      { extras.push(' AND domain = {exportDomain:String}');     mergedParams.exportDomain = domain }
+  if (domain)      { extras.push(` AND (${NORM_DOMAIN_EXPR}) = {exportDomain:String}`);     mergedParams.exportDomain = domain }
   if (breach_name) { extras.push(' AND breach_name = {exportBreach:String}'); mergedParams.exportBreach = breach_name }
   if (email_domain){ extras.push(' AND email_domain = {emailDomain:String}'); mergedParams.emailDomain = email_domain.toLowerCase() }
   if (source_file) { extras.push(' AND source_file = {sourceFile:String}');  mergedParams.sourceFile = source_file }
