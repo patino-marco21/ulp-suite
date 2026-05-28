@@ -17,13 +17,14 @@ export const dynamic = 'force-dynamic'
 // the mutation runs in the background. Use system.mutations to track progress.
 export async function POST(
   request: NextRequest,
-  { params }: { params: { name: string } }
+  { params }: { params: Promise<{ name: string }> }
 ) {
   const user = await validateRequest(request)
   const adminError = requireAdminRole(user)
   if (adminError) return adminError
 
-  const breachName = decodeURIComponent(params.name)
+  const { name } = await params
+  const breachName = decodeURIComponent(name)
   const breach = dbGet(`SELECT id FROM breaches WHERE breach_name = ?`, [breachName])
   if (!breach) return NextResponse.json({ success: false, error: "Breach not found" }, { status: 404 })
 
