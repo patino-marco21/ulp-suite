@@ -1,20 +1,43 @@
+# ── Environment / secrets (never commit real values) ─────────────────────────
 .env
 .env.local
+.env.production
+.env.production.local
+.env.staging
+.env.staging.local
+.env.*.local
+
+# ── Build output ──────────────────────────────────────────────────────────────
 node_modules/*
 .next/*
 tsconfig.tsbuildinfo
+
+# ── Editors / OS ──────────────────────────────────────────────────────────────
 .vscode
-uploads/*
+.idea
+.DS_Store
+Thumbs.db
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
 error.log
 server.log
-clickhouse-data
-mysql-data
-minio-data
-tmp
-.DS_Store
+*.log
+
+# ── Data volumes (live credential data — never commit) ────────────────────────
+uploads/
+data/
+clickhouse-data/
+mysql-data/
+minio-data/
+
+# ── SQLite database files ─────────────────────────────────────────────────────
+*.db
+*.db-shm
+*.db-wal
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+tmp/
+test-data/
 .devtasks
 docs/generated
 docs/api
-test-data/
-data/
-uploads/
