@@ -13,7 +13,8 @@ minio-data
 tmp
 .DS_Store
 .devtasks
-docs
+docs/generated
+docs/api
 test-data/
 data/
 uploads/
