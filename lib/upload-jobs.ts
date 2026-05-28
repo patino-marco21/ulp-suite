@@ -7,6 +7,8 @@
  * Note: single-process only. Works for self-hosted Next.js.
  */
 
+import { makeRejectionMap } from '@/lib/ulp-parser'
+
 export type JobStatus = 'running' | 'done' | 'error'
 
 export interface UploadJob {
@@ -35,7 +37,7 @@ export function createJob(id: string, totalLines: number, breachName: string): U
     total_lines: totalLines,
     breach_name: breachName,
     started_at:  Date.now(),
-    rejection_breakdown: { blank: 0, no_fields: 0, no_password: 0 },
+    rejection_breakdown: makeRejectionMap(),
   }
   jobs.set(id, job)
   return job
