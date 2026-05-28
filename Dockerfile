@@ -7,8 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
-COPY package.json ./
-RUN yarn install --frozen-lockfile
+COPY package.json package-lock.json ./
+RUN npm ci
 
 # ─── Stage 2: Build ───────────────────────────────────────────────────────────
 FROM node:20-bookworm-slim AS builder
@@ -17,7 +17,7 @@ WORKDIR /app
 COPY . .
 COPY --from=deps /app/node_modules ./node_modules
 
-RUN yarn build
+RUN npm run build
 
 # ─── Stage 3: Production runner ───────────────────────────────────────────────
 FROM node:20-bookworm-slim AS runner

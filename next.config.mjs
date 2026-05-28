@@ -58,11 +58,11 @@ const nextConfig = {
     },
   } : {}),
   eslint: {
-    // Skip ESLint during builds — run `yarn lint` separately
+    // Skip ESLint during builds — run `npm run lint` separately
     ignoreDuringBuilds: true,
   },
   typescript: {
-    // Skip TypeScript errors during builds — run `yarn tsc --noEmit` separately
+    // Skip TypeScript errors during builds — run `npx tsc --noEmit` separately
     ignoreBuildErrors: true,
   },
   images: {
