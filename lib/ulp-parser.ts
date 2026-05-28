@@ -23,7 +23,7 @@ export interface ULPCredential {
   source_file: string
 }
 
-export type RejectionReason = 'blank' | 'no_fields' | 'no_password'
+export type RejectionReason = 'blank' | 'no_fields' | 'no_password' | 'dedup'
 
 export interface ParseResult {
   credentials:         ULPCredential[]
@@ -165,8 +165,11 @@ export function parseBlockContent(content: string, sourceFile: string): ParseRes
       credentials.push(cred)
     } else if (state.url || state.login || state.password) {
       skipped++
-      if (!state.login || !state.password) breakdown.no_fields++
-      else breakdown.no_password++
+      // Classify: if no login found at all → no_fields; otherwise the credential
+      // had a login but was rejected for a password reason (missing / too-short /
+      // equals login) → no_password.
+      if (!state.login) breakdown.no_fields++
+      else              breakdown.no_password++
     }
     state = makeBlockState()
   }
@@ -202,13 +205,13 @@ export async function* parseBlockStream(
   let   buffer  = ''
   let   batch:  ULPCredential[] = []
   let   batchRejected = 0
-  let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0 }
+  let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0, dedup: 0 }
   let   state   = makeBlockState()
 
   function flushBatch(): StreamBatch {
     const out: StreamBatch = { credentials: batch, rejected: batchRejected, breakdown: batchBreakdown }
     batch = []; batchRejected = 0
-    batchBreakdown = { blank: 0, no_fields: 0, no_password: 0 }
+    batchBreakdown = { blank: 0, no_fields: 0, no_password: 0, dedup: 0 }
     return out
   }
 
@@ -218,8 +221,9 @@ export async function* parseBlockStream(
       batch.push(cred)
     } else if (state.url || state.login || state.password) {
       batchRejected++
-      if (!state.login || !state.password) batchBreakdown.no_fields++
-      else batchBreakdown.no_password++
+      // no login at all → no_fields; login present but password issue → no_password
+      if (!state.login) batchBreakdown.no_fields++
+      else              batchBreakdown.no_password++
     }
     state = makeBlockState()
   }
@@ -481,7 +485,7 @@ export function parseLine(
 // ── Batch / stream parsers ────────────────────────────────────────────────────
 
 export function makeRejectionMap(): Record<string, number> {
-  return { blank: 0, no_fields: 0, no_password: 0 }
+  return { blank: 0, no_fields: 0, no_password: 0, dedup: 0 }
 }
 
 export function parseULPContent(content: string, sourceFile: string): ParseResult {
@@ -496,15 +500,20 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
   //       mypassword123           ← emit credential, reset
   let   positionalUrl   = ''
   let   positionalLogin = ''
+  // Per-call dedup set: keyed by url\0email\0password.  Catches repeated lines
+  // within the same file (e.g. a stealer capturing the same login 12 times).
+  const seen = new Set<string>()
 
   function tryFlushBlock() {
     const cred = flushBlockState(blockState, sourceFile)
     if (cred) {
-      credentials.push(cred)
+      const fp = `${cred.url}\0${cred.email}\0${cred.password}`
+      if (seen.has(fp)) { skipped++; breakdown.dedup++ }
+      else              { seen.add(fp); credentials.push(cred) }
     } else if (blockState.url || blockState.login || blockState.password) {
       skipped++
-      if (!blockState.login || !blockState.password) breakdown.no_fields++
-      else breakdown.no_password++
+      if (!blockState.login) breakdown.no_fields++
+      else                   breakdown.no_password++
     }
     blockState = makeBlockState()
   }
@@ -538,8 +547,14 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
 
     // Positional password: URL + login already collected → emit credential
     if (positionalUrl && positionalLogin) {
-      const domain = extractDomain(positionalUrl)
-      credentials.push({ url: positionalUrl, email: positionalLogin, password: trimmed, domain, source_file: sourceFile })
+      const fp = `${positionalUrl}\0${positionalLogin}\0${trimmed}`
+      if (seen.has(fp)) {
+        skipped++; breakdown.dedup++
+      } else {
+        seen.add(fp)
+        const domain = extractDomain(positionalUrl)
+        credentials.push({ url: positionalUrl, email: positionalLogin, password: trimmed, domain, source_file: sourceFile })
+      }
       positionalUrl = positionalLogin = ''
       continue
     }
@@ -553,7 +568,9 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
     // Inline parseLine (non-labeled, non-separator, non-positional lines)
     const { credential, reason } = parseLine(line, sourceFile)
     if (credential) {
-      credentials.push(credential)
+      const fp = `${credential.url}\0${credential.email}\0${credential.password}`
+      if (seen.has(fp)) { skipped++; breakdown.dedup++ }
+      else              { seen.add(fp); credentials.push(credential) }
     } else if (reason === 'no_fields' && trimmed.startsWith('http')) {
       // Bare URL line → enter positional mode; next line is login, line after is password.
       // Not counted as skipped — will be consumed by positional collection or discarded at separator/EOF.
@@ -598,27 +615,34 @@ export async function* parseULPStream(
   let   buffer  = ''
   let   batch:  ULPCredential[] = []
   let   batchRejected = 0
-  let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0 }
+  let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0, dedup: 0 }
   let   blockState = makeBlockState()
   // Positional (label-free) state — mirrors the same logic in parseULPContent
   let   positionalUrl   = ''
   let   positionalLogin = ''
+  // Per-upload dedup set: keyed by url\0email\0password.  Persists across all
+  // batches for the lifetime of this stream so cross-batch duplicates are caught.
+  // Memory: ~210 bytes per unique credential; safe for files up to ~50M rows.
+  const seen = new Set<string>()
 
   function flushBatch(): StreamBatch {
     const out: StreamBatch = { credentials: batch, rejected: batchRejected, breakdown: batchBreakdown }
     batch = []; batchRejected = 0
-    batchBreakdown = { blank: 0, no_fields: 0, no_password: 0 }
+    batchBreakdown = { blank: 0, no_fields: 0, no_password: 0, dedup: 0 }
     return out
   }
 
   function tryFlushBlock() {
     const cred = flushBlockState(blockState, filename)
     if (cred) {
-      batch.push(cred)
+      const fp = `${cred.url}\0${cred.email}\0${cred.password}`
+      if (seen.has(fp)) { batchRejected++; batchBreakdown.dedup++ }
+      else              { seen.add(fp); batch.push(cred) }
     } else if (blockState.url || blockState.login || blockState.password) {
       batchRejected++
-      if (!blockState.login || !blockState.password) batchBreakdown.no_fields++
-      else batchBreakdown.no_password++
+      // no login at all → no_fields; login present but password issue → no_password
+      if (!blockState.login) batchBreakdown.no_fields++
+      else                   batchBreakdown.no_password++
     }
     blockState = makeBlockState()
   }
@@ -650,8 +674,14 @@ export async function* parseULPStream(
 
     // Positional password: URL + login collected → emit credential
     if (positionalUrl && positionalLogin) {
-      const domain = extractDomain(positionalUrl)
-      batch.push({ url: positionalUrl, email: positionalLogin, password: trimmed, domain, source_file: filename })
+      const fp = `${positionalUrl}\0${positionalLogin}\0${trimmed}`
+      if (seen.has(fp)) {
+        batchRejected++; batchBreakdown.dedup++
+      } else {
+        seen.add(fp)
+        const domain = extractDomain(positionalUrl)
+        batch.push({ url: positionalUrl, email: positionalLogin, password: trimmed, domain, source_file: filename })
+      }
       positionalUrl = positionalLogin = ''
       return
     }
@@ -664,7 +694,9 @@ export async function* parseULPStream(
 
     const { credential, reason } = parseLine(line, filename)
     if (credential) {
-      batch.push(credential)
+      const fp = `${credential.url}\0${credential.email}\0${credential.password}`
+      if (seen.has(fp)) { batchRejected++; batchBreakdown.dedup++ }
+      else              { seen.add(fp); batch.push(credential) }
     } else if (reason === 'no_fields' && trimmed.startsWith('http')) {
       // Bare URL → enter positional mode
       positionalUrl   = trimmed
