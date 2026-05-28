@@ -16,3 +16,17 @@ export const uploadQueue = pLimit(1)
 export function queueSize(): number {
   return uploadQueue.activeCount + uploadQueue.pendingCount
 }
+
+// ── Current job tracking ──────────────────────────────────────────────────────
+
+let _currentJob: string | null = null
+
+/** Set the filename of the job currently being processed. Pass null when done. */
+export function setCurrentJob(name: string | null): void {
+  _currentJob = name
+}
+
+/** Returns the filename currently being processed, or null if the queue is idle. */
+export function getCurrentJob(): string | null {
+  return _currentJob
+}
