@@ -6,6 +6,10 @@ import { runClickHouseMigrations } from '@/lib/clickhouse-migrations'
 import { createJob, getJob, updateJob, pushEvent } from '@/lib/upload-jobs'
 import { uploadQueue } from '@/lib/upload-queue'
 import { processTextStream, processZipBuffer, type ProcessResult } from '@/lib/upload-processor'
+import { checkLimit, getClientIP } from '@/lib/rate-limiter'
+
+// 5 uploads per IP per 5 minutes — generous for admin use, blocks runaway loops.
+const uploadLimiter = new Map<string, { count: number; resetAt: number }>()
 
 export const dynamic = 'force-dynamic'
 
@@ -58,6 +62,24 @@ export async function POST(request: NextRequest) {
   const user = await validateRequest(request)
   const adminError = requireAdminRole(user)
   if (adminError) return adminError
+
+  // Rate limit: 5 uploads per IP per 5 minutes
+  const ip       = getClientIP(request)
+  const rlResult = checkLimit(uploadLimiter, ip, 5, 5 * 60_000)
+  if (!rlResult.allowed) {
+    return NextResponse.json(
+      { success: false, error: 'Too many uploads — please wait before uploading again.' },
+      {
+        status: 429,
+        headers: {
+          'Retry-After':           String(Math.ceil((rlResult.resetAt - Date.now()) / 1000)),
+          'X-RateLimit-Limit':     '5',
+          'X-RateLimit-Remaining': '0',
+          'X-RateLimit-Reset':     String(rlResult.resetAt),
+        },
+      }
+    )
+  }
 
   await runClickHouseMigrations()
 
