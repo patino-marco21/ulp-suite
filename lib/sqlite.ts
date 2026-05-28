@@ -235,6 +235,26 @@ function initSchema(db: Database.Database): void {
       ON webhook_outbox (status, next_attempt_at)
   `)
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS processing_jobs (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      source        TEXT    NOT NULL,
+      filename      TEXT    NOT NULL,
+      status        TEXT    NOT NULL,
+      imported      INTEGER NOT NULL DEFAULT 0,
+      skipped       INTEGER NOT NULL DEFAULT 0,
+      duration_ms   INTEGER NOT NULL DEFAULT 0,
+      error_message TEXT,
+      breach_name   TEXT,
+      created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_processing_jobs_created
+      ON processing_jobs (id DESC)
+  `)
+
   // Add rescan columns to existing databases (idempotent — catch swallows "duplicate column" errors)
   try { db.exec(`ALTER TABLE domain_monitors ADD COLUMN rescan_mode TEXT NOT NULL DEFAULT 'dedup' CHECK(rescan_mode IN ('dedup','digest'))`) } catch {}
   try { db.exec(`ALTER TABLE domain_monitors ADD COLUMN rescan_interval_hours INTEGER NOT NULL DEFAULT 24`) } catch {}
