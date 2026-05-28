@@ -16,7 +16,8 @@
 import path from 'path'
 import fs from 'fs'
 import { Readable } from 'stream'
-import { uploadQueue, queueSize } from '@/lib/upload-queue'
+import { uploadQueue, queueSize, setCurrentJob } from '@/lib/upload-queue'
+import { logJob } from '@/lib/processing-log'
 import { processTextStream, processZipBuffer, processZipFile } from '@/lib/upload-processor'
 
 const INBOX = path.resolve('./inbox')
@@ -80,11 +81,17 @@ export function startInboxWatcher(): void {
         console.log(`[inbox-watcher] queued: ${filename} (queue: ${queueSize()})`)
 
         uploadQueue(async () => {
+          const startAt = Date.now()
           console.log(`[inbox-watcher] processing: ${filename}`)
+          setCurrentJob(filename)
+          // Accumulate totals across all ZIP entries (or single file)
+          let imported = 0
+          let skipped  = 0
           try {
             if (ext === '.zip') {
-              // processZipFile reads directly from disk — no readFileSync buffer
               await processZipFile(filePath, result => {
+                imported += result.imported
+                skipped  += result.skipped
                 if (result.imported > 0) {
                   console.log(
                     `[inbox-watcher]   ${result.filename}: ` +
@@ -96,16 +103,36 @@ export function startInboxWatcher(): void {
               const nodeStream = fs.createReadStream(filePath)
               const webStream  = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>
               const result     = await processTextStream(webStream, filename)
+              imported = result.imported
+              skipped  = result.skipped
               console.log(
                 `[inbox-watcher] done: ${filename} ` +
                 `imported=${result.imported} skipped=${result.skipped}`
               )
             }
-            // Move to done/ — rename is atomic on same filesystem
+            logJob({
+              source:      'inbox',
+              filename,
+              status:      'done',
+              imported,
+              skipped,
+              duration_ms: Date.now() - startAt,
+            })
             fs.renameSync(filePath, path.join(DONE, filename))
           } catch (err) {
             console.error(`[inbox-watcher] failed: ${filename}`, err)
+            logJob({
+              source:        'inbox',
+              filename,
+              status:        'failed',
+              imported,
+              skipped,
+              duration_ms:   Date.now() - startAt,
+              error_message: err instanceof Error ? err.message : String(err),
+            })
             try { fs.renameSync(filePath, path.join(FAIL, filename)) } catch {}
+          } finally {
+            setCurrentJob(null)
           }
         })
       }).on('error', (err: unknown) => {
