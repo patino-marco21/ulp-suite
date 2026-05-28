@@ -6,6 +6,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
 import { executeQuery } from "@/lib/clickhouse"
+import { NORM_DOMAIN_EXPR } from '@/lib/ulp-normalize'
 
 export const dynamic = 'force-dynamic'
 
@@ -30,12 +31,12 @@ export async function GET(request: NextRequest) {
   try {
     const [countResult, rows] = await Promise.all([
       executeQuery(
-        `SELECT count() as total FROM ulp.credentials WHERE domain = {domain:String}`,
+        `SELECT count() as total FROM ulp.credentials WHERE (${NORM_DOMAIN_EXPR}) = {domain:String}`,
         { domain }
       ),
       executeQuery(
         `SELECT url, email, password, domain, source_file, imported_at
-         FROM ulp.credentials WHERE domain = {domain:String}
+         FROM ulp.credentials WHERE (${NORM_DOMAIN_EXPR}) = {domain:String}
          ORDER BY imported_at DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         { domain, limit, offset }
       ),
