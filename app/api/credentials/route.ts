@@ -115,7 +115,7 @@ export async function GET(request: NextRequest) {
     Object.assign(params, qParams)
   }
 
-  if (domain)      { conditions.push('domain = {domain:String}');               params.domain = domain }
+  if (domain)      { conditions.push(`(${NORM_DOMAIN_EXPR}) = {domain:String}`); params.domain = domain }
   if (breach)      { conditions.push('breach_name = {breach:String}');           params.breach = breach }
   if (sourceFile)  { conditions.push('source_file = {sourceFile:String}');       params.sourceFile = sourceFile }
   if (urlHost)     { conditions.push('url_host = {urlHost:String}');             params.urlHost = urlHost.toLowerCase() }
