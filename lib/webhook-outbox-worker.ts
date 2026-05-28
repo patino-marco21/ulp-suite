@@ -119,80 +119,93 @@ export async function runWebhookOutboxTick(): Promise<void> {
   ) as OutboxRow[]
 
   for (const row of dueRows) {
-    // Look up active webhook
-    const whRow = dbGet(
-      `SELECT url, secret, headers FROM monitor_webhooks WHERE id = ? AND is_active = 1`,
-      [row.webhook_id],
-    ) as { url: string; secret: string | null; headers: string | null } | undefined
+    try {
+      // Look up active webhook
+      const whRow = dbGet(
+        `SELECT url, secret, headers FROM monitor_webhooks WHERE id = ? AND is_active = 1`,
+        [row.webhook_id],
+      ) as { url: string; secret: string | null; headers: string | null } | undefined
 
-    if (!whRow) {
-      dbRun(
-        `UPDATE webhook_outbox
-         SET status='dead_letter', last_error='webhook not found or inactive', updated_at=datetime('now')
-         WHERE id=?`,
-        [row.id],
+      if (!whRow) {
+        dbRun(
+          `UPDATE webhook_outbox
+           SET status='dead_letter', last_error='webhook not found or inactive', updated_at=datetime('now')
+           WHERE id=?`,
+          [row.id],
+        )
+        dbRun(
+          `INSERT INTO monitor_alerts
+             (monitor_id, webhook_id, source_file, matched_domain, match_type,
+              credential_match_count, payload_sent, status, error_message, retry_count)
+           VALUES (?, ?, ?, ?, 'credential_email', ?, ?, 'failed', ?, ?)`,
+          [row.monitor_id, row.webhook_id, row.source_file, row.matched_domain,
+           row.cred_count, row.payload, 'webhook not found or inactive', row.attempt_count],
+        )
+        continue
+      }
+
+      let parsedHeaders: Record<string, string> | null = null
+      try { parsedHeaders = whRow.headers ? JSON.parse(whRow.headers) : null } catch {}
+
+      const result = await attemptDelivery(
+        { url: whRow.url, secret: whRow.secret, headers: parsedHeaders },
+        row.payload,
       )
-      dbRun(
-        `INSERT INTO monitor_alerts
-           (monitor_id, webhook_id, source_file, matched_domain, match_type,
-            credential_match_count, payload_sent, status, error_message, retry_count)
-         VALUES (?, ?, ?, ?, 'credential_email', ?, ?, 'failed', ?, ?)`,
-        [row.monitor_id, row.webhook_id, row.source_file, row.matched_domain,
-         row.cred_count, row.payload, 'webhook not found or inactive', row.attempt_count],
-      )
-      continue
-    }
 
-    let parsedHeaders: Record<string, string> | null = null
-    try { parsedHeaders = whRow.headers ? JSON.parse(whRow.headers) : null } catch {}
+      const newAttemptCount = row.attempt_count + 1
 
-    const result = await attemptDelivery(
-      { url: whRow.url, secret: whRow.secret, headers: parsedHeaders },
-      row.payload,
-    )
+      if (result.ok) {
+        dbRun(
+          `UPDATE webhook_outbox SET status='delivered', updated_at=datetime('now') WHERE id=?`,
+          [row.id],
+        )
+        dbRun(
+          `INSERT INTO monitor_alerts
+             (monitor_id, webhook_id, source_file, matched_domain, match_type,
+              credential_match_count, payload_sent, status, http_status, retry_count)
+           VALUES (?, ?, ?, ?, 'credential_email', ?, ?, 'success', ?, ?)`,
+          [row.monitor_id, row.webhook_id, row.source_file, row.matched_domain,
+           row.cred_count, row.payload, result.status, row.attempt_count],
+        )
+        dbRun(`UPDATE monitor_webhooks SET last_triggered_at = datetime('now') WHERE id = ?`, [row.webhook_id])
 
-    const newAttemptCount = row.attempt_count + 1
+      } else if (result.status !== null && result.status >= 400 && result.status < 500) {
+        // 4xx — dead-letter immediately, no retry
+        deadLetter(row, result)
 
-    if (result.ok) {
-      dbRun(
-        `UPDATE webhook_outbox SET status='delivered', updated_at=datetime('now') WHERE id=?`,
-        [row.id],
-      )
-      dbRun(
-        `INSERT INTO monitor_alerts
-           (monitor_id, webhook_id, source_file, matched_domain, match_type,
-            credential_match_count, payload_sent, status, http_status, retry_count)
-         VALUES (?, ?, ?, ?, 'credential_email', ?, ?, 'success', ?, ?)`,
-        [row.monitor_id, row.webhook_id, row.source_file, row.matched_domain,
-         row.cred_count, row.payload, result.status, row.attempt_count],
-      )
-      dbRun(`UPDATE monitor_webhooks SET last_triggered_at = datetime('now') WHERE id = ?`, [row.webhook_id])
+      } else if (newAttemptCount >= MAX_ATTEMPTS) {
+        // Reached max attempts — dead-letter
+        deadLetter(row, result)
 
-    } else if (result.status !== null && result.status >= 400 && result.status < 500) {
-      // 4xx — dead-letter immediately, no retry
-      deadLetter(row, result)
-
-    } else if (newAttemptCount >= MAX_ATTEMPTS) {
-      // Reached max attempts — dead-letter
-      deadLetter(row, result)
-
-    } else {
-      // Retry with exponential backoff: 2^(newAttemptCount-1) minutes
-      const backoffMinutes = Math.pow(2, newAttemptCount - 1)
-      dbRun(
-        `UPDATE webhook_outbox
-         SET status='retrying', attempt_count=?, next_attempt_at=datetime('now', ?), last_error=?, updated_at=datetime('now')
-         WHERE id=?`,
-        [newAttemptCount, `+${backoffMinutes} minute`, result.error, row.id],
-      )
-      dbRun(
-        `INSERT INTO monitor_alerts
-           (monitor_id, webhook_id, source_file, matched_domain, match_type,
-            credential_match_count, payload_sent, status, http_status, error_message, retry_count)
-         VALUES (?, ?, ?, ?, 'credential_email', ?, ?, 'failed', ?, ?, ?)`,
-        [row.monitor_id, row.webhook_id, row.source_file, row.matched_domain,
-         row.cred_count, row.payload, result.status, result.error, row.attempt_count],
-      )
+      } else {
+        // Retry with exponential backoff: 2^(newAttemptCount-1) minutes
+        const backoffMinutes = Math.pow(2, newAttemptCount - 1)
+        dbRun(
+          `UPDATE webhook_outbox
+           SET status='retrying', attempt_count=?, next_attempt_at=datetime('now', ?), last_error=?, updated_at=datetime('now')
+           WHERE id=?`,
+          [newAttemptCount, `+${backoffMinutes} minute`, result.error, row.id],
+        )
+        dbRun(
+          `INSERT INTO monitor_alerts
+             (monitor_id, webhook_id, source_file, matched_domain, match_type,
+              credential_match_count, payload_sent, status, http_status, error_message, retry_count)
+           VALUES (?, ?, ?, ?, 'credential_email', ?, ?, 'failed', ?, ?, ?)`,
+          [row.monitor_id, row.webhook_id, row.source_file, row.matched_domain,
+           row.cred_count, row.payload, result.status, result.error, row.attempt_count],
+        )
+      }
+    } catch (err) {
+      console.error(`[outbox] error processing row ${row.id}:`, err)
+      try {
+        dbRun(
+          `UPDATE webhook_outbox SET status='dead_letter', last_error=?, updated_at=datetime('now') WHERE id=?`,
+          [err instanceof Error ? err.message : String(err), row.id],
+        )
+      } catch {
+        // If even the dead-letter update fails, just log and move on
+        console.error(`[outbox] could not dead-letter row ${row.id}`)
+      }
     }
   }
 }
