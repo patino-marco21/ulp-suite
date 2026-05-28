@@ -26,6 +26,7 @@ server.log
 # ── Data volumes (live credential data — never commit) ────────────────────────
 uploads/
 data/
+inbox/
 clickhouse-data/
 mysql-data/
 minio-data/

@@ -15,6 +15,8 @@ function getDb(): Database.Database {
 
   const db = new Database(DB_PATH)
   db.pragma('journal_mode = WAL')
+  db.pragma('synchronous = NORMAL')   // safe with WAL; faster than FULL
+  db.pragma('busy_timeout = 5000')    // wait up to 5 s before SQLITE_BUSY
   db.pragma('foreign_keys = ON')
   initSchema(db)
   globalForDb._sqliteDb = db

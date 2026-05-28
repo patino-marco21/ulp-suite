@@ -1,5 +1,5 @@
 # ─── Stage 1: Install dependencies ────────────────────────────────────────────
-FROM node:20-bookworm-slim AS deps
+FROM node:22-bookworm-slim AS deps
 WORKDIR /app
 
 # Build tools for native addons (better-sqlite3)
@@ -11,7 +11,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 # ─── Stage 2: Build ───────────────────────────────────────────────────────────
-FROM node:20-bookworm-slim AS builder
+FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 
 COPY . .
@@ -20,7 +20,7 @@ COPY --from=deps /app/node_modules ./node_modules
 RUN npm run build
 
 # ─── Stage 3: Production runner ───────────────────────────────────────────────
-FROM node:20-bookworm-slim AS runner
+FROM node:22-bookworm-slim AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
