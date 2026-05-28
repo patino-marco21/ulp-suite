@@ -177,3 +177,46 @@ export async function processZipBuffer(
     })
   })
 }
+
+/**
+ * Process a ZIP file on disk by streaming its .txt/.csv entries one at a time.
+ *
+ * Uses yauzl.open — reads lazily from disk, no Buffer needed.
+ * Ideal for the inbox watcher where we already have a file path.
+ */
+export async function processZipFile(
+  filepath: string,
+  onEntry:  (result: ProcessResult) => void,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    yauzl.open(filepath, { lazyEntries: true }, (err, zipfile) => {
+      if (err) return reject(err)
+
+      zipfile.readEntry()
+
+      zipfile.on('entry', (entry: yauzl.Entry) => {
+        if (/\/$/.test(entry.fileName)) { zipfile.readEntry(); return }
+
+        const lp = entry.fileName.toLowerCase()
+        if (!lp.endsWith('.txt') && !lp.endsWith('.csv')) {
+          zipfile.readEntry()
+          return
+        }
+
+        zipfile.openReadStream(entry, (streamErr, readStream) => {
+          if (streamErr) { reject(streamErr); return }
+
+          const entryName = entry.fileName.split('/').pop() || entry.fileName
+          const webStream = Readable.toWeb(readStream) as ReadableStream<Uint8Array>
+
+          processTextStream(webStream, entryName)
+            .then(result => { onEntry(result); zipfile.readEntry() })
+            .catch(reject)
+        })
+      })
+
+      zipfile.on('end', resolve)
+      zipfile.on('error', reject)
+    })
+  })
+}
