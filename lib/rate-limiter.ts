@@ -76,7 +76,7 @@ class RateLimiter {
     // Try to get real IP from headers (for production behind proxy)
     const forwarded = request.headers.get('x-forwarded-for')
     const realIp = request.headers.get('x-real-ip')
-    const ip = forwarded?.split(',')[0] || realIp || request.ip || 'anonymous'
+    const ip = forwarded?.split(',')[0] || realIp || 'anonymous'
     
     // Include user agent for additional uniqueness
     const userAgent = request.headers.get('user-agent') || 'unknown'
