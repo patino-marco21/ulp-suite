@@ -17,6 +17,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
 import { executeQuery } from "@/lib/clickhouse"
+import { NORM_EMAIL_EXPR, NORM_DOMAIN_EXPR, NORM_COLS } from '@/lib/ulp-normalize'
 
 export const dynamic = "force-dynamic"
 
@@ -75,13 +76,13 @@ export async function POST(request: NextRequest) {
       emails.forEach((e, i) => { emailParams[`email${i}`] = e.toLowerCase() })
 
       const rows = await executeQuery(
-        `SELECT email, url, domain, source_file, breach_name, imported_at
+        `SELECT ${NORM_COLS}, source_file, breach_name, imported_at
          FROM ulp.credentials
-         WHERE email IN (${emailList})
+         WHERE (${NORM_EMAIL_EXPR}) IN (${emailList})
          ORDER BY imported_at DESC
          LIMIT {cap:UInt32}`,
         { ...emailParams, cap: emails.length * RESULTS_CAP }
-      ) as Array<{ email: string; url: string; domain: string; source_file: string; breach_name: string; imported_at: string }>
+      ) as Array<{ email: string; url: string; password: string; domain: string; source_file: string; breach_name: string; imported_at: string }>
 
       // Group results back by the queried email
       for (const email of emails) {
@@ -98,13 +99,13 @@ export async function POST(request: NextRequest) {
       domains.forEach((d, i) => { domainParams[`domain${i}`] = d.toLowerCase() })
 
       const rows = await executeQuery(
-        `SELECT domain, email, url, source_file, breach_name, imported_at
+        `SELECT ${NORM_COLS}, source_file, breach_name, imported_at
          FROM ulp.credentials
-         WHERE domain IN (${domainList})
+         WHERE (${NORM_DOMAIN_EXPR}) IN (${domainList})
          ORDER BY imported_at DESC
          LIMIT {cap:UInt32}`,
         { ...domainParams, cap: domains.length * RESULTS_CAP }
-      ) as Array<{ domain: string; email: string; url: string; source_file: string; breach_name: string; imported_at: string }>
+      ) as Array<{ email: string; url: string; password: string; domain: string; source_file: string; breach_name: string; imported_at: string }>
 
       for (const domain of domains) {
         const lc   = domain.toLowerCase()
