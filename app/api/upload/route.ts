@@ -4,9 +4,10 @@ import { makeRejectionMap, type RejectionReason } from '@/lib/ulp-parser'
 import { matchBreach } from '@/lib/breach-matcher'
 import { runClickHouseMigrations } from '@/lib/clickhouse-migrations'
 import { createJob, getJob, updateJob, pushEvent } from '@/lib/upload-jobs'
-import { uploadQueue } from '@/lib/upload-queue'
+import { uploadQueue, setCurrentJob } from '@/lib/upload-queue'
 import { processTextStream, processZipBuffer, type ProcessResult } from '@/lib/upload-processor'
 import { checkLimit, getClientIP } from '@/lib/rate-limiter'
+import { logJob } from '@/lib/processing-log'
 
 // 5 uploads per IP per 5 minutes — generous for admin use, blocks runaway loops.
 const uploadLimiter = new Map<string, { count: number; resetAt: number }>()
@@ -22,13 +23,15 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024 * 1024
 // ─── SSE progress wrapper ─────────────────────────────────────────────────────
 
 /**
- * Wraps a processing function with SSE progress events.
+ * Wraps a processing function with SSE progress events + audit logging.
  * Pushes a heartbeat every 2 s; pushes a final event on done/error.
  */
 async function runWithProgress(
-  jobId: string,
-  fn: () => Promise<ProcessResult>,
+  jobId:    string,
+  filename: string,
+  fn:       () => Promise<ProcessResult>,
 ): Promise<void> {
+  const startAt = Date.now()
   const interval = setInterval(async () => {
     const j = getJob(jobId)
     if (j) await pushEvent(j).catch(() => {})
@@ -44,6 +47,15 @@ async function runWithProgress(
     })
     const j = getJob(jobId)
     if (j) await pushEvent(j)
+    logJob({
+      source:      'http',
+      filename,
+      status:      'done',
+      imported:    result.imported,
+      skipped:     result.skipped,
+      duration_ms: Date.now() - startAt,
+      breach_name: result.breach_name,
+    })
   } catch (err) {
     updateJob(jobId, {
       status: 'error',
@@ -51,6 +63,15 @@ async function runWithProgress(
     })
     const j = getJob(jobId)
     if (j) await pushEvent(j)
+    logJob({
+      source:        'http',
+      filename,
+      status:        'failed',
+      imported:      0,
+      skipped:       0,
+      duration_ms:   Date.now() - startAt,
+      error_message: err instanceof Error ? err.message : String(err),
+    })
   } finally {
     clearInterval(interval)
   }
@@ -113,8 +134,6 @@ export async function POST(request: NextRequest) {
 
   try {
     // ── Plain text / CSV ──────────────────────────────────────────────────────
-    // Fire-and-forget: return jobId immediately; SSE stream delivers progress.
-    // uploadQueue serialises concurrent submissions — only one stream at a time.
     if (filename.endsWith('.txt') || filename.endsWith('.csv')) {
       const jobId       = crypto.randomUUID()
       const totalLines  = contentLength ? Math.floor(parseInt(contentLength) / 60) : 0
@@ -123,7 +142,15 @@ export async function POST(request: NextRequest) {
 
       runWithProgress(
         jobId,
-        () => uploadQueue(() => processTextStream(file.stream(), file.name, jobId)),
+        file.name,
+        () => uploadQueue(async () => {
+          setCurrentJob(file.name)
+          try {
+            return await processTextStream(file.stream(), file.name, jobId)
+          } finally {
+            setCurrentJob(null)
+          }
+        }),
       ).catch(console.error)
 
       return NextResponse.json({
@@ -135,18 +162,21 @@ export async function POST(request: NextRequest) {
     }
 
     // ── ZIP archive ───────────────────────────────────────────────────────────
-    // Blocks the HTTP response until fully processed (maxDuration = 300 s).
-    // yauzl streams each .txt/.csv entry lazily — only one entry in memory at a
-    // time, so a 2 GB ZIP does not spike RAM.
     if (filename.endsWith('.zip')) {
+      const startAt = Date.now()
       const buffer  = Buffer.from(await file.arrayBuffer())
       const results: ProcessResult[] = []
 
-      await uploadQueue(() =>
-        processZipBuffer(buffer, result => {
-          if (result.imported > 0) results.push(result)
-        }),
-      )
+      await uploadQueue(async () => {
+        setCurrentJob(file.name)
+        try {
+          await processZipBuffer(buffer, result => {
+            if (result.imported > 0) results.push(result)
+          })
+        } finally {
+          setCurrentJob(null)
+        }
+      })
 
       const totalBreakdown = makeRejectionMap()
       let totalImported = 0
@@ -159,6 +189,15 @@ export async function POST(request: NextRequest) {
           totalBreakdown[k as RejectionReason] += v
         }
       }
+
+      logJob({
+        source:      'http',
+        filename:    file.name,
+        status:      'done',
+        imported:    totalImported,
+        skipped:     totalSkipped,
+        duration_ms: Date.now() - startAt,
+      })
 
       const total = totalImported + totalSkipped
       return NextResponse.json({
