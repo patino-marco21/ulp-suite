@@ -1,6 +1,7 @@
 import { dbQuery, dbGet, dbRun } from '@/lib/sqlite'
 import { executeQuery as executeClickHouseQuery } from '@/lib/clickhouse'
 import { NORM_DOMAIN_EXPR, NORM_EMAIL_EXPR } from '@/lib/ulp-normalize'
+import { attemptDelivery, enqueueFailedDelivery } from '@/lib/webhook-outbox-worker'
 import crypto from 'crypto'
 
 // ─── Fingerprinting ───────────────────────────────────────────────────────────
@@ -318,58 +319,6 @@ export async function getAlertStats(): Promise<{ total: number; today: number; s
   return { total: row.total || 0, today: row.today || 0, success: row.success || 0, failed: row.failed || 0 }
 }
 
-// ─── Webhook delivery ─────────────────────────────────────────────────────────
-
-async function deliverWebhook(
-  webhook: MonitorWebhook,
-  payloadJson: string,
-  monitorId: number,
-  sourceFile: string,
-  matchedDomain: string,
-  credCount: number,
-  retryCount = 0
-): Promise<void> {
-  const MAX_RETRIES = 3
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'User-Agent': 'ULPSuite-DomainMonitor/1.0',
-    ...(webhook.headers || {}),
-  }
-  if (webhook.secret) {
-    headers['X-Webhook-Signature'] = `sha256=${crypto.createHmac('sha256', webhook.secret).update(payloadJson).digest('hex')}`
-  }
-
-  try {
-    const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 30_000)
-    const res = await fetch(webhook.url, { method: 'POST', headers, body: payloadJson, signal: ctrl.signal })
-    clearTimeout(t)
-
-    dbRun(
-      `INSERT INTO monitor_alerts (monitor_id, webhook_id, source_file, matched_domain, match_type, credential_match_count, payload_sent, status, http_status, retry_count)
-       VALUES (?, ?, ?, ?, 'credential_email', ?, ?, ?, ?, ?)`,
-      [monitorId, webhook.id, sourceFile, matchedDomain, credCount, payloadJson, res.ok ? 'success' : 'failed', res.status, retryCount]
-    )
-    dbRun(`UPDATE monitor_webhooks SET last_triggered_at = datetime('now') WHERE id = ?`, [webhook.id])
-
-    if (!res.ok && res.status >= 500 && retryCount < MAX_RETRIES) {
-      await new Promise(r => setTimeout(r, Math.pow(2, retryCount) * 1000))
-      return deliverWebhook(webhook, payloadJson, monitorId, sourceFile, matchedDomain, credCount, retryCount + 1)
-    }
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err)
-    dbRun(
-      `INSERT INTO monitor_alerts (monitor_id, webhook_id, source_file, matched_domain, match_type, credential_match_count, payload_sent, status, error_message, retry_count)
-       VALUES (?, ?, ?, ?, 'credential_email', ?, ?, 'failed', ?, ?)`,
-      [monitorId, webhook.id, sourceFile, matchedDomain, credCount, payloadJson, errMsg, retryCount]
-    )
-    if (retryCount < MAX_RETRIES) {
-      await new Promise(r => setTimeout(r, Math.pow(2, retryCount) * 1000))
-      return deliverWebhook(webhook, payloadJson, monitorId, sourceFile, matchedDomain, credCount, retryCount + 1)
-    }
-  }
-}
-
 // ─── ULP monitoring ───────────────────────────────────────────────────────────
 
 export async function checkMonitorsForULPUpload(
@@ -437,10 +386,30 @@ export async function checkMonitorsForULPUpload(
         }
         const payloadJson = JSON.stringify(payload)
 
+        // Sequential delivery is intentional: inline attempt + outbox enqueue must not race.
+        const matchedDomain = monitor.domains.join(',')
         for (const wr of webhookRows) {
           const webhook = parseWebhookRow(wr)
-          deliverWebhook(webhook, payloadJson, monitor.id, sourceFile, monitor.domains.join(','), unseenRows.length)
-            .catch(err => log(`Webhook delivery error: ${err}`, 'error'))
+          const result = await attemptDelivery(webhook, payloadJson)
+          dbRun(
+            `INSERT INTO monitor_alerts
+               (monitor_id, webhook_id, source_file, matched_domain, match_type,
+                credential_match_count, payload_sent, status, http_status, retry_count)
+             VALUES (?, ?, ?, ?, 'credential_email', ?, ?, ?, ?, 0)`,
+            [monitor.id, webhook.id, sourceFile, matchedDomain,
+             unseenRows.length, payloadJson, result.ok ? 'success' : 'failed', result.status ?? null],
+          )
+          dbRun(`UPDATE monitor_webhooks SET last_triggered_at = datetime('now') WHERE id = ?`, [webhook.id])
+          if (!result.ok) {
+            if (result.status !== null && result.status >= 400 && result.status < 500) {
+              // 4xx — permanent client error, don't retry
+              log(`Webhook delivery permanently failed (4xx, not queued): ${result.error}`, 'warning')
+            } else {
+              // Network error or 5xx — queue for retry
+              enqueueFailedDelivery(monitor.id, webhook.id, payloadJson, sourceFile, matchedDomain, unseenRows.length)
+              log(`Webhook delivery failed (queued for retry): ${result.error}`, 'warning')
+            }
+          }
         }
 
         // Record fingerprints so future uploads of the same credentials don't re-alert
