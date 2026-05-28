@@ -622,10 +622,14 @@ export default function CredentialsPage() {
 
   const { toast } = useToast()
 
-  const buildParams = useCallback((p: number) => {
-    const ps = new URLSearchParams({ page: String(p), limit: String(limit), sort: sortKey })
-    if (q.trim())           ps.set('q', q.trim())
-    if (domain)             ps.set('domain', domain)
+  const buildParams = useCallback((p: number, overrides?: { sort?: string; limit?: number; q?: string; domain?: string }) => {
+    const effectiveSort  = overrides?.sort   ?? sortKey
+    const effectiveLimit = overrides?.limit  ?? limit
+    const effectiveQ     = overrides?.q      ?? q
+    const effectiveDomain = overrides?.domain ?? domain
+    const ps = new URLSearchParams({ page: String(p), limit: String(effectiveLimit), sort: effectiveSort })
+    if (effectiveQ.trim())     ps.set('q', effectiveQ.trim())
+    if (effectiveDomain)       ps.set('domain', effectiveDomain)
     if (breach)             ps.set('breach', breach)
     if (loginType)          ps.set('login_type', loginType)
     if (pwMask.length)      ps.set('pw_mask', pwMask.join(','))
@@ -649,10 +653,10 @@ export default function CredentialsPage() {
     sortKey, limit,
   ])
 
-  const load = useCallback(async (p: number) => {
+  const load = useCallback(async (p: number, overrides?: { sort?: string; limit?: number; q?: string; domain?: string }) => {
     setLoading(true)
     try {
-      const res  = await fetch(`/api/credentials?${buildParams(p)}`)
+      const res  = await fetch(`/api/credentials?${buildParams(p, overrides)}`)
       const json = await res.json()
       if (json.success) {
         setData(json)
@@ -678,7 +682,14 @@ export default function CredentialsPage() {
     setEmailDomainFilter(''); setSourceFileFilter(''); setUrlHostFilter('')
     setRegexMode(false)
     setSortKey('imported_desc'); setLimit(50)
-    setTimeout(() => load(1), 0)
+    // Fetch directly with hardcoded defaults — all state setters above are async,
+    // so calling load() here would still see the old values via its closure.
+    setLoading(true)
+    fetch('/api/credentials?page=1&limit=50&sort=imported_desc')
+      .then(r => r.json())
+      .then(json => { if (json.success) { setData(json); setPage(1) } })
+      .catch(() => { toast({ title: 'Failed to load', variant: 'destructive' }) })
+      .finally(() => setLoading(false))
   }
 
   const copy = (text: string) => {
@@ -694,11 +705,11 @@ export default function CredentialsPage() {
   // Quick-action callbacks from the detail sheet
   const handleSearchEmail = (email: string) => {
     setQ(email)
-    setTimeout(() => load(1), 0)
+    load(1, { q: email })
   }
   const handleSearchDomain = (dom: string) => {
     setDomain(dom)
-    setTimeout(() => load(1), 0)
+    load(1, { domain: dom })
   }
 
   /** Cycle sort: unsorted → asc → desc → reset; updates the dropdown in sync. */
@@ -707,7 +718,7 @@ export default function CredentialsPage() {
                : sortKey === descKey ? 'imported_desc'
                : ascKey
     setSortKey(next)
-    setTimeout(() => load(1), 0)
+    load(1, { sort: next })
   }
 
   /** Render the correct sort icon for a column header. */
@@ -803,7 +814,7 @@ export default function CredentialsPage() {
               <ArrowUpDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
               <select
                 value={sortKey}
-                onChange={e => { setSortKey(e.target.value); setTimeout(() => load(1), 0) }}
+                onChange={e => { const s = e.target.value; setSortKey(s); load(1, { sort: s }) }}
                 className={selectCls}
               >
                 {SORT_OPTIONS.map(o => (
@@ -815,7 +826,7 @@ export default function CredentialsPage() {
             {/* Page size */}
             <select
               value={limit}
-              onChange={e => { setLimit(Number(e.target.value)); setTimeout(() => load(1), 0) }}
+              onChange={e => { const l = Number(e.target.value); setLimit(l); load(1, { limit: l }) }}
               className={selectCls}
               title="Rows per page"
             >
