@@ -4,11 +4,9 @@ import path from 'path'
 const isDev = process.env.NODE_ENV === 'development'
 
 const nextConfig = {
-  // Enable instrumentation hook for global error handlers
+  // Tell Next.js not to bundle better-sqlite3 (native addon — must be required at runtime)
+  serverExternalPackages: ['better-sqlite3'],
   experimental: {
-    instrumentationHook: true,
-    // Tell Next.js not to bundle better-sqlite3 (native addon — must be required at runtime)
-    serverComponentsExternalPackages: ['better-sqlite3'],
     // Disabled: worker process duplicates memory; single-process build uses less RAM (avoids OOM on large apps)
     webpackBuildWorker: false,
     // Exclude large data folders from output file tracing (fixes slow builds)
@@ -48,9 +46,7 @@ const nextConfig = {
   },
   // Enable standalone output for smaller Docker images (production only)
   ...(isDev ? {} : { output: 'standalone' }),
-  // Bundle optimization (only in production - not compatible with Turbo)
-  swcMinify: true,
-  ...(!isDev ? {
+...(!isDev ? {
     compiler: {
       removeConsole: {
         exclude: ['error', 'warn']
