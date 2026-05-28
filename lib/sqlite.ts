@@ -209,6 +209,28 @@ function initSchema(db: Database.Database): void {
       updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (category_id) REFERENCES feed_categories(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS webhook_outbox (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      monitor_id       INTEGER NOT NULL,
+      webhook_id       INTEGER NOT NULL,
+      payload          TEXT    NOT NULL,
+      source_file      TEXT    NOT NULL,
+      matched_domain   TEXT    NOT NULL,
+      cred_count       INTEGER NOT NULL DEFAULT 0,
+      status           TEXT    NOT NULL DEFAULT 'pending',
+      attempt_count    INTEGER NOT NULL DEFAULT 1,
+      next_attempt_at  TEXT    NOT NULL,
+      last_error       TEXT,
+      created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+      updated_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+  `)
+
+  // Index for the outbox worker's hot-path query
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_webhook_outbox_status_next
+      ON webhook_outbox (status, next_attempt_at)
   `)
 
   // Add rescan columns to existing databases (idempotent — catch swallows "duplicate column" errors)
