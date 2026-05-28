@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
 import { executeQuery } from "@/lib/clickhouse"
+import { NORM_EMAIL_EXPR, NORM_DOMAIN_EXPR } from '@/lib/ulp-normalize'
 
 export const dynamic = 'force-dynamic'
 
@@ -33,7 +34,7 @@ export async function GET(request: NextRequest) {
       results = await executeQuery(
         `SELECT url, email, domain, source_file, imported_at
          FROM ulp.credentials
-         WHERE email = {email:String}
+         WHERE (${NORM_EMAIL_EXPR}) = {email:String}
          ORDER BY imported_at DESC LIMIT 100`,
         { email }
       )
@@ -50,7 +51,7 @@ export async function GET(request: NextRequest) {
     results = await executeQuery(
       `SELECT url, email, domain, source_file, imported_at
        FROM ulp.credentials
-       WHERE domain = {domain:String}
+       WHERE (${NORM_DOMAIN_EXPR}) = {domain:String}
        ORDER BY imported_at DESC LIMIT 100`,
       { domain }
     )
