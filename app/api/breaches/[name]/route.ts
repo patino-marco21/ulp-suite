@@ -10,12 +10,13 @@ export const dynamic = 'force-dynamic'
 // Returns breach metadata + ClickHouse stats (credential count, top domains, sources).
 export async function GET(
   request: NextRequest,
-  { params }: { params: { name: string } }
+  { params }: { params: Promise<{ name: string }> }
 ) {
   const user = await validateRequest(request)
   if (!user) return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
 
-  const breachName = decodeURIComponent(params.name)
+  const { name } = await params
+  const breachName = decodeURIComponent(name)
   const row = dbGet(`SELECT * FROM breaches WHERE breach_name = ?`, [breachName]) as Record<string, unknown> | undefined
   if (!row) return NextResponse.json({ success: false, error: "Breach not found" }, { status: 404 })
 
@@ -56,13 +57,14 @@ export async function GET(
 // Update breach metadata fields.
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { name: string } }
+  { params }: { params: Promise<{ name: string }> }
 ) {
   const user = await validateRequest(request)
   const adminError = requireAdminRole(user)
   if (adminError) return adminError
 
-  const breachName = decodeURIComponent(params.name)
+  const { name } = await params
+  const breachName = decodeURIComponent(name)
   const existing = dbGet(`SELECT id FROM breaches WHERE breach_name = ?`, [breachName])
   if (!existing) return NextResponse.json({ success: false, error: "Breach not found" }, { status: 404 })
 
@@ -108,13 +110,14 @@ export async function PATCH(
 // Removes breach record from SQLite (does NOT alter ClickHouse credentials).
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { name: string } }
+  { params }: { params: Promise<{ name: string }> }
 ) {
   const user = await validateRequest(request)
   const adminError = requireAdminRole(user)
   if (adminError) return adminError
 
-  const breachName = decodeURIComponent(params.name)
+  const { name } = await params
+  const breachName = decodeURIComponent(name)
   const existing = dbGet(`SELECT id FROM breaches WHERE breach_name = ?`, [breachName])
   if (!existing) return NextResponse.json({ success: false, error: "Breach not found" }, { status: 404 })
 
