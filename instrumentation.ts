@@ -42,6 +42,13 @@ export async function register() {
       } catch (err) {
         console.error('[instrumentation] Monitor rescan cron failed to start:', err)
       }
+
+      try {
+        const { startInboxWatcher } = await import('./lib/inbox-watcher')
+        startInboxWatcher()
+      } catch (err) {
+        console.error('[instrumentation] Inbox watcher failed to start:', err)
+      }
     }
   }
 }
