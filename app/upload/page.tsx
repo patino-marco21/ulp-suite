@@ -2,7 +2,7 @@
 export const dynamic = "force-dynamic"
 
 import { useState, useRef, useCallback, useEffect } from "react"
-import { Upload, FileText, FileArchive, CheckCircle, AlertCircle, Loader2, X, TrendingDown, FlaskConical, CheckCheck, XCircle, ChevronDown, ChevronUp } from "lucide-react"
+import { Upload, FileText, FileArchive, CheckCircle, AlertCircle, Loader2, X, TrendingDown, FlaskConical, CheckCheck, XCircle, ChevronDown, ChevronUp, Activity, Clock, Inbox } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
@@ -450,6 +450,9 @@ export default function UploadPage() {
         </Alert>
       )}
 
+      {/* Queue status — always visible for admins */}
+      <QueueStatusPanel />
+
       {/* Format guide */}
       <Card className="mt-6">
         <CardHeader>
@@ -728,6 +731,181 @@ function ParseSamplePanel() {
                 <p className="text-[11px] text-muted-foreground/60 italic">{result.note}</p>
               )}
             </div>
+          )}
+        </CardContent>
+      )}
+    </Card>
+  )
+}
+
+// ─── Queue Status Panel ───────────────────────────────────────────────────────
+
+interface QueueJob {
+  id:            number
+  source:        'http' | 'inbox'
+  filename:      string
+  status:        'done' | 'failed'
+  imported:      number
+  skipped:       number
+  duration_ms:   number
+  error_message: string | null
+  breach_name:   string | null
+  created_at:    string
+}
+
+interface QueueStatus {
+  queue: {
+    active:       number
+    pending:      number
+    current_file: string | null
+  }
+  recent: QueueJob[]
+  totals: {
+    files_done:    number
+    files_failed:  number
+    rows_imported: number
+    rows_skipped:  number
+  }
+}
+
+function fmtDuration(ms: number): string {
+  if (ms < 1_000)    return `${ms}ms`
+  if (ms < 60_000)   return `${(ms / 1_000).toFixed(0)}s`
+  const m = Math.floor(ms / 60_000)
+  const s = Math.floor((ms % 60_000) / 1_000)
+  return `${m}m${s.toString().padStart(2, '0')}s`
+}
+
+function fmtRows(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(0)}K`
+  return String(n)
+}
+
+function QueueStatusPanel() {
+  const [open, setOpen]   = useState(true)
+  const [data, setData]   = useState<QueueStatus | null>(null)
+  const [error, setError] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/upload/queue-status')
+        if (!res.ok) { setError(true); return }
+        const json = await res.json()
+        if (!cancelled) { setData(json); setError(false) }
+      } catch {
+        if (!cancelled) setError(true)
+      }
+    }
+
+    poll()
+    const id = setInterval(poll, 3_000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [])
+
+  const isActive = (data?.queue.active ?? 0) > 0 || (data?.queue.pending ?? 0) > 0
+
+  const summary = data
+    ? `${fmtRows(data.totals.rows_imported)} rows · ${data.totals.files_done} files · ${data.totals.files_failed} failed`
+    : 'Loading…'
+
+  return (
+    <Card className="mt-6">
+      <CardHeader
+        className="cursor-pointer select-none py-3"
+        onClick={() => setOpen(o => !o)}
+      >
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Activity className={`h-4 w-4 ${isActive ? 'text-green-500 animate-pulse' : 'text-muted-foreground'}`} />
+            <CardTitle className="text-base">Processing Queue</CardTitle>
+            {isActive && (
+              <Badge variant="outline" className="text-xs text-green-600 border-green-500/40">
+                ● Live
+              </Badge>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            {!open && <span className="text-xs text-muted-foreground">{summary}</span>}
+            {open ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+          </div>
+        </div>
+      </CardHeader>
+
+      {open && (
+        <CardContent className="pt-0 pb-4 space-y-3">
+          {error && (
+            <p className="text-xs text-muted-foreground">Could not load queue status.</p>
+          )}
+
+          {data && (
+            <>
+              <div className="flex items-center gap-4 text-sm flex-wrap">
+                <div className="flex items-center gap-1.5">
+                  {isActive
+                    ? <Loader2 className="h-3.5 w-3.5 animate-spin text-green-500" />
+                    : <span className="h-3.5 w-3.5 flex items-center justify-center text-muted-foreground">○</span>
+                  }
+                  <span className={isActive ? 'text-green-600 dark:text-green-400 font-medium' : 'text-muted-foreground'}>
+                    {isActive ? 'Processing' : 'Idle'}
+                  </span>
+                </div>
+                {data.queue.current_file && (
+                  <span className="text-xs font-mono text-muted-foreground truncate max-w-xs" title={data.queue.current_file}>
+                    {data.queue.current_file}
+                    {data.queue.pending > 0 && (
+                      <span className="ml-2 text-muted-foreground">+{data.queue.pending} waiting</span>
+                    )}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex gap-4 text-xs text-muted-foreground flex-wrap">
+                <span><span className="font-medium text-foreground">{fmtRows(data.totals.rows_imported)}</span> rows imported</span>
+                <span><span className="font-medium text-foreground">{data.totals.files_done}</span> files done</span>
+                {data.totals.files_failed > 0 && (
+                  <span className="text-red-500"><span className="font-medium">{data.totals.files_failed}</span> failed</span>
+                )}
+              </div>
+
+              {data.recent.length > 0 && (
+                <div className="space-y-0.5 max-h-52 overflow-y-auto">
+                  {data.recent.map(job => (
+                    <div key={job.id} className="flex items-center gap-2 text-xs py-0.5">
+                      {job.status === 'done'
+                        ? <CheckCircle className="h-3 w-3 shrink-0 text-green-500" />
+                        : <XCircle    className="h-3 w-3 shrink-0 text-red-500" />
+                      }
+                      <Badge variant="outline" className="text-[10px] px-1 py-0 shrink-0">
+                        {job.source === 'http' ? 'http' : <Inbox className="h-2.5 w-2.5" />}
+                      </Badge>
+                      <span className="font-mono truncate flex-1 text-muted-foreground" title={job.filename}>
+                        {job.filename}
+                      </span>
+                      {job.status === 'done' ? (
+                        <>
+                          <span className="tabular-nums shrink-0">{fmtRows(job.imported)} rows</span>
+                          <span className="text-muted-foreground shrink-0 flex items-center gap-0.5">
+                            <Clock className="h-2.5 w-2.5" />{fmtDuration(job.duration_ms)}
+                          </span>
+                        </>
+                      ) : (
+                        <span className="text-red-500 truncate max-w-[200px]" title={job.error_message ?? ''}>
+                          {job.error_message ?? 'failed'}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {data.recent.length === 0 && (
+                <p className="text-xs text-muted-foreground">No jobs processed yet.</p>
+              )}
+            </>
           )}
         </CardContent>
       )}
