@@ -58,6 +58,12 @@ export default function UploadPage() {
   const [elapsedMs, setElapsedMs]       = useState(0)
   const eventSourceRef                  = useRef<EventSource | null>(null)
 
+  // ── Queue state ────────────────────────────────────────────────────────────
+  const [fileQueue, setFileQueue]   = useState<File[]>([])
+  const [queueIndex, setQueueIndex] = useState(0)
+  const [allResults, setAllResults] = useState<UploadResult[]>([])
+  const isProcessingRef             = useRef(false)
+
   const inputRef = useRef<HTMLInputElement>(null)
 
   // Clean up EventSource on unmount
@@ -65,101 +71,132 @@ export default function UploadPage() {
     return () => { eventSourceRef.current?.close() }
   }, [])
 
-  function startSSE(id: string) {
-    setLiveImported(0); setLiveSkipped(0); setLivePct(0); setElapsedMs(0)
 
-    const es = new EventSource(`/api/upload/progress/${id}`)
-    eventSourceRef.current = es
+  /**
+   * Process a single file. Returns a Promise that resolves when the file is
+   * fully done (SSE done/error for text files; sync response for ZIPs).
+   * Always resolves — never rejects — so the queue loop continues on errors.
+   */
+  const processFileSingle = useCallback((file: File): Promise<void> => {
+    return new Promise<void>((resolve) => {
+      const ext = file.name.toLowerCase()
+      if (!ext.endsWith('.txt') && !ext.endsWith('.csv') && !ext.endsWith('.zip')) {
+        resolve()
+        return
+      }
 
-    es.onmessage = (e: MessageEvent) => {
-      const data = JSON.parse(e.data)
-      setLiveImported(data.imported ?? 0)
-      setLiveSkipped(data.skipped ?? 0)
-      setLivePct(data.pct ?? 0)
-      setElapsedMs(data.elapsed_ms ?? 0)
+      setState('uploading')
+      setProgress(20)
+      setResult(null)
+      setErrorMsg('')
 
-      if (data.status === 'done') {
-        setState('success')
-        setResult({
-          imported:            data.imported,
-          skipped:             data.skipped,
-          errors:              0,
-          filename:            '',
-          breach_name:         '',
-          rejection_breakdown: data.rejection_breakdown ?? {},
+      const formData = new FormData()
+      formData.append('file', file)
+
+      fetch('/api/upload', { method: 'POST', body: formData })
+        .then(r => r.json())
+        .then((data: any) => {
+          setProgress(90)
+          if (!data.success) throw new Error(data.error || 'Upload failed')
+
+          if (data.jobId) {
+            // SSE path — resolve when server signals done or error
+            setLiveImported(0); setLiveSkipped(0); setLivePct(0); setElapsedMs(0)
+            const es = new EventSource(`/api/upload/progress/${data.jobId}`)
+            eventSourceRef.current = es
+
+            es.onmessage = (e: MessageEvent) => {
+              const d = JSON.parse(e.data)
+              setLiveImported(d.imported ?? 0)
+              setLiveSkipped(d.skipped   ?? 0)
+              setLivePct(d.pct           ?? 0)
+              setElapsedMs(d.elapsed_ms  ?? 0)
+
+              if (d.status === 'done') {
+                const r: UploadResult = {
+                  imported:            d.imported,
+                  skipped:             d.skipped,
+                  errors:              0,
+                  filename:            file.name,
+                  breach_name:         '',
+                  rejection_breakdown: d.rejection_breakdown ?? {},
+                }
+                setResult(r)
+                setAllResults(prev => [...prev, r])
+                es.close()
+                resolve()
+              }
+              if (d.status === 'error') {
+                setErrorMsg(d.error || 'Upload failed')
+                setState('error')
+                toast({ title: d.error || 'Upload failed', variant: 'destructive' })
+                es.close()
+                resolve()
+              }
+            }
+            es.onerror = () => { es.close(); resolve() }
+          } else {
+            // Sync path (ZIP)
+            const r = data as UploadResult
+            setResult(r)
+            setAllResults(prev => [...prev, r])
+            resolve()
+          }
         })
-        es.close()
-      }
-      if (data.status === 'error') {
-        setState('error')
-        setErrorMsg(data.error || 'Upload failed')
-        toast({ title: data.error || 'Upload failed', variant: 'destructive' })
-        es.close()
-      }
-    }
+        .catch(err => {
+          setErrorMsg(err instanceof Error ? err.message : 'Upload failed')
+          setState('error')
+          setProgress(0)
+          resolve()
+        })
+    })
+  }, [toast])
 
-    es.onerror = () => { es.close() }
-  }
-
-  const processFile = useCallback(async (file: File) => {
-    const ext = file.name.toLowerCase()
-    if (!ext.endsWith('.txt') && !ext.endsWith('.csv') && !ext.endsWith('.zip')) {
-      toast({ title: 'Unsupported file type. Use .txt, .csv, or .zip', variant: 'destructive' })
+  /** Enqueue multiple files and process them one at a time. */
+  const processQueue = useCallback(async (files: File[]) => {
+    if (isProcessingRef.current) return
+    const valid = files.filter(f => f.name.match(/\.(txt|csv|zip)$/i))
+    if (valid.length === 0) {
+      toast({ title: 'No supported files selected (.txt, .csv, .zip)', variant: 'destructive' })
       return
     }
 
-    setState('uploading')
-    setProgress(20)
-    setResult(null)
-    setErrorMsg('')
+    isProcessingRef.current = true
+    setFileQueue(valid)
+    setAllResults([])
+    setQueueIndex(0)
 
-    const formData = new FormData()
-    formData.append('file', file)
-
-    try {
-      setProgress(50)
-      const res = await fetch('/api/upload', { method: 'POST', body: formData })
-      setProgress(90)
-      const data = await res.json()
-
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Upload failed')
-      }
-
-      if (data.jobId) {
-        // SSE mode — stay in 'uploading' state; SSE events transition to success/error
-        startSSE(data.jobId)
-      } else {
-        // Legacy sync response (ZIP or other)
-        setResult(data)
-        setState('success')
-        setProgress(100)
-      }
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Upload failed')
-      setState('error')
-      setProgress(0)
+    for (let i = 0; i < valid.length; i++) {
+      setQueueIndex(i)
+      await processFileSingle(valid[i])
     }
-  }, [toast])
+
+    setState('success')
+    isProcessingRef.current = false
+  }, [processFileSingle, toast])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     setDragOver(false)
-    const file = e.dataTransfer.files[0]
-    if (file) processFile(file)
-  }, [processFile])
+    const files = Array.from(e.dataTransfer.files)
+    if (files.length > 0) processQueue(files)
+  }, [processQueue])
 
   const handleFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) processFile(file)
+    const files = Array.from(e.target.files || [])
+    if (files.length > 0) processQueue(files)
     e.target.value = ''
-  }, [processFile])
+  }, [processQueue])
 
   const reset = () => {
     setState('idle')
     setProgress(0)
     setResult(null)
     setErrorMsg('')
+    setFileQueue([])
+    setQueueIndex(0)
+    setAllResults([])
+    isProcessingRef.current = false
   }
 
   if (authLoading) {
@@ -200,8 +237,10 @@ export default function UploadPage() {
         >
           <CardContent className="flex flex-col items-center justify-center py-16 text-center">
             <Upload className="mb-4 h-12 w-12 text-muted-foreground" />
-            <p className="text-lg font-medium">Drop file here or click to browse</p>
-            <p className="mt-1 text-sm text-muted-foreground">Supports .txt, .csv, and .zip archives</p>
+            <p className="text-lg font-medium">Drop files here or click to browse</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Select multiple files — processed one at a time in order
+            </p>
             <div className="mt-4 flex gap-3 flex-wrap justify-center">
               <div className="flex items-center gap-1 text-xs text-muted-foreground">
                 <FileText className="h-4 w-4" /> .txt / .csv — ULP text
@@ -213,6 +252,7 @@ export default function UploadPage() {
             <input
               ref={inputRef}
               type="file"
+              multiple
               accept=".txt,.csv,.zip"
               className="hidden"
               onChange={handleFileInput}
@@ -225,6 +265,17 @@ export default function UploadPage() {
       {state === 'uploading' && (
         <Card>
           <CardContent className="p-6 space-y-4">
+            {/* Queue position badge */}
+            {fileQueue.length > 1 && (
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <span className="font-mono truncate max-w-[200px]" title={fileQueue[queueIndex]?.name}>
+                  {fileQueue[queueIndex]?.name}
+                </span>
+                <Badge variant="outline" className="shrink-0">
+                  {queueIndex + 1} / {fileQueue.length}
+                </Badge>
+              </div>
+            )}
             <div className="flex items-center justify-between text-sm">
               <span className="font-medium flex items-center gap-2">
                 <Loader2 className="h-4 w-4 animate-spin text-primary" />
@@ -251,114 +302,142 @@ export default function UploadPage() {
       )}
 
       {/* Success */}
-      {state === 'success' && result && (
-        <Card className="border-green-500/30 bg-green-500/5">
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <CheckCircle className="h-5 w-5 text-green-500" />
-              <CardTitle className="text-green-600 dark:text-green-400">Import complete</CardTitle>
-            </div>
-            <CardDescription className="flex items-center gap-2 flex-wrap">
-              <span>{result.filename}</span>
-              {result.breach_name && (
-                <Badge variant="outline" className="text-xs">{result.breach_name}</Badge>
-              )}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="grid grid-cols-3 gap-3">
-              <StatBox label="Imported" value={result.imported.toLocaleString()} color="green" />
-              <StatBox label="Skipped" value={result.skipped.toLocaleString()} color="yellow" />
-              <StatBox label="Errors" value={result.errors.toLocaleString()} color="red" />
-            </div>
+      {state === 'success' && allResults.length > 0 && (() => {
+        const totalImported = allResults.reduce((s, r) => s + r.imported, 0)
+        const totalSkipped  = allResults.reduce((s, r) => s + r.skipped,  0)
+        const totalErrors   = allResults.reduce((s, r) => s + r.errors,   0)
+        const mergedBreakdown = allResults.reduce((acc, r) => {
+          for (const [k, v] of Object.entries(r.rejection_breakdown ?? {}))
+            acc[k] = (acc[k] ?? 0) + v
+          return acc
+        }, {} as Record<string, number>)
+        const total      = totalImported + totalSkipped
+        const import_pct = total > 0 ? Math.round(totalImported / total * 1000) / 10 : 0
+        const fileRows = allResults.length > 1
+          ? allResults.flatMap(r =>
+              r.files ?? [{ filename: r.filename, breach_name: r.breach_name ?? '', imported: r.imported }]
+            )
+          : allResults[0].files
+        const displayResult: UploadResult = {
+          imported:            totalImported,
+          skipped:             totalSkipped,
+          errors:              totalErrors,
+          import_pct,
+          filename:            allResults.length === 1
+                                 ? allResults[0].filename
+                                 : `${allResults.length} files`,
+          breach_name:         allResults.length === 1 ? allResults[0].breach_name : undefined,
+          rejection_breakdown: mergedBreakdown,
+          files:               fileRows,
+        }
 
-            {/* Import rate */}
-            {result.import_pct !== undefined && (
-              <div className="flex items-center gap-2 rounded-md border bg-background px-3 py-2">
-                <div className="flex-1">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs text-muted-foreground">Import rate</span>
-                    <span className={`text-sm font-semibold tabular-nums ${
-                      result.import_pct >= 80 ? 'text-green-600 dark:text-green-400'
-                      : result.import_pct >= 50 ? 'text-yellow-600 dark:text-yellow-400'
-                      : 'text-red-600 dark:text-red-400'
-                    }`}>
-                      {result.import_pct}%
-                    </span>
-                  </div>
-                  <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-                    <div
-                      className={`h-full rounded-full transition-all ${
-                        result.import_pct >= 80 ? 'bg-green-500'
-                        : result.import_pct >= 50 ? 'bg-yellow-500'
-                        : 'bg-red-500'
-                      }`}
-                      style={{ width: `${Math.min(100, result.import_pct)}%` }}
-                    />
+        return (
+          <Card className="border-green-500/30 bg-green-500/5">
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                <CheckCircle className="h-5 w-5 text-green-500" />
+                <CardTitle className="text-green-600 dark:text-green-400">Import complete</CardTitle>
+              </div>
+              <CardDescription className="flex items-center gap-2 flex-wrap">
+                <span>{displayResult.filename}</span>
+                {displayResult.breach_name && (
+                  <Badge variant="outline" className="text-xs">{displayResult.breach_name}</Badge>
+                )}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="grid grid-cols-3 gap-3">
+                <StatBox label="Imported" value={displayResult.imported.toLocaleString()} color="green" />
+                <StatBox label="Skipped"  value={displayResult.skipped.toLocaleString()}  color="yellow" />
+                <StatBox label="Errors"   value={displayResult.errors.toLocaleString()}   color="red" />
+              </div>
+
+              {displayResult.import_pct !== undefined && (
+                <div className="flex items-center gap-2 rounded-md border bg-background px-3 py-2">
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs text-muted-foreground">Import rate</span>
+                      <span className={`text-sm font-semibold tabular-nums ${
+                        import_pct >= 80 ? 'text-green-600 dark:text-green-400'
+                        : import_pct >= 50 ? 'text-yellow-600 dark:text-yellow-400'
+                        : 'text-red-600 dark:text-red-400'
+                      }`}>
+                        {import_pct}%
+                      </span>
+                    </div>
+                    <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all ${
+                          import_pct >= 80 ? 'bg-green-500'
+                          : import_pct >= 50 ? 'bg-yellow-500'
+                          : 'bg-red-500'
+                        }`}
+                        style={{ width: `${Math.min(100, import_pct)}%` }}
+                      />
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              )}
 
-            {/* Rejection breakdown */}
-            {result.rejection_breakdown && result.skipped > 0 && (() => {
-              const total = result.imported + result.skipped
-              const rejections = topRejections(result.rejection_breakdown, total)
-              if (rejections.length === 0) return null
-              return (
-                <div>
-                  <div className="flex items-center gap-1.5 mb-2">
-                    <TrendingDown className="h-3.5 w-3.5 text-muted-foreground" />
-                    <p className="text-xs text-muted-foreground font-medium">Why lines were skipped</p>
-                  </div>
-                  <div className="space-y-1.5">
-                    {rejections.map(r => (
-                      <div key={r.reason} className="flex items-center gap-2 text-xs">
-                        <div className="w-24 shrink-0">
-                          <div className="h-1 w-full rounded-full bg-muted overflow-hidden">
-                            <div className="h-full rounded-full bg-orange-400/70" style={{ width: `${Math.min(100, r.pct)}%` }} />
+              {displayResult.rejection_breakdown && displayResult.skipped > 0 && (() => {
+                const rejTotal   = displayResult.imported + displayResult.skipped
+                const rejections = topRejections(displayResult.rejection_breakdown, rejTotal)
+                if (rejections.length === 0) return null
+                return (
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <TrendingDown className="h-3.5 w-3.5 text-muted-foreground" />
+                      <p className="text-xs text-muted-foreground font-medium">Why lines were skipped</p>
+                    </div>
+                    <div className="space-y-1.5">
+                      {rejections.map(r => (
+                        <div key={r.reason} className="flex items-center gap-2 text-xs">
+                          <div className="w-24 shrink-0">
+                            <div className="h-1 w-full rounded-full bg-muted overflow-hidden">
+                              <div className="h-full rounded-full bg-orange-400/70" style={{ width: `${Math.min(100, r.pct)}%` }} />
+                            </div>
                           </div>
+                          <span className="tabular-nums text-muted-foreground shrink-0 w-10 text-right">{r.pct}%</span>
+                          <span className="text-muted-foreground truncate">{r.label}</span>
                         </div>
-                        <span className="tabular-nums text-muted-foreground shrink-0 w-10 text-right">{r.pct}%</span>
-                        <span className="text-muted-foreground truncate">{r.label}</span>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })()}
+
+              {displayResult.files && displayResult.files.length > 0 && (
+                <div>
+                  <p className="text-xs text-muted-foreground mb-2">
+                    Files imported ({displayResult.files.length}):
+                  </p>
+                  <div className="space-y-1 max-h-48 overflow-y-auto">
+                    {displayResult.files.map(f => (
+                      <div key={f.filename} className="flex items-center gap-2 text-xs py-0.5">
+                        <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
+                        <span className="font-mono truncate flex-1" title={f.filename}>{f.filename}</span>
+                        <span className="text-muted-foreground tabular-nums shrink-0">
+                          {f.imported.toLocaleString()} rows
+                        </span>
+                        {f.breach_name && (
+                          <Badge variant="outline" className="text-xs shrink-0">{f.breach_name}</Badge>
+                        )}
                       </div>
                     ))}
                   </div>
                 </div>
-              )
-            })()}
+              )}
 
-            {result.files && result.files.length > 0 && (
-              <div>
-                <p className="text-xs text-muted-foreground mb-2">
-                  Files imported from archive ({result.files.length}):
-                </p>
-                <div className="space-y-1 max-h-48 overflow-y-auto">
-                  {result.files.map(f => (
-                    <div key={f.filename} className="flex items-center gap-2 text-xs py-0.5">
-                      <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
-                      <span className="font-mono truncate flex-1" title={f.filename}>{f.filename}</span>
-                      <span className="text-muted-foreground tabular-nums shrink-0">
-                        {f.imported.toLocaleString()} rows
-                      </span>
-                      {f.breach_name && (
-                        <Badge variant="outline" className="text-xs shrink-0">{f.breach_name}</Badge>
-                      )}
-                    </div>
-                  ))}
-                </div>
+              <div className="flex gap-2 pt-2">
+                <Button onClick={reset} variant="outline">Upload more</Button>
+                <Button asChild>
+                  <Link href="/credentials">Search credentials</Link>
+                </Button>
               </div>
-            )}
-
-            <div className="flex gap-2 pt-2">
-              <Button onClick={reset} variant="outline">Upload another</Button>
-              <Button asChild>
-                <Link href="/credentials">Search credentials</Link>
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+            </CardContent>
+          </Card>
+        )
+      })()}
 
       {/* Error */}
       {state === 'error' && (
