@@ -13,7 +13,7 @@
 
 import { dbQuery, dbRun } from '@/lib/sqlite'
 import { executeQuery as executeClickHouseQuery } from '@/lib/clickhouse'
-import { NORM_DOMAIN_EXPR } from '@/lib/ulp-normalize'
+import { NORM_DOMAIN_EXPR, NORM_EMAIL_EXPR } from '@/lib/ulp-normalize'
 import crypto from 'crypto'
 
 const TICK_MS = 15 * 60 * 1000  // 15 minutes
@@ -105,7 +105,7 @@ async function runTick(): Promise<void> {
           `SELECT url, email, password, (${NORM_DOMAIN_EXPR}) AS domain
            FROM ulp.credentials
            WHERE (${NORM_DOMAIN_EXPR}) = {domain:String}
-              OR endsWith(lower(${NORM_DOMAIN_EXPR}), {emailSuffix:String})
+              OR endsWith(lower(${NORM_EMAIL_EXPR}), {emailSuffix:String})
            LIMIT 100`,
           { domain: d, emailSuffix: `@${d}` }
         ) as CredentialRow[]

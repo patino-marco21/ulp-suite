@@ -1,5 +1,6 @@
 import { dbQuery, dbGet, dbRun } from '@/lib/sqlite'
 import { executeQuery as executeClickHouseQuery } from '@/lib/clickhouse'
+import { NORM_DOMAIN_EXPR, NORM_EMAIL_EXPR } from '@/lib/ulp-normalize'
 import crypto from 'crypto'
 
 // ─── Fingerprinting ───────────────────────────────────────────────────────────
@@ -389,10 +390,10 @@ export async function checkMonitorsForULPUpload(
         for (const domain of monitor.domains) {
           const d = domain.toLowerCase().trim()
           const rows = await executeClickHouseQuery(
-            `SELECT url, email, password, domain
+            `SELECT url, email, password, (${NORM_DOMAIN_EXPR}) AS domain
              FROM ulp.credentials
              WHERE source_file = {sourceFile:String}
-               AND (domain = {domain:String} OR endsWith(lower(email), {emailSuffix:String}))
+               AND ((${NORM_DOMAIN_EXPR}) = {domain:String} OR endsWith(lower(${NORM_EMAIL_EXPR}), {emailSuffix:String}))
              LIMIT 100`,
             { sourceFile, domain: d, emailSuffix: `@${d}` }
           ) as Array<{ url: string; email: string; password: string; domain: string }>
