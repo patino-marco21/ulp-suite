@@ -38,14 +38,14 @@ export const metadata: Metadata = {
 //   })
 // }
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode
 }) {
   // Read user_role cookie on the server so the sidebar SSR HTML
   // already contains the correct menu items (no 2-step flash).
-  const cookieStore = cookies()
+  const cookieStore = await cookies()
   const initialUserRole = cookieStore.get('user_role')?.value || null
 
   return (
