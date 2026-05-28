@@ -14,6 +14,7 @@
 import { dbQuery, dbRun } from '@/lib/sqlite'
 import { executeQuery as executeClickHouseQuery } from '@/lib/clickhouse'
 import { NORM_DOMAIN_EXPR, NORM_EMAIL_EXPR } from '@/lib/ulp-normalize'
+import { attemptDelivery, enqueueFailedDelivery, runWebhookOutboxTick } from '@/lib/webhook-outbox-worker'
 import crypto from 'crypto'
 
 const TICK_MS = 15 * 60 * 1000  // 15 minutes
@@ -81,6 +82,7 @@ async function runTick(): Promise<void> {
 
   if (dueMonitors.length === 0) {
     console.log('[monitor-rescan] tick: due=0 fired=0')
+    await runWebhookOutboxTick()
     return
   }
 
@@ -167,10 +169,31 @@ async function runTick(): Promise<void> {
       }
       const payloadJson = JSON.stringify(payload)
 
-      // Fire webhooks (fire-and-forget with basic error logging)
+      // Sequential delivery is intentional: inline attempt + outbox enqueue must not race.
+      const matchedDomain = domains.join(',')
       for (const wr of webhookRows) {
-        deliverWebhookSimple(wr, payloadJson, monitorRow.id, domains.join(','), unseenRows.length)
-          .catch(err => console.error(`[monitor-rescan] webhook delivery error: ${err}`))
+        let parsedHeaders: Record<string, string> | null = null
+        try { parsedHeaders = wr.headers ? JSON.parse(wr.headers) : null } catch {}
+        const result = await attemptDelivery({ url: wr.url, secret: wr.secret, headers: parsedHeaders }, payloadJson)
+        dbRun(
+          `INSERT INTO monitor_alerts
+             (monitor_id, webhook_id, source_file, matched_domain, match_type,
+              credential_match_count, payload_sent, status, http_status, retry_count)
+           VALUES (?, ?, '[scheduled-rescan]', ?, 'credential_email', ?, ?, ?, ?, 0)`,
+          [monitorRow.id, wr.id, matchedDomain,
+           unseenRows.length, payloadJson, result.ok ? 'success' : 'failed', result.status ?? null],
+        )
+        dbRun(`UPDATE monitor_webhooks SET last_triggered_at = datetime('now') WHERE id = ?`, [wr.id])
+        if (!result.ok) {
+          if (result.status !== null && result.status >= 400 && result.status < 500) {
+            // 4xx — permanent client error, don't retry
+            console.error(`[monitor-rescan] webhook delivery permanently failed (4xx, not queued): ${result.error}`)
+          } else {
+            // Network error or 5xx — queue for retry
+            enqueueFailedDelivery(monitorRow.id, wr.id, payloadJson, '[scheduled-rescan]', matchedDomain, unseenRows.length)
+            console.error(`[monitor-rescan] webhook delivery failed (queued for retry): ${result.error}`)
+          }
+        }
       }
 
       // Record seen fingerprints (dedup mode) or after re-clear (digest mode)
@@ -194,47 +217,8 @@ async function runTick(): Promise<void> {
   }
 
   console.log(`[monitor-rescan] tick: due=${dueMonitors.length} fired=${fired}`)
+
+  // Process any pending outbox retries from previous failed deliveries
+  await runWebhookOutboxTick()
 }
 
-// ─── Minimal webhook delivery ────────────────────────────────────────────────
-
-async function deliverWebhookSimple(
-  webhook: WebhookRow,
-  payloadJson: string,
-  monitorId: number,
-  matchedDomain: string,
-  credCount: number
-): Promise<void> {
-  let parsedHeaders: Record<string, string> = {}
-  try { parsedHeaders = webhook.headers ? JSON.parse(webhook.headers) : {} } catch {}
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'User-Agent': 'ULPSuite-DomainMonitor/1.0',
-    ...parsedHeaders,
-  }
-  if (webhook.secret) {
-    headers['X-Webhook-Signature'] = `sha256=${crypto.createHmac('sha256', webhook.secret).update(payloadJson).digest('hex')}`
-  }
-
-  try {
-    const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 30_000)
-    const res = await fetch(webhook.url, { method: 'POST', headers, body: payloadJson, signal: ctrl.signal })
-    clearTimeout(t)
-
-    dbRun(
-      `INSERT INTO monitor_alerts (monitor_id, webhook_id, source_file, matched_domain, match_type, credential_match_count, payload_sent, status, http_status)
-       VALUES (?, ?, '[scheduled-rescan]', ?, 'credential_email', ?, ?, ?, ?)`,
-      [monitorId, webhook.id, matchedDomain, credCount, payloadJson, res.ok ? 'success' : 'failed', res.status]
-    )
-    dbRun(`UPDATE monitor_webhooks SET last_triggered_at = datetime('now') WHERE id = ?`, [webhook.id])
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err)
-    dbRun(
-      `INSERT INTO monitor_alerts (monitor_id, webhook_id, source_file, matched_domain, match_type, credential_match_count, payload_sent, status, error_message)
-       VALUES (?, ?, '[scheduled-rescan]', ?, 'credential_email', ?, ?, 'failed', ?)`,
-      [monitorId, webhook.id, matchedDomain, credCount, payloadJson, errMsg]
-    )
-  }
-}
