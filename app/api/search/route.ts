@@ -46,7 +46,9 @@ export async function GET(request: NextRequest) {
   const tierInclude = searchParams.get('tier_include') || ''
   const tierExclude = searchParams.get('tier_exclude') || ''
   const loginType   = searchParams.get('login_type')  || ''
-  const page        = Math.max(1, parseInt(searchParams.get('page')  || '1'))
+  // Cap at page 2000 (max offset = 2000 × 1000 = 2 000 000 rows).
+  // Deep OFFSET over 100B+ rows is O(offset) — almost no use case needs page > 50.
+  const page        = Math.min(2_000, Math.max(1, parseInt(searchParams.get('page')  || '1')))
   const limit       = Math.min(1000, Math.max(1, parseInt(searchParams.get('limit') || '50')))
   const offset      = (page - 1) * limit
 

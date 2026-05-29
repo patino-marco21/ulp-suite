@@ -73,7 +73,10 @@ export async function GET(request: NextRequest) {
   }
 
   const sp = new URL(request.url).searchParams
-  const page  = Math.max(1, parseInt(sp.get('page')  || '1'))
+  // Cap at page 2000 (max offset = 2000 × 200 = 400 000 rows).
+  // Deep OFFSET scans over 100B+ rows are O(offset) even with primary-key
+  // pruning.  Almost no legitimate use case goes beyond page ~50.
+  const page  = Math.min(2_000, Math.max(1, parseInt(sp.get('page')  || '1')))
   const limit = Math.min(200, Math.max(1, parseInt(sp.get('limit') || '50')))
   const offset = (page - 1) * limit
 

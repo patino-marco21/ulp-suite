@@ -1,65 +1,28 @@
 /**
- * Upload API v1 - ULP Credentials Upload
- * POST /api/v1/upload  (multipart: file .txt or .zip)
- * ADMIN ONLY
+ * Upload API v1 — ULP Credentials Upload
+ * POST /api/v1/upload  (multipart: file .txt/.csv/.zip)
+ *
+ * API-key authenticated (admin role).  Goes through the shared uploadQueue
+ * (pLimit 1) so v1 API uploads are serialised with browser uploads and the
+ * inbox watcher — no RAM spikes from concurrent streams.
+ *
+ * Uses the same processing pipeline as the HTTP upload route:
+ *   - processTextStream  for .txt/.csv  (streaming, 500K-row batches)
+ *   - processZipFile     for .zip       (yauzl lazy entry streaming)
+ *   - logJob             for observability (appears in /inbox monitor)
+ *   - checkMonitorsForULPUpload  for domain monitor alerts
  */
 
 import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
-import { parseULPContent, parseULPStream, type ULPCredential } from "@/lib/ulp-parser"
-import { getClient } from "@/lib/clickhouse"
-import JSZip from "jszip"
+import { uploadQueue } from "@/lib/upload-queue"
+import { processTextStream, processZipFile, type ProcessResult } from "@/lib/upload-processor"
+import { logJob } from "@/lib/processing-log"
 
 export const dynamic    = "force-dynamic"
 export const maxDuration = 300  // 5 minutes — large uploads need sustained time
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024 * 1024  // 10 GB
-
-async function insertBatch(credentials: ULPCredential[]) {
-  if (!credentials.length) return
-  const client = getClient()
-  await client.insert({
-    table: 'ulp.credentials',
-    values: credentials,
-    format: 'JSONEachRow',
-    clickhouse_settings: {
-      async_insert:          1 as any,   // server-side buffering
-      wait_for_async_insert: 1 as any,   // back-pressure: wait for flush
-      max_execution_time:    0,          // no cap for inserts
-    },
-  })
-}
-
-async function recordSource(filename: string, lineCount: number) {
-  const client = getClient()
-  await client.insert({
-    table: 'ulp.sources',
-    values: [{ filename, line_count: lineCount }],
-    format: 'JSONEachRow',
-  })
-}
-
-/** Streaming processor — never loads the full file into memory. */
-async function processStream(stream: ReadableStream<Uint8Array>, filename: string) {
-  let imported = 0
-  for await (const batch of parseULPStream(stream, filename, 500_000)) {
-    await insertBatch(batch.credentials)
-    imported += batch.credentials.length
-  }
-  if (imported > 0) await recordSource(filename, imported)
-  return { imported, skipped: 0, errors: 0, filename }
-}
-
-/** In-memory processor for ZIP entries (already decompressed strings). */
-async function processContent(content: string, filename: string) {
-  const { credentials, skipped, errors } = parseULPContent(content, filename)
-  const BATCH = 500_000
-  for (let i = 0; i < credentials.length; i += BATCH) {
-    await insertBatch(credentials.slice(i, i + BATCH))
-  }
-  if (credentials.length > 0) await recordSource(filename, credentials.length)
-  return { imported: credentials.length, skipped, errors, filename }
-}
 
 export async function POST(request: NextRequest) {
   const authResult = await withApiKeyAuth(request, ['admin'])
@@ -86,37 +49,94 @@ export async function POST(request: NextRequest) {
 
   const name = file.name.toLowerCase()
 
+  const startAt = Date.now()
+
   try {
-    // Plain-text: stream line by line — constant RAM regardless of file size
+    // ── Plain text / CSV ──────────────────────────────────────────────────────
+    // Streaming: constant RAM regardless of file size.
+    // Runs through the shared uploadQueue so it doesn't race with other uploads.
     if (name.endsWith('.txt') || name.endsWith('.csv')) {
-      const result   = await processStream(file.stream(), file.name)
-      const response = NextResponse.json({ success: true, ...result })
+      let result: ProcessResult | null = null
+
+      await uploadQueue(async () => {
+        result = await processTextStream(file.stream(), file.name)
+      })
+
+      const r = result as unknown as ProcessResult
+      logJob({
+        source:      'http',
+        filename:    file.name,
+        status:      'done',
+        imported:    r.imported,
+        skipped:     r.skipped,
+        duration_ms: Date.now() - startAt,
+        breach_name: r.breach_name,
+      })
+
+      const response = NextResponse.json({
+        success:  true,
+        imported: r.imported,
+        skipped:  r.skipped,
+        errors:   r.errors,
+        filename: r.filename,
+      })
       return addRateLimitHeaders(response, authResult.rateLimit)
     }
 
+    // ── ZIP archive ───────────────────────────────────────────────────────────
+    // processZipFile uses yauzl.open — streams entry contents from disk
+    // without buffering the whole archive (unlike JSZip).
+    // Because v1 receives the file via multipart, we still need the buffer
+    // for yauzl.fromBuffer; but entries are decompressed lazily one at a time.
     if (name.endsWith('.zip')) {
-      const zip = await JSZip.loadAsync(await file.arrayBuffer())
-      let imported = 0, skipped = 0, errors = 0
-      const files: string[] = []
+      const buffer  = Buffer.from(await file.arrayBuffer())
+      const results: ProcessResult[] = []
 
-      for (const [path, entry] of Object.entries(zip.files)) {
-        if (entry.dir) continue
-        const lp = path.toLowerCase()
-        if (!lp.endsWith('.txt') && !lp.endsWith('.csv')) continue
-        const content    = await entry.async('string')
-        const entryName  = path.split('/').pop() || path
-        const result     = await processContent(content, entryName)
-        imported += result.imported; skipped += result.skipped; errors += result.errors
-        if (result.imported > 0) files.push(entryName)
-      }
+      await uploadQueue(async () => {
+        // processZipBuffer (not processZipFile) because we have a Buffer,
+        // not a file path — same lazy-entry streaming under the hood.
+        const { processZipBuffer } = await import('@/lib/upload-processor')
+        await processZipBuffer(buffer, result => {
+          if (result.imported > 0) results.push(result)
+        })
+      })
 
-      const response = NextResponse.json({ success: true, imported, skipped, errors, files, filename: file.name })
+      let totalImported = 0
+      let totalSkipped  = 0
+      for (const r of results) { totalImported += r.imported; totalSkipped += r.skipped }
+
+      logJob({
+        source:      'http',
+        filename:    file.name,
+        status:      'done',
+        imported:    totalImported,
+        skipped:     totalSkipped,
+        duration_ms: Date.now() - startAt,
+      })
+
+      const response = NextResponse.json({
+        success:  true,
+        imported: totalImported,
+        skipped:  totalSkipped,
+        errors:   0,
+        files:    results.map(r => ({ filename: r.filename, imported: r.imported })),
+        filename: file.name,
+      })
       return addRateLimitHeaders(response, authResult.rateLimit)
     }
 
     return NextResponse.json({ success: false, error: 'Unsupported file type. Use .txt, .csv, or .zip' }, { status: 400 })
   } catch (error) {
     console.error('v1 upload error:', error)
+    logJob({
+      source:        'http',
+      filename:      file.name,
+      status:        'failed',
+      imported:      0,
+      skipped:       0,
+      duration_ms:   Date.now() - startAt,
+      error_message: error instanceof Error ? error.message : String(error),
+    })
     return NextResponse.json(
       { success: false, error: error instanceof Error ? error.message : 'Upload failed' },
       { status: 500 }
