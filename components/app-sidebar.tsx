@@ -1,6 +1,6 @@
 "use client"
 
-import { Upload, Database, Settings, Users, LucideIcon, Key, BookOpen, ClipboardList, FileText, Radio, BarChart2, AlertTriangle, Layers, ShieldAlert, Search, Shield } from "lucide-react"
+import { Upload, Database, Settings, Users, LucideIcon, Key, BookOpen, ClipboardList, FileText, Radio, BarChart2, AlertTriangle, Layers, ShieldAlert, Search, Shield, Inbox } from "lucide-react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useTheme } from "next-themes"
@@ -49,6 +49,7 @@ const menuGroups: MenuGroup[] = [
     title: "Import",
     items: [
       { title: "Upload", url: "/upload", icon: Upload, adminOnly: true },
+      { title: "Inbox",  url: "/inbox",  icon: Inbox,  adminOnly: true },
       { title: "Sources", url: "/sources", icon: FileText },
     ],
   },
