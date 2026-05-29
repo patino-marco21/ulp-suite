@@ -263,7 +263,8 @@ function streamUniqueList(
           query: `SELECT DISTINCT ${normExpr} AS ${field}
                   FROM ulp.credentials
                   WHERE ${clause}${allExtras} AND ${normExpr} != ''
-                  ORDER BY ${field}`,
+                  ORDER BY ${field}
+                  SETTINGS max_execution_time = 120`,
           query_params: mergedParams,
           format: 'JSONEachRow',
         })
@@ -305,7 +306,7 @@ function streamWordlist(incTiers: string[], excTiers: string[], loginTypes: stri
       try {
         const chClient = getClient()
         const resultSet = await chClient.query({
-          query: `SELECT password, count() AS freq FROM ulp.credentials ${where} GROUP BY password ORDER BY freq DESC`,
+          query: `SELECT password, count() AS freq FROM ulp.credentials ${where} GROUP BY password ORDER BY freq DESC LIMIT 5000000 SETTINGS max_execution_time = 120`,
           format: 'JSONEachRow',
         })
         const stream = resultSet.stream<{ password: string; freq: string }>()
@@ -359,7 +360,8 @@ function streamSprayList(
           query: `SELECT DISTINCT arrayElement(splitByChar('@', email), 1) AS username
                   FROM ulp.credentials
                   WHERE ${clause}${domainExtra}${breachExtra}${tierExtra}${loginTypeExtra}
-                  ORDER BY username`,
+                  ORDER BY username
+                  SETTINGS max_execution_time = 120`,
           query_params: mergedParams,
           format: 'JSONEachRow',
         })

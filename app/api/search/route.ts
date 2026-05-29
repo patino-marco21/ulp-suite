@@ -116,7 +116,8 @@ export async function GET(request: NextRequest) {
     const t0 = Date.now()
     const [countResult, rows] = await Promise.all([
       executeQuery(
-        `SELECT count() AS total FROM ulp.credentials WHERE ${clause}${allExtras}`,
+        `SELECT count() AS total FROM ulp.credentials WHERE ${clause}${allExtras}
+         SETTINGS optimize_trivial_count_query = 1, max_execution_time = 30`,
         mergedParams
       ),
       executeQuery(
