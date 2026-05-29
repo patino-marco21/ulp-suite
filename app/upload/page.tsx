@@ -73,15 +73,21 @@ export default function UploadPage() {
 
 
   /**
-   * Process a single file. Returns a Promise that resolves when the file is
-   * fully done (SSE done/error for text files; sync response for ZIPs).
-   * Always resolves — never rejects — so the queue loop continues on errors.
+   * Process a single file.
+   *
+   * Returns the UploadResult on success, null on any failure (SSE error,
+   * network error, server error).  Always resolves — never rejects — so
+   * the queue loop continues regardless.
+   *
+   * Returning null (instead of void) lets processQueue distinguish between
+   * "file processed with results" and "file silently failed", avoiding the
+   * blank-page trap where setState('success') fired with an empty allResults.
    */
-  const processFileSingle = useCallback((file: File): Promise<void> => {
-    return new Promise<void>((resolve) => {
+  const processFileSingle = useCallback((file: File): Promise<UploadResult | null> => {
+    return new Promise<UploadResult | null>((resolve) => {
       const ext = file.name.toLowerCase()
       if (!ext.endsWith('.txt') && !ext.endsWith('.csv') && !ext.endsWith('.zip')) {
-        resolve()
+        resolve(null)
         return
       }
 
@@ -105,6 +111,16 @@ export default function UploadPage() {
             const es = new EventSource(`/api/upload/progress/${data.jobId}`)
             eventSourceRef.current = es
 
+            // Guard against resolve being called twice (onerror can fire after
+            // onmessage when the server cleanly closes the SSE stream).
+            let settled = false
+            const settle = (r: UploadResult | null) => {
+              if (settled) return
+              settled = true
+              es.close()
+              resolve(r)
+            }
+
             es.onmessage = (e: MessageEvent) => {
               const d = JSON.parse(e.data)
               setLiveImported(d.imported ?? 0)
@@ -123,31 +139,32 @@ export default function UploadPage() {
                 }
                 setResult(r)
                 setAllResults(prev => [...prev, r])
-                es.close()
-                resolve()
+                settle(r)
               }
               if (d.status === 'error') {
-                setErrorMsg(d.error || 'Upload failed')
-                setState('error')
-                toast({ title: d.error || 'Upload failed', variant: 'destructive' })
-                es.close()
-                resolve()
+                const msg = d.error || 'Upload failed'
+                setErrorMsg(msg)
+                toast({ title: `${file.name}: ${msg}`, variant: 'destructive' })
+                settle(null)
               }
             }
-            es.onerror = () => { es.close(); resolve() }
+            // onerror fires when connection drops OR server closes the stream.
+            // After settle() the es is already closed so double-fire is safe.
+            es.onerror = () => { settle(null) }
           } else {
-            // Sync path (ZIP)
+            // Sync path (ZIP) — server already processed and returned results
             const r = data as UploadResult
             setResult(r)
             setAllResults(prev => [...prev, r])
-            resolve()
+            resolve(r)
           }
         })
         .catch(err => {
-          setErrorMsg(err instanceof Error ? err.message : 'Upload failed')
-          setState('error')
+          const msg = err instanceof Error ? err.message : 'Upload failed'
+          setErrorMsg(msg)
+          toast({ title: `${file.name}: ${msg}`, variant: 'destructive' })
           setProgress(0)
-          resolve()
+          resolve(null)
         })
     })
   }, [toast])
@@ -162,16 +179,27 @@ export default function UploadPage() {
     }
 
     isProcessingRef.current = true
+    // Use a local array — React state (allResults) is async and stale in this
+    // closure, so we can't rely on it to decide the terminal state.
+    const localResults: Array<UploadResult> = []
     setFileQueue(valid)
     setAllResults([])
     setQueueIndex(0)
 
     for (let i = 0; i < valid.length; i++) {
       setQueueIndex(i)
-      await processFileSingle(valid[i])
+      const r = await processFileSingle(valid[i])
+      if (r !== null) localResults.push(r)
     }
 
-    setState('success')
+    if (localResults.length > 0) {
+      // At least one file succeeded — show the success summary.
+      setState('success')
+    } else {
+      // Every file failed silently — go back to idle so the drop zone
+      // reappears and the user isn't stuck on a blank page.
+      setState('idle')
+    }
     isProcessingRef.current = false
   }, [processFileSingle, toast])
 

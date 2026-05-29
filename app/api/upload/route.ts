@@ -9,7 +9,9 @@ import { processTextStream, processZipBuffer, type ProcessResult } from '@/lib/u
 import { checkLimit, getClientIP } from '@/lib/rate-limiter'
 import { logJob } from '@/lib/processing-log'
 
-// 5 uploads per IP per 5 minutes — generous for admin use, blocks runaway loops.
+// 60 uploads per IP per 5 minutes — permits batch multi-file uploads while
+// still blocking runaway automation.  Admin-only endpoint; session auth is the
+// primary gate.  Previously 5/5 min which blocked normal batch use.
 const uploadLimiter = new Map<string, { count: number; resetAt: number }>()
 
 export const dynamic = 'force-dynamic'
@@ -86,7 +88,7 @@ export async function POST(request: NextRequest) {
 
   // Rate limit: 5 uploads per IP per 5 minutes
   const ip       = getClientIP(request)
-  const rlResult = checkLimit(uploadLimiter, ip, 5, 5 * 60_000)
+  const rlResult = checkLimit(uploadLimiter, ip, 60, 5 * 60_000)
   if (!rlResult.allowed) {
     return NextResponse.json(
       { success: false, error: 'Too many uploads — please wait before uploading again.' },
