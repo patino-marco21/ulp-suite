@@ -68,6 +68,12 @@ export function startInboxWatcher(): void {
         persistent:    true,
         ignoreInitial: false,  // process files already in inbox on startup
         depth:         0,      // only watch root of inbox/, not subdirectories
+        // usePolling is required for Docker bind mounts:
+        // inotify events do NOT propagate when files are added from the host
+        // filesystem into a bind-mounted directory.  Without polling, chokidar
+        // never fires 'add' for those files and they sit in Waiting forever.
+        usePolling: true,
+        interval:   2_000,     // scan every 2 s — low CPU, 2 s max detection lag
       }).on('add', (filePath: string) => {
         // Filter to supported extensions in the event handler (v4 dropped glob support)
         const ext = path.extname(filePath).toLowerCase()
