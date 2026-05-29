@@ -54,6 +54,8 @@ interface InboxStatus {
   failed:           InboxFileEntry[]
   done_count:       number
   done_recent:      DoneEntry[]
+  in_flight_count?: number
+  stale_in_flight?: number
 }
 
 // ─── Formatting helpers ───────────────────────────────────────────────────────
@@ -104,6 +106,7 @@ export default function InboxPage() {
   const [loadError, setLoadError]     = useState(false)
   const [retrying, setRetrying]       = useState<string | null>(null)
   const [retryingAll, setRetryingAll] = useState(false)
+  const [scanning, setScanning]       = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -156,6 +159,19 @@ export default function InboxPage() {
     }
   }, [toast])
 
+  const forceScan = useCallback(async () => {
+    setScanning(true)
+    try {
+      const res  = await fetch('/api/inbox/scan', { method: 'POST' })
+      const json = await res.json()
+      toast({ title: json.message ?? 'Scan triggered' })
+    } catch {
+      toast({ title: 'Force scan failed', variant: 'destructive' })
+    } finally {
+      setScanning(false)
+    }
+  }, [toast])
+
   if (authLoading) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -192,10 +208,41 @@ export default function InboxPage() {
             <code className="text-xs bg-muted px-1 rounded">./inbox/</code> to process them automatically.
           </p>
         </div>
-        <Badge variant="outline" className={`text-xs ${isActive ? 'text-green-600 border-green-500/40' : 'text-muted-foreground'}`}>
-          {isActive ? '● Live' : '○ Idle'}
-        </Badge>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline" className={`text-xs ${isActive ? 'text-green-600 border-green-500/40' : 'text-muted-foreground'}`}>
+            {isActive ? '● Live' : '○ Idle'}
+          </Badge>
+          {/* Force Scan button — always visible so it's easy to find when stuck */}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={forceScan}
+            disabled={scanning}
+            className="h-7 text-xs"
+            title="Clear stale queue entries and re-scan inbox/ for unprocessed files"
+          >
+            {scanning ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <RefreshCw className="h-3 w-3 mr-1" />}
+            Force Scan
+          </Button>
+        </div>
       </div>
+
+      {/* Stale inFlight warning — files may be stuck */}
+      {data && (data.stale_in_flight ?? 0) > 0 && !isActive && (
+        <Alert>
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription className="flex items-center justify-between">
+            <span>
+              {data.stale_in_flight} file(s) appear stuck — they are queued but not processing.
+              This usually happens when files were moved out and back in while queued.
+            </span>
+            <Button size="sm" variant="outline" onClick={forceScan} disabled={scanning} className="ml-3 h-7 text-xs shrink-0">
+              {scanning ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+              Fix Now
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
 
       {loadError && (
         <Alert variant="destructive">

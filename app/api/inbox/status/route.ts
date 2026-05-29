@@ -3,7 +3,7 @@ import { validateRequest, requireAdminRole } from '@/lib/auth'
 import { dbQuery } from '@/lib/sqlite'
 import { uploadQueue, getCurrentJob } from '@/lib/upload-queue'
 import { getWaiting, getFailed, getDoneCount } from '@/lib/inbox-helpers'
-import { getInboxJobProgress } from '@/lib/inbox-watcher'
+import { getInboxJobProgress, getInFlightCount } from '@/lib/inbox-watcher'
 
 export const dynamic = 'force-dynamic'
 
@@ -85,6 +85,11 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  const in_flight_count = getInFlightCount()
+  // "stuck" = files in inbox/ but NOT in inFlight (reconcile missed them)
+  // OR files IN inFlight but NOT the current job AND not moving → stale entries
+  const stale_in_flight = Math.max(0, in_flight_count - (current ? 1 : 0))
+
   return NextResponse.json({
     watcher_active:   depth > 0 || current !== null,
     current_file:     current,
@@ -92,6 +97,8 @@ export async function GET(request: NextRequest) {
     current_progress,
     waiting,
     waiting_total:    allWaiting.length,   // includes the file being processed
+    in_flight_count,
+    stale_in_flight,  // > 0 means files may be stuck — use Force Scan to recover
     failed,
     done_count,
     done_recent,

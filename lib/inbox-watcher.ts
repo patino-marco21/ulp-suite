@@ -61,6 +61,60 @@ export function getInboxJobProgress(): InboxJobProgress | null {
   return _currentProgress
 }
 
+/** Number of filenames currently marked as queued or in-progress. */
+export function getInFlightCount(): number {
+  return inFlight.size
+}
+
+/**
+ * Clear inFlight entries that are NOT the currently-processing file so that
+ * a forced reconcile can re-queue them.
+ *
+ * When are entries stale?
+ *   - File was in inbox/, queued → user moved it out → uploadQueue task failed
+ *     (no such file) → inFlight.delete ran → but chokidar fired 'add' BEFORE
+ *     the delete, so the NEW enqueueFile call saw inFlight.has()=true → skipped.
+ *   - User then moved files back in → chokidar fires 'add' again → still in
+ *     inFlight (pending task) → still skipped.
+ *
+ * This function removes entries that are:
+ *   a) Not currently being processed (not _currentProgress.filename), AND
+ *   b) Still in inbox/ (file exists — we want to re-queue it) OR
+ *      Not in inbox/ (task already ran and cleaned up, but entry leaked)
+ */
+export function clearStaleInFlight(): number {
+  const current = _currentProgress?.filename ?? null
+  let cleared = 0
+  for (const name of Array.from(inFlight)) {
+    if (name === current) continue  // actively processing — leave it
+    inFlight.delete(name)
+    cleared++
+  }
+  console.log(`[inbox-watcher] clearStaleInFlight: cleared ${cleared} entries`)
+  return cleared
+}
+
+/**
+ * Trigger an immediate reconciliation scan outside the normal 30-second interval.
+ * Call after clearStaleInFlight() to re-queue any files that were stuck.
+ */
+export function forceReconcile(): number {
+  let queued = 0
+  try {
+    const entries = fs.readdirSync(INBOX, { withFileTypes: true })
+    for (const entry of entries) {
+      if (!entry.isFile()) continue
+      const filePath = path.join(INBOX, entry.name)
+      if (!inFlight.has(entry.name)) {
+        enqueueFile(filePath)
+        queued++
+      }
+    }
+  } catch { /* inbox/ might not exist yet */ }
+  console.log(`[inbox-watcher] forceReconcile: queued ${queued} file(s)`)
+  return queued
+}
+
 const SUPPORTED_EXTS = new Set(['.txt', '.csv', '.zip'])
 
 /** Delete files in dir that are older than maxAgeMs. Silent on errors. */
