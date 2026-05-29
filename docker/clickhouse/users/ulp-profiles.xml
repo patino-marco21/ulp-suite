@@ -12,7 +12,11 @@
             <async_insert>1</async_insert>
             <async_insert_max_data_size>104857600</async_insert_max_data_size>   <!-- 100 MB -->
             <async_insert_max_query_number>1000</async_insert_max_query_number>
-            <async_insert_busy_timeout_ms>500</async_insert_busy_timeout_ms>     <!-- flush 500 ms idle -->
+            <!-- Reduced from 500 ms to 100 ms: saves ~80 s per 100M-row file.
+                 Each 500K-row batch (≈30 MB) is under the 100 MB flush threshold
+                 so ClickHouse waits busy_timeout_ms per batch.  Shorter timeout =
+                 faster bulk ingestion without losing the async-buffering benefit. -->
+            <async_insert_busy_timeout_ms>100</async_insert_busy_timeout_ms>
             <async_insert_stale_timeout_ms>0</async_insert_stale_timeout_ms>     <!-- no stale eviction -->
 
             <!-- Allow more memory for GROUP BY and ORDER BY before spilling to disk -->

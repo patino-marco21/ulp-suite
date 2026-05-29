@@ -46,8 +46,15 @@ services:
     restart: on-failure
     ports:
       - "3000:3000"
+    # Memory limits: give Node.js 4 GB heap inside a 6 GB container.
+    # Node.js 22 is container-aware but without an explicit cap it defaults
+    # to system RAM which can exceed what Docker allows, causing silent OOM.
+    # 6 GB container − 4 GB Node heap = 2 GB headroom for OS + ClickHouse client.
+    mem_limit: 6g
+    mem_reservation: 2g
     environment:
       NODE_ENV: production
+      NODE_OPTIONS: "--max-old-space-size=4096"
       # ClickHouse — credential data store
       CLICKHOUSE_HOST: "http://clickhouse:8123"
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}

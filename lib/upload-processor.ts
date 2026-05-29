@@ -74,6 +74,12 @@ export async function insertBatch(
       async_insert:          1 as any,
       wait_for_async_insert: 1 as any,
       max_execution_time:    0,
+      // Disable row-level insert deduplication — we already dedup in the parser
+      // (seen Set cap) so ClickHouse doesn't need to re-check.  Saves CPU per batch.
+      insert_deduplicate:    0 as any,
+      // Allow ClickHouse to use multiple threads for column compression per insert.
+      // Default is 1; 4 uses spare CPU to speed up bulk loads.
+      max_insert_threads:    4 as any,
     },
   })
 }
