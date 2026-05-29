@@ -10,7 +10,7 @@
 
 ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores them in ClickHouse, and exposes a fast search and monitoring interface. It is designed for **tens to hundreds of billions of credential lines** and runs entirely on your own infrastructure.
 
-**Tech stack:** Next.js 14 · ClickHouse · SQLite · TypeScript · Docker
+**Tech stack:** Next.js 15 · React 19 · ClickHouse · SQLite · TypeScript · Docker
 
 ---
 
@@ -71,6 +71,7 @@ ClickHouse       SQLite
 - **ClickHouse** — columnar store, MergeTree ORDER BY `(domain, email, imported_at)`, ZSTD(3) compression, monthly partitions, bloom filters on email/domain/url.
 - **SQLite** — lightweight relational store for all metadata. No MySQL, no replication setup required.
 - **Monitor cron** — 15-minute tick registered in `instrumentation.ts` (production only); runs in-process via `setInterval`.
+- **Inbox watcher** — drop files into `./inbox/` and they process automatically. Polling + 30s reconciliation loop for reliability.
 
 ---
 
@@ -83,31 +84,78 @@ ClickHouse       SQLite
   - Linux: `./install_docker.sh` or install `docker-ce` + `docker-compose-plugin`
 - Git
 
-### Quick Start
+### RAM Requirements
+
+| Component | Default `mem_limit` | Notes |
+|---|---|---|
+| App (Node.js 22) | 6 GB | 4 GB heap + 2 GB headroom |
+| ClickHouse | 6 GB | Scales caches to limit |
+| OS | ~2 GB minimum | |
+| **Total** | **~14 GB** | 16 GB laptop recommended |
+
+**8 GB laptop:** Lower both services to `mem_limit: 4g` in `docker-compose.yml`.
+
+### Quick Start (Ubuntu / Linux)
 
 ```bash
+# 1. Install Docker Engine (skip if already installed)
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER && newgrp docker
+
+# 2. Clone and configure
 git clone https://github.com/patino-marco21/ulp-suite
 cd ulp-suite
 
 cp .env.example .env
-# Edit .env — set strong passwords and a random JWT_SECRET
+# Set a real JWT_SECRET:
+sed -i "s|change-me-run-openssl-rand-hex-32|$(openssl rand -hex 32)|" .env
+# Edit .env and change ADMIN_PASSWORD to something strong:
+nano .env
 
-bash docker-start.sh
+# 3. Build and start (first build: 3-5 minutes)
+docker compose up -d --build
+
+# 4. Wait for ClickHouse (30-60 s on first run)
+docker compose logs -f app | grep -m1 "Ready in"
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open [http://localhost:3000](http://localhost:3000). Log in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
 
-**Default credentials:**
-- Email: `admin@ulpsuite.local`
-- Password: `admin`
+> **Security:** Change the admin password immediately. The app logs a warning at startup if it is still `admin`.
 
-> Change the default password immediately after first login.
+### Inbox folder (batch / automated uploads)
+
+Drop credential files directly into `./inbox/` from the host:
+
+```bash
+cp /path/to/dumps/*.txt ~/ulp-suite/inbox/
+
+# Monitor progress at http://localhost:3000/inbox
+# Or from terminal:
+docker compose logs -f app | grep inbox-watcher
+```
+
+Files move to `./inbox/done/` on success, `./inbox/failed/` on failure.
+Retry failed files:
+
+```bash
+mv ~/ulp-suite/inbox/failed/* ~/ulp-suite/inbox/
+# Or click "Retry All" in the Inbox Monitor UI
+```
+
+**Large files:** Files with >2M unique credentials disable in-file dedup once the cap is hit.
+Run the dedup endpoint after importing to clean up duplicates in ClickHouse:
+```bash
+curl -s -b cookies.txt -X POST http://localhost:3000/api/admin/dedup | jq
+```
 
 ### Service URLs
 
 | Service | URL |
 |---|---|
 | ULP Suite | http://localhost:3000 |
+| Inbox Monitor | http://localhost:3000/inbox |
+| API Docs | http://localhost:3000/docs |
 
 ClickHouse is intentionally NOT exposed on the host — it is only reachable inside the Docker network. To query it directly:
 
@@ -118,32 +166,41 @@ docker exec -it ulpsuite_clickhouse clickhouse-client
 ### Useful Commands
 
 ```bash
-# View logs
+# View all logs
 docker compose logs -f
 
-# Stop
+# Stop (data is preserved)
 docker compose down
 
-# Restart
-docker compose restart
+# Rebuild after git pull
+git pull && docker compose up -d --build
 
-# Check status
-bash docker-status.sh
+# ⚠️ DANGER: erase ALL ClickHouse credential data
+docker compose down -v
+
+# Row count
+docker exec ulpsuite_clickhouse clickhouse-client \
+  --query "SELECT formatReadableQuantity(count()) FROM ulp.credentials"
+
+# Run dedup after large imports
+curl -s -b cookies.txt -X POST http://localhost:3000/api/admin/dedup | jq
 ```
 
 ### Development (hot reload)
 
-Run ClickHouse in Docker, Next.js locally:
+Run ClickHouse in Docker, Next.js on the host:
 
 ```bash
-# Start infrastructure only (no app container)
+# Install Node.js 22 via nvm
+nvm install 22 && nvm alias default 22
+
+# Start ClickHouse only
 docker compose up -d clickhouse
 
-# Configure local environment
-cp env.local.example .env.local
-
-yarn install
-yarn dev
+# Copy .env and install
+cp .env.example .env  # set JWT_SECRET
+npm install
+npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000). Changes apply instantly without rebuilding Docker.
@@ -172,10 +229,12 @@ Tested at tens of billions of credential lines:
 
 | Metric | Value |
 |---|---|
-| Insert throughput | ~50–100K lines/sec per worker (single-process) |
-| Peak heap per 500K-row batch | ~2 MB (CSV streaming) |
+| Insert throughput | ~1–2M rows/min on laptop SSD (single-process) |
+| Peak heap per 500K-row batch | ~100 MB (array in memory before insert) |
+| Dedup Set cap | 2M entries → ~440 MB max (prevents OOM on huge files) |
 | Credential search P99 | <200 ms with ClickHouse bloom filters |
 | Monitor re-scan tick | 15 minutes, in-process, no external queue |
+| Inbox reconciliation | Every 30 s — catches any missed chokidar events |
 
 ---
 

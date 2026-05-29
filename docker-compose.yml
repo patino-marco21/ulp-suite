@@ -10,14 +10,24 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:26.3
     container_name: ulpsuite_clickhouse
-    restart: always
+    restart: unless-stopped
     # Ports intentionally NOT exposed on host — app connects via internal Docker network.
     # To query ClickHouse directly for debugging: docker exec -it ulpsuite_clickhouse clickhouse-client
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-ulp}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      # IMPORTANT: Leave CLICKHOUSE_PASSWORD empty (the default).
+      # docker/clickhouse/users/default-user.xml hardcodes an empty password for
+      # the 'default' user.  If you set a non-empty password here the app will
+      # fail every ClickHouse query (server has empty password, app sends yours).
+      # The ClickHouse port is NOT exposed to the host, so no password is needed.
+      CLICKHOUSE_PASSWORD: ""
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    # Memory: ClickHouse caches scale to available RAM without a limit.
+    # On a laptop with 16 GB total, cap at 6 GB so the app + OS have headroom.
+    # Adjust both values to match your hardware (laptop: 4-6g; desktop: 8-12g).
+    mem_limit: 6g
+    mem_reservation: 2g
     ulimits:
       nofile:
         soft: 262144
@@ -28,14 +38,16 @@ services:
       - ./docker/clickhouse/config:/etc/clickhouse-server/config.d/
       - ./docker/clickhouse/users:/etc/clickhouse-server/users.d/
     healthcheck:
-      # clickhouse-client is always present in the official image.
-      # Passes $CLICKHOUSE_USER/$CLICKHOUSE_PASSWORD from the container env so
-      # the check works regardless of whether a password is configured.
-      test: ["CMD-SHELL", "clickhouse-client --host localhost --user $CLICKHOUSE_USER --password $CLICKHOUSE_PASSWORD --query 'SELECT 1'"]
+      test: ["CMD-SHELL", "clickhouse-client --host localhost --user $CLICKHOUSE_USER --query 'SELECT 1'"]
       interval: 10s
       timeout: 5s
       retries: 30
       start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # ─── App (Next.js — SQLite for metadata, ClickHouse for credentials) ──────
   app:
@@ -43,13 +55,13 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: ulpsuite_app
-    restart: on-failure
+    # unless-stopped: restarts after laptop reboot (unlike on-failure which only
+    # restarts on crash, not after a clean Docker daemon restart).
+    restart: unless-stopped
     ports:
       - "3000:3000"
-    # Memory limits: give Node.js 4 GB heap inside a 6 GB container.
-    # Node.js 22 is container-aware but without an explicit cap it defaults
-    # to system RAM which can exceed what Docker allows, causing silent OOM.
-    # 6 GB container − 4 GB Node heap = 2 GB headroom for OS + ClickHouse client.
+    # Memory: 6 GB container / 4 GB Node.js heap = 2 GB OS headroom.
+    # Node.js 22 is container-aware — NODE_OPTIONS makes the limit explicit.
     mem_limit: 6g
     mem_reservation: 2g
     environment:
@@ -58,11 +70,11 @@ services:
       # ClickHouse — credential data store
       CLICKHOUSE_HOST: "http://clickhouse:8123"
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_PASSWORD: ""
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB:-ulp}
       # SQLite — app metadata (users, API keys, monitors, audit logs)
       SQLITE_PATH: /app/data/ulp.db
-      # Auth
+      # Auth — MUST be set to a random secret before first run
       JWT_SECRET: ${JWT_SECRET}
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
       # Default admin (seeded on first startup if no users exist)
@@ -75,6 +87,11 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 volumes:
   clickhouse_data:
