@@ -46,6 +46,21 @@ const RECONCILE_INTERVAL_MS = 30_000                       // scan for missed fi
 /** Filenames currently queued or being processed. Prevents double-queuing. */
 const inFlight = new Set<string>()
 
+/** Live progress for the file currently being processed. */
+export interface InboxJobProgress {
+  filename:        string
+  started_at:      number   // Date.now() when processing began
+  rows_imported:   number   // rows successfully inserted so far
+  file_size_bytes: number   // from fs.statSync before processing
+}
+
+let _currentProgress: InboxJobProgress | null = null
+
+/** Returns live progress for the inbox file currently being processed, or null if idle. */
+export function getInboxJobProgress(): InboxJobProgress | null {
+  return _currentProgress
+}
+
 const SUPPORTED_EXTS = new Set(['.txt', '.csv', '.zip'])
 
 /** Delete files in dir that are older than maxAgeMs. Silent on errors. */
@@ -87,6 +102,11 @@ function enqueueFile(filePath: string): void {
     const startAt = Date.now()
     console.log(`[inbox-watcher] processing: ${filename}`)
     setCurrentJob(filename)
+
+    // Capture file size for ETA calculation in the status API.
+    const fileSizeBytes = (() => { try { return fs.statSync(filePath).size } catch { return 0 } })()
+    _currentProgress = { filename, started_at: startAt, rows_imported: 0, file_size_bytes: fileSizeBytes }
+
     let imported = 0
     let skipped  = 0
     try {
@@ -94,6 +114,7 @@ function enqueueFile(filePath: string): void {
         await processZipFile(filePath, result => {
           imported += result.imported
           skipped  += result.skipped
+          if (_currentProgress) _currentProgress.rows_imported = imported
           if (result.imported > 0) {
             console.log(
               `[inbox-watcher]   ${result.filename}: ` +
@@ -104,7 +125,10 @@ function enqueueFile(filePath: string): void {
       } else {
         const nodeStream = fs.createReadStream(filePath)
         const webStream  = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>
-        const result     = await processTextStream(webStream, filename)
+        const result     = await processTextStream(webStream, filename, undefined, n => {
+          // onBatch: update live progress after each 500 K-row batch
+          if (_currentProgress) _currentProgress.rows_imported = n
+        })
         imported = result.imported
         skipped  = result.skipped
         console.log(
@@ -134,6 +158,7 @@ function enqueueFile(filePath: string): void {
       })
       try { fs.renameSync(filePath, path.join(FAIL, filename)) } catch {}
     } finally {
+      _currentProgress = null
       inFlight.delete(filename)
       setCurrentJob(null)
     }

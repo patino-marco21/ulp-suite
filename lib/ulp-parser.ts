@@ -500,16 +500,33 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
   //       mypassword123           ← emit credential, reset
   let   positionalUrl   = ''
   let   positionalLogin = ''
-  // Per-call dedup set: keyed by url\0email\0password.  Catches repeated lines
-  // within the same file (e.g. a stealer capturing the same login 12 times).
+  // Per-call dedup set — caps at SEEN_CAP to prevent OOM on huge files.
+  // Beyond the cap, duplicates are allowed through and can be cleaned up later
+  // via POST /api/admin/dedup (ClickHouse OPTIMIZE TABLE DEDUPLICATE).
+  const SEEN_CAP = 2_000_000  // ~440 MB max heap for the Set
   const seen = new Set<string>()
+  let seenCapWarned = false
+
+  function addSeen(fp: string, filename: string): boolean {
+    if (seen.size >= SEEN_CAP) {
+      if (!seenCapWarned) {
+        seenCapWarned = true
+        console.warn(`[ulp-parser] dedup cap (${SEEN_CAP.toLocaleString()}) reached for ${filename}. ` +
+          'Remaining rows skip in-file dedup — run POST /api/admin/dedup after import.')
+      }
+      return false  // not added; caller should push credential
+    }
+    seen.add(fp)
+    return true
+  }
 
   function tryFlushBlock() {
     const cred = flushBlockState(blockState, sourceFile)
     if (cred) {
       const fp = `${cred.url}\0${cred.email}\0${cred.password}`
-      if (seen.has(fp)) { skipped++; breakdown.dedup++ }
-      else              { seen.add(fp); credentials.push(cred) }
+      if (!seen.has(fp) && seen.size >= SEEN_CAP) { credentials.push(cred) }  // cap hit — allow
+      else if (seen.has(fp)) { skipped++; breakdown.dedup++ }
+      else { addSeen(fp, sourceFile); credentials.push(cred) }
     } else if (blockState.url || blockState.login || blockState.password) {
       skipped++
       if (!blockState.login) breakdown.no_fields++
@@ -551,8 +568,8 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
       if (seen.has(fp)) {
         skipped++; breakdown.dedup++
       } else {
-        seen.add(fp)
         const domain = extractDomain(positionalUrl)
+        addSeen(fp, sourceFile)
         credentials.push({ url: positionalUrl, email: positionalLogin, password: trimmed, domain, source_file: sourceFile })
       }
       positionalUrl = positionalLogin = ''
@@ -570,7 +587,7 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
     if (credential) {
       const fp = `${credential.url}\0${credential.email}\0${credential.password}`
       if (seen.has(fp)) { skipped++; breakdown.dedup++ }
-      else              { seen.add(fp); credentials.push(credential) }
+      else { addSeen(fp, sourceFile); credentials.push(credential) }
     } else if (reason === 'no_fields' && trimmed.startsWith('http')) {
       // Bare URL line → enter positional mode; next line is login, line after is password.
       // Not counted as skipped — will be consumed by positional collection or discarded at separator/EOF.
@@ -620,10 +637,13 @@ export async function* parseULPStream(
   // Positional (label-free) state — mirrors the same logic in parseULPContent
   let   positionalUrl   = ''
   let   positionalLogin = ''
-  // Per-upload dedup set: keyed by url\0email\0password.  Persists across all
-  // batches for the lifetime of this stream so cross-batch duplicates are caught.
-  // Memory: ~210 bytes per unique credential; safe for files up to ~50M rows.
+  // Per-upload dedup set — capped at STREAM_SEEN_CAP to prevent OOM on huge files.
+  // At 2M entries × ~220 bytes = ~440 MB max heap cost.  Beyond the cap, dedup is
+  // disabled for the remainder of the file.  Run POST /api/admin/dedup afterwards
+  // to remove any duplicates ClickHouse received past the cap.
+  const STREAM_SEEN_CAP = 2_000_000
   const seen = new Set<string>()
+  let streamSeenCapWarned = false
 
   function flushBatch(): StreamBatch {
     const out: StreamBatch = { credentials: batch, rejected: batchRejected, breakdown: batchBreakdown }
@@ -632,12 +652,28 @@ export async function* parseULPStream(
     return out
   }
 
+  // Cap-aware seen check for parseULPStream
+  function streamSeenCheck(fp: string): boolean {
+    // Returns true if credential should be skipped (duplicate)
+    if (seen.size >= STREAM_SEEN_CAP) {
+      if (!streamSeenCapWarned) {
+        streamSeenCapWarned = true
+        console.warn(`[ulp-parser] dedup cap (${STREAM_SEEN_CAP.toLocaleString()}) reached for ${filename}. ` +
+          'Remaining rows skip in-file dedup — run POST /api/admin/dedup after import.')
+      }
+      return false  // cap hit — allow through (not a known duplicate)
+    }
+    if (seen.has(fp)) return true
+    seen.add(fp)
+    return false
+  }
+
   function tryFlushBlock() {
     const cred = flushBlockState(blockState, filename)
     if (cred) {
       const fp = `${cred.url}\0${cred.email}\0${cred.password}`
-      if (seen.has(fp)) { batchRejected++; batchBreakdown.dedup++ }
-      else              { seen.add(fp); batch.push(cred) }
+      if (streamSeenCheck(fp)) { batchRejected++; batchBreakdown.dedup++ }
+      else                     { batch.push(cred) }
     } else if (blockState.url || blockState.login || blockState.password) {
       batchRejected++
       // no login at all → no_fields; login present but password issue → no_password
@@ -675,10 +711,9 @@ export async function* parseULPStream(
     // Positional password: URL + login collected → emit credential
     if (positionalUrl && positionalLogin) {
       const fp = `${positionalUrl}\0${positionalLogin}\0${trimmed}`
-      if (seen.has(fp)) {
+      if (streamSeenCheck(fp)) {
         batchRejected++; batchBreakdown.dedup++
       } else {
-        seen.add(fp)
         const domain = extractDomain(positionalUrl)
         batch.push({ url: positionalUrl, email: positionalLogin, password: trimmed, domain, source_file: filename })
       }
@@ -695,8 +730,8 @@ export async function* parseULPStream(
     const { credential, reason } = parseLine(line, filename)
     if (credential) {
       const fp = `${credential.url}\0${credential.email}\0${credential.password}`
-      if (seen.has(fp)) { batchRejected++; batchBreakdown.dedup++ }
-      else              { seen.add(fp); batch.push(credential) }
+      if (streamSeenCheck(fp)) { batchRejected++; batchBreakdown.dedup++ }
+      else                     { batch.push(credential) }
     } else if (reason === 'no_fields' && trimmed.startsWith('http')) {
       // Bare URL → enter positional mode
       positionalUrl   = trimmed

@@ -99,6 +99,8 @@ export async function processTextStream(
   stream: ReadableStream<Uint8Array>,
   filename: string,
   jobId?: string,
+  /** Called after each 500K-row batch with the cumulative imported count. */
+  onBatch?: (imported: number) => void,
 ): Promise<ProcessResult> {
   const breach_name        = matchBreach(filename)
   let imported             = 0
@@ -113,7 +115,8 @@ export async function processTextStream(
       rejection_breakdown[k as RejectionReason] =
         (rejection_breakdown[k as RejectionReason] ?? 0) + v
     }
-    if (jobId) updateJob(jobId, { imported, skipped })
+    if (jobId)   updateJob(jobId, { imported, skipped })
+    if (onBatch) onBatch(imported)
   }
 
   if (imported > 0) {
