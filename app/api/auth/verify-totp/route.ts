@@ -60,7 +60,7 @@ export async function POST(request: NextRequest) {
 
     const response = NextResponse.json({ success: true, user: { id: row.id, email: row.email, name: row.name, role: userRole } })
     response.cookies.set('auth', token, getSecureCookieOptions(request))
-    response.cookies.set('user_role', userRole, { httpOnly: false, secure: isRequestSecure(request), sameSite: 'strict', maxAge: 24 * 60 * 60, path: '/' })
+    response.cookies.set('user_role', userRole, { httpOnly: true, secure: isRequestSecure(request), sameSite: 'strict', maxAge: 24 * 60 * 60, path: '/' })
     response.cookies.set('pending_2fa', '', { httpOnly: true, secure: isRequestSecure(request), sameSite: 'strict', path: '/api/auth/verify-totp', maxAge: 0 })
     return response
   } catch (err) {

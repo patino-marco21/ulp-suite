@@ -24,11 +24,13 @@ export async function GET(request: NextRequest) {
                countDistinct(domain) as total_domains,
                countDistinct(email) as unique_emails
         FROM ulp.credentials
+        SETTINGS optimize_trivial_count_query = 1, max_execution_time = 30
       `),
       executeQuery(`SELECT count() as total_sources, sum(line_count) as total_lines FROM ulp.sources`),
       executeQuery(`
         SELECT domain, count() as count
         FROM ulp.credentials GROUP BY domain ORDER BY count DESC LIMIT 20
+        SETTINGS max_execution_time = 30
       `),
     ])
 

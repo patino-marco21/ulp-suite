@@ -243,7 +243,11 @@ export async function executeQuery(
     console.error("❌ Error type (ClickHouse):", (error as any)?.type)
     // Log short query snippet for debugging (don't log full if too long)
     console.error("📝 Query Snippet:", query.substring(0, 200) + (query.length > 200 ? "..." : ""))
-    console.error("📦 Params:", params)
+    // SECURITY: do not log raw params — they may contain emails, passwords, or
+    // other credential fragments.  Log only the param keys for debugging.
+    if (params && typeof params === 'object') {
+      console.error("📦 Param keys:", Object.keys(params).join(', '))
+    }
     
     // Re-throw error for handling in caller
     throw error

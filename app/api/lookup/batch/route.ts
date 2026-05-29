@@ -13,6 +13,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { validateRequest } from "@/lib/auth"
 import { executeQuery } from "@/lib/clickhouse"
+import { NORM_EMAIL_EXPR, NORM_DOMAIN_EXPR } from "@/lib/ulp-normalize"
 
 export const dynamic = "force-dynamic"
 
@@ -71,7 +72,7 @@ export async function POST(request: NextRequest) {
       const rows = await executeQuery(
         `SELECT email, password, url, domain, source_file, breach_name, imported_at
          FROM ulp.credentials
-         WHERE email IN (${emailList})
+         WHERE (${NORM_EMAIL_EXPR}) IN (${emailList})
          ORDER BY imported_at DESC
          LIMIT {cap:UInt32}`,
         { ...emailParams, cap: emails.length * RESULTS_CAP }
@@ -82,7 +83,7 @@ export async function POST(request: NextRequest) {
 
       for (const email of emails) {
         const lc   = email.toLowerCase()
-        const hits = rows.filter(r => r.email === lc).slice(0, RESULTS_CAP)
+        const hits = rows.filter(r => (r.email ?? '').toLowerCase() === lc).slice(0, RESULTS_CAP)
         results[email] = { found: hits.length > 0, count: hits.length, results: hits }
       }
     }
@@ -94,9 +95,9 @@ export async function POST(request: NextRequest) {
       domains.forEach((d, i) => { domainParams[`domain${i}`] = d.toLowerCase() })
 
       const rows = await executeQuery(
-        `SELECT domain, email, password, url, source_file, breach_name, imported_at
+        `SELECT (${NORM_DOMAIN_EXPR}) AS domain, email, password, url, source_file, breach_name, imported_at
          FROM ulp.credentials
-         WHERE domain IN (${domainList})
+         WHERE (${NORM_DOMAIN_EXPR}) IN (${domainList})
          ORDER BY imported_at DESC
          LIMIT {cap:UInt32}`,
         { ...domainParams, cap: domains.length * RESULTS_CAP }
@@ -107,7 +108,7 @@ export async function POST(request: NextRequest) {
 
       for (const domain of domains) {
         const lc   = domain.toLowerCase()
-        const hits = rows.filter(r => r.domain === lc).slice(0, RESULTS_CAP)
+        const hits = rows.filter(r => (r.domain ?? '').toLowerCase() === lc).slice(0, RESULTS_CAP)
         results[domain] = { found: hits.length > 0, count: hits.length, results: hits }
       }
     }

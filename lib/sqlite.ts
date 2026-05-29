@@ -290,7 +290,19 @@ function initSchema(db: Database.Database): void {
   const count = (db.prepare('SELECT COUNT(*) as c FROM users').get() as { c: number }).c
   if (count === 0) {
     const email = process.env.ADMIN_EMAIL || 'admin@ulp.local'
-    const raw = process.env.ADMIN_PASSWORD || 'admin'
+    const raw   = process.env.ADMIN_PASSWORD || 'admin'
+
+    // SECURITY: warn loudly when the default password is still in use so it's
+    // visible in Docker logs on every startup.  This does NOT block startup —
+    // the seeded account is needed for first login — but you MUST change the
+    // password immediately after.
+    if (!process.env.ADMIN_PASSWORD || raw === 'admin') {
+      console.warn(
+        '[SECURITY WARNING] ADMIN_PASSWORD is unset or still "admin". ' +
+        'Set a strong password in .env and restart, then change it in the UI.'
+      )
+    }
+
     const hash = bcrypt.hashSync(raw, 12)
     db.prepare(
       `INSERT INTO users (email, password_hash, name, role) VALUES (?, ?, ?, 'admin')`
@@ -311,6 +323,11 @@ export function dbGet(sql: string, params: unknown[] = []): unknown | undefined 
 export function dbRun(sql: string, params: unknown[] = []): { lastId: number; changes: number } {
   const r = getDb().prepare(sql).run(params)
   return { lastId: Number(r.lastInsertRowid), changes: r.changes }
+}
+
+/** Run a function inside a SQLite transaction.  Commits on success, rolls back on throw. */
+export function dbTransaction<T>(fn: () => T): T {
+  return getDb().transaction(fn)()
 }
 
 export function dbExec(sql: string): void {

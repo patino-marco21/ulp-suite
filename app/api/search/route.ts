@@ -127,7 +127,8 @@ export async function GET(request: NextRequest) {
          FROM ulp.credentials
          WHERE ${clause}${allExtras}
          ORDER BY ${orderBy}
-         LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
+         LIMIT {limit:UInt32} OFFSET {offset:UInt32}
+         SETTINGS max_execution_time = 30`,
         mergedParams
       ),
     ])

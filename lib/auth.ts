@@ -75,9 +75,13 @@ export function requireAdminRole(payload: JWTPayload | null): NextResponse | nul
   return null // No error - user is admin
 }
 
-// Simple base64 encoding/decoding for Edge Runtime compatibility
+// Base64url encoding that handles full Unicode (btoa only accepts Latin-1).
+// Uses TextEncoder → binary string → btoa to avoid InvalidCharacterError when
+// a user's name or email contains non-Latin-1 characters (accented, CJK, etc.)
 function base64UrlEncode(str: string): string {
-  return btoa(str)
+  const bytes = new TextEncoder().encode(str)
+  const bin   = Array.from(bytes, b => String.fromCharCode(b)).join('')
+  return btoa(bin)
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=/g, '')
@@ -85,7 +89,9 @@ function base64UrlEncode(str: string): string {
 
 function base64UrlDecode(str: string): string {
   str += '='.repeat((4 - str.length % 4) % 4)
-  return atob(str.replace(/-/g, '+').replace(/_/g, '/'))
+  const bin   = atob(str.replace(/-/g, '+').replace(/_/g, '/'))
+  const bytes = Uint8Array.from(bin, c => c.charCodeAt(0))
+  return new TextDecoder().decode(bytes)
 }
 
 // Simple HMAC-SHA256 implementation using Web Crypto API

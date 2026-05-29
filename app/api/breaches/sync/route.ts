@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { validateRequest, requireAdminRole } from "@/lib/auth"
-import { dbRun, dbGet } from "@/lib/sqlite"
+import { dbRun, dbGet, dbTransaction } from "@/lib/sqlite"
 
 export const dynamic = 'force-dynamic'
 
@@ -67,6 +67,10 @@ export async function POST(request: NextRequest) {
   let inserted = 0
   let updated = 0
 
+  // Wrap all inserts/updates in a single transaction so a mid-loop failure
+  // doesn't leave a partial sync, and to avoid N×2 synchronous SQLite statements
+  // blocking the event loop one-by-one.
+  dbTransaction(() => {
   for (const b of hibpBreaches) {
     const existing = dbGet(`SELECT id FROM breaches WHERE breach_name = ?`, [b.Name])
     if (existing) {
@@ -104,6 +108,7 @@ export async function POST(request: NextRequest) {
       inserted++
     }
   }
+  }) // end transaction
 
   return NextResponse.json({
     success: true,

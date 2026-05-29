@@ -56,13 +56,15 @@ export async function POST(request: NextRequest) {
     // Streaming: constant RAM regardless of file size.
     // Runs through the shared uploadQueue so it doesn't race with other uploads.
     if (name.endsWith('.txt') || name.endsWith('.csv')) {
-      let result: ProcessResult | null = null
+      // Definite assignment: uploadQueue always resolves processTextStream
+      // or throws, so `result` is always assigned when we reach the next line.
+      // eslint-disable-next-line prefer-const
+      let result!: ProcessResult
 
       await uploadQueue(async () => {
         result = await processTextStream(file.stream(), file.name)
       })
-
-      const r = result as unknown as ProcessResult
+      const r = result
       logJob({
         source:      'http',
         filename:    file.name,
