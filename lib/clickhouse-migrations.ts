@@ -7,12 +7,35 @@ import { getClient } from './clickhouse'
 import { buildCountryTierExpression } from './country-tiers'
 import { buildLoginTypeExpression } from './login-type'
 import { buildFreeWebmailInClause } from './webmail-providers'
+import { dbGet, dbRun } from './sqlite'
 
+// Per-process guard (still useful to avoid redundant calls within one process)
 let migrationsDone = false
+
+// Schema-migration version — bump this to re-run the DDL block on next startup.
+// The data-repair mutations have their own separate persistence gate below.
+const DDL_VERSION = 1
+
+// Per-version persistence: stored in SQLite app_settings.
+// Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
+// Key: 'ch_repair_mutations_fired' — value: '1' once the 5 data-repair
+//   mutations have been dispatched (they run in background; we only fire
+//   them once across all cold-starts, not on every boot).
+function getSettingInt(key: string, defaultVal: number): number {
+  try {
+    const row = dbGet(`SELECT value FROM app_settings WHERE key = ?`, [key]) as { value: string } | undefined
+    return row ? parseInt(row.value, 10) : defaultVal
+  } catch { return defaultVal }
+}
+function setSetting(key: string, value: string): void {
+  try { dbRun(`INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)`, [key, value]) } catch {}
+}
 
 export async function runClickHouseMigrations(): Promise<void> {
   if (migrationsDone) return
   migrationsDone = true
+
+  const lastDdl = getSettingInt('ch_ddl_version', 0)
 
   const client = getClient()
 
@@ -107,28 +130,49 @@ export async function runClickHouseMigrations(): Promise<void> {
     },
   ]
 
-  for (const { sql, materialize } of migrations) {
-    try {
-      await client.exec({ query: sql })
-      if (materialize) {
-        // Fire-and-forget: mutation runs in the background
-        client.exec({ query: materialize }).catch(err => {
-          console.warn('[ClickHouse migration] MATERIALIZE COLUMN non-fatal:', String(err).substring(0, 120))
-        })
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (!msg.includes('column with this name already exists') && !msg.includes('DUPLICATE_COLUMN')) {
-        console.warn('[ClickHouse migration] Non-fatal error:', msg.substring(0, 120))
+  // Only run DDL if this version hasn't been applied yet.
+  // ADD COLUMN IF NOT EXISTS / MODIFY SETTING are idempotent, but firing
+  // MATERIALIZE COLUMN on every cold-start queues background mutations that
+  // re-write column data even when nothing changed — expensive at 1.6B rows.
+  if (lastDdl < DDL_VERSION) {
+    for (const { sql, materialize } of migrations) {
+      try {
+        await client.exec({ query: sql })
+        if (materialize) {
+          // Fire-and-forget: mutation runs in the background
+          client.exec({ query: materialize }).catch(err => {
+            console.warn('[ClickHouse migration] MATERIALIZE COLUMN non-fatal:', String(err).substring(0, 120))
+          })
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (!msg.includes('column with this name already exists') && !msg.includes('DUPLICATE_COLUMN')) {
+          console.warn('[ClickHouse migration] Non-fatal error:', msg.substring(0, 120))
+        }
       }
     }
+    setSetting('ch_ddl_version', String(DDL_VERSION))
+    console.log(`[ClickHouse migration] DDL v${DDL_VERSION} applied`)
+  } else {
+    console.log(`[ClickHouse migration] DDL v${DDL_VERSION} already applied — skipping`)
   }
 
-  // ── Data-repair mutations (fire-and-forget) ──────────────────────────────
+  // ── Data-repair mutations (fire-and-forget, run exactly once) ────────────
   // These fix rows that were mis-parsed before the ULP parser was patched.
   // Safe to re-run: WHERE clauses only match corrupted rows, so on already-clean
   // data they match zero rows and ClickHouse completes them instantly.
   //
+  // Gate: only fire once ever (not on every cold-start).
+  // The WHERE clauses match corrupted rows only, but at 1.6B rows even a
+  // zero-match mutation rewrites parts and uses CPU.
+  const repairFired = getSettingInt('ch_repair_mutations_fired', 0)
+  if (repairFired >= 1) {
+    console.log('[ClickHouse migration] data-repair mutations already fired — skipping')
+    return
+  }
+  setSetting('ch_repair_mutations_fired', '1')
+  console.log('[ClickHouse migration] firing data-repair mutations (one-time)')
+
   // Case A — jsessionid bank-log rows
   //   Before fix: email=jsessionid=TOKEN:SRV:USER:PASS  password=IN https://URL  url=''
   //   After fix : url=https://URL  email=USER  password=PASS  domain=from URL

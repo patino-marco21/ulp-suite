@@ -100,36 +100,26 @@ export async function DELETE(request: NextRequest) {
   }
 
   try {
-    // 1. Delete the specific source record
+    // 1. Delete ALL source rows for this filename (handles duplicates too).
+    //    The (filename, imported_at) key may match multiple rows when a file was
+    //    double-processed.  Deleting by filename alone removes all of them.
     await executeQuery(
-      `ALTER TABLE ulp.sources DELETE
-       WHERE filename = {filename:String} AND imported_at = {imported_at:DateTime}`,
-      { filename, imported_at: importedAt }
-    )
-
-    // 2. Count remaining source entries for this filename
-    const remaining = await executeQuery(
-      `SELECT count() AS c FROM ulp.sources WHERE filename = {filename:String}`,
+      `ALTER TABLE ulp.sources DELETE WHERE filename = {filename:String}`,
       { filename }
     )
-    const remainingCount = Number((remaining as any[])[0]?.c ?? 0)
 
-    let deletedCredentials = false
-    if (remainingCount === 0) {
-      // Last import of this file — also purge its credentials
-      await executeQuery(
-        `ALTER TABLE ulp.credentials DELETE WHERE source_file = {source_file:String}`,
-        { source_file: filename }
-      )
-      deletedCredentials = true
-      invalidateStatsCache()
-    }
+    // 2. Purge the credentials for this source file as well.
+    await executeQuery(
+      `ALTER TABLE ulp.credentials DELETE WHERE source_file = {source_file:String}`,
+      { source_file: filename }
+    )
+    invalidateStatsCache()
 
     return NextResponse.json({
-      success: true,
+      success:             true,
       deleted_source:      true,
-      deleted_credentials: deletedCredentials,
-      remaining_sources:   remainingCount,
+      deleted_credentials: true,
+      remaining_sources:   0,
     })
   } catch (error) {
     console.error('Source delete error:', error)

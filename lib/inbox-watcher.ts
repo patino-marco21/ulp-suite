@@ -43,8 +43,23 @@ let started = false
 const DONE_MAX_AGE_MS       = 7 * 24 * 60 * 60 * 1_000   // 7 days
 const RECONCILE_INTERVAL_MS = 30_000                       // scan for missed files every 30 s
 
-/** Filenames currently queued or being processed. Prevents double-queuing. */
-const inFlight = new Set<string>()
+/**
+ * Filenames that have been submitted to uploadQueue (both pending and active).
+ * Entries are added in enqueueFile() and removed in the task's finally block.
+ *
+ * This is the source of truth for "is this file already in pLimit?".
+ * inFlight mirrors pendingTasks but is also used by reconcile() as a fast guard.
+ *
+ * The distinction matters for clearStaleInFlight():
+ *   inFlight = filenames added by enqueueFile (may include true orphans)
+ *   pendingTasks = filenames with live pLimit tasks (active OR queued)
+ *
+ * An entry in inFlight but NOT in pendingTasks is a true orphan
+ * (enqueueFile was called but the task's finally never ran — should never
+ * happen in normal operation but guards against future bugs).
+ */
+const inFlight    = new Set<string>()
+const pendingTasks = new Set<string>()  // subset of inFlight — has live pLimit task
 
 /** Live progress for the file currently being processed. */
 export interface InboxJobProgress {
@@ -86,11 +101,13 @@ export function clearStaleInFlight(): number {
   const current = _currentProgress?.filename ?? null
   let cleared = 0
   for (const name of Array.from(inFlight)) {
-    if (name === current) continue  // actively processing — leave it
+    if (name === current)          continue  // actively processing — leave it
+    if (pendingTasks.has(name))    continue  // has a live pLimit task — DO NOT clear
+    // True orphan: in inFlight but no live pLimit task — safe to remove
     inFlight.delete(name)
     cleared++
   }
-  console.log(`[inbox-watcher] clearStaleInFlight: cleared ${cleared} entries`)
+  console.log(`[inbox-watcher] clearStaleInFlight: cleared ${cleared} true orphan(s)`)
   return cleared
 }
 
@@ -150,6 +167,7 @@ function enqueueFile(filePath: string): void {
   if (filePath.startsWith(DONE_PREFIX) || filePath.startsWith(FAIL_PREFIX)) return
 
   inFlight.add(filename)
+  pendingTasks.add(filename)   // mark as having a live pLimit task
   console.log(`[inbox-watcher] queued: ${filename} (queue: ${queueSize()})`)
 
   uploadQueue(async () => {
@@ -217,6 +235,7 @@ function enqueueFile(filePath: string): void {
       try { fs.renameSync(filePath, path.join(FAIL, filename)) } catch {}
     } finally {
       _currentProgress = null
+      pendingTasks.delete(filename)   // task is done (success or fail)
       inFlight.delete(filename)
       setCurrentJob(null)
     }

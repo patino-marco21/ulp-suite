@@ -86,8 +86,24 @@ export async function insertBatch(
 
 export async function recordSource(filename: string, lineCount: number): Promise<void> {
   const chClient = getClient()
+
+  // Idempotent: skip if this filename was already recorded in ulp.sources.
+  // Prevents duplicate source rows when a file is re-processed (e.g. after an
+  // OOM crash between processTextStream and renameSync, or a Force Scan race).
+  // Safe because inbox processing is serialised via uploadQueue (pLimit 1).
+  const existing = await chClient.query({
+    query:        `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1`,
+    query_params: { f: filename },
+    format:       'JSONEachRow',
+  })
+  const rows = await existing.json() as Array<{ c: string | number }>
+  if (Number(rows[0]?.c ?? 0) > 0) {
+    console.log(`[upload-processor] recordSource: ${filename} already in ulp.sources — skipping`)
+    return
+  }
+
   await chClient.insert({
-    table: 'ulp.sources',
+    table:  'ulp.sources',
     values: [{ filename, line_count: lineCount }],
     format: 'JSONEachRow',
   })
