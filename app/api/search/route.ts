@@ -119,7 +119,7 @@ export async function GET(request: NextRequest) {
     const [countResult, rows] = await Promise.all([
       executeQuery(
         `SELECT count() AS total FROM ulp.credentials WHERE ${clause}${allExtras}
-         SETTINGS optimize_trivial_count_query = 1, max_execution_time = 30`,
+         SETTINGS optimize_trivial_count_query = 1, max_execution_time = 120`,
         mergedParams
       ),
       executeQuery(
@@ -128,12 +128,14 @@ export async function GET(request: NextRequest) {
          WHERE ${clause}${allExtras}
          ORDER BY ${orderBy}
          LIMIT {limit:UInt32} OFFSET {offset:UInt32}
-         SETTINGS max_execution_time = 30`,
+         SETTINGS max_execution_time = 120,
+                  max_rows_to_sort = 50000000`,
         mergedParams
       ),
     ])
     const query_ms = Date.now() - t0
     const total = Number(countResult[0]?.total || 0)
+    const timed_out = query_ms > 100_000
 
     return NextResponse.json({
       success:          true,
@@ -143,6 +145,7 @@ export async function GET(request: NextRequest) {
       pages:            Math.ceil(total / limit),
       query:            q,
       query_ms,
+      timed_out,
       sort:             sortKey,
       breach_filter:    breach,
       tier_include:     tierInclude,

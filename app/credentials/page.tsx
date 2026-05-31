@@ -50,13 +50,14 @@ interface RelatedData {
 }
 
 interface ApiResult {
-  success: boolean
-  results: Credential[]
-  total: number
-  page: number
-  pages: number
-  query_ms?: number
-  sort?: string
+  success:    boolean
+  results:    Credential[]
+  total:      number
+  page:       number
+  pages:      number
+  query_ms?:  number
+  timed_out?: boolean   // true when query_ms > 100s — results may be incomplete
+  sort?:      string
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -798,13 +799,26 @@ export default function CredentialsPage() {
           <div>
             <h1 className="text-xl font-bold">Credentials Browser</h1>
             {data && (
-              <p className="text-sm text-muted-foreground">
-                {data.total.toLocaleString()} records
-                {data.query_ms !== undefined && (
-                  <span className="ml-2 opacity-50">{data.query_ms}ms</span>
+              <>
+                <p className="text-sm text-muted-foreground">
+                  {data.total.toLocaleString()} records
+                  {data.query_ms !== undefined && (
+                    <span className={`ml-2 ${data.query_ms > 10_000 ? 'text-amber-500' : 'opacity-50'}`}>
+                      {data.query_ms >= 1_000
+                        ? `${(data.query_ms / 1_000).toFixed(1)}s`
+                        : `${data.query_ms}ms`}
+                    </span>
+                  )}
+                  <span className="ml-2 opacity-40 text-xs">· click any row to inspect</span>
+                </p>
+                {/* Slow/timed-out query warning */}
+                {(data.timed_out || (data.query_ms !== undefined && data.query_ms > 25_000 && data.results.length === 0)) && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400 mt-0.5 flex items-center gap-1">
+                    ⚠ Query was slow or may have been cut short at this data size.
+                    Try a more specific filter (exact email, domain, or breach name).
+                  </p>
                 )}
-                <span className="ml-2 opacity-40 text-xs">· click any row to inspect</span>
-              </p>
+              </>
             )}
           </div>
 

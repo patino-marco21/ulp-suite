@@ -145,7 +145,7 @@ export async function GET(request: NextRequest) {
       // For filtered queries the setting is a no-op and the WHERE runs normally.
       executeQuery(
         `SELECT count() AS total FROM ulp.credentials WHERE ${where}
-         SETTINGS optimize_trivial_count_query = 1, max_execution_time = 15`,
+         SETTINGS optimize_trivial_count_query = 1, max_execution_time = 120`,
         params
       ),
       executeQuery(
@@ -154,12 +154,16 @@ export async function GET(request: NextRequest) {
          WHERE ${where}
          ORDER BY ${orderBy}
          LIMIT {limit:UInt32} OFFSET {offset:UInt32}
-         SETTINGS max_execution_time = 30`,
+         SETTINGS max_execution_time = 120,
+                  max_rows_to_sort = 50000000`,
         params
       ),
     ])
     const query_ms = Date.now() - t0
     const total = Number(countResult[0]?.total || 0)
+    // timed_out: query ran close to the limit — results may be incomplete.
+    // At 1.6B+ rows a non-indexed query can hit 120s before finding all matches.
+    const timed_out = query_ms > 100_000
 
     return NextResponse.json({
       success: true,
@@ -168,6 +172,7 @@ export async function GET(request: NextRequest) {
       page,
       pages: Math.ceil(total / limit),
       query_ms,
+      timed_out,
       sort: sortKey,
     })
   } catch (error) {
