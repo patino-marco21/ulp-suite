@@ -17,12 +17,21 @@ export async function GET(request: NextRequest) {
   const offset = (page - 1) * limit
 
   try {
+    // Deduplicate sources: ulp.sources is a plain MergeTree with no uniqueness
+    // constraint.  If a file was processed twice (e.g. container OOM mid-rename),
+    // it appears twice.  argMax picks the most-recent row per filename so the
+    // count and UI show each file exactly once.
     const [countResult, rows, credCounts] = await Promise.all([
-      executeQuery('SELECT count() as total FROM ulp.sources'),
       executeQuery(
-        `SELECT filename, line_count, imported_at
+        `SELECT count() AS total FROM (SELECT DISTINCT filename FROM ulp.sources)`
+      ),
+      executeQuery(
+        `SELECT filename,
+                argMax(line_count,  imported_at) AS line_count,
+                max(imported_at)                 AS imported_at
          FROM ulp.sources
-         ORDER BY imported_at DESC
+         GROUP BY filename
+         ORDER BY max(imported_at) DESC
          LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         { limit, offset }
       ),

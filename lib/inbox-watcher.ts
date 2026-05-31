@@ -190,6 +190,11 @@ function enqueueFile(filePath: string): void {
           `imported=${result.imported} skipped=${result.skipped}`
         )
       }
+      // Rename to done/ BEFORE calling logJob so that if the process crashes
+      // between here and logJob (e.g. OOM), the file is already out of inbox/.
+      // The next reconcile scan won't re-queue it, preventing double-processing
+      // and duplicate credentials in ClickHouse.
+      fs.renameSync(filePath, path.join(DONE, filename))
       logJob({
         source:      'inbox',
         filename,
@@ -198,7 +203,6 @@ function enqueueFile(filePath: string): void {
         skipped,
         duration_ms: Date.now() - startAt,
       })
-      fs.renameSync(filePath, path.join(DONE, filename))
     } catch (err) {
       console.error(`[inbox-watcher] failed: ${filename}`, err)
       logJob({
