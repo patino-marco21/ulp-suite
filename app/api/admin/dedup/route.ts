@@ -1,29 +1,20 @@
 /**
  * POST /api/admin/dedup
  *
- * One-time (or scheduled) deduplication of the ulp.credentials table.
+ * Deduplication of the ulp.credentials table.
  *
- * Runs:
- *   OPTIMIZE TABLE ulp.credentials FINAL DEDUPLICATE BY url, email, password
+ * Table schema: ORDER BY (domain, email, imported_at)
+ *               PARTITION BY toYYYYMM(imported_at)
  *
- * This forces ClickHouse to merge ALL parts in every partition into one and
- * then discard rows where (url, email, password) are identical, keeping the
- * first occurrence (lowest imported_at within the merged part).
+ * DEDUPLICATE BY must include ALL ORDER BY / PRIMARY KEY / PARTITION BY columns.
+ * We include them plus url, password, source_file so only truly identical
+ * credential rows are removed (not rows that happen to share domain+email+time).
  *
- * Performance note:
- *   - "FINAL" forces a full merge — expensive on large tables.
- *   - For 3–20 M rows expect 30 s–5 min depending on disk and CPU.
- *   - For very large tables (100 M+) prefer partition-by-partition:
- *       OPTIMIZE TABLE ulp.credentials PARTITION '202401' FINAL DEDUPLICATE BY url, email, password
- *   - The request returns immediately after submitting the mutation.
- *     ClickHouse runs the actual merge asynchronously — poll /api/stats or
- *     check system.merges to track progress.
- *
- * Prevention note:
- *   The ULP parser already deduplicates within each uploaded file using an
- *   in-memory Set.  This endpoint cleans up cross-upload duplicates (the same
- *   file uploaded twice) or legacy data imported before the parser-level dedup
- *   was added.
+ * Performance:
+ *   - FINAL forces a full partition merge — expensive on large tables.
+ *   - For 1B+ rows prefer partition-by-partition (pass { "partition": "202405" }).
+ *   - Returns immediately; ClickHouse merges asynchronously.
+ *     Monitor via system.merges or system.processes.
  *
  * Auth: admin role required.
  */
@@ -35,40 +26,33 @@ import { invalidateStatsCache } from '@/lib/stats-cache'
 
 export const dynamic = 'force-dynamic'
 
+// Columns used in ORDER BY + PRIMARY KEY + PARTITION BY MUST be included.
+// Additional content columns narrow the dedup key so only truly identical
+// rows are removed.
+const DEDUP_BY = 'domain, email, imported_at, url, password, source_file'
+
 export async function POST(request: NextRequest) {
   const user = await validateRequest(request)
   const adminError = requireAdminRole(user)
   if (adminError) return adminError
 
   const body = await request.json().catch(() => ({}))
-  // Optional: scope to a specific partition (e.g. "202401") to limit blast radius.
   const partition: string | undefined = typeof body.partition === 'string' ? body.partition : undefined
 
   const client = getClient()
 
-  // Count rows before so we can report how many were removed.
   let rowsBefore = 0
   try {
-    const res = await client.query({
-      query: 'SELECT count() AS n FROM ulp.credentials',
-      format: 'JSONEachRow',
-    })
+    const res = await client.query({ query: 'SELECT count() AS n FROM ulp.credentials', format: 'JSONEachRow' })
     const rows: Array<{ n: string }> = await res.json()
     rowsBefore = Number(rows[0]?.n ?? 0)
-  } catch {
-    // Non-fatal — we'll skip the delta report
-  }
+  } catch { /* non-fatal */ }
 
-  // Build OPTIMIZE query.  FINAL forces all parts in each (scoped) partition
-  // to merge; DEDUPLICATE BY restricts the dedup key to (url, email, password)
-  // so rows differing only in imported_at or breach_name are still removed.
   const optimizeQuery = partition
-    ? `OPTIMIZE TABLE ulp.credentials PARTITION '${partition.replace(/'/g, '')}' FINAL DEDUPLICATE BY url, email, password`
-    : `OPTIMIZE TABLE ulp.credentials FINAL DEDUPLICATE BY url, email, password`
+    ? `OPTIMIZE TABLE ulp.credentials PARTITION '${partition.replace(/'/g, '')}' FINAL DEDUPLICATE BY ${DEDUP_BY}`
+    : `OPTIMIZE TABLE ulp.credentials FINAL DEDUPLICATE BY ${DEDUP_BY}`
 
   try {
-    // OPTIMIZE TABLE is synchronous when mutations_sync = 1, but for large tables
-    // we use the default async mode and return immediately.
     await client.exec({ query: optimizeQuery })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -76,28 +60,21 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: false, error: msg }, { status: 500 })
   }
 
-  // Count rows after
   let rowsAfter = 0
   try {
-    const res = await client.query({
-      query: 'SELECT count() AS n FROM ulp.credentials',
-      format: 'JSONEachRow',
-    })
+    const res = await client.query({ query: 'SELECT count() AS n FROM ulp.credentials', format: 'JSONEachRow' })
     const rows: Array<{ n: string }> = await res.json()
     rowsAfter = Number(rows[0]?.n ?? 0)
-  } catch {
-    // Non-fatal
-  }
+  } catch { /* non-fatal */ }
 
-  // Invalidate stats so the dashboard reflects the new count
   if (rowsAfter < rowsBefore) invalidateStatsCache()
 
   return NextResponse.json({
-    success:        true,
-    rows_before:    rowsBefore,
-    rows_after:     rowsAfter,
+    success:            true,
+    rows_before:        rowsBefore,
+    rows_after:         rowsAfter,
     duplicates_removed: rowsBefore - rowsAfter,
-    partition:      partition ?? 'all',
-    query:          optimizeQuery,
+    partition:          partition ?? 'all',
+    query:              optimizeQuery,
   })
 }
