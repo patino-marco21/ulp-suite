@@ -145,7 +145,7 @@ export async function GET(request: NextRequest) {
       // For filtered queries the setting is a no-op and the WHERE runs normally.
       executeQuery(
         `SELECT count() AS total FROM ulp.credentials WHERE ${where}
-         SETTINGS optimize_trivial_count_query = 1, max_execution_time = 120`,
+         SETTINGS optimize_trivial_count_query = 1, max_execution_time = 240`,
         params
       ),
       executeQuery(
@@ -154,16 +154,19 @@ export async function GET(request: NextRequest) {
          WHERE ${where}
          ORDER BY ${orderBy}
          LIMIT {limit:UInt32} OFFSET {offset:UInt32}
-         SETTINGS max_execution_time = 120,
-                  max_rows_to_sort = 50000000`,
+         SETTINGS max_execution_time = 240`,
+        // max_rows_to_sort removed: it caused ORDER BY queries to return 0 rows
+        // when the sort buffer hit the cap before flushing (ClickHouse issue #52234).
+        // timeout_overflow_mode=break (set in the server profile) still provides a
+        // hard stop — the 240s limit is the correct guard at 1B+ row scale.
         params
       ),
     ])
     const query_ms = Date.now() - t0
     const total = Number(countResult[0]?.total || 0)
     // timed_out: query ran close to the limit — results may be incomplete.
-    // At 1.6B+ rows a non-indexed query can hit 120s before finding all matches.
-    const timed_out = query_ms > 100_000
+    // count>0 + results=0 is the classic timeout_overflow_mode=break symptom with ORDER BY.
+    const timed_out = query_ms > 200_000
 
     return NextResponse.json({
       success: true,

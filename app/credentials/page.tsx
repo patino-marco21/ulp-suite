@@ -56,7 +56,7 @@ interface ApiResult {
   page:       number
   pages:      number
   query_ms?:  number
-  timed_out?: boolean   // true when query_ms > 100s — results may be incomplete
+  timed_out?: boolean   // true when query_ms > 200s — results may be incomplete
   sort?:      string
 }
 
@@ -1285,8 +1285,26 @@ export default function CredentialsPage() {
             </tbody>
           </table>
         ) : (
-          <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
-            {loading ? null : 'No credentials found'}
+          <div className="flex h-full items-center justify-center text-center p-6">
+            {loading ? null : (
+              // count>0 but results=0 means the data query timed out (timeout_overflow_mode=break
+              // flushes 0 rows when ORDER BY query is interrupted mid-sort).
+              data && data.total > 0
+                ? (
+                  <div className="space-y-2">
+                    <p className="text-amber-600 dark:text-amber-400 font-medium">
+                      ⚠ Results timed out on this page
+                    </p>
+                    <p className="text-sm text-muted-foreground">
+                      {data.total.toLocaleString()} records were found but couldn't be loaded on page {page}.
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Try page 1, reduce the page size, or add a more specific filter.
+                    </p>
+                  </div>
+                )
+                : <span className="text-muted-foreground text-sm">No credentials found</span>
+            )}
           </div>
         )}
       </div>
