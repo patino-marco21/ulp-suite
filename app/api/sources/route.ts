@@ -25,13 +25,16 @@ export async function GET(request: NextRequest) {
       executeQuery(
         `SELECT count() AS total FROM (SELECT DISTINCT filename FROM ulp.sources)`
       ),
+      // Note: alias 'imported_at' must NOT match the column name or ClickHouse
+      // treats argMax(line_count, imported_at) as argMax(line_count, max(imported_at))
+      // → nested aggregate error.  Use 'last_imported' to avoid the collision.
       executeQuery(
         `SELECT filename,
-                argMax(line_count,  imported_at) AS line_count,
-                max(imported_at)                 AS imported_at
+                argMax(line_count, imported_at) AS line_count,
+                max(imported_at)                AS last_imported
          FROM ulp.sources
          GROUP BY filename
-         ORDER BY max(imported_at) DESC
+         ORDER BY last_imported DESC
          LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         { limit, offset }
       ),
@@ -55,7 +58,7 @@ export async function GET(request: NextRequest) {
     const sources = (rows as any[]).map(r => ({
       filename:    String(r.filename),
       line_count:  Number(r.line_count),
-      imported_at: String(r.imported_at),
+      imported_at: String(r.last_imported),   // alias is now 'last_imported'
       cred_count:  credMap.get(String(r.filename)) ?? 0,
     }))
 
