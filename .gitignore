@@ -42,3 +42,7 @@ test-data/
 .devtasks
 docs/generated
 docs/api
+# curl cookie jars — contain live session tokens, never commit
+cookies.txt
+*.cookie
+curl_cookies*.txt
