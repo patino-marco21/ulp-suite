@@ -119,7 +119,9 @@ export async function GET(request: NextRequest) {
     const [countResult, rows] = await Promise.all([
       executeQuery(
         `SELECT count() AS total FROM ulp.credentials WHERE ${clause}${allExtras}
-         SETTINGS optimize_trivial_count_query = 1, max_execution_time = 240`,
+         SETTINGS optimize_trivial_count_query = 1,
+                  max_execution_time = 300,
+                  timeout_overflow_mode = 'break'`,
         mergedParams
       ),
       executeQuery(
@@ -128,32 +130,47 @@ export async function GET(request: NextRequest) {
          WHERE ${clause}${allExtras}
          ORDER BY ${orderBy}
          LIMIT {limit:UInt32} OFFSET {offset:UInt32}
-         SETTINGS max_execution_time = 240`,
+         SETTINGS max_execution_time = 300,
+                  timeout_overflow_mode = 'throw'`,
         mergedParams
       ),
     ])
     const query_ms = Date.now() - t0
     const total = Number(countResult[0]?.total || 0)
-    const timed_out = query_ms > 100_000
+    const timed_out = query_ms > 250_000
 
     return NextResponse.json({
-      success:          true,
-      results:          rows,
+      success:           true,
+      results:           rows,
       total,
       page,
-      pages:            Math.ceil(total / limit),
-      query:            q,
+      pages:             Math.ceil(total / limit),
+      query:             q,
       query_ms,
       timed_out,
-      sort:             sortKey,
-      breach_filter:    breach,
-      tier_include:     tierInclude,
-      tier_exclude:     tierExclude,
+      sort:              sortKey,
+      breach_filter:     breach,
+      tier_include:      tierInclude,
+      tier_exclude:      tierExclude,
       login_type_filter: loginType,
-      regex_mode:       regexMode,
+      regex_mode:        regexMode,
     })
   } catch (error) {
-    console.error('Search error:', error)
+    const msg = error instanceof Error ? error.message : String(error)
+    const isTimeout = msg.includes('TIMEOUT_EXCEEDED') || msg.includes('timeout') || msg.includes('Timeout')
+
+    if (isTimeout) {
+      return NextResponse.json({
+        success:   false,
+        timed_out: true,
+        error:     'Query timed out — use an exact domain, email, or breach name for fast results at this data size.',
+        results:   [],
+        total:     0,
+        pages:     0,
+      }, { status: 408 })
+    }
+
+    console.error('Search error:', msg)
     return NextResponse.json({ success: false, error: 'Search failed' }, { status: 500 })
   }
 }

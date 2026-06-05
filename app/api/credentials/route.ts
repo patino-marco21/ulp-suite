@@ -144,42 +144,59 @@ export async function GET(request: NextRequest) {
       // the partition metadata instead of scanning rows — nearly instant.
       // For filtered queries the setting is a no-op and the WHERE runs normally.
       executeQuery(
+        // Count uses break so a partial count is returned rather than an error.
         `SELECT count() AS total FROM ulp.credentials WHERE ${where}
-         SETTINGS optimize_trivial_count_query = 1, max_execution_time = 240`,
+         SETTINGS optimize_trivial_count_query = 1,
+                  max_execution_time = 300,
+                  timeout_overflow_mode = 'break'`,
         params
       ),
       executeQuery(
+        // Data query uses throw so a timeout produces a clear error (caught below)
+        // rather than silently returning 0 rows (timeout_overflow_mode=break with
+        // ORDER BY does not flush the sort buffer — ClickHouse issue #52234).
         `SELECT ${SELECT}
          FROM ulp.credentials
          WHERE ${where}
          ORDER BY ${orderBy}
          LIMIT {limit:UInt32} OFFSET {offset:UInt32}
-         SETTINGS max_execution_time = 240`,
-        // max_rows_to_sort removed: it caused ORDER BY queries to return 0 rows
-        // when the sort buffer hit the cap before flushing (ClickHouse issue #52234).
-        // timeout_overflow_mode=break (set in the server profile) still provides a
-        // hard stop — the 240s limit is the correct guard at 1B+ row scale.
+         SETTINGS max_execution_time = 300,
+                  timeout_overflow_mode = 'throw'`,
         params
       ),
     ])
     const query_ms = Date.now() - t0
     const total = Number(countResult[0]?.total || 0)
-    // timed_out: query ran close to the limit — results may be incomplete.
-    // count>0 + results=0 is the classic timeout_overflow_mode=break symptom with ORDER BY.
-    const timed_out = query_ms > 200_000
+    const timed_out = query_ms > 250_000
 
     return NextResponse.json({
-      success: true,
-      results: rows,
+      success:  true,
+      results:  rows,
       total,
       page,
-      pages: Math.ceil(total / limit),
+      pages:    Math.ceil(total / limit),
       query_ms,
       timed_out,
-      sort: sortKey,
+      sort:     sortKey,
     })
   } catch (error) {
-    console.error('Credentials browse error:', error)
+    const msg = error instanceof Error ? error.message : String(error)
+    const isTimeout = msg.includes('TIMEOUT_EXCEEDED') || msg.includes('timeout') || msg.includes('Timeout')
+
+    if (isTimeout) {
+      // timeout_overflow_mode=throw: return a structured timeout response so the
+      // UI can show "query timed out" instead of crashing with a 500 error.
+      return NextResponse.json({
+        success:   false,
+        timed_out: true,
+        error:     'Query timed out — add a more specific filter (exact domain, email, or breach name) for faster results.',
+        results:   [],
+        total:     0,
+        pages:     0,
+      }, { status: 408 })
+    }
+
+    console.error('Credentials browse error:', msg)
     return NextResponse.json({ success: false, error: 'Query failed' }, { status: 500 })
   }
 }

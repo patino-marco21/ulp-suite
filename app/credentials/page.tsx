@@ -662,6 +662,11 @@ export default function CredentialsPage() {
       if (json.success) {
         setData(json)
         setPage(p)
+      } else if (json.timed_out) {
+        // 408 timeout: show the structured timeout response in the results panel
+        // instead of a toast — the user can see why and what to do.
+        setData({ ...json, results: [], pages: 0 } as any)
+        setPage(p)
       } else {
         toast({ title: 'Failed to load', variant: 'destructive' })
       }
