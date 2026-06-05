@@ -68,9 +68,13 @@ export async function POST(request: NextRequest) {
   const results: Record<string, BatchResult> = {}
 
   try {
+    const SETTINGS = `SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw'`
+
     // ── Email lookups ────────────────────────────────────────────────────────
     if (emails.length > 0) {
-      // Use IN clause — each value hits the bloom_filter skip index
+      // Raw column: bloom_filter(0.05) on email provides fast granule pruning.
+      // LIMIT {cap} BY email guarantees up to RESULTS_CAP rows per queried
+      // address — fixes starvation bug where one hot email fills the global cap.
       const emailList = emails.map((_, i) => `{email${i}:String}`).join(", ")
       const emailParams: Record<string, string> = {}
       emails.forEach((e, i) => { emailParams[`email${i}`] = e.toLowerCase() })
@@ -78,16 +82,16 @@ export async function POST(request: NextRequest) {
       const rows = await executeQuery(
         `SELECT ${NORM_COLS}, source_file, breach_name, imported_at
          FROM ulp.credentials
-         WHERE (${NORM_EMAIL_EXPR}) IN (${emailList})
-         ORDER BY imported_at DESC
-         LIMIT {cap:UInt32}`,
-        { ...emailParams, cap: emails.length * RESULTS_CAP }
+         WHERE email IN (${emailList})
+         ORDER BY email ASC, imported_at DESC
+         LIMIT {cap:UInt32} BY email
+         ${SETTINGS}`,
+        { ...emailParams, cap: RESULTS_CAP }
       ) as Array<{ email: string; url: string; password: string; domain: string; source_file: string; breach_name: string; imported_at: string }>
 
-      // Group results back by the queried email
       for (const email of emails) {
         const lc   = email.toLowerCase()
-        const hits = rows.filter(r => r.email === lc).slice(0, RESULTS_CAP)
+        const hits = rows.filter(r => r.email === lc)
         results[email] = { found: hits.length > 0, count: hits.length, results: hits }
       }
     }
@@ -101,15 +105,16 @@ export async function POST(request: NextRequest) {
       const rows = await executeQuery(
         `SELECT ${NORM_COLS}, source_file, breach_name, imported_at
          FROM ulp.credentials
-         WHERE (${NORM_DOMAIN_EXPR}) IN (${domainList})
-         ORDER BY imported_at DESC
-         LIMIT {cap:UInt32}`,
-        { ...domainParams, cap: domains.length * RESULTS_CAP }
+         WHERE domain IN (${domainList})
+         ORDER BY domain ASC, imported_at DESC
+         LIMIT {cap:UInt32} BY domain
+         ${SETTINGS}`,
+        { ...domainParams, cap: RESULTS_CAP }
       ) as Array<{ email: string; url: string; password: string; domain: string; source_file: string; breach_name: string; imported_at: string }>
 
       for (const domain of domains) {
         const lc   = domain.toLowerCase()
-        const hits = rows.filter(r => r.domain === lc).slice(0, RESULTS_CAP)
+        const hits = rows.filter(r => r.domain === lc)
         results[domain] = { found: hits.length > 0, count: hits.length, results: hits }
       }
     }

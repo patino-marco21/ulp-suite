@@ -29,31 +29,31 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    // Raw domain column: all data-repair mutations done, bloom_filter index used.
     const [countResult, rows] = await Promise.all([
       executeQuery(
-        `SELECT count() as total FROM ulp.credentials WHERE (${NORM_DOMAIN_EXPR}) = {domain:String}`,
+        `SELECT count() as total FROM ulp.credentials WHERE domain = {domain:String}
+         SETTINGS optimize_trivial_count_query = 1, max_execution_time = 30, timeout_overflow_mode = 'break'`,
         { domain }
       ),
       executeQuery(
         `SELECT url, email, password, domain, source_file, imported_at
-         FROM ulp.credentials WHERE (${NORM_DOMAIN_EXPR}) = {domain:String}
-         ORDER BY imported_at DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
+         FROM ulp.credentials WHERE domain = {domain:String}
+         ORDER BY imported_at DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}
+         SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw'`,
         { domain, limit, offset }
       ),
     ])
 
     const total = Number(countResult[0]?.total || 0)
-    const response = NextResponse.json({
-      success: true,
-      domain,
-      results: rows,
-      total,
-      page,
-      pages: Math.ceil(total / limit),
-    })
+    const response = NextResponse.json({ success: true, domain, results: rows, total, page, pages: Math.ceil(total / limit) })
     return addRateLimitHeaders(response, authResult.rateLimit)
   } catch (error) {
-    console.error('v1 domain search error:', error)
+    const msg = error instanceof Error ? error.message : String(error)
+    if (msg.includes('TIMEOUT_EXCEEDED') || msg.includes('timeout')) {
+      return NextResponse.json({ success: false, timed_out: true, error: 'Query timed out — domain may have too many results, try adding a breach or date filter' }, { status: 408 })
+    }
+    console.error('v1 domain search error:', msg)
     return NextResponse.json({ success: false, error: 'Domain search failed' }, { status: 500 })
   }
 }

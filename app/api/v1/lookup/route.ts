@@ -2,14 +2,19 @@
  * Quick Lookup API v1
  * GET /api/v1/lookup?email=john@example.com
  * GET /api/v1/lookup?domain=example.com
+ *
+ * Performance: queries raw domain/email columns (indexed) instead of
+ * NORM_*_EXPR wrappers.  All background data-repair mutations are done
+ * so stored values are correct — raw columns use bloom filters + primary key.
  */
 
 import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
 import { executeQuery } from "@/lib/clickhouse"
-import { NORM_EMAIL_EXPR, NORM_DOMAIN_EXPR } from '@/lib/ulp-normalize'
 
 export const dynamic = 'force-dynamic'
+
+const SETTINGS = `SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw'`
 
 export async function GET(request: NextRequest) {
   const authResult = await withApiKeyAuth(request, ['admin', 'analyst'])
@@ -20,8 +25,8 @@ export async function GET(request: NextRequest) {
   await logApiRequest(authResult.apiKey!, request, 'v1/lookup')
 
   const { searchParams } = new URL(request.url)
-  const email = searchParams.get('email') || ''
-  const domain = searchParams.get('domain') || ''
+  const email  = searchParams.get('email')?.toLowerCase().trim()  || ''
+  const domain = searchParams.get('domain')?.toLowerCase().trim() || ''
 
   if (!email && !domain) {
     return NextResponse.json({ success: false, error: 'Provide email or domain parameter' }, { status: 400 })
@@ -34,37 +39,31 @@ export async function GET(request: NextRequest) {
       results = await executeQuery(
         `SELECT url, email, domain, source_file, imported_at
          FROM ulp.credentials
-         WHERE (${NORM_EMAIL_EXPR}) = {email:String}
-         ORDER BY imported_at DESC LIMIT 100`,
+         WHERE email = {email:String}
+         ORDER BY imported_at DESC LIMIT 100
+         ${SETTINGS}`,
         { email }
       )
-      const response = NextResponse.json({
-        success: true,
-        found: results.length > 0,
-        email,
-        count: results.length,
-        results,
-      })
+      const response = NextResponse.json({ success: true, found: results.length > 0, email, count: results.length, results })
       return addRateLimitHeaders(response, authResult.rateLimit)
     }
 
     results = await executeQuery(
       `SELECT url, email, domain, source_file, imported_at
        FROM ulp.credentials
-       WHERE (${NORM_DOMAIN_EXPR}) = {domain:String}
-       ORDER BY imported_at DESC LIMIT 100`,
+       WHERE domain = {domain:String}
+       ORDER BY imported_at DESC LIMIT 100
+       ${SETTINGS}`,
       { domain }
     )
-    const response = NextResponse.json({
-      success: true,
-      found: results.length > 0,
-      domain,
-      count: results.length,
-      results,
-    })
+    const response = NextResponse.json({ success: true, found: results.length > 0, domain, count: results.length, results })
     return addRateLimitHeaders(response, authResult.rateLimit)
   } catch (error) {
-    console.error('v1 lookup error:', error)
+    const msg = error instanceof Error ? error.message : String(error)
+    if (msg.includes('TIMEOUT_EXCEEDED') || msg.includes('timeout')) {
+      return NextResponse.json({ success: false, timed_out: true, error: 'Query timed out — use exact email or domain' }, { status: 408 })
+    }
+    console.error('v1 lookup error:', msg)
     return NextResponse.json({ success: false, error: 'Lookup failed' }, { status: 500 })
   }
 }

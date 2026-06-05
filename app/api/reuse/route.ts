@@ -43,7 +43,7 @@ export async function GET(request: NextRequest) {
       SELECT
         email,
         password,
-        count(DISTINCT domain) AS domain_count,
+        uniq(domain) AS domain_count,
         groupUniqArray(domain)  AS domains
       FROM ulp.credentials
       WHERE ${BASE_WHERE}
@@ -52,9 +52,10 @@ export async function GET(request: NextRequest) {
       ORDER BY domain_count DESC
       LIMIT {limit:UInt32}
       OFFSET {offset:UInt32}
+      SETTINGS max_execution_time = 120, timeout_overflow_mode = 'break'
     `, queryParams)
 
-    // Total count via subquery — kept separate so the main query stays streaming-friendly
+    // Total count via subquery
     const countResult = await executeQuery(`
       SELECT count() AS total
       FROM (
@@ -62,8 +63,9 @@ export async function GET(request: NextRequest) {
         FROM ulp.credentials
         WHERE ${BASE_WHERE}
         GROUP BY email, password
-        HAVING count(DISTINCT domain) > 1
+        HAVING uniq(domain) > 1
       )
+      SETTINGS max_execution_time = 120, timeout_overflow_mode = 'break'
     `, { emailFilter: emailFilter || '', pwFilter: pwFilter || '' })
 
     const total = Number(countResult[0]?.total || 0)

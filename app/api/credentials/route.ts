@@ -12,25 +12,17 @@ export const dynamic = 'force-dynamic'
 const VALID_MASKS = new Set(['alpha', 'numeric', 'alphanumeric', 'mixed', 'empty'])
 
 // Allowed ORDER BY expressions — prevents SQL injection via sort param.
-//
-// domain_asc/desc: must use NORM_DOMAIN_EXPR rather than the raw `domain` column.
-//   ClickHouse resolves ORDER BY identifiers to the raw column first
-//   (prefer_column_name_to_alias = 1 by default), so `ORDER BY domain` sorts by
-//   the un-normalised stored value even though SELECT displays the NORM_COLS alias.
-//   Corrupted rows (Case A jsessionid, Case C scheme-split, Case D blank-tab)
-//   have wrong raw domain values (e.g. 'jsessionid', 'https', '').
-//
-//   The (expr='') ASC prefix pushes email-only credentials (no domain) to the
-//   bottom of BOTH sort directions so real domains fill the visible pages.
-//
-// email_asc/desc: same logic — sort by NORM_EMAIL_EXPR to handle corrupted rows.
+// All background ALTER TABLE UPDATE data-repair mutations are done (verified:
+// SELECT countIf(is_done=0) FROM system.mutations WHERE table='credentials' = 0).
+// Raw domain/email columns are now correct — no need for NORM_*_EXPR in ORDER BY.
+// Using raw columns enables ClickHouse optimize_read_in_order for asc sorts.
 const SORT_MAP: Record<string, string> = {
   imported_desc: 'imported_at DESC',
   imported_asc:  'imported_at ASC',
-  domain_asc:    `(${NORM_DOMAIN_EXPR}='') ASC, ${NORM_DOMAIN_EXPR} ASC, imported_at DESC`,
-  domain_desc:   `(${NORM_DOMAIN_EXPR}='') ASC, ${NORM_DOMAIN_EXPR} DESC, imported_at DESC`,
-  email_asc:     `${NORM_EMAIL_EXPR} ASC, imported_at DESC`,
-  email_desc:    `${NORM_EMAIL_EXPR} DESC, imported_at DESC`,
+  domain_asc:    `(domain='') ASC, domain ASC, imported_at DESC`,
+  domain_desc:   `(domain='') ASC, domain DESC, imported_at DESC`,
+  email_asc:     `email ASC, imported_at DESC`,
+  email_desc:    `email DESC, imported_at DESC`,
   pw_len_desc:   'password_length DESC, imported_at DESC',
   pw_len_asc:    'password_length ASC, imported_at DESC',
 }
@@ -118,7 +110,9 @@ export async function GET(request: NextRequest) {
     Object.assign(params, qParams)
   }
 
-  if (domain)      { conditions.push(`(${NORM_DOMAIN_EXPR}) = {domain:String}`); params.domain = domain }
+  // Raw column: mutations done, all domain/email values are corrected.
+  // Querying raw columns uses the primary key index + bloom filters.
+  if (domain)      { conditions.push('domain = {domain:String}'); params.domain = domain }
   if (breach)      { conditions.push('breach_name = {breach:String}');           params.breach = breach }
   if (sourceFile)  { conditions.push('source_file = {sourceFile:String}');       params.sourceFile = sourceFile }
   if (urlHost)     { conditions.push('url_host = {urlHost:String}');             params.urlHost = urlHost.toLowerCase() }
