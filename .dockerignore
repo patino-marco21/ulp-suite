@@ -50,7 +50,7 @@ test-data/
 # ─── TypeScript build info ────────────────────────────────────────────────────
 *.tsbuildinfo
 
-# ─── Docker / docs (not needed inside image) ─────────────────────────────────
+# ─── Docker / docs / assets (not needed inside image) ────────────────────────
 docker-compose.yml
 docker-start.sh
 docker-status.sh
@@ -60,6 +60,7 @@ README.md
 AUTHORS.md
 LICENSE
 docs/
+images/
 
 # ─── Tests (not needed in production image) ──────────────────────────────────
 *.test.ts
