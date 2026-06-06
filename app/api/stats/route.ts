@@ -7,6 +7,7 @@ import {
   setStatsCache,
   invalidateStatsCache,
 } from "@/lib/stats-cache"
+import { isMvReady } from "@/lib/mv-ready"
 
 export const dynamic = 'force-dynamic'
 
@@ -25,6 +26,14 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    // ── MV readiness: cheap cache check (5-min TTL, no DB hit once warm) ────
+    const [domainReady, passwordReady, urlHostReady, reuseReady] = await Promise.all([
+      isMvReady('domain',   'ulp.domain_counts'),
+      isMvReady('password', 'ulp.password_counts'),
+      isMvReady('urlHost',  'ulp.url_host_counts'),
+      isMvReady('reuse',    'ulp.reuse_pairs'),
+    ])
+
     const [
       totalCount,
       credAggStats,
@@ -70,30 +79,47 @@ export async function GET(request: NextRequest) {
         SELECT count() AS total_sources, sum(line_count) AS total_lines
         FROM ulp.sources
       `),
-      // domain is the first column in the primary key → GROUP BY domain is index-aligned
-      executeQuery(`
-        SELECT domain, count() AS count
-        FROM ulp.credentials
-        WHERE domain != ''
-        GROUP BY domain
-        ORDER BY count DESC
-        LIMIT 15
-        SETTINGS max_execution_time = 30
-      `),
-      // Standard GROUP BY — fast for current scale (< 100 M rows).
-      // At 100 B+ rows, ClickHouse will use the skip index on password and
-      // the 30-second cap (max_execution_time) returns partial results rather
-      // than hanging. SAMPLE BY requires schema-level SAMPLE BY clause;
-      // since the table doesn't define one we use plain GROUP BY here.
-      executeQuery(`
-        SELECT password, count() AS count
-        FROM ulp.credentials
-        WHERE length(password) > 0
-        GROUP BY password
-        ORDER BY count DESC
-        LIMIT 50
-        SETTINGS max_execution_time = 30
-      `),
+      // top_domains — MV path: sum(count) over SummingMergeTree partials (<50 ms)
+      // Fallback: full GROUP BY on credentials (30 s at 1.46 B rows)
+      domainReady
+        ? executeQuery(`
+            SELECT domain, sum(count) AS count
+            FROM ulp.domain_counts
+            WHERE domain != ''
+            GROUP BY domain
+            ORDER BY count DESC
+            LIMIT 15
+            SETTINGS max_execution_time = 10
+          `)
+        : executeQuery(`
+            SELECT domain, count() AS count
+            FROM ulp.credentials
+            WHERE domain != ''
+            GROUP BY domain
+            ORDER BY count DESC
+            LIMIT 15
+            SETTINGS max_execution_time = 30
+          `),
+      // top_passwords — MV path (<50 ms); fallback full scan (30 s)
+      passwordReady
+        ? executeQuery(`
+            SELECT password, sum(count) AS count
+            FROM ulp.password_counts
+            WHERE password != ''
+            GROUP BY password
+            ORDER BY count DESC
+            LIMIT 50
+            SETTINGS max_execution_time = 10
+          `)
+        : executeQuery(`
+            SELECT password, count() AS count
+            FROM ulp.credentials
+            WHERE length(password) > 0
+            GROUP BY password
+            ORDER BY count DESC
+            LIMIT 50
+            SETTINGS max_execution_time = 30
+          `),
       executeQuery(`
         SELECT tld, count() AS count
         FROM ulp.credentials
@@ -175,22 +201,33 @@ export async function GET(request: NextRequest) {
         LIMIT 15
         SETTINGS max_execution_time = 30
       `),
-      // Password reuse rate — most expensive query: double GROUP BY.
-      // uniq(domain) instead of count(DISTINCT domain) is ~5× faster (HyperLogLog).
-      // LIMIT on inner query caps it at 5 M unique pairs — sufficient for a rate estimate.
-      executeQuery(`
-        SELECT
-          countIf(domain_count > 1) AS reused_pairs,
-          count()                   AS total_pairs
-        FROM (
-          SELECT email, password, uniq(domain) AS domain_count
-          FROM ulp.credentials
-          WHERE login_type = 'email' AND length(password) > 0
-          GROUP BY email, password
-          LIMIT 5000000
-        )
-        SETTINGS max_execution_time = 60
-      `),
+      // reuse_stats — MV path: uniqMerge over AggregatingMergeTree (~200 ms)
+      // Fallback: double GROUP BY on credentials (45–120 s at 1.46 B rows)
+      reuseReady
+        ? executeQuery(`
+            SELECT
+              countIf(dc > 1) AS reused_pairs,
+              count()         AS total_pairs
+            FROM (
+              SELECT email, password, uniqMerge(domain_hll) AS dc
+              FROM ulp.reuse_pairs
+              GROUP BY email, password
+            )
+            SETTINGS max_execution_time = 30
+          `)
+        : executeQuery(`
+            SELECT
+              countIf(domain_count > 1) AS reused_pairs,
+              count()                   AS total_pairs
+            FROM (
+              SELECT email, password, uniq(domain) AS domain_count
+              FROM ulp.credentials
+              WHERE login_type = 'email' AND length(password) > 0
+              GROUP BY email, password
+              LIMIT 5000000
+            )
+            SETTINGS max_execution_time = 60
+          `),
       // Corporate vs consumer — two countIf on a LowCardinality column → fast
       executeQuery(`
         SELECT
@@ -230,18 +267,29 @@ export async function GET(request: NextRequest) {
         LIMIT 20
         SETTINGS max_execution_time = 30
       `).catch(() => [] as any[]),
-      // Top URL hosts — url_host has a bloom_filter skip index
-      executeQuery(`
-        SELECT
-          if(url_host != '', url_host, domain) AS host,
-          count()                               AS count
-        FROM ulp.credentials
-        WHERE (url_host != '' OR domain != '')
-        GROUP BY host
-        ORDER BY count DESC
-        LIMIT 15
-        SETTINGS max_execution_time = 30
-      `).catch(() => [] as any[]),
+      // top_url_hosts — MV path (<50 ms); fallback full scan (10–20 s)
+      // MV aliases url_host AS host to match the existing result-mapping key r.host
+      urlHostReady
+        ? executeQuery(`
+            SELECT url_host AS host, sum(count) AS count
+            FROM ulp.url_host_counts
+            WHERE url_host != ''
+            GROUP BY url_host
+            ORDER BY count DESC
+            LIMIT 15
+            SETTINGS max_execution_time = 10
+          `).catch(() => [] as any[])
+        : executeQuery(`
+            SELECT
+              if(url_host != '', url_host, domain) AS host,
+              count()                               AS count
+            FROM ulp.credentials
+            WHERE (url_host != '' OR domain != '')
+            GROUP BY host
+            ORDER BY count DESC
+            LIMIT 15
+            SETTINGS max_execution_time = 30
+          `).catch(() => [] as any[]),
     ])
 
     const reuseRow = (reuseStats as any[])[0] || {}
