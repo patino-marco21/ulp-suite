@@ -225,7 +225,7 @@ export async function runClickHouseMigrations(): Promise<void> {
       TO ulp.password_counts AS
       SELECT password, count() AS count
       FROM ulp.credentials
-      WHERE length(password) > 0
+      WHERE password != ''
       GROUP BY password
     `)
     await runMigration(`
