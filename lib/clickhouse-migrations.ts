@@ -16,7 +16,7 @@ let migrationsDone = false
 // The data-repair mutations have their own separate persistence gate below.
 // v1: columns + materialized columns + table settings
 // v2: additional skip indexes (breach_name + source_file bloom filters)
-const DDL_VERSION = 3
+const DDL_VERSION = 4
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -248,6 +248,44 @@ export async function runClickHouseMigrations(): Promise<void> {
       GROUP BY email, password
     `)
     console.log('[ClickHouse migration] DDL v3 applied (4 MV tables + 4 MVs)')
+  }
+
+  // v4 — ngrambf_v1 skip indexes on url_host + email_domain.
+  // These two columns are position()-scanned on every token search query
+  // (see lib/ulp-search.ts buildULPWhere, type='token'). Without skip indexes
+  // the full 1.46 B row table must be scanned for both conditions per request.
+  //
+  // ngrambf_v1 builds a bloom filter of all 4-character n-grams per granule.
+  // ClickHouse checks the filter before reading granule data: if none of the
+  // search term's 4-grams appear in the filter, the granule is skipped entirely.
+  //
+  // BOTH columns are indexed because the WHERE condition is:
+  //   position(url_host, tok) > 0 OR position(email_domain, tok) > 0
+  // With OR, ClickHouse can only skip a granule when it can prove BOTH sides
+  // are false — indexing only one column leaves the other side unconstrained.
+  //
+  // Parameters: ngrambf_v1(n=4, size=1024, hash_functions=1, seed=0)
+  //   n=4        — 4-char n-grams; shorter terms fall back to full scan (no regression)
+  //   size=1024  — 1 KB bloom filter per granule → ~22 MB total at 1.46 B rows
+  //   GRANULARITY 1 — one filter per 65,536-row granule (matches all existing indexes)
+  //
+  // MATERIALIZE INDEX fires a background mutation (mutations_sync=0 default).
+  // runMigration fires the second arg non-awaited (.catch()) — exec returns after
+  // queueing, build completes in 30–120 min in background.
+  // Monitor: SELECT command, is_done, parts_to_do FROM system.mutations
+  //          WHERE table = 'credentials' AND command LIKE '%idx_ngram%'
+  if (lastDdl < 4) {
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_ngram_url_host
+       url_host TYPE ngrambf_v1(4, 1024, 1, 0) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_ngram_url_host`
+    )
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_ngram_email_domain
+       email_domain TYPE ngrambf_v1(4, 1024, 1, 0) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_ngram_email_domain`
+    )
+    console.log('[ClickHouse migration] DDL v4 applied (ngrambf_v1 on url_host + email_domain — MATERIALIZE running in background)')
   }
 
   if (lastDdl < DDL_VERSION) {
