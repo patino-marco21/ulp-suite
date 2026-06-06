@@ -257,6 +257,80 @@ export async function runClickHouseMigrations(): Promise<void> {
     console.log(`[ClickHouse migration] DDL v${DDL_VERSION} already applied — skipping`)
   }
 
+  // ── MV backfill (fire-and-forget, sequential, run exactly once) ──────────
+  // Placed BEFORE the repairFired early return so it runs on all deployments,
+  // including existing ones where ch_repair_mutations_fired is already '1'.
+  // MVs only capture inserts after creation; this covers the existing 1.46 B rows.
+  // Sequential (not parallel) to avoid OOM in a 6 GB container:
+  //   each GROUP BY at 1.46 B rows uses 2–4 GB with disk spill.
+  //
+  // Gate: ch_mv_backfill_fired = '1' once the chain starts.
+  // Reset to '0' by POST /api/admin/rebuild-mv to allow re-backfill.
+  const mvBackfillFired = getSettingInt('ch_mv_backfill_fired', 0)
+  if (mvBackfillFired >= 1) {
+    console.log('[MV backfill] already fired — skipping')
+    // No early return here: let the repairFired guard below run normally.
+  } else {
+    setSetting('ch_mv_backfill_fired', '1')
+    console.log('[MV backfill] starting sequential backfill (fire-and-forget)')
+
+    // Fire-and-forget: do NOT await — this takes 5–30 min at 1.46 B rows.
+    // The server continues serving requests normally during the backfill.
+    ;(async () => {
+      try {
+        await client.exec({
+          query: `INSERT INTO ulp.domain_counts
+                  SELECT domain, count() AS count
+                  FROM ulp.credentials
+                  WHERE domain != ''
+                  GROUP BY domain
+                  SETTINGS max_bytes_before_external_group_by = 4294967296,
+                           max_execution_time = 3600`,
+        })
+        console.log('[MV backfill] domain_counts done')
+
+        await client.exec({
+          query: `INSERT INTO ulp.password_counts
+                  SELECT password, count() AS count
+                  FROM ulp.credentials
+                  WHERE length(password) > 0
+                  GROUP BY password
+                  SETTINGS max_bytes_before_external_group_by = 4294967296,
+                           max_execution_time = 3600`,
+        })
+        console.log('[MV backfill] password_counts done')
+
+        await client.exec({
+          query: `INSERT INTO ulp.url_host_counts
+                  SELECT if(url_host != '', url_host, domain) AS url_host, count() AS count
+                  FROM ulp.credentials
+                  WHERE (url_host != '' OR domain != '')
+                  GROUP BY url_host
+                  SETTINGS max_bytes_before_external_group_by = 4294967296,
+                           max_execution_time = 3600`,
+        })
+        console.log('[MV backfill] url_host_counts done')
+
+        await client.exec({
+          query: `INSERT INTO ulp.reuse_pairs
+                  SELECT email, password, uniqState(domain) AS domain_hll
+                  FROM ulp.credentials
+                  WHERE login_type = 'email' AND length(password) > 0
+                  GROUP BY email, password
+                  SETTINGS max_bytes_before_external_group_by = 4294967296,
+                           max_execution_time = 3600`,
+        })
+        console.log('[MV backfill] reuse_pairs done')
+
+        console.log('[MV backfill] All four MV tables backfilled successfully')
+      } catch (err) {
+        console.error('[MV backfill] Error:', String(err).substring(0, 300))
+        // ch_mv_backfill_fired stays '1' to prevent infinite retry.
+        // Use POST /api/admin/rebuild-mv to reset and retry.
+      }
+    })()
+  }
+
   // ── Data-repair mutations (fire-and-forget, run exactly once) ────────────
   // These fix rows that were mis-parsed before the ULP parser was patched.
   // Safe to re-run: WHERE clauses only match corrupted rows, so on already-clean
@@ -360,75 +434,4 @@ export async function runClickHouseMigrations(): Promise<void> {
   }).catch(err => {
     console.warn('[ClickHouse migration] junk-url repair non-fatal:', String(err).substring(0, 180))
   })
-
-  // ── MV backfill (fire-and-forget, sequential, run exactly once) ──────────
-  // MVs only capture inserts after creation; this covers the existing 1.46 B rows.
-  // Sequential (not parallel) to avoid OOM in a 6 GB container:
-  //   each GROUP BY at 1.46 B rows uses 2–4 GB with disk spill.
-  //
-  // Gate: ch_mv_backfill_fired = '1' once the chain starts.
-  // Reset to '0' by POST /api/admin/rebuild-mv to allow re-backfill.
-  const mvBackfillFired = getSettingInt('ch_mv_backfill_fired', 0)
-  if (mvBackfillFired >= 1) {
-    console.log('[MV backfill] already fired — skipping')
-    return
-  }
-  setSetting('ch_mv_backfill_fired', '1')
-  console.log('[MV backfill] starting sequential backfill (fire-and-forget)')
-
-  // Fire-and-forget: do NOT await — this takes 5–30 min at 1.46 B rows.
-  // The server continues serving requests normally during the backfill.
-  ;(async () => {
-    try {
-      await client.exec({
-        query: `INSERT INTO ulp.domain_counts
-                SELECT domain, count() AS count
-                FROM ulp.credentials
-                WHERE domain != ''
-                GROUP BY domain
-                SETTINGS max_bytes_before_external_group_by = 4294967296,
-                         max_execution_time = 3600`,
-      })
-      console.log('[MV backfill] domain_counts done')
-
-      await client.exec({
-        query: `INSERT INTO ulp.password_counts
-                SELECT password, count() AS count
-                FROM ulp.credentials
-                WHERE length(password) > 0
-                GROUP BY password
-                SETTINGS max_bytes_before_external_group_by = 4294967296,
-                         max_execution_time = 3600`,
-      })
-      console.log('[MV backfill] password_counts done')
-
-      await client.exec({
-        query: `INSERT INTO ulp.url_host_counts
-                SELECT if(url_host != '', url_host, domain) AS url_host, count() AS count
-                FROM ulp.credentials
-                WHERE (url_host != '' OR domain != '')
-                GROUP BY url_host
-                SETTINGS max_bytes_before_external_group_by = 4294967296,
-                         max_execution_time = 3600`,
-      })
-      console.log('[MV backfill] url_host_counts done')
-
-      await client.exec({
-        query: `INSERT INTO ulp.reuse_pairs
-                SELECT email, password, uniqState(domain) AS domain_hll
-                FROM ulp.credentials
-                WHERE login_type = 'email' AND length(password) > 0
-                GROUP BY email, password
-                SETTINGS max_bytes_before_external_group_by = 4294967296,
-                         max_execution_time = 3600`,
-      })
-      console.log('[MV backfill] reuse_pairs done')
-
-      console.log('[MV backfill] All four MV tables backfilled successfully')
-    } catch (err) {
-      console.error('[MV backfill] Error:', String(err).substring(0, 300))
-      // ch_mv_backfill_fired stays '1' to prevent infinite retry.
-      // Use POST /api/admin/rebuild-mv to reset and retry.
-    }
-  })()
 }
