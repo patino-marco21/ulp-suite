@@ -16,7 +16,7 @@ let migrationsDone = false
 // The data-repair mutations have their own separate persistence gate below.
 // v1: columns + materialized columns + table settings
 // v2: additional skip indexes (breach_name + source_file bloom filters)
-const DDL_VERSION = 2
+const DDL_VERSION = 3
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -176,6 +176,80 @@ export async function runClickHouseMigrations(): Promise<void> {
     console.log('[ClickHouse migration] DDL v2 applied')
   }
 
+  // v3 — materialized view backing tables + MVs.
+  // Four SummingMergeTree tables for simple counts, one AggregatingMergeTree
+  // for reuse_pairs (stores HyperLogLog state for uniq(domain)).
+  // MVs only capture INSERTs after creation — backfill is handled below.
+  if (lastDdl < 3) {
+    // Backing tables
+    await runMigration(`
+      CREATE TABLE IF NOT EXISTS ulp.domain_counts (
+        domain String,
+        count  UInt64
+      ) ENGINE = SummingMergeTree(count)
+      ORDER BY domain
+    `)
+    await runMigration(`
+      CREATE TABLE IF NOT EXISTS ulp.password_counts (
+        password String,
+        count    UInt64
+      ) ENGINE = SummingMergeTree(count)
+      ORDER BY password
+    `)
+    await runMigration(`
+      CREATE TABLE IF NOT EXISTS ulp.url_host_counts (
+        url_host String,
+        count    UInt64
+      ) ENGINE = SummingMergeTree(count)
+      ORDER BY url_host
+    `)
+    await runMigration(`
+      CREATE TABLE IF NOT EXISTS ulp.reuse_pairs (
+        email      String,
+        password   String,
+        domain_hll AggregateFunction(uniq, String)
+      ) ENGINE = AggregatingMergeTree()
+      ORDER BY (email, password)
+    `)
+    // Materialized views (fire-and-forget — CREATE MV is non-blocking)
+    await runMigration(`
+      CREATE MATERIALIZED VIEW IF NOT EXISTS ulp.mv_domain_counts
+      TO ulp.domain_counts AS
+      SELECT domain, count() AS count
+      FROM ulp.credentials
+      WHERE domain != ''
+      GROUP BY domain
+    `)
+    await runMigration(`
+      CREATE MATERIALIZED VIEW IF NOT EXISTS ulp.mv_password_counts
+      TO ulp.password_counts AS
+      SELECT password, count() AS count
+      FROM ulp.credentials
+      WHERE length(password) > 0
+      GROUP BY password
+    `)
+    await runMigration(`
+      CREATE MATERIALIZED VIEW IF NOT EXISTS ulp.mv_url_host_counts
+      TO ulp.url_host_counts AS
+      SELECT if(url_host != '', url_host, domain) AS url_host, count() AS count
+      FROM ulp.credentials
+      WHERE (url_host != '' OR domain != '')
+      GROUP BY url_host
+    `)
+    await runMigration(`
+      CREATE MATERIALIZED VIEW IF NOT EXISTS ulp.mv_reuse_pairs
+      TO ulp.reuse_pairs AS
+      SELECT
+        email,
+        password,
+        uniqState(domain) AS domain_hll
+      FROM ulp.credentials
+      WHERE login_type = 'email' AND length(password) > 0
+      GROUP BY email, password
+    `)
+    console.log('[ClickHouse migration] DDL v3 applied (4 MV tables + 4 MVs)')
+  }
+
   if (lastDdl < DDL_VERSION) {
     setSetting('ch_ddl_version', String(DDL_VERSION))
     console.log(`[ClickHouse migration] DDL now at v${DDL_VERSION}`)
@@ -286,4 +360,75 @@ export async function runClickHouseMigrations(): Promise<void> {
   }).catch(err => {
     console.warn('[ClickHouse migration] junk-url repair non-fatal:', String(err).substring(0, 180))
   })
+
+  // ── MV backfill (fire-and-forget, sequential, run exactly once) ──────────
+  // MVs only capture inserts after creation; this covers the existing 1.46 B rows.
+  // Sequential (not parallel) to avoid OOM in a 6 GB container:
+  //   each GROUP BY at 1.46 B rows uses 2–4 GB with disk spill.
+  //
+  // Gate: ch_mv_backfill_fired = '1' once the chain starts.
+  // Reset to '0' by POST /api/admin/rebuild-mv to allow re-backfill.
+  const mvBackfillFired = getSettingInt('ch_mv_backfill_fired', 0)
+  if (mvBackfillFired >= 1) {
+    console.log('[MV backfill] already fired — skipping')
+    return
+  }
+  setSetting('ch_mv_backfill_fired', '1')
+  console.log('[MV backfill] starting sequential backfill (fire-and-forget)')
+
+  // Fire-and-forget: do NOT await — this takes 5–30 min at 1.46 B rows.
+  // The server continues serving requests normally during the backfill.
+  ;(async () => {
+    try {
+      await client.exec({
+        query: `INSERT INTO ulp.domain_counts
+                SELECT domain, count() AS count
+                FROM ulp.credentials
+                WHERE domain != ''
+                GROUP BY domain
+                SETTINGS max_bytes_before_external_group_by = 4294967296,
+                         max_execution_time = 3600`,
+      })
+      console.log('[MV backfill] domain_counts done')
+
+      await client.exec({
+        query: `INSERT INTO ulp.password_counts
+                SELECT password, count() AS count
+                FROM ulp.credentials
+                WHERE length(password) > 0
+                GROUP BY password
+                SETTINGS max_bytes_before_external_group_by = 4294967296,
+                         max_execution_time = 3600`,
+      })
+      console.log('[MV backfill] password_counts done')
+
+      await client.exec({
+        query: `INSERT INTO ulp.url_host_counts
+                SELECT if(url_host != '', url_host, domain) AS url_host, count() AS count
+                FROM ulp.credentials
+                WHERE (url_host != '' OR domain != '')
+                GROUP BY url_host
+                SETTINGS max_bytes_before_external_group_by = 4294967296,
+                         max_execution_time = 3600`,
+      })
+      console.log('[MV backfill] url_host_counts done')
+
+      await client.exec({
+        query: `INSERT INTO ulp.reuse_pairs
+                SELECT email, password, uniqState(domain) AS domain_hll
+                FROM ulp.credentials
+                WHERE login_type = 'email' AND length(password) > 0
+                GROUP BY email, password
+                SETTINGS max_bytes_before_external_group_by = 4294967296,
+                         max_execution_time = 3600`,
+      })
+      console.log('[MV backfill] reuse_pairs done')
+
+      console.log('[MV backfill] All four MV tables backfilled successfully')
+    } catch (err) {
+      console.error('[MV backfill] Error:', String(err).substring(0, 300))
+      // ch_mv_backfill_fired stays '1' to prevent infinite retry.
+      // Use POST /api/admin/rebuild-mv to reset and retry.
+    }
+  })()
 }
