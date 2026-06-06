@@ -111,7 +111,8 @@ export async function GET(request: NextRequest) {
         ORDER BY domain_count DESC
         LIMIT {limit:UInt32}
         OFFSET {offset:UInt32}
-        SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break'
+        SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break',
+                 use_query_cache = 1, query_cache_ttl = 120
       `, mvQueryParams),
       executeQuery(`
         SELECT count() AS total
@@ -122,7 +123,8 @@ export async function GET(request: NextRequest) {
           GROUP BY email, password
           HAVING uniqMerge(domain_hll) > 1
         )
-        SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break'
+        SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break',
+                 use_query_cache = 1, query_cache_ttl = 120
       `, mvCountParams),
     ])
 
