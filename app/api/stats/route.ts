@@ -114,7 +114,7 @@ export async function GET(request: NextRequest) {
         : executeQuery(`
             SELECT password, count() AS count
             FROM ulp.credentials
-            WHERE length(password) > 0
+            WHERE password != ''
             GROUP BY password
             ORDER BY count DESC
             LIMIT 50
@@ -209,6 +209,8 @@ export async function GET(request: NextRequest) {
               countIf(dc > 1) AS reused_pairs,
               count()         AS total_pairs
             FROM (
+              -- reuse_pairs only contains login_type='email' AND length(password)>0 rows
+              -- per the MV definition; the login_type filter is implicit in the table.
               SELECT email, password, uniqMerge(domain_hll) AS dc
               FROM ulp.reuse_pairs
               GROUP BY email, password
