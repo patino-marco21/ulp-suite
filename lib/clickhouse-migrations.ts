@@ -16,6 +16,8 @@ let migrationsDone = false
 // The data-repair mutations have their own separate persistence gate below.
 // v1: columns + materialized columns + table settings
 // v2: additional skip indexes (breach_name + source_file bloom filters)
+// v3: MV backing tables (SummingMergeTree + AggregatingMergeTree) + 4 materialized views
+// v4: ngrambf_v1(4,1024,1,0) skip indexes on url_host + email_domain (substring search)
 const DDL_VERSION = 4
 
 // Per-version persistence: stored in SQLite app_settings.
