@@ -57,6 +57,10 @@ export async function GET(request: NextRequest) {
         SETTINGS max_execution_time = 120, timeout_overflow_mode = 'break'
       `, queryParams)
 
+      const countParams: Record<string, unknown> = {}
+      if (emailFilter) countParams.emailFilter = emailFilter
+      if (pwFilter)    countParams.pwFilter    = pwFilter
+
       const countResult = await executeQuery(`
         SELECT count() AS total
         FROM (
@@ -67,7 +71,7 @@ export async function GET(request: NextRequest) {
           HAVING uniq(domain) > 1
         )
         SETTINGS max_execution_time = 120, timeout_overflow_mode = 'break'
-      `, { emailFilter: emailFilter || '', pwFilter: pwFilter || '' })
+      `, countParams)
 
       const total = Number((countResult as any[])[0]?.total || 0)
       return NextResponse.json({
@@ -144,7 +148,7 @@ export async function GET(request: NextRequest) {
       `, pairParams) as Array<{ email: string; password: string; domains: string[] }>
 
       for (const r of domainRows) {
-        domainsMap.set(`${r.email}:${r.password}`, r.domains)
+        domainsMap.set(`${r.email}\0${r.password}`, r.domains)
       }
     }
 
@@ -153,7 +157,7 @@ export async function GET(request: NextRequest) {
       email:        String(r.email),
       password:     String(r.password),
       domain_count: Number(r.domain_count),
-      domains:      domainsMap.get(`${r.email}:${r.password}`) || [],
+      domains:      domainsMap.get(`${r.email}\0${r.password}`) || [],
     }))
 
     return NextResponse.json({
