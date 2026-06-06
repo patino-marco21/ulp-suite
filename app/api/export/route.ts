@@ -4,20 +4,20 @@ import { validateRequest } from "@/lib/auth"
 import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-search"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
-import { NORM_COLS, NORM_EMAIL_EXPR, NORM_DOMAIN_EXPR } from "@/lib/ulp-normalize"
+import { NORM_COLS } from "@/lib/ulp-normalize"
 
 export const dynamic = 'force-dynamic'
 
-// Allowed ORDER BY expressions — mirrors search route whitelist
-// domain_asc/desc + email_asc/desc: use NORM_*_EXPR to sort by the
-// normalised value displayed in the UI, not the raw (potentially corrupted)
-// stored column.  Empty domains are pushed to the bottom of both directions.
+// Allowed ORDER BY expressions — mirrors search route whitelist.
+// All data-repair mutations done (0 pending) — raw columns are correct.
+// Raw columns enable optimize_read_in_order and avoid per-row NORM_*_EXPR
+// computation that defeated primary-key pruning.
 const SORT_MAP: Record<string, string> = {
   'imported_desc': 'imported_at DESC',
   'imported_asc':  'imported_at ASC',
-  'domain_asc':    `(${NORM_DOMAIN_EXPR}='') ASC, ${NORM_DOMAIN_EXPR} ASC, imported_at DESC`,
-  'domain_desc':   `(${NORM_DOMAIN_EXPR}='') ASC, ${NORM_DOMAIN_EXPR} DESC, imported_at DESC`,
-  'email_asc':     `${NORM_EMAIL_EXPR} ASC`,
+  'domain_asc':    `(domain='') ASC, domain ASC, imported_at DESC`,
+  'domain_desc':   `(domain='') ASC, domain DESC, imported_at DESC`,
+  'email_asc':     `email ASC`,
   'pw_len_desc':   'password_length DESC',
   'pw_len_asc':    'password_length ASC',
 }
@@ -85,7 +85,8 @@ export async function POST(request: NextRequest) {
   const extras: string[] = []
   const mergedParams: Record<string, unknown> = { ...baseParams }
 
-  if (domain)      { extras.push(` AND (${NORM_DOMAIN_EXPR}) = {exportDomain:String}`);     mergedParams.exportDomain = domain }
+  // Raw domain column: mutations done, bloom_filter(0.01) skip index used.
+  if (domain)      { extras.push(' AND domain = {exportDomain:String}');                     mergedParams.exportDomain = domain }
   if (breach_name) { extras.push(' AND breach_name = {exportBreach:String}'); mergedParams.exportBreach = breach_name }
   if (email_domain){ extras.push(' AND email_domain = {emailDomain:String}'); mergedParams.emailDomain = email_domain.toLowerCase() }
   if (source_file) { extras.push(' AND source_file = {sourceFile:String}');  mergedParams.sourceFile = source_file }
@@ -256,13 +257,12 @@ function streamUniqueList(
     async start(controller) {
       try {
         const chClient = getClient()
-        const normExpr = field === 'email' ? NORM_EMAIL_EXPR
-                       : field === 'domain' ? NORM_DOMAIN_EXPR
-                       : field
+        // Raw column — all data-repair mutations done, bloom filter index used.
+        // NORM_*_EXPR in SELECT DISTINCT + WHERE defeated the index; raw field is correct.
         const resultSet = await chClient.query({
-          query: `SELECT DISTINCT ${normExpr} AS ${field}
+          query: `SELECT DISTINCT ${field}
                   FROM ulp.credentials
-                  WHERE ${clause}${allExtras} AND ${normExpr} != ''
+                  WHERE ${clause}${allExtras} AND ${field} != ''
                   ORDER BY ${field}
                   SETTINGS max_execution_time = 120`,
           query_params: mergedParams,

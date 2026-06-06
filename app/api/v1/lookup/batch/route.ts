@@ -17,7 +17,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
 import { executeQuery } from "@/lib/clickhouse"
-import { NORM_EMAIL_EXPR, NORM_DOMAIN_EXPR, NORM_COLS } from '@/lib/ulp-normalize'
+import { NORM_COLS } from '@/lib/ulp-normalize'
 
 export const dynamic = "force-dynamic"
 

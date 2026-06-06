@@ -4,7 +4,7 @@ import { validateRequest } from "@/lib/auth"
 import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-search"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
-import { NORM_COLS, NORM_DOMAIN_EXPR, NORM_EMAIL_EXPR } from "@/lib/ulp-normalize"
+import { NORM_COLS } from "@/lib/ulp-normalize"
 
 export const dynamic = 'force-dynamic'
 

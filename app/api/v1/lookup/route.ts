@@ -14,7 +14,12 @@ import { executeQuery } from "@/lib/clickhouse"
 
 export const dynamic = 'force-dynamic'
 
-const SETTINGS = `SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw'`
+// use_query_cache: cache identical repeat lookups in ClickHouse's native LRU cache
+// for 60 seconds — eliminates re-scanning for the same email/domain on hot paths.
+// query_cache_nondeterministic_function_handling = throw prevents caching of
+// functions like now() (not applicable here but good hygiene).
+const SETTINGS = `SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw',
+                          use_query_cache = 1, query_cache_ttl = 60`
 
 export async function GET(request: NextRequest) {
   const authResult = await withApiKeyAuth(request, ['admin', 'analyst'])

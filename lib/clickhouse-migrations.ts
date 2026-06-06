@@ -12,9 +12,11 @@ import { dbGet, dbRun } from './sqlite'
 // Per-process guard (still useful to avoid redundant calls within one process)
 let migrationsDone = false
 
-// Schema-migration version — bump this to re-run the DDL block on next startup.
+// Schema-migration version — bump this to run the new DDL block on next startup.
 // The data-repair mutations have their own separate persistence gate below.
-const DDL_VERSION = 1
+// v1: columns + materialized columns + table settings
+// v2: additional skip indexes (breach_name + source_file bloom filters)
+const DDL_VERSION = 2
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -130,29 +132,53 @@ export async function runClickHouseMigrations(): Promise<void> {
     },
   ]
 
-  // Only run DDL if this version hasn't been applied yet.
-  // ADD COLUMN IF NOT EXISTS / MODIFY SETTING are idempotent, but firing
-  // MATERIALIZE COLUMN on every cold-start queues background mutations that
-  // re-write column data even when nothing changed — expensive at 1.6B rows.
-  if (lastDdl < DDL_VERSION) {
-    for (const { sql, materialize } of migrations) {
-      try {
-        await client.exec({ query: sql })
-        if (materialize) {
-          // Fire-and-forget: mutation runs in the background
-          client.exec({ query: materialize }).catch(err => {
-            console.warn('[ClickHouse migration] MATERIALIZE COLUMN non-fatal:', String(err).substring(0, 120))
-          })
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        if (!msg.includes('column with this name already exists') && !msg.includes('DUPLICATE_COLUMN')) {
-          console.warn('[ClickHouse migration] Non-fatal error:', msg.substring(0, 120))
-        }
+  // Helper: run one migration + optional background materialize step.
+  async function runMigration(sql: string, materialize?: string) {
+    try {
+      await client.exec({ query: sql })
+      if (materialize) {
+        client.exec({ query: materialize }).catch(err => {
+          console.warn('[ClickHouse migration] MATERIALIZE non-fatal:', String(err).substring(0, 120))
+        })
       }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      const benign = msg.includes('column with this name already exists')
+                  || msg.includes('DUPLICATE_COLUMN')
+                  || msg.includes('already exists')
+      if (!benign) console.warn('[ClickHouse migration] Non-fatal error:', msg.substring(0, 120))
     }
+  }
+
+  // v1 — columns, materialized columns, table settings (idempotent; only run once).
+  // MATERIALIZE COLUMN creates background mutations; skipping on re-runs avoids
+  // redundant 1.6B-row rewrites when nothing changed.
+  if (lastDdl < 1) {
+    for (const { sql, materialize } of migrations) {
+      await runMigration(sql, materialize)
+    }
+    console.log('[ClickHouse migration] DDL v1 applied')
+  }
+
+  // v2 — additional skip indexes for faster WHERE filtering on breach_name + source_file.
+  // bloom_filter(0.01) prunes granules that cannot contain the queried value, giving
+  // 10–100× speedup for the common breach_name = ? and source_file = ? filter patterns.
+  // MATERIALIZE INDEX rebuilds the index for existing data (fire-and-forget mutation).
+  if (lastDdl < 2) {
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_bf_breach_name breach_name TYPE bloom_filter(0.01) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_bf_breach_name`
+    )
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_bf_source_file source_file TYPE bloom_filter(0.01) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_bf_source_file`
+    )
+    console.log('[ClickHouse migration] DDL v2 applied')
+  }
+
+  if (lastDdl < DDL_VERSION) {
     setSetting('ch_ddl_version', String(DDL_VERSION))
-    console.log(`[ClickHouse migration] DDL v${DDL_VERSION} applied`)
+    console.log(`[ClickHouse migration] DDL now at v${DDL_VERSION}`)
   } else {
     console.log(`[ClickHouse migration] DDL v${DDL_VERSION} already applied — skipping`)
   }

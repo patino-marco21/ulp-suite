@@ -99,7 +99,9 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    // Return breach names + domains only — NO passwords exposed
+    // Return breach names + domains only — NO passwords exposed.
+    // email is in the primary key (ORDER BY domain, email, imported_at) and has a
+    // bloom_filter skip index — point lookup is fast even at 1.46B rows.
     const rows = await executeQuery(
       `SELECT
          breach_name,
@@ -108,7 +110,8 @@ export async function GET(request: NextRequest) {
        FROM ulp.credentials
        WHERE email = {email:String}
        ORDER BY imported_at DESC
-       LIMIT 500`,
+       LIMIT 500
+       SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break'`,
       { email: rawEmail }
     ) as Array<{ breach_name: string; domain: string; imported_at: string }>
 

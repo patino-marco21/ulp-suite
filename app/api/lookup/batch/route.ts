@@ -13,8 +13,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { validateRequest } from "@/lib/auth"
 import { executeQuery } from "@/lib/clickhouse"
-import { NORM_EMAIL_EXPR, NORM_DOMAIN_EXPR } from "@/lib/ulp-normalize"
-
 export const dynamic = "force-dynamic"
 
 const MAX_QUERIES  = 100
@@ -62,8 +60,14 @@ export async function POST(request: NextRequest) {
 
   const results: Record<string, BatchResult> = {}
 
+  const SETTINGS = `SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw'`
+
   try {
     // ── Email lookups ──────────────────────────────────────────────────────
+    // Raw email column: bloom_filter(0.05) provides fast granule pruning.
+    // NORM_EMAIL_EXPR in WHERE defeated the index — raw column is correct now.
+    // LIMIT {cap:UInt32} BY email guarantees up to RESULTS_CAP rows per queried
+    // address, fixing the starvation bug where one hot email filled the global cap.
     if (emails.length > 0) {
       const emailList = emails.map((_, i) => `{email${i}:String}`).join(", ")
       const emailParams: Record<string, string | number> = {}
@@ -72,10 +76,11 @@ export async function POST(request: NextRequest) {
       const rows = await executeQuery(
         `SELECT email, password, url, domain, source_file, breach_name, imported_at
          FROM ulp.credentials
-         WHERE (${NORM_EMAIL_EXPR}) IN (${emailList})
-         ORDER BY imported_at DESC
-         LIMIT {cap:UInt32}`,
-        { ...emailParams, cap: emails.length * RESULTS_CAP }
+         WHERE email IN (${emailList})
+         ORDER BY email ASC, imported_at DESC
+         LIMIT {cap:UInt32} BY email
+         ${SETTINGS}`,
+        { ...emailParams, cap: RESULTS_CAP }
       ) as Array<{
         email: string; password: string; url: string; domain: string
         source_file: string; breach_name: string; imported_at: string
@@ -83,24 +88,27 @@ export async function POST(request: NextRequest) {
 
       for (const email of emails) {
         const lc   = email.toLowerCase()
-        const hits = rows.filter(r => (r.email ?? '').toLowerCase() === lc).slice(0, RESULTS_CAP)
+        const hits = rows.filter(r => r.email === lc)
         results[email] = { found: hits.length > 0, count: hits.length, results: hits }
       }
     }
 
     // ── Domain lookups ─────────────────────────────────────────────────────
+    // Raw domain column: bloom_filter provides granule pruning.
+    // LIMIT BY domain prevents one hot domain from consuming all results.
     if (domains.length > 0) {
       const domainList = domains.map((_, i) => `{domain${i}:String}`).join(", ")
       const domainParams: Record<string, string | number> = {}
       domains.forEach((d, i) => { domainParams[`domain${i}`] = d.toLowerCase() })
 
       const rows = await executeQuery(
-        `SELECT (${NORM_DOMAIN_EXPR}) AS domain, email, password, url, source_file, breach_name, imported_at
+        `SELECT domain, email, password, url, source_file, breach_name, imported_at
          FROM ulp.credentials
-         WHERE (${NORM_DOMAIN_EXPR}) IN (${domainList})
-         ORDER BY imported_at DESC
-         LIMIT {cap:UInt32}`,
-        { ...domainParams, cap: domains.length * RESULTS_CAP }
+         WHERE domain IN (${domainList})
+         ORDER BY domain ASC, imported_at DESC
+         LIMIT {cap:UInt32} BY domain
+         ${SETTINGS}`,
+        { ...domainParams, cap: RESULTS_CAP }
       ) as Array<{
         domain: string; email: string; password: string; url: string
         source_file: string; breach_name: string; imported_at: string
@@ -108,7 +116,7 @@ export async function POST(request: NextRequest) {
 
       for (const domain of domains) {
         const lc   = domain.toLowerCase()
-        const hits = rows.filter(r => (r.domain ?? '').toLowerCase() === lc).slice(0, RESULTS_CAP)
+        const hits = rows.filter(r => r.domain === lc)
         results[domain] = { found: hits.length > 0, count: hits.length, results: hits }
       }
     }
@@ -120,6 +128,10 @@ export async function POST(request: NextRequest) {
       results,
     })
   } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    if (msg.includes('TIMEOUT_EXCEEDED') || msg.includes('timeout')) {
+      return NextResponse.json({ success: false, timed_out: true, error: 'Batch lookup timed out — reduce batch size or use more specific queries' }, { status: 408 })
+    }
     console.error("Batch lookup error:", error)
     return NextResponse.json({ success: false, error: "Batch lookup failed" }, { status: 500 })
   }
