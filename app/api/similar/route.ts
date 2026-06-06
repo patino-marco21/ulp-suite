@@ -56,7 +56,8 @@ export async function GET(request: NextRequest) {
       HAVING freq >= {minFreq:UInt32}
       ORDER BY freq DESC
       LIMIT {limit:UInt32}
-      SETTINGS max_execution_time = 60, timeout_overflow_mode = 'break'
+      SETTINGS max_execution_time = 60, timeout_overflow_mode = 'break',
+               use_query_cache = 1, query_cache_ttl = 600
     `, { minFreq, limit }) as Array<{ password: string; freq: string; phash: string }>
 
     const parsed: PasswordRow[] = rows.map(r => ({
