@@ -293,7 +293,7 @@ export async function runClickHouseMigrations(): Promise<void> {
           query: `INSERT INTO ulp.password_counts
                   SELECT password, count() AS count
                   FROM ulp.credentials
-                  WHERE length(password) > 0
+                  WHERE password != ''
                   GROUP BY password
                   SETTINGS max_bytes_before_external_group_by = 4294967296,
                            max_execution_time = 3600`,

@@ -50,6 +50,9 @@ export async function POST(request: NextRequest) {
 
   if (truncateErrors.length > 0) {
     console.error('[rebuild-mv] TRUNCATE errors:', truncateErrors)
+    // Invalidate cache so routes immediately fall back to full-scan for any
+    // tables that were truncated (rather than serving empty MV results).
+    invalidateAllMvCaches()
     return NextResponse.json({
       success: false,
       error: 'Failed to truncate one or more MV tables',
@@ -71,6 +74,14 @@ export async function POST(request: NextRequest) {
   invalidateAllMvCaches()
 
   // 4. Re-fire sequential backfill chain (fire-and-forget)
+  // Set gate to '1' BEFORE firing the IIFE so a server restart during backfill
+  // does not trigger a second parallel backfill from runClickHouseMigrations.
+  try {
+    dbRun(`INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)`,
+      ['ch_mv_backfill_fired', '1'])
+  } catch (err) {
+    console.error('[rebuild-mv] SQLite gate set error:', err)
+  }
   console.log('[rebuild-mv] re-firing sequential MV backfill')
   ;(async () => {
     try {
