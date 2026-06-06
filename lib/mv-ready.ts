@@ -12,6 +12,11 @@
  *
  * Returns false on any ClickHouse error (conservative — caller falls back to
  * full-scan rather than serving an error).
+ *
+ * @param key   Short cache key, e.g. 'domain'. Must be unique per table across all callers.
+ * @param table ClickHouse table name, e.g. 'ulp.domain_counts'.
+ *              MUST be a hard-coded string literal at every call site.
+ *              Never pass a value derived from user input — no quoting or validation is done.
  */
 import { executeQuery } from './clickhouse'
 
@@ -29,13 +34,14 @@ export async function isMvReady(key: string, table: string): Promise<boolean> {
 
   try {
     const rows = await executeQuery(
-      `SELECT count() AS n FROM ${table} LIMIT 1 SETTINGS max_execution_time = 5`
-    ) as Array<{ n: string | number }>
-    const ready = Number(rows[0]?.n ?? 0) > 0
+      `SELECT 1 AS n FROM ${table} LIMIT 1 SETTINGS max_execution_time = 5`
+    ) as Array<{ n: number }>
+    const ready = rows.length > 0
     cache[key] = { value: ready, checkedAt: Date.now() }
     return ready
   } catch {
-    // Conservative: if we can't check, assume not ready → full-scan fallback
+    // Conservative: cache false for the full TTL to avoid retry storms on a struggling server.
+    // Use invalidateMvCache(key) or wait for TTL to expire for the next probe to retry.
     cache[key] = { value: false, checkedAt: Date.now() }
     return false
   }
