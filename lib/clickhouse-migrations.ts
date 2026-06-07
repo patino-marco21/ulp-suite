@@ -19,7 +19,12 @@ let migrationsDone = false
 // v3: MV backing tables (SummingMergeTree + AggregatingMergeTree) + 4 materialized views
 // v4: ngrambf_v1(4,1024,1,0) skip indexes on url_host + email_domain (substring search)
 // v5: full_text(0) inverted indexes on url/email/password (replace tokenbf_v1; drop unused idx_email_ngram)
-const DDL_VERSION = 5
+//     ⚠️  full_text() type was removed in ClickHouse 26.2 — v5 silently fails on 26.x.
+//         The v5 DROPs succeed, leaving the table with no skip indexes on url/email/password.
+// v6: re-create the text indexes using the correct ClickHouse 26.x syntax:
+//     TYPE text(tokenizer = splitByNonAlpha, preprocessor = lower(col))
+//     preprocessor = lower(col) matches hasToken(col, lower(value)) in lib/ulp-search.ts.
+const DDL_VERSION = 6
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -332,6 +337,48 @@ export async function runClickHouseMigrations(): Promise<void> {
     await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_password`)
     await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_email_ngram`)
     console.log('[ClickHouse migration] DDL v5 applied (full_text on url/email/password — MATERIALIZE running in background)')
+  }
+
+  // v6 — Fix for failed v5: ClickHouse 26.2 dropped the full_text() index type in favour of
+  // text(tokenizer = splitByNonAlpha, preprocessor = lower(col)).
+  //
+  // v5 silently failed on ClickHouse 26.x because:
+  //   1. ADD INDEX ... TYPE full_text(0) → Unknown type error → caught by runMigration
+  //   2. DROP INDEX old tokenbf_v1 indexes → SUCCEEDED (unrelated to the error)
+  //   3. ch_ddl_version bumped to 5
+  // Result: table has no skip indexes on url/email/password → full 1.46 B row scan on every
+  // hasToken() search → 300 s timeout → "credentials search not working".
+  //
+  // v6 cleans up any partial v5 artifacts and re-creates with the 26.x API:
+  //   TYPE text(tokenizer = splitByNonAlpha, preprocessor = lower(col))
+  //   preprocessor = lower(col) ensures stored tokens are lowercase, matching the
+  //   lower(value) the search queries always pass to hasToken().
+  //
+  // Idempotent: IF EXISTS / IF NOT EXISTS guards make it safe to re-run.
+  // On 25.x or earlier the full_text(0) indexes from v5 may exist with the correct name —
+  // DROP IF EXISTS removes them and ADD IF NOT EXISTS re-creates with the new syntax.
+  if (lastDdl < 6) {
+    // Remove any partial or incorrectly-typed v5 artifacts first
+    await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_inv_url`)
+    await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_inv_email`)
+    await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_inv_password`)
+    // Re-create with ClickHouse 26.x text() syntax
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_url
+       url TYPE text(tokenizer = splitByNonAlpha, preprocessor = lower(url)) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_url`
+    )
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_email
+       email TYPE text(tokenizer = splitByNonAlpha, preprocessor = lower(email)) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_email`
+    )
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_password
+       password TYPE text(tokenizer = splitByNonAlpha, preprocessor = lower(password)) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_password`
+    )
+    console.log('[ClickHouse migration] DDL v6 applied (text indexes on url/email/password — MATERIALIZE running in background)')
   }
 
   if (lastDdl < DDL_VERSION) {

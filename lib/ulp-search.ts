@@ -5,11 +5,11 @@
  *
  *   token      — pure alphanumeric/hyphen word
  *                → hasToken(url/email/password, lower(value))
- *                   Uses full_text inverted indexes on all three columns.
+ *                   Uses text() inverted indexes on all three columns
+ *                   (ClickHouse 26.x: TYPE text(tokenizer=splitByNonAlpha, preprocessor=lower(col))).
  *                   Skips entire 65 536-row granules that provably can't match.
- *                   Value is always lowercased: ULP data is mostly lowercase so
- *                   the inverted index stores lowercase tokens; passing uppercase
- *                   would silently return 0 results even for 'GOOGLE'.
+ *                   Value is always lowercased: the index preprocessor lowercases stored
+ *                   tokens; passing uppercase would silently return 0 results for 'GOOGLE'.
  *                → position(url_host, lower(value)) > 0
  *                   Catches compound-domain substrings: "ledger" matches
  *                   coinledger.com, ledgernano.com, etc.  url_host is a
@@ -103,15 +103,15 @@ export function buildULPWhere(tokens: ParsedToken[]): { clause: string; params: 
       match = `(email_domain = {${edp}:String} OR domain = {${edp}:String})`
 
     } else if (token.type === 'token') {
-      // Pure word: hasToken() leverages the full_text inverted index on url/email/password
+      // Pure word: hasToken() leverages the text() inverted index on url/email/password
       // to prune entire granules that can't possibly match (e.g. searching "ledger" skips
       // granules that contain no occurrence of the word "ledger" as a whole token).
       //
       // Always lowercase the search value because:
-      //   1. ULP data (URLs, emails) is almost entirely lowercase, so the full_text
-      //      inverted index stores lowercase tokens.  hasToken(url, 'GOOGLE') would return
-      //      0 rows even though google.com credentials exist — the token 'GOOGLE' is never
-      //      in the index.  Lowercasing normalises the needle to match stored tokens.
+      //   1. The index was created with preprocessor = lower(col), so stored tokens are
+      //      always lowercase.  hasToken(url, 'GOOGLE') would return 0 rows even though
+      //      google.com credentials exist — the token in the index is 'google', not
+      //      'GOOGLE'.  Lowercasing normalises the needle to match stored tokens.
       //   2. url_host and email_domain are lower()-materialised columns, so position()
       //      already required a lowercase needle.  Using one shared lowercase param avoids
       //      sending duplicate data and keeps the param namespace tidy.
