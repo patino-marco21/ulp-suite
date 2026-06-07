@@ -5,27 +5,13 @@ import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-sear
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS } from "@/lib/ulp-normalize"
+import { SORT_MAP, type SortKey, encodeCursor, decodeCursor, buildCursorWhere } from "@/lib/cursor-pagination"
 
 export const dynamic = 'force-dynamic'
 
 // Valid password mask values — whitelisted so they can be safely interpolated.
 const VALID_MASKS = new Set(['alpha', 'numeric', 'alphanumeric', 'mixed', 'empty'])
 
-// Allowed ORDER BY expressions — prevents SQL injection via sort param.
-// All background ALTER TABLE UPDATE data-repair mutations are done (verified:
-// SELECT countIf(is_done=0) FROM system.mutations WHERE table='credentials' = 0).
-// Raw domain/email columns are now correct — no need for NORM_*_EXPR in ORDER BY.
-// Using raw columns enables ClickHouse optimize_read_in_order for asc sorts.
-const SORT_MAP: Record<string, string> = {
-  imported_desc: 'imported_at DESC',
-  imported_asc:  'imported_at ASC',
-  domain_asc:    `(domain='') ASC, domain ASC, imported_at DESC`,
-  domain_desc:   `(domain='') ASC, domain DESC, imported_at DESC`,
-  email_asc:     `email ASC, imported_at DESC`,
-  email_desc:    `email DESC, imported_at DESC`,
-  pw_len_desc:   'password_length DESC, imported_at DESC',
-  pw_len_asc:    'password_length ASC, imported_at DESC',
-}
 
 const SELECT = `${NORM_COLS},
   source_file, breach_name,
@@ -65,12 +51,8 @@ export async function GET(request: NextRequest) {
   }
 
   const sp = new URL(request.url).searchParams
-  // Cap at page 2000 (max offset = 2000 × 200 = 400 000 rows).
-  // Deep OFFSET scans over 100B+ rows are O(offset) even with primary-key
-  // pruning.  Almost no legitimate use case goes beyond page ~50.
-  const page  = Math.min(2_000, Math.max(1, parseInt(sp.get('page')  || '1')))
+  const cursorToken = sp.get('cursor') || ''
   const limit = Math.min(200, Math.max(1, parseInt(sp.get('limit') || '50')))
-  const offset = (page - 1) * limit
 
   const q           = sp.get('q')            || ''
   const regex       = sp.get('regex')         === '1'
@@ -91,14 +73,14 @@ export async function GET(request: NextRequest) {
   const tierInclude = sp.get('tier_include')  || ''
   const tierExclude = sp.get('tier_exclude')  || ''
 
-  const orderBy    = SORT_MAP[sortKey] ?? SORT_MAP['imported_desc']
+  const orderBy    = SORT_MAP[sortKey as SortKey] ?? SORT_MAP['imported_desc']
   const { include: incTiers, exclude: excTiers } = parseTierParams(tierInclude, tierExclude)
   const loginTypes = parseLoginTypeParam(loginType)
   const pwMasks    = pwMaskRaw.split(',').map(m => m.trim()).filter(m => VALID_MASKS.has(m))
 
   // ── WHERE clause ─────────────────────────────────────────────────────────────
   const conditions: string[] = ['1=1']
-  const params: Record<string, unknown> = { limit, offset }
+  const params: Record<string, unknown> = { limit }
 
   // Text search: uses hasToken() / bloom-filter indexes — NOT a LIKE full scan
   if (q.trim()) {
@@ -131,6 +113,20 @@ export async function GET(request: NextRequest) {
   const loginTypeExtra = loginTypeWhere(loginTypes)
   const where = conditions.join(' AND ') + tierExtra + loginTypeExtra
 
+  let cursorClause = ''
+  let cursorParams: Record<string, unknown> = {}
+
+  if (cursorToken) {
+    const cursor = decodeCursor(cursorToken)
+    if (cursor && cursor.sort === sortKey) {
+      const { clause, params: cp } = buildCursorWhere(sortKey as SortKey, cursor)
+      cursorClause = ` AND ${clause}`
+      cursorParams = cp
+    }
+  }
+
+  const allParams = { ...params, ...cursorParams }
+
   try {
     const t0 = Date.now()
     const [countResult, rows] = await Promise.all([
@@ -151,27 +147,30 @@ export async function GET(request: NextRequest) {
         // ORDER BY does not flush the sort buffer — ClickHouse issue #52234).
         `SELECT ${SELECT}
          FROM ulp.credentials
-         WHERE ${where}
+         WHERE ${where}${cursorClause}
          ORDER BY ${orderBy}
-         LIMIT {limit:UInt32} OFFSET {offset:UInt32}
+         LIMIT {limit:UInt32}
          SETTINGS max_execution_time = 300,
                   timeout_overflow_mode = 'throw'`,
-        params
+        allParams
       ),
     ])
     const query_ms = Date.now() - t0
     const total = Number(countResult[0]?.total || 0)
     const timed_out = query_ms > 250_000
 
+    const nextCursor = (rows as unknown[]).length === limit
+      ? encodeCursor(sortKey as SortKey, (rows as Record<string, unknown>[])[rows.length - 1])
+      : null
+
     return NextResponse.json({
-      success:  true,
-      results:  rows,
+      success:     true,
+      results:     rows,
       total,
-      page,
-      pages:    Math.ceil(total / limit),
+      next_cursor: nextCursor,
       query_ms,
       timed_out,
-      sort:     sortKey,
+      sort:        sortKey,
     })
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
@@ -186,7 +185,6 @@ export async function GET(request: NextRequest) {
         error:     'Query timed out — add a more specific filter (exact domain, email, or breach name) for faster results.',
         results:   [],
         total:     0,
-        pages:     0,
       }, { status: 408 })
     }
 
