@@ -8,20 +8,24 @@
             <enable_http_compression>1</enable_http_compression>
 
             <!-- Async INSERT buffering — combines many small inserts into larger parts.
-                 Dramatically reduces WAL pressure and merge amplification at bulk scale. -->
+                 Dramatically reduces WAL pressure and merge amplification at bulk scale.
+                 Buffer raised from 100 MB → 256 MB: on a 32 GB machine each async
+                 buffer costs more before flush, meaning fewer parts and fewer merges. -->
             <async_insert>1</async_insert>
-            <async_insert_max_data_size>104857600</async_insert_max_data_size>   <!-- 100 MB -->
+            <async_insert_max_data_size>268435456</async_insert_max_data_size>   <!-- 256 MB -->
             <async_insert_max_query_number>1000</async_insert_max_query_number>
-            <!-- Reduced from 500 ms to 100 ms: saves ~80 s per 100M-row file.
-                 Each 500K-row batch (≈30 MB) is under the 100 MB flush threshold
-                 so ClickHouse waits busy_timeout_ms per batch.  Shorter timeout =
-                 faster bulk ingestion without losing the async-buffering benefit. -->
+            <!-- 100 ms busy timeout: each 500K-row batch (≈30 MB) is well under the
+                 256 MB flush threshold, so the timeout still controls flush cadence.
+                 Keeping at 100 ms for fast bulk import throughput. -->
             <async_insert_busy_timeout_ms>100</async_insert_busy_timeout_ms>
             <async_insert_stale_timeout_ms>0</async_insert_stale_timeout_ms>     <!-- no stale eviction -->
 
-            <!-- Allow more memory for GROUP BY and ORDER BY before spilling to disk -->
-            <max_bytes_before_external_group_by>10737418240</max_bytes_before_external_group_by>
-            <max_bytes_before_external_sort>10737418240</max_bytes_before_external_sort>
+            <!-- Spill-to-disk thresholds for GROUP BY / ORDER BY.
+                 Raised from 10 GB → 20 GB: on 32 GB, larger intermediate aggregation
+                 sets fit in RAM without disk spill, which is 5–10× faster.
+                 Rule: set to ~50% of per-query max_memory_usage (left at server default). -->
+            <max_bytes_before_external_group_by>21474836480</max_bytes_before_external_group_by>
+            <max_bytes_before_external_sort>21474836480</max_bytes_before_external_sort>
 
             <!-- Prevent runaway stats / analytics queries from blocking the server.
                  60 s matches the client-side max_execution_time in lib/clickhouse.ts.

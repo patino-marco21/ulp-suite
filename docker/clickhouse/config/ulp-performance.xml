@@ -4,8 +4,10 @@
 <clickhouse>
 
     <!-- ── Background merge / mutation pool ──────────────────────────────── -->
-    <!-- More threads = faster consolidation of small parts from bulk inserts -->
-    <background_pool_size>16</background_pool_size>
+    <!-- More threads = faster consolidation of small parts from bulk inserts.
+         Raised from 16 → 20 for 32 GB / multi-core Ubuntu machine.
+         Rule of thumb: (1–2) × CPU cores. 20 suits an 8–16 core processor. -->
+    <background_pool_size>20</background_pool_size>
     <background_merges_mutations_concurrency_ratio>3</background_merges_mutations_concurrency_ratio>
     <background_merges_mutations_scheduling_policy>shortest_task_first</background_merges_mutations_scheduling_policy>
 
@@ -31,6 +33,28 @@
         <!-- How many rows are read per I/O block during compaction -->
         <merge_max_block_size>65536</merge_max_block_size>
     </merge_tree>
+
+    <!-- ── Memory ceiling ────────────────────────────────────────────────────────
+         Hard cap ClickHouse at 18 GB inside the 20 GB Docker container.
+         Budget: 4 GB mark cache + 4 GB uncompressed + 1 GB query result +
+                 1 GB condition cache = 10 GB caches; 8 GB free for active queries.
+         Without this, ClickHouse auto-detects 20 GB cgroup and tries to use 90%,
+         leaving less than 2 GB for process/kernel overhead inside the container. -->
+    <max_server_memory_usage>19327352832</max_server_memory_usage>      <!-- 18 GB -->
+
+    <!-- ── Mark cache ─────────────────────────────────────────────────────────────
+         Stores granule-to-column-file offsets; required for every primary key lookup.
+         At ~65 GB compressed data, 4 GB ≈ 6% of data — essentially a full warm cache.
+         Rule of thumb is 0.5–1%; 6% means virtually every mark hit stays in RAM.
+         Monitor: SELECT value FROM system.asynchronous_metrics
+                  WHERE metric IN ('MarkCacheFiles', 'MarkCacheBytes') -->
+    <mark_cache_size>4294967296</mark_cache_size>                       <!-- 4 GB -->
+
+    <!-- ── Uncompressed cache ─────────────────────────────────────────────────────
+         Caches decompressed column blocks; speeds repeated reads of the same granule.
+         4 GB on a 32 GB machine: meaningful L2 layer above the OS page cache,
+         especially useful when the same email domain or URL host is searched repeatedly. -->
+    <uncompressed_cache_size>4294967296</uncompressed_cache_size>       <!-- 4 GB -->
     <!-- max_bytes_before_external_group_by / external_sort are user-level query settings
          in ClickHouse 26.3 — see users.d/ulp-profiles.xml. -->
 
@@ -40,13 +64,14 @@
     <!-- ── Query result cache (ClickHouse 23.1+) ─────────────────────────────
          Stores the full result of a SELECT in memory for up to query_cache_ttl seconds.
          Subsequent identical queries return from cache without touching ClickHouse storage.
-         Sized conservatively: 256 MB total, max 2 MB per entry (most searches return << 1 MB),
-         max 1 000 distinct cached results. -->
+         1 GB total / 5 000 distinct entries / 4 MB per entry / 20 k rows per entry.
+         Scaled up from 256 MB: on a 32 GB machine with analyst teams running
+         repeated searches, a larger cache eliminates far more redundant ClickHouse work. -->
     <query_cache>
-        <size_in_bytes>268435456</size_in_bytes>     <!-- 256 MB total cache -->
-        <max_entries>1000</max_entries>
-        <max_entry_size_in_bytes>2097152</max_entry_size_in_bytes>  <!-- 2 MB per entry -->
-        <max_entry_size_in_rows>10000</max_entry_size_in_rows>       <!-- 10 k rows per entry -->
+        <size_in_bytes>1073741824</size_in_bytes>    <!-- 1 GB total cache -->
+        <max_entries>5000</max_entries>
+        <max_entry_size_in_bytes>4194304</max_entry_size_in_bytes>  <!-- 4 MB per entry -->
+        <max_entry_size_in_rows>20000</max_entry_size_in_rows>       <!-- 20 k rows per entry -->
     </query_cache>
 
     <!-- ── Query condition cache (ClickHouse 25.3+) ──────────────────────────
@@ -54,9 +79,10 @@
          Complementary to skip indexes: subsequent queries with the same filter
          skip granule re-evaluation entirely.  1 bit × 65 536 rows/granule ×
          22 000 granules ≈ 3 KB per filter condition — essentially free.
-         512 MB ceiling (hard to reach at 3 KB per condition). -->
+         1 GB ceiling: with 3 KB per condition, this holds ~341 000 distinct filter
+         conditions — essentially unlimited for any realistic query pattern. -->
     <query_condition_cache>
-        <size_in_bytes>536870912</size_in_bytes>     <!-- 512 MB ceiling -->
+        <size_in_bytes>1073741824</size_in_bytes>    <!-- 1 GB ceiling -->
     </query_condition_cache>
 
 </clickhouse>

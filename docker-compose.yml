@@ -23,11 +23,12 @@ services:
       # The ClickHouse port is NOT exposed to the host, so no password is needed.
       CLICKHOUSE_PASSWORD: ""
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
-    # Memory: ClickHouse caches scale to available RAM without a limit.
-    # On a laptop with 16 GB total, cap at 6 GB so the app + OS have headroom.
-    # Adjust both values to match your hardware (laptop: 4-6g; desktop: 8-12g).
-    mem_limit: 6g
-    mem_reservation: 2g
+    # Memory: 32 GB total — 20 GB ClickHouse + 8 GB App + 4 GB OS/kernel headroom.
+    # ClickHouse caches (mark: 4 GB, uncompressed: 4 GB, query: 1 GB, condition: 1 GB)
+    # leave ~8 GB free inside the container for active query execution.
+    # Adjust if sharing the machine with other heavy workloads.
+    mem_limit: 20g
+    mem_reservation: 12g
     ulimits:
       nofile:
         soft: 262144
@@ -60,13 +61,13 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
-    # Memory: 6 GB container / 4 GB Node.js heap = 2 GB OS headroom.
-    # Node.js 22 is container-aware — NODE_OPTIONS makes the limit explicit.
-    mem_limit: 6g
-    mem_reservation: 2g
+    # Memory: 8 GB container / 6 GB Node.js heap = 2 GB OS headroom.
+    # Node.js 24 is container-aware — NODE_OPTIONS makes the limit explicit.
+    mem_limit: 8g
+    mem_reservation: 4g
     environment:
       NODE_ENV: production
-      NODE_OPTIONS: "--max-old-space-size=4096"
+      NODE_OPTIONS: "--max-old-space-size=6144"
       # ClickHouse — credential data store
       CLICKHOUSE_HOST: "http://clickhouse:8123"
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}

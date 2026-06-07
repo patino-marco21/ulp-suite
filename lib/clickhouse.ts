@@ -287,7 +287,7 @@ export async function closeConnection() {
     if (globalForClickHouse.clickhouse) {
       globalForClickHouse.clickhouse = undefined
     }
-    console.log("✅ ClickHouse connection closed")
+    console.warn("✅ ClickHouse connection closed")
   } catch (error) {
     console.error("❌ Error closing ClickHouse connection:", error)
   }
