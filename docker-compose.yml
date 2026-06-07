@@ -77,6 +77,14 @@ services:
     environment:
       NODE_ENV: production
       NODE_OPTIONS: "--max-old-space-size=6144"
+      # CRITICAL: Docker sets HOSTNAME to the container short-ID by default, silently
+      # overriding the "ENV HOSTNAME=0.0.0.0" baked into the Dockerfile image.
+      # Next.js standalone server.js reads process.env.HOSTNAME for its bind address;
+      # without this override Next.js binds to the container's internal IP only, which
+      # breaks all server-side fetch() calls to http://localhost:3000/api/... and makes
+      # every SSR page fail to load. (Next.js issue #58657)
+      HOSTNAME: "0.0.0.0"
+      PORT: "3000"
       # ClickHouse — credential data store
       CLICKHOUSE_HOST: "http://clickhouse:8123"
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
