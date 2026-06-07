@@ -51,6 +51,7 @@ test-data/
 *.tsbuildinfo
 
 # ─── Docker / docs / assets (not needed inside image) ────────────────────────
+docker/
 docker-compose.yml
 docker-start.sh
 docker-status.sh
