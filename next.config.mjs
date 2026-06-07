@@ -6,18 +6,14 @@ const isDev = process.env.NODE_ENV === 'development'
 const nextConfig = {
   // Tell Next.js not to bundle better-sqlite3 (native addon — must be required at runtime)
   serverExternalPackages: ['better-sqlite3'],
-  experimental: {
-    // Disabled: worker process duplicates memory; single-process build uses less RAM (avoids OOM on large apps)
-    webpackBuildWorker: false,
-    // Exclude large data folders from output file tracing (fixes slow builds)
-    outputFileTracingExcludes: {
-      '*': [
-        './uploads/**',
-        './clickhouse-data/**',
-        './data/**',
-        './.devtasks/**',
-      ],
-    },
+  // Exclude large data folders from output file tracing (fixes slow builds)
+  outputFileTracingExcludes: {
+    '*': [
+      './uploads/**',
+      './clickhouse-data/**',
+      './data/**',
+      './.devtasks/**',
+    ],
   },
   // Exclude data folders from webpack processing (these contain stealer logs with .ts files)
   webpack: (config, { isServer }) => {
