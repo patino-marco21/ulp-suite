@@ -8,7 +8,7 @@ networks:
 services:
   # ─── ClickHouse (primary credential data store) ───────────────────────────
   clickhouse:
-    image: clickhouse/clickhouse-server:26.3
+    image: clickhouse/clickhouse-server:26.4
     container_name: ulpsuite_clickhouse
     restart: unless-stopped
     # Ports intentionally NOT exposed on host — app connects via internal Docker network.
