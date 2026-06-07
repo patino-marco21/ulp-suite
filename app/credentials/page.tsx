@@ -50,14 +50,13 @@ interface RelatedData {
 }
 
 interface ApiResult {
-  success:    boolean
-  results:    Credential[]
-  total:      number
-  page:       number
-  pages:      number
-  query_ms?:  number
-  timed_out?: boolean   // true when query_ms > 200s — results may be incomplete
-  sort?:      string
+  success:     boolean
+  results:     Credential[]
+  total:       number
+  next_cursor: string | null
+  query_ms?:   number
+  timed_out?:  boolean   // true when query_ms > 200s — results may be incomplete
+  sort?:       string
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -587,7 +586,9 @@ export default function CredentialsPage() {
   const [data, setData]               = useState<ApiResult | null>(null)
   const [loading, setLoading]         = useState(true)
   const [exportLoading, setExportLoading] = useState(false)
-  const [page, setPage]               = useState(1)
+  const [cursorStack, setCursorStack]     = useState<Array<string | null>>([])
+  const [currentCursor, setCurrentCursor] = useState<string | null>(null)
+  const resetCursor = () => { setCursorStack([]); setCurrentCursor(null) }
 
   // Credential detail sheet
   const [selectedCred, setSelectedCred] = useState<Credential | null>(null)
@@ -623,12 +624,13 @@ export default function CredentialsPage() {
 
   const { toast } = useToast()
 
-  const buildParams = useCallback((p: number, overrides?: { sort?: string; limit?: number; q?: string; domain?: string }) => {
+  const buildParams = useCallback((cursor: string | null, overrides?: { sort?: string; limit?: number; q?: string; domain?: string }) => {
     const effectiveSort  = overrides?.sort   ?? sortKey
     const effectiveLimit = overrides?.limit  ?? limit
     const effectiveQ     = overrides?.q      ?? q
     const effectiveDomain = overrides?.domain ?? domain
-    const ps = new URLSearchParams({ page: String(p), limit: String(effectiveLimit), sort: effectiveSort })
+    const ps = new URLSearchParams({ limit: String(effectiveLimit), sort: effectiveSort })
+    if (cursor) ps.set('cursor', cursor)
     if (effectiveQ.trim())     ps.set('q', effectiveQ.trim())
     if (effectiveDomain)       ps.set('domain', effectiveDomain)
     if (breach)             ps.set('breach', breach)
@@ -654,19 +656,19 @@ export default function CredentialsPage() {
     sortKey, limit,
   ])
 
-  const load = useCallback(async (p: number, overrides?: { sort?: string; limit?: number; q?: string; domain?: string }) => {
+  const load = useCallback(async (cursor: string | null, overrides?: { sort?: string; limit?: number; q?: string; domain?: string }) => {
     setLoading(true)
     try {
-      const res  = await fetch(`/api/credentials?${buildParams(p, overrides)}`)
+      const res  = await fetch(`/api/credentials?${buildParams(cursor, overrides)}`)
       const json = await res.json()
       if (json.success) {
         setData(json)
-        setPage(p)
+        setCurrentCursor(cursor)
       } else if (json.timed_out) {
         // 408 timeout: show the structured timeout response in the results panel
         // instead of a toast — the user can see why and what to do.
-        setData({ ...json, results: [], pages: 0 } as any)
-        setPage(p)
+        setData({ ...json, results: [] })
+        setCurrentCursor(cursor)
       } else {
         toast({ title: 'Failed to load', variant: 'destructive' })
       }
@@ -677,9 +679,9 @@ export default function CredentialsPage() {
     }
   }, [buildParams, toast])
 
-  useEffect(() => { load(1) }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(null) }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
-  const applyFilters = () => load(1)
+  const applyFilters = () => { resetCursor(); load(null) }
 
   const clearAll = () => {
     setQ(''); setDomain(''); setBreach(''); setLoginType(''); setPwMask([])
@@ -691,9 +693,10 @@ export default function CredentialsPage() {
     // Fetch directly with hardcoded defaults — all state setters above are async,
     // so calling load() here would still see the old values via its closure.
     setLoading(true)
-    fetch('/api/credentials?page=1&limit=50&sort=imported_desc')
+    setCursorStack([]); setCurrentCursor(null)
+    fetch('/api/credentials?limit=50&sort=imported_desc')
       .then(r => r.json())
-      .then(json => { if (json.success) { setData(json); setPage(1) } })
+      .then(json => { if (json.success) { setData(json); setCurrentCursor(null) } })
       .catch(() => { toast({ title: 'Failed to load', variant: 'destructive' }) })
       .finally(() => setLoading(false))
   }
@@ -711,11 +714,11 @@ export default function CredentialsPage() {
   // Quick-action callbacks from the detail sheet
   const handleSearchEmail = (email: string) => {
     setQ(email)
-    load(1, { q: email })
+    resetCursor(); load(null, { q: email })
   }
   const handleSearchDomain = (dom: string) => {
     setDomain(dom)
-    load(1, { domain: dom })
+    resetCursor(); load(null, { domain: dom })
   }
 
   /** Cycle sort: unsorted → asc → desc → reset; updates the dropdown in sync. */
@@ -724,7 +727,7 @@ export default function CredentialsPage() {
                : sortKey === descKey ? 'imported_desc'
                : ascKey
     setSortKey(next)
-    load(1, { sort: next })
+    resetCursor(); load(null, { sort: next })
   }
 
   /** Render the correct sort icon for a column header. */
@@ -833,7 +836,7 @@ export default function CredentialsPage() {
               <ArrowUpDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
               <select
                 value={sortKey}
-                onChange={e => { const s = e.target.value; setSortKey(s); load(1, { sort: s }) }}
+                onChange={e => { const s = e.target.value; setSortKey(s); resetCursor(); load(null, { sort: s }) }}
                 className={selectCls}
               >
                 {SORT_OPTIONS.map(o => (
@@ -845,7 +848,7 @@ export default function CredentialsPage() {
             {/* Page size */}
             <select
               value={limit}
-              onChange={e => { const l = Number(e.target.value); setLimit(l); load(1, { limit: l }) }}
+              onChange={e => { const l = Number(e.target.value); setLimit(l); resetCursor(); load(null, { limit: l }) }}
               className={selectCls}
               title="Rows per page"
             >
@@ -1301,10 +1304,7 @@ export default function CredentialsPage() {
                       ⚠ Results timed out on this page
                     </p>
                     <p className="text-sm text-muted-foreground">
-                      {data.total.toLocaleString()} records were found but couldn't be loaded on page {page}.
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      Try page 1, reduce the page size, or add a more specific filter.
+                      {data.total.toLocaleString()} records were found but couldn't be loaded — go back to the first page or add a more specific filter.
                     </p>
                   </div>
                 )
@@ -1315,15 +1315,31 @@ export default function CredentialsPage() {
       </div>
 
       {/* ── Pagination ─────────────────────────────────────────────────────── */}
-      {data && data.pages > 1 && (
+      {(cursorStack.length > 0 || data?.next_cursor) && (
         <div className="flex items-center justify-center gap-3 border-t px-4 py-3">
-          <Button size="sm" variant="outline" disabled={page <= 1 || loading} onClick={() => load(page - 1)}>
+          <Button
+            size="sm" variant="outline"
+            disabled={cursorStack.length === 0 || loading}
+            onClick={() => {
+              const prev = cursorStack[cursorStack.length - 1] ?? null
+              setCursorStack(s => s.slice(0, -1))
+              load(prev)
+            }}
+          >
             <ChevronLeft className="h-4 w-4" />
           </Button>
-          <span className="text-sm tabular-nums">
-            Page {data.page} of {data.pages}
+          <span className="text-sm text-muted-foreground tabular-nums">
+            {data?.total.toLocaleString()} results
           </span>
-          <Button size="sm" variant="outline" disabled={page >= data.pages || loading} onClick={() => load(page + 1)}>
+          <Button
+            size="sm" variant="outline"
+            disabled={!data?.next_cursor || loading}
+            onClick={() => {
+              const next = data!.next_cursor!
+              setCursorStack(s => [...s, currentCursor])
+              load(next)
+            }}
+          >
             <ChevronRight className="h-4 w-4" />
           </Button>
         </div>
