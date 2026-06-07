@@ -33,12 +33,16 @@ const DDL_VERSION = 6
 //   them once across all cold-starts, not on every boot).
 function getSettingInt(key: string, defaultVal: number): number {
   try {
-    const row = dbGet(`SELECT value FROM app_settings WHERE key = ?`, [key]) as { value: string } | undefined
+    // app_settings column is key_name (not key) — match lib/sqlite.ts schema
+    const row = dbGet(`SELECT value FROM app_settings WHERE key_name = ?`, [key]) as { value: string } | undefined
     return row ? parseInt(row.value, 10) : defaultVal
   } catch { return defaultVal }
 }
 function setSetting(key: string, value: string): void {
-  try { dbRun(`INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)`, [key, value]) } catch {}
+  // app_settings column is key_name (not key) — match lib/sqlite.ts schema
+  // description/created_at/updated_at have DEFAULT values in the schema so
+  // they are safe to omit from INSERT.
+  try { dbRun(`INSERT OR REPLACE INTO app_settings (key_name, value) VALUES (?, ?)`, [key, value]) } catch {}
 }
 
 export async function runClickHouseMigrations(): Promise<void> {

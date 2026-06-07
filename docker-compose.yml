@@ -50,9 +50,11 @@ services:
       timeout: 5s
       # 90 retries × 10 s = 900 s (15 min) of checking after start_period expires.
       retries: 90
-      # 300 s (5 min) before the first check: gives ClickHouse time to load all
-      # part metadata for 1.46 B rows before health checks start counting failures.
-      start_period: 300s
+      # 60 s before the first check: ClickHouse's HTTP server (and therefore /ping)
+      # starts responding within 10–30 s even on large datasets. 300 s was tuned for
+      # SELECT 1 which needs the query layer fully ready; /ping needs only the HTTP
+      # server thread, which starts far earlier.
+      start_period: 60s
     logging:
       driver: "json-file"
       options:
