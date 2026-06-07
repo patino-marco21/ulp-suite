@@ -5,6 +5,7 @@ import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-sear
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS } from "@/lib/ulp-normalize"
+import { SORT_MAP, type SortKey, encodeCursor, decodeCursor, buildCursorWhere } from "@/lib/cursor-pagination"
 
 export const dynamic = 'force-dynamic'
 
@@ -18,21 +19,6 @@ const SELECT = `${NORM_COLS},
 // can be safely interpolated into SQL without a parameterised placeholder.
 const VALID_MASKS = new Set(['alpha', 'numeric', 'alphanumeric', 'mixed', 'empty'])
 
-// Allowed ORDER BY expressions (whitelist to prevent injection).
-// All data-repair mutations are done (0 pending).  Raw domain/email columns are
-// correct — using raw columns enables optimize_read_in_order for ASC sorts and
-// lets ClickHouse use the primary key index (ORDER BY domain, email, imported_at)
-// instead of computing NORM_*_EXPR per row (which forces a full-column scan).
-// Tiebreaker chain terminates with (url, password) for stable OFFSET pagination.
-const SORT_MAP: Record<string, string> = {
-  'imported_desc': `imported_at DESC, domain ASC, email ASC, url ASC, password ASC`,
-  'imported_asc':  `imported_at ASC,  domain ASC, email ASC, url ASC, password ASC`,
-  'domain_asc':    `(domain='') ASC, domain ASC,  email ASC, imported_at ASC, url ASC, password ASC`,
-  'domain_desc':   `(domain='') ASC, domain DESC, email ASC, imported_at ASC, url ASC, password ASC`,
-  'email_asc':     `email ASC, domain ASC, imported_at ASC, url ASC, password ASC`,
-  'pw_len_desc':   `password_length DESC, domain ASC, email ASC, imported_at ASC, url ASC`,
-  'pw_len_asc':    `password_length ASC,  domain ASC, email ASC, imported_at ASC, url ASC`,
-}
 
 export async function GET(request: NextRequest) {
   const user = await validateRequest(request)
@@ -46,11 +32,8 @@ export async function GET(request: NextRequest) {
   const tierInclude = searchParams.get('tier_include') || ''
   const tierExclude = searchParams.get('tier_exclude') || ''
   const loginType   = searchParams.get('login_type')  || ''
-  // Cap at page 2000 (max offset = 2000 × 1000 = 2 000 000 rows).
-  // Deep OFFSET over 100B+ rows is O(offset) — almost no use case needs page > 50.
-  const page        = Math.min(2_000, Math.max(1, parseInt(searchParams.get('page')  || '1')))
+  const cursorToken = searchParams.get('cursor') || ''
   const limit       = Math.min(1000, Math.max(1, parseInt(searchParams.get('limit') || '50')))
-  const offset      = (page - 1) * limit
 
   // Filters
   const pwMaskRaw   = searchParams.get('pw_mask')      || ''
@@ -66,7 +49,7 @@ export async function GET(request: NextRequest) {
 
   // Sort: whitelist-validated to prevent injection
   const sortKey     = searchParams.get('sort') || 'imported_desc'
-  const orderBy     = SORT_MAP[sortKey] ?? SORT_MAP['imported_desc']
+  const orderBy     = SORT_MAP[sortKey as SortKey] ?? SORT_MAP['imported_desc']
 
   // Sanitise password mask — only allow known values
   const pwMasks = pwMaskRaw
@@ -79,7 +62,7 @@ export async function GET(request: NextRequest) {
                     pwMasks.length || urlScheme || isCorporate || pwLenMin !== null ||
                     pwLenMax !== null || dateFrom || dateTo || emailDomain || sourceFile
   if (!hasFilter) {
-    return NextResponse.json({ success: true, results: [], total: 0, page: 1, pages: 0, query: '' })
+    return NextResponse.json({ success: true, results: [], total: 0, next_cursor: null, query: '' })
   }
 
   const { include: incTiers, exclude: excTiers } = parseTierParams(tierInclude, tierExclude)
@@ -93,7 +76,7 @@ export async function GET(request: NextRequest) {
 
   // Extra WHERE fragments
   const extras: string[] = []
-  const mergedParams: Record<string, unknown> = { ...baseParams, limit, offset }
+  const mergedParams: Record<string, unknown> = { ...baseParams, limit }
 
   if (breach)      { extras.push(' AND breach_name = {breachFilter:String}');   mergedParams.breachFilter = breach }
   if (emailDomain) { extras.push(' AND email_domain = {emailDomain:String}');   mergedParams.emailDomain = emailDomain.toLowerCase() }
@@ -114,6 +97,22 @@ export async function GET(request: NextRequest) {
   const loginTypeExtra = loginTypeWhere(loginTypes)
   const allExtras      = extras.join('') + tierExtra + loginTypeExtra
 
+  // Cursor values compare against raw storage columns. Safe because all data-repair
+  // mutations are done — raw columns match normalized values for all rows.
+  let cursorClause = ''
+  let cursorParams: Record<string, unknown> = {}
+
+  if (cursorToken) {
+    const cur = decodeCursor(cursorToken)
+    if (cur && cur.sort === sortKey) {
+      const { clause: cc, params: cp } = buildCursorWhere(sortKey as SortKey, cur)
+      cursorClause = ` AND ${cc}`
+      cursorParams = cp
+    }
+  }
+
+  const allParams = { ...mergedParams, ...cursorParams }
+
   try {
     const t0 = Date.now()
     const [countResult, rows] = await Promise.all([
@@ -127,24 +126,27 @@ export async function GET(request: NextRequest) {
       executeQuery(
         `SELECT ${SELECT}
          FROM ulp.credentials
-         WHERE ${clause}${allExtras}
+         WHERE ${clause}${allExtras}${cursorClause}
          ORDER BY ${orderBy}
-         LIMIT {limit:UInt32} OFFSET {offset:UInt32}
+         LIMIT {limit:UInt32}
          SETTINGS max_execution_time = 300,
                   timeout_overflow_mode = 'throw'`,
-        mergedParams
+        allParams
       ),
     ])
     const query_ms = Date.now() - t0
     const total = Number(countResult[0]?.total || 0)
     const timed_out = query_ms > 250_000
 
+    const nextCursor = (rows as unknown[]).length === limit
+      ? encodeCursor(sortKey as SortKey, (rows as Record<string, unknown>[])[rows.length - 1])
+      : null
+
     return NextResponse.json({
       success:           true,
       results:           rows,
       total,
-      page,
-      pages:             Math.ceil(total / limit),
+      next_cursor:       nextCursor,
       query:             q,
       query_ms,
       timed_out,
@@ -166,7 +168,6 @@ export async function GET(request: NextRequest) {
         error:     'Query timed out — use an exact domain, email, or breach name for fast results at this data size.',
         results:   [],
         total:     0,
-        pages:     0,
       }, { status: 408 })
     }
 
