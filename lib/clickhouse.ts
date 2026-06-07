@@ -95,7 +95,7 @@ function getClickHouseClient(): ClickHouseClient {
     // ── Keep-alive: reuse TCP connections across requests ──────────────────
     keep_alive: {
       enabled: true,
-      idle_socket_ttl: 2_500,  // recycle before ClickHouse server-side timeout
+      idle_socket_ttl: 9_000,  // recycle before ClickHouse server-side 10s keepalive timeout
     },
 
     // ── Server-side settings applied to every request ──────────────────────
