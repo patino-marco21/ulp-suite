@@ -35,26 +35,29 @@
     </merge_tree>
 
     <!-- ── Memory ceiling ────────────────────────────────────────────────────────
-         Hard cap ClickHouse at 18 GB inside the 20 GB Docker container.
-         Budget: 4 GB mark cache + 4 GB uncompressed + 1 GB query result +
-                 1 GB condition cache = 10 GB caches; 8 GB free for active queries.
-         Without this, ClickHouse auto-detects 20 GB cgroup and tries to use 90%,
-         leaving less than 2 GB for process/kernel overhead inside the container. -->
-    <max_server_memory_usage>19327352832</max_server_memory_usage>      <!-- 18 GB -->
+         CRITICAL: mark_cache and uncompressed_cache are allocated OUTSIDE of
+         max_server_memory_usage (they use a separate jemalloc arena).
+         Total ClickHouse RSS = max_server_memory_usage + mark_cache + uncompressed_cache.
+         Container: 20 GB.  Budget: 16 + 1 + 1 = 18 GB  →  2 GB safety margin.
+
+         max_server_memory_usage covers: query execution, query result cache,
+         query condition cache, background merge buffers, connection overhead. -->
+    <max_server_memory_usage>17179869184</max_server_memory_usage>      <!-- 16 GB -->
 
     <!-- ── Mark cache ─────────────────────────────────────────────────────────────
-         Stores granule-to-column-file offsets; required for every primary key lookup.
-         At ~65 GB compressed data, 4 GB ≈ 6% of data — essentially a full warm cache.
-         Rule of thumb is 0.5–1%; 6% means virtually every mark hit stays in RAM.
+         Stores granule-to-column-file offsets — allocated OUTSIDE max_server_memory.
+         Actual size for this dataset: 22 278 granules × 40 columns × 16 B ≈ 14 MB.
+         1 GB is 70× larger than needed — covers fragmented parts during heavy imports.
          Monitor: SELECT value FROM system.asynchronous_metrics
                   WHERE metric IN ('MarkCacheFiles', 'MarkCacheBytes') -->
-    <mark_cache_size>4294967296</mark_cache_size>                       <!-- 4 GB -->
+    <mark_cache_size>1073741824</mark_cache_size>                       <!-- 1 GB -->
 
     <!-- ── Uncompressed cache ─────────────────────────────────────────────────────
-         Caches decompressed column blocks; speeds repeated reads of the same granule.
-         4 GB on a 32 GB machine: meaningful L2 layer above the OS page cache,
-         especially useful when the same email domain or URL host is searched repeatedly. -->
-    <uncompressed_cache_size>4294967296</uncompressed_cache_size>       <!-- 4 GB -->
+         LRU cache of decompressed column blocks — allocated OUTSIDE max_server_memory.
+         1 GB ≈ 125 recent granules cached; effective for repeated domain/email searches.
+         Combined with OS page cache and the query result cache, this avoids redundant
+         decompression on hot columns without consuming excessive RSS. -->
+    <uncompressed_cache_size>1073741824</uncompressed_cache_size>       <!-- 1 GB -->
     <!-- max_bytes_before_external_group_by / external_sort are user-level query settings
          in ClickHouse 26.3 — see users.d/ulp-profiles.xml. -->
 
