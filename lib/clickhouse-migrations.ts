@@ -18,7 +18,8 @@ let migrationsDone = false
 // v2: additional skip indexes (breach_name + source_file bloom filters)
 // v3: MV backing tables (SummingMergeTree + AggregatingMergeTree) + 4 materialized views
 // v4: ngrambf_v1(4,1024,1,0) skip indexes on url_host + email_domain (substring search)
-const DDL_VERSION = 4
+// v5: full_text(0) inverted indexes on url/email/password (replace tokenbf_v1; drop unused idx_email_ngram)
+const DDL_VERSION = 5
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -288,6 +289,49 @@ export async function runClickHouseMigrations(): Promise<void> {
       `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_ngram_email_domain`
     )
     console.log('[ClickHouse migration] DDL v4 applied (ngrambf_v1 on url_host + email_domain — MATERIALIZE running in background)')
+  }
+
+  // v5 — Replace tokenbf_v1 bloom filter skip indexes on url/email/password with
+  // full_text (inverted index). full_text stores the actual token list per granule,
+  // so hasToken() lookups are exact — zero false positives vs tokenbf_v1's bloom filter.
+  // Granule pruning is 7-10× faster for selective token searches.
+  //
+  // full_text(0): tokenizer=0 (default English tokenizer — splits on whitespace/punct,
+  // same as tokenbf_v1). GRANULARITY 1 is standard for search indexes.
+  //
+  // ngrambf_v1 indexes on url_host + email_domain (v4) are NOT changed — those serve
+  // position() substring searches which full_text cannot accelerate.
+  //
+  // idx_email_ngram (original ngrambf_v1(3) on email from schema v1) is dropped:
+  // no query in lib/ulp-search.ts uses position(email,...), so it has never pruned
+  // anything. Removing it frees ~22 MB and one mutation slot.
+  //
+  // MATERIALIZE INDEX fires background mutations (mutations_sync=0 default).
+  // Monitor via: SELECT * FROM system.mutations WHERE table='credentials'
+  //   AND command LIKE '%idx_inv%' ORDER BY create_time DESC
+  // DROP runs after MATERIALIZE is queued — old indexes stay readable during build.
+  if (lastDdl < 5) {
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_url
+       url TYPE full_text(0) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_url`
+    )
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_email
+       email TYPE full_text(0) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_email`
+    )
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_password
+       password TYPE full_text(0) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_password`
+    )
+    // Drop old tokenbf_v1 indexes (replaced above) and idx_email_ngram (unused)
+    await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_url`)
+    await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_email`)
+    await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_password`)
+    await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_email_ngram`)
+    console.log('[ClickHouse migration] DDL v5 applied (full_text on url/email/password — MATERIALIZE running in background)')
   }
 
   if (lastDdl < DDL_VERSION) {
