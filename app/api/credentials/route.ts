@@ -116,7 +116,7 @@ export async function GET(request: NextRequest) {
   // Cursor values are captured from result rows (which are normalized via NORM_COLS)
   // and compared against raw storage columns in buildCursorWhere. This is safe because
   // all data-repair mutations are done — raw columns match normalized values for all rows.
-  // See: "All background ALTER TABLE UPDATE data-repair mutations are done" comment above.
+  // Verify with: SELECT countIf(is_done=0) FROM system.mutations WHERE table='credentials'
   let cursorClause = ''
   let cursorParams: Record<string, unknown> = {}
 

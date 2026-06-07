@@ -108,5 +108,7 @@ export function buildCursorWhere(
         clause: `(password_length < {c_pl:UInt8} OR (password_length = {c_pl:UInt8} AND (domain, email, imported_at, url) > ({c_d:String}, {c_e:String}, {c_ia:DateTime}, {c_u:String})))`,
         params: { c_pl: v.password_length, c_d: v.domain, c_e: v.email, c_ia: v.imported_at, c_u: v.url },
       }
+    default:
+      return { clause: '', params: {} }
   }
 }

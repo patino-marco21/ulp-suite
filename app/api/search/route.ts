@@ -99,6 +99,7 @@ export async function GET(request: NextRequest) {
 
   // Cursor values compare against raw storage columns. Safe because all data-repair
   // mutations are done — raw columns match normalized values for all rows.
+  // Verify with: SELECT countIf(is_done=0) FROM system.mutations WHERE table='credentials'
   let cursorClause = ''
   let cursorParams: Record<string, unknown> = {}
 
