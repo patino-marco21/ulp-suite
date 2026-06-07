@@ -1,12 +1,19 @@
-# Inverted Text Index (DDL v5) Implementation Plan
+# Inverted Text Index (DDL v6) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace `tokenbf_v1` bloom filter skip indexes on `url`/`email`/`password` with `full_text` inverted indexes via a DDL v5 migration, eliminating false positives and delivering 7-10× faster `hasToken()` granule pruning.
+**Goal:** Replace `tokenbf_v1` bloom filter skip indexes on `url`/`email`/`password` with
+ClickHouse 26.x `text()` inverted indexes, eliminating false positives and delivering
+7-10× faster `hasToken()` granule pruning.
 
-**Architecture:** One file changes: `lib/clickhouse-migrations.ts`. `DDL_VERSION` bumps 4→5. A v5 block ADDs three `full_text(0)` indexes, fires `MATERIALIZE` for each in the background (fire-and-forget, same pattern as v4), then DROPs the three old `tokenbf_v1` indexes and the unused `idx_email_ngram`. No query changes anywhere — `hasToken()` uses the new index automatically.
+**Architecture:** One file changes: `lib/clickhouse-migrations.ts`. `DDL_VERSION` bumps 4→6.
+DDL v5 (attempted `full_text(0)`) silently failed on ClickHouse 26.x — the `full_text`
+type was renamed to `text(tokenizer = ...)` in 26.2. DDL v6 is the actual working
+implementation: DROP partial v5 artifacts, ADD `text(tokenizer = splitByNonAlpha,
+preprocessor = lower(col))` indexes, MATERIALIZE, then DROP old `tokenbf_v1` and
+`idx_email_ngram`. No query changes anywhere — `hasToken()` uses the new index automatically.
 
-**Tech Stack:** TypeScript, ClickHouse 26.3 (`full_text` GA since 24.x), `@clickhouse/client`
+**Tech Stack:** TypeScript, ClickHouse 26.3 (`text()` index GA in 26.2), `@clickhouse/client`
 
 ---
 
@@ -14,11 +21,11 @@
 
 | Action | File | Change |
 |---|---|---|
-| Modify | `lib/clickhouse-migrations.ts` | Bump `DDL_VERSION` 4→5; insert v5 block after `if (lastDdl < 4)` |
+| Modify | `lib/clickhouse-migrations.ts` | Bump `DDL_VERSION` 4→6; insert v5 + v6 blocks after `if (lastDdl < 4)` |
 
 ---
 
-### Task 1: Implement DDL v5 migration
+### Task 1: Implement DDL v5 + v6 migration
 
 **Files:**
 - Modify: `lib/clickhouse-migrations.ts`
@@ -59,56 +66,49 @@ const DDL_VERSION = 4
 With:
 ```typescript
 // v4: ngrambf_v1(4,1024,1,0) skip indexes on url_host + email_domain (substring search)
-// v5: full_text(0) inverted indexes on url/email/password (replace tokenbf_v1; drop unused idx_email_ngram)
-const DDL_VERSION = 5
+// v5: full_text(0) inverted indexes — FAILED on ClickHouse 26.x (wrong type name)
+// v6: text(tokenizer=splitByNonAlpha) indexes replacing v5 failed attempt
+const DDL_VERSION = 6
 ```
 
-- [ ] **Step 3: Insert the v5 migration block**
+- [ ] **Step 3: Insert the v5 + v6 migration blocks**
 
-After the closing brace of the `if (lastDdl < 4)` block (the line with the `console.log` for DDL v4 and its closing `}`) and immediately before `if (lastDdl < DDL_VERSION)`, insert:
+After the `if (lastDdl < 4)` closing brace and before `if (lastDdl < DDL_VERSION)`:
 
 ```typescript
-  // v5 — Replace tokenbf_v1 bloom filter skip indexes on url/email/password with
-  // full_text (inverted index). full_text stores the actual token list per granule,
-  // so hasToken() lookups are exact — zero false positives vs tokenbf_v1's bloom filter.
-  // Granule pruning is 7-10× faster for selective token searches.
-  //
-  // full_text(0): tokenizer=0 (default English tokenizer — splits on whitespace/punct,
-  // same as tokenbf_v1). GRANULARITY 1 is standard for search indexes.
-  //
-  // ngrambf_v1 indexes on url_host + email_domain (v4) are NOT changed — those serve
-  // position() substring searches which full_text cannot accelerate.
-  //
-  // idx_email_ngram (original ngrambf_v1(3) on email from schema v1) is dropped:
-  // no query in lib/ulp-search.ts uses position(email,...), so it has never pruned
-  // anything. Removing it frees ~22 MB and one mutation slot.
-  //
-  // MATERIALIZE INDEX fires background mutations (mutations_sync=0 default).
-  // Monitor via: SELECT * FROM system.mutations WHERE table='credentials'
-  //   AND command LIKE '%idx_inv%' ORDER BY create_time DESC
-  // DROP runs after MATERIALIZE is queued — old indexes stay readable during build.
+  // v5 — FAILED on ClickHouse 26.x (full_text type was renamed to text() in 26.2).
+  // Kept as historical record. The DROPs in v5 still run and remove tokenbf_v1 indexes.
   if (lastDdl < 5) {
-    await runMigration(
-      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_url
-       url TYPE full_text(0) GRANULARITY 1`,
-      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_url`
-    )
-    await runMigration(
-      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_email
-       email TYPE full_text(0) GRANULARITY 1`,
-      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_email`
-    )
-    await runMigration(
-      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_password
-       password TYPE full_text(0) GRANULARITY 1`,
-      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_password`
-    )
-    // Drop old tokenbf_v1 indexes (replaced above) and idx_email_ngram (unused)
+    // full_text(0) ADD INDEX fails silently on 26.x; DROP INDEX succeeds
     await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_url`)
     await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_email`)
     await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_password`)
     await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_email_ngram`)
-    console.log('[ClickHouse migration] DDL v5 applied (full_text on url/email/password — MATERIALIZE running in background)')
+    console.log('[ClickHouse migration] DDL v5 applied (tokenbf_v1 indexes dropped)')
+  }
+
+  // v6 — Correct text() index syntax for ClickHouse 26.x.
+  // preprocessor = lower(col) matches hasToken(col, lower(value)) in lib/ulp-search.ts.
+  if (lastDdl < 6) {
+    await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_inv_url`)
+    await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_inv_email`)
+    await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_inv_password`)
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_url
+       url TYPE text(tokenizer = splitByNonAlpha, preprocessor = lower(url)) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_url`
+    )
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_email
+       email TYPE text(tokenizer = splitByNonAlpha, preprocessor = lower(email)) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_email`
+    )
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_password
+       password TYPE text(tokenizer = splitByNonAlpha, preprocessor = lower(password)) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_password`
+    )
+    console.log('[ClickHouse migration] DDL v6 applied (text indexes — MATERIALIZE running in background)')
   }
 ```
 
@@ -118,32 +118,20 @@ After the closing brace of the `if (lastDdl < 4)` block (the line with the `cons
 npx vitest run
 ```
 
-Expected: all tests pass. The DDL migration itself is not unit-testable (runs against a live ClickHouse instance), but the test suite guards against accidental compile/logic errors in adjacent code.
+Expected: all tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add lib/clickhouse-migrations.ts
-git commit -m "$(cat <<'EOF'
-feat: DDL v5 — full_text inverted indexes on url/email/password
-
-Replace tokenbf_v1 bloom filter skip indexes with full_text (inverted
-index) for zero false positives and 7-10x faster hasToken() granule
-pruning. Drop unused idx_email_ngram (original ngrambf_v1 on email —
-no position(email,...) query exists). ngrambf_v1 on url_host and
-email_domain (v4) unchanged — required for position() substring searches.
-No query changes; hasToken() uses the new index automatically.
-
-Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
-EOF
-)"
+git commit -m "fix: DDL v6 — correct text() index syntax for ClickHouse 26.x"
 ```
 
 ---
 
 ### Task 2: Post-deployment verification (manual)
 
-> Run these queries after the app restarts with DDL v5 deployed. ClickHouse processes the `if (lastDdl < 5)` block on first startup; the MATERIALIZE mutations run in background (30–120 min).
+> Run these queries after the app restarts with DDL v6 deployed. ClickHouse processes the `if (lastDdl < 6)` block on first startup; the MATERIALIZE mutations run in background (30–120 min).
 
 - [ ] **Step 1: Confirm new indexes exist and old indexes are gone**
 
@@ -162,9 +150,9 @@ Expected — these rows MUST be present:
 | `idx_bf_email_domain` | `bloom_filter` |
 | `idx_bf_source_file` | `bloom_filter` |
 | `idx_bf_url_host` | `bloom_filter` |
-| `idx_inv_email` | `full_text` |
-| `idx_inv_password` | `full_text` |
-| `idx_inv_url` | `full_text` |
+| `idx_inv_email` | `text` |
+| `idx_inv_password` | `text` |
+| `idx_inv_url` | `text` |
 | `idx_ngram_email_domain` | `ngrambf_v1` |
 | `idx_ngram_url_host` | `ngrambf_v1` |
 | `idx_set_password_entropy` | `set` |

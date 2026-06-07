@@ -412,9 +412,9 @@ describe('parseULPQuery + buildULPWhere integration', () => {
   })
 
   test('token search always lowercases the value (case-insensitive for hasToken + position)', () => {
-    // ULP URLs/emails are stored lowercase so the tokenbf_v1 bloom filter contains
-    // lowercase tokens.  hasToken(url, 'GOOGLE') would return 0 rows even though
-    // google.com credentials exist.  We always lowercase so 'Google'→'google'.
+    // The text() inverted index uses preprocessor = lower(col), so stored tokens are
+    // lowercase.  hasToken(url, 'GOOGLE') would return 0 rows even though google.com
+    // credentials exist.  We always lowercase the needle so 'Google'→'google'.
     const tokens = parseULPQuery('Ledger')
     const { params } = buildULPWhere(tokens)
     const paramValues = Object.values(params)
