@@ -23,7 +23,7 @@ const SELECT = `${NORM_COLS},
  * GET /api/credentials — browse all credentials with pagination, filtering, and sorting.
  *
  * Query params:
- *   page          number    (default 1)
+ *   cursor        string    opaque pagination token (absent = first page)
  *   limit         number    (default 50, max 200)
  *   q             string    text search (indexed — hasToken / bloom-filter, NOT LIKE)
  *   regex         '1'       treat q as RE2 regex
@@ -113,6 +113,10 @@ export async function GET(request: NextRequest) {
   const loginTypeExtra = loginTypeWhere(loginTypes)
   const where = conditions.join(' AND ') + tierExtra + loginTypeExtra
 
+  // Cursor values are captured from result rows (which are normalized via NORM_COLS)
+  // and compared against raw storage columns in buildCursorWhere. This is safe because
+  // all data-repair mutations are done — raw columns match normalized values for all rows.
+  // See: "All background ALTER TABLE UPDATE data-repair mutations are done" comment above.
   let cursorClause = ''
   let cursorParams: Record<string, unknown> = {}
 
