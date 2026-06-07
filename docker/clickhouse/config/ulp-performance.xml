@@ -37,4 +37,26 @@
     <!-- Query resource limits (max_execution_time, timeout_overflow_mode) are user-level
          settings — see users.d/ulp-profiles.xml for the default profile overrides. -->
 
+    <!-- ── Query result cache (ClickHouse 23.1+) ─────────────────────────────
+         Stores the full result of a SELECT in memory for up to query_cache_ttl seconds.
+         Subsequent identical queries return from cache without touching ClickHouse storage.
+         Sized conservatively: 256 MB total, max 2 MB per entry (most searches return << 1 MB),
+         max 1 000 distinct cached results. -->
+    <query_cache>
+        <size_in_bytes>268435456</size_in_bytes>     <!-- 256 MB total cache -->
+        <max_entries>1000</max_entries>
+        <max_entry_size_in_bytes>2097152</max_entry_size_in_bytes>  <!-- 2 MB per entry -->
+        <max_entry_size_in_rows>10000</max_entry_size_in_rows>       <!-- 10 k rows per entry -->
+    </query_cache>
+
+    <!-- ── Query condition cache (ClickHouse 25.3+) ──────────────────────────
+         Caches WHICH granules matched a WHERE filter (one bit per granule).
+         Complementary to skip indexes: subsequent queries with the same filter
+         skip granule re-evaluation entirely.  1 bit × 65 536 rows/granule ×
+         22 000 granules ≈ 3 KB per filter condition — essentially free.
+         512 MB ceiling (hard to reach at 3 KB per condition). -->
+    <query_condition_cache>
+        <size_in_bytes>536870912</size_in_bytes>     <!-- 512 MB ceiling -->
+    </query_condition_cache>
+
 </clickhouse>

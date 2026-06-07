@@ -23,9 +23,17 @@
             <max_bytes_before_external_group_by>10737418240</max_bytes_before_external_group_by>
             <max_bytes_before_external_sort>10737418240</max_bytes_before_external_sort>
 
-            <!-- Prevent runaway stats / analytics queries from blocking the server -->
-            <max_execution_time>300</max_execution_time>        <!-- 5 min hard cap -->
+            <!-- Prevent runaway stats / analytics queries from blocking the server.
+                 60 s matches the client-side max_execution_time in lib/clickhouse.ts.
+                 The MV backfill queries override this inline (max_execution_time = 3600). -->
+            <max_execution_time>60</max_execution_time>
             <timeout_overflow_mode>break</timeout_overflow_mode> <!-- return partial results -->
+
+            <!-- Query result cache — caches SELECT results for 30 s.
+                 Identical searches (same SQL + params) return instantly on repeat.
+                 TTL short enough that fresh imports surface within 30 s. -->
+            <use_query_cache>1</use_query_cache>
+            <query_cache_ttl>30</query_cache_ttl>
         </default>
     </profiles>
 </clickhouse>

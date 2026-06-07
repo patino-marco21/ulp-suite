@@ -100,9 +100,16 @@ function getClickHouseClient(): ClickHouseClient {
 
     // ── Server-side settings applied to every request ──────────────────────
     clickhouse_settings: {
-      // Cap SELECT queries at 5 minutes — prevents runaway analytics from
-      // blocking the server.  INSERT/DDL are not affected by this setting.
-      max_execution_time: 300,
+      // Cap SELECT queries at 60 s — fast enough for any indexed search;
+      // prevents runaway LIKE/regex fallbacks from blocking the server.
+      // INSERT/DDL are not affected by this setting.
+      max_execution_time: 60,
+
+      // Query result cache: ClickHouse 23.1+ stores SELECT results in memory.
+      // Identical repeated queries (same SQL + same params) return instantly.
+      // 30 s TTL balances freshness (new imports visible quickly) vs. server load.
+      use_query_cache: 1,
+      query_cache_ttl: 30,
 
       // Ask ClickHouse to ZSTD-compress HTTP responses.
       // The client decompresses automatically (see compression.response below).
