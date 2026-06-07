@@ -165,7 +165,7 @@ export async function runClickHouseMigrations(): Promise<void> {
     for (const { sql, materialize } of migrations) {
       await runMigration(sql, materialize)
     }
-    console.log('[ClickHouse migration] DDL v1 applied')
+    console.warn('[ClickHouse migration] DDL v1 applied')
   }
 
   // v2 — additional skip indexes for faster WHERE filtering on breach_name + source_file.
@@ -181,7 +181,7 @@ export async function runClickHouseMigrations(): Promise<void> {
       `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_bf_source_file source_file TYPE bloom_filter(0.01) GRANULARITY 1`,
       `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_bf_source_file`
     )
-    console.log('[ClickHouse migration] DDL v2 applied')
+    console.warn('[ClickHouse migration] DDL v2 applied')
   }
 
   // v3 — materialized view backing tables + MVs.
@@ -255,7 +255,7 @@ export async function runClickHouseMigrations(): Promise<void> {
       WHERE login_type = 'email' AND length(password) > 0
       GROUP BY email, password
     `)
-    console.log('[ClickHouse migration] DDL v3 applied (4 MV tables + 4 MVs)')
+    console.warn('[ClickHouse migration] DDL v3 applied (4 MV tables + 4 MVs)')
   }
 
   // v4 — ngrambf_v1 skip indexes on url_host + email_domain.
@@ -293,7 +293,7 @@ export async function runClickHouseMigrations(): Promise<void> {
        email_domain TYPE ngrambf_v1(4, 1024, 1, 0) GRANULARITY 1`,
       `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_ngram_email_domain`
     )
-    console.log('[ClickHouse migration] DDL v4 applied (ngrambf_v1 on url_host + email_domain — MATERIALIZE running in background)')
+    console.warn('[ClickHouse migration] DDL v4 applied (ngrambf_v1 on url_host + email_domain — MATERIALIZE running in background)')
   }
 
   // v5 — ⚠️ BROKEN on ClickHouse 26.x.
@@ -333,7 +333,7 @@ export async function runClickHouseMigrations(): Promise<void> {
     await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_email`)
     await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_password`)
     await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_email_ngram`)
-    console.log('[ClickHouse migration] DDL v5 applied (old tokenbf_v1 indexes dropped; text() ADD INDEX requires v6 on ClickHouse 26.x)')
+    console.warn('[ClickHouse migration] DDL v5 applied (old tokenbf_v1 indexes dropped; text() ADD INDEX requires v6 on ClickHouse 26.x)')
   }
 
   // v6 — Fix for failed v5: ClickHouse 26.2 dropped the full_text() index type in favour of
@@ -375,14 +375,14 @@ export async function runClickHouseMigrations(): Promise<void> {
        password TYPE text(tokenizer = splitByNonAlpha, preprocessor = lower(password)) GRANULARITY 1`,
       `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_password`
     )
-    console.log('[ClickHouse migration] DDL v6 applied (text indexes on url/email/password — MATERIALIZE running in background)')
+    console.warn('[ClickHouse migration] DDL v6 applied (text indexes on url/email/password — MATERIALIZE running in background)')
   }
 
   if (lastDdl < DDL_VERSION) {
     setSetting('ch_ddl_version', String(DDL_VERSION))
-    console.log(`[ClickHouse migration] DDL now at v${DDL_VERSION}`)
+    console.warn(`[ClickHouse migration] DDL now at v${DDL_VERSION}`)
   } else {
-    console.log(`[ClickHouse migration] DDL v${DDL_VERSION} already applied — skipping`)
+    console.warn(`[ClickHouse migration] DDL v${DDL_VERSION} already applied — skipping`)
   }
 
   // ── MV backfill (fire-and-forget, sequential, run exactly once) ──────────
@@ -396,11 +396,11 @@ export async function runClickHouseMigrations(): Promise<void> {
   // Reset to '0' by POST /api/admin/rebuild-mv to allow re-backfill.
   const mvBackfillFired = getSettingInt('ch_mv_backfill_fired', 0)
   if (mvBackfillFired >= 1) {
-    console.log('[MV backfill] already fired — skipping')
+    console.warn('[MV backfill] already fired — skipping')
     // No early return here: let the repairFired guard below run normally.
   } else {
     setSetting('ch_mv_backfill_fired', '1')
-    console.log('[MV backfill] starting sequential backfill (fire-and-forget)')
+    console.warn('[MV backfill] starting sequential backfill (fire-and-forget)')
 
     // Fire-and-forget: do NOT await — this takes 5–30 min at 1.46 B rows.
     // The server continues serving requests normally during the backfill.
@@ -415,7 +415,7 @@ export async function runClickHouseMigrations(): Promise<void> {
                   SETTINGS max_bytes_before_external_group_by = 4294967296,
                            max_execution_time = 3600`,
         })
-        console.log('[MV backfill] domain_counts done')
+        console.warn('[MV backfill] domain_counts done')
 
         await client.exec({
           query: `INSERT INTO ulp.password_counts
@@ -426,7 +426,7 @@ export async function runClickHouseMigrations(): Promise<void> {
                   SETTINGS max_bytes_before_external_group_by = 4294967296,
                            max_execution_time = 3600`,
         })
-        console.log('[MV backfill] password_counts done')
+        console.warn('[MV backfill] password_counts done')
 
         await client.exec({
           query: `INSERT INTO ulp.url_host_counts
@@ -437,7 +437,7 @@ export async function runClickHouseMigrations(): Promise<void> {
                   SETTINGS max_bytes_before_external_group_by = 4294967296,
                            max_execution_time = 3600`,
         })
-        console.log('[MV backfill] url_host_counts done')
+        console.warn('[MV backfill] url_host_counts done')
 
         await client.exec({
           query: `INSERT INTO ulp.reuse_pairs
@@ -448,9 +448,9 @@ export async function runClickHouseMigrations(): Promise<void> {
                   SETTINGS max_bytes_before_external_group_by = 4294967296,
                            max_execution_time = 3600`,
         })
-        console.log('[MV backfill] reuse_pairs done')
+        console.warn('[MV backfill] reuse_pairs done')
 
-        console.log('[MV backfill] All four MV tables backfilled successfully')
+        console.warn('[MV backfill] All four MV tables backfilled successfully')
       } catch (err) {
         console.error('[MV backfill] Error:', String(err).substring(0, 300))
         // ch_mv_backfill_fired stays '1' to prevent infinite retry.
@@ -469,11 +469,11 @@ export async function runClickHouseMigrations(): Promise<void> {
   // zero-match mutation rewrites parts and uses CPU.
   const repairFired = getSettingInt('ch_repair_mutations_fired', 0)
   if (repairFired >= 1) {
-    console.log('[ClickHouse migration] data-repair mutations already fired — skipping')
+    console.warn('[ClickHouse migration] data-repair mutations already fired — skipping')
     return
   }
   setSetting('ch_repair_mutations_fired', '1')
-  console.log('[ClickHouse migration] firing data-repair mutations (one-time)')
+  console.warn('[ClickHouse migration] firing data-repair mutations (one-time)')
 
   // Case A — jsessionid bank-log rows
   //   Before fix: email=jsessionid=TOKEN:SRV:USER:PASS  password=IN https://URL  url=''
