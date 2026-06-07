@@ -296,25 +296,21 @@ export async function runClickHouseMigrations(): Promise<void> {
     console.log('[ClickHouse migration] DDL v4 applied (ngrambf_v1 on url_host + email_domain — MATERIALIZE running in background)')
   }
 
-  // v5 — Replace tokenbf_v1 bloom filter skip indexes on url/email/password with
-  // full_text (inverted index). full_text stores the actual token list per granule,
-  // so hasToken() lookups are exact — zero false positives vs tokenbf_v1's bloom filter.
-  // Granule pruning is 7-10× faster for selective token searches.
+  // v5 — ⚠️ BROKEN on ClickHouse 26.x.
+  // Attempted to replace tokenbf_v1 skip indexes on url/email/password with full_text(0)
+  // inverted indexes.  full_text() was renamed to text(tokenizer = ...) in ClickHouse 26.2;
+  // the ADD INDEX calls below fail silently on 26.x:
+  //   1. ADD INDEX TYPE full_text(0) → "Unknown index type" error → caught by runMigration
+  //   2. DROP INDEX old tokenbf_v1 indexes → SUCCEEDS (unrelated to the ADD error)
+  //   3. ch_ddl_version bumped to 5
+  // Net result on 26.x: old indexes gone, no new indexes added → full 1.46 B row scans
+  // on every hasToken() search → 300 s timeout → "credentials search not working".
   //
-  // full_text(0): tokenizer=0 (default English tokenizer — splits on whitespace/punct,
-  // same as tokenbf_v1). GRANULARITY 1 is standard for search indexes.
+  // The ADD INDEX calls are kept as a historical record; on ClickHouse ≤25.x they work
+  // correctly, but v6 (below) immediately DROPs and re-creates with the 26.x text() API.
   //
-  // ngrambf_v1 indexes on url_host + email_domain (v4) are NOT changed — those serve
-  // position() substring searches which full_text cannot accelerate.
-  //
-  // idx_email_ngram (original ngrambf_v1(3) on email from schema v1) is dropped:
-  // no query in lib/ulp-search.ts uses position(email,...), so it has never pruned
-  // anything. Removing it frees ~22 MB and one mutation slot.
-  //
-  // MATERIALIZE INDEX fires background mutations (mutations_sync=0 default).
-  // Monitor via: SELECT * FROM system.mutations WHERE table='credentials'
-  //   AND command LIKE '%idx_inv%' ORDER BY create_time DESC
-  // DROP runs after MATERIALIZE is queued — old indexes stay readable during build.
+  // idx_email_ngram (original ngrambf_v1(3) on email) is also dropped here — no query
+  // calls position(email,...) so it never pruned anything.
   if (lastDdl < 5) {
     await runMigration(
       `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_url
@@ -331,12 +327,13 @@ export async function runClickHouseMigrations(): Promise<void> {
        password TYPE full_text(0) GRANULARITY 1`,
       `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_password`
     )
-    // Drop old tokenbf_v1 indexes (replaced above) and idx_email_ngram (unused)
+    // Drop old tokenbf_v1 indexes and idx_email_ngram (unused).
+    // On 26.x the ADD INDEX calls above failed silently, so only these DROPs take effect.
     await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_url`)
     await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_email`)
     await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_password`)
     await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_email_ngram`)
-    console.log('[ClickHouse migration] DDL v5 applied (full_text on url/email/password — MATERIALIZE running in background)')
+    console.log('[ClickHouse migration] DDL v5 applied (old tokenbf_v1 indexes dropped; text() ADD INDEX requires v6 on ClickHouse 26.x)')
   }
 
   // v6 — Fix for failed v5: ClickHouse 26.2 dropped the full_text() index type in favour of
@@ -355,8 +352,8 @@ export async function runClickHouseMigrations(): Promise<void> {
   //   lower(value) the search queries always pass to hasToken().
   //
   // Idempotent: IF EXISTS / IF NOT EXISTS guards make it safe to re-run.
-  // On 25.x or earlier the full_text(0) indexes from v5 may exist with the correct name —
-  // DROP IF EXISTS removes them and ADD IF NOT EXISTS re-creates with the new syntax.
+  // DROP IF EXISTS cleans up any partial v5 artifacts; ADD IF NOT EXISTS then re-creates
+  // them with the correct 26.x syntax.
   if (lastDdl < 6) {
     // Remove any partial or incorrectly-typed v5 artifacts first
     await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_inv_url`)

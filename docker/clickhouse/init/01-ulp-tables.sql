@@ -1,6 +1,6 @@
 -- ULP Suite — ClickHouse Schema
 -- Optimised for 100 B+ row credential tables.
--- Requires ClickHouse 25.1+.
+-- Requires ClickHouse 26.2+ (text() inverted index GA).
 --
 -- Key scale decisions vs the baseline schema:
 --   CODEC(ZSTD(3))  → 3-5× compression on string columns; halves I/O at query time
@@ -222,11 +222,9 @@ CREATE TABLE IF NOT EXISTS ulp.credentials
     ),
 
     -- ── Skip indexes ──────────────────────────────────────────────────────────
-    -- tokenbf_v1: hasToken() on url/email/password for keyword search
-    INDEX idx_url      url      TYPE tokenbf_v1(65536, 3, 0) GRANULARITY 2,
-    INDEX idx_email    email    TYPE tokenbf_v1(65536, 3, 0) GRANULARITY 2,
-    INDEX idx_password password TYPE tokenbf_v1(65536, 3, 0) GRANULARITY 2,
-    INDEX idx_email_ngram email TYPE ngrambf_v1(3, 512, 2, 0) GRANULARITY 2,
+    -- text() inverted indexes on url/email/password are added by DDL v6 in
+    -- lib/clickhouse-migrations.ts (requires ClickHouse 26.2+; not defined here
+    -- because the init SQL may run before migrations bump ch_ddl_version).
 
     -- bloom_filter: exact-match point lookups (FPR 0.05 = 5× smaller than 0.01)
     INDEX idx_bf_email        email        TYPE bloom_filter(0.05) GRANULARITY 1,
