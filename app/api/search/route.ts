@@ -116,6 +116,7 @@ export async function GET(request: NextRequest) {
   try {
     const t0 = Date.now()
     const [countResult, rows] = await Promise.all([
+      // Count is cursor-free: reflects total filtered matches, not remaining rows.
       executeQuery(
         `SELECT count() AS total FROM ulp.credentials WHERE ${clause}${allExtras}
          SETTINGS optimize_trivial_count_query = 1,
