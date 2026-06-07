@@ -8,7 +8,7 @@ networks:
 services:
   # ─── ClickHouse (primary credential data store) ───────────────────────────
   clickhouse:
-    image: clickhouse/clickhouse-server:26.4
+    image: clickhouse/clickhouse-server:26.3
     container_name: ulpsuite_clickhouse
     restart: unless-stopped
     # Ports intentionally NOT exposed on host — app connects via internal Docker network.
@@ -39,11 +39,17 @@ services:
       - ./docker/clickhouse/config:/etc/clickhouse-server/config.d/
       - ./docker/clickhouse/users:/etc/clickhouse-server/users.d/
     healthcheck:
-      test: ["CMD-SHELL", "clickhouse-client --host localhost --user $CLICKHOUSE_USER --query 'SELECT 1'"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 30s
+      # --no-warnings suppresses version-mismatch output that can confuse the exit-code check.
+      test: ["CMD-SHELL", "clickhouse-client --host localhost --user $CLICKHOUSE_USER --no-warnings --query 'SELECT 1'"]
+      interval: 15s
+      # 30 s per check: background MATERIALIZE INDEX mutations on 1.46 B rows keep the
+      # server busy; 5 s was too short for the server to respond under load.
+      timeout: 30s
+      # 60 retries × 15 s = 900 s (15 min) of checking after start_period expires.
+      retries: 60
+      # 120 s before the first check: ClickHouse needs time to load part metadata
+      # and begin responding before we start counting failures.
+      start_period: 120s
     logging:
       driver: "json-file"
       options:
