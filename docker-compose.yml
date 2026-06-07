@@ -24,9 +24,9 @@ services:
       CLICKHOUSE_PASSWORD: ""
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     # Memory: 32 GB total — 20 GB ClickHouse + 8 GB App + 4 GB OS/kernel headroom.
-    # ClickHouse caches (mark: 4 GB, uncompressed: 4 GB, query: 1 GB, condition: 1 GB)
-    # leave ~8 GB free inside the container for active query execution.
-    # Adjust if sharing the machine with other heavy workloads.
+    # CRITICAL: mark_cache (1 GB) + uncompressed_cache (1 GB) are allocated OUTSIDE
+    # max_server_memory_usage (16 GB). Total ClickHouse RSS ceiling = 18 GB → 2 GB
+    # safety margin inside the 20 GB container. See ulp-performance.xml for details.
     mem_limit: 20g
     mem_reservation: 12g
     ulimits:
@@ -39,17 +39,20 @@ services:
       - ./docker/clickhouse/config:/etc/clickhouse-server/config.d/
       - ./docker/clickhouse/users:/etc/clickhouse-server/users.d/
     healthcheck:
-      # --no-warnings suppresses version-mismatch output that can confuse the exit-code check.
-      test: ["CMD-SHELL", "clickhouse-client --host localhost --user $CLICKHOUSE_USER --no-warnings --query 'SELECT 1'"]
-      interval: 15s
-      # 30 s per check: background MATERIALIZE INDEX mutations on 1.46 B rows keep the
-      # server busy; 5 s was too short for the server to respond under load.
-      timeout: 30s
-      # 60 retries × 15 s = 900 s (15 min) of checking after start_period expires.
-      retries: 60
-      # 120 s before the first check: ClickHouse needs time to load part metadata
-      # and begin responding before we start counting failures.
-      start_period: 120s
+      # /ping is answered by a dedicated lightweight HTTP thread that bypasses the
+      # query layer entirely — returns "Ok." in milliseconds regardless of whether
+      # MATERIALIZE INDEX mutations are saturating background threads.
+      # wget is pre-installed in the clickhouse/clickhouse-server image.
+      # No auth needed: /ping is unauthenticated by design.
+      test: ["CMD-SHELL", "wget -q --tries=1 -O /dev/null http://localhost:8123/ping || exit 1"]
+      interval: 10s
+      # /ping responds in <1 s when the server is alive; 5 s is generous.
+      timeout: 5s
+      # 90 retries × 10 s = 900 s (15 min) of checking after start_period expires.
+      retries: 90
+      # 300 s (5 min) before the first check: gives ClickHouse time to load all
+      # part metadata for 1.46 B rows before health checks start counting failures.
+      start_period: 300s
     logging:
       driver: "json-file"
       options:
