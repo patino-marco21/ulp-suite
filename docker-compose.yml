@@ -55,6 +55,12 @@ services:
       # SELECT 1 which needs the query layer fully ready; /ping needs only the HTTP
       # server thread, which starts far earlier.
       start_period: 60s
+      # Docker Compose 2.20+: probe every 5 s DURING the start_period window
+      # instead of waiting the full 60 s before the first probe.  Without this,
+      # Docker runs zero probes for 60 s then starts the 10 s interval — meaning
+      # a ClickHouse that's ready in 15 s still blocks the app container for ~70 s.
+      # With start_interval: 5 s the app starts within ~20 s on a warm cache.
+      start_interval: 5s
     logging:
       driver: "json-file"
       options:
