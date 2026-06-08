@@ -49,6 +49,13 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 # Copy the entire next/dist from the builder to fill all gaps reliably.
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules/next/dist ./node_modules/next/dist
 
+# @vercel/nft output file tracing sometimes misses compiled .node binaries for
+# native addons (the binary is referenced via a relative path that the tracer
+# doesn't always follow).  Copy better-sqlite3 explicitly from the deps stage
+# — where the binary was compiled with python3/make/g++ — so it is always
+# present at /app/node_modules/better-sqlite3/ regardless of tracer behaviour.
+COPY --from=deps --chown=nextjs:nodejs /app/node_modules/better-sqlite3 ./node_modules/better-sqlite3
+
 # NOTE: The previous "RUN chown -R nextjs:nodejs /app" has been removed.
 # Every COPY above already carries --chown=nextjs:nodejs, so the recursive chown
 # was completely redundant.  It was the single slowest step at ~58 seconds and
