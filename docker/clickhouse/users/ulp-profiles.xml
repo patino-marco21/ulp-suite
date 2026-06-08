@@ -31,13 +31,24 @@
                  60 s matches the client-side max_execution_time in lib/clickhouse.ts.
                  The MV backfill queries override this inline (max_execution_time = 3600). -->
             <max_execution_time>60</max_execution_time>
-            <timeout_overflow_mode>break</timeout_overflow_mode> <!-- return partial results -->
+            <!-- MUST be 'throw', not 'break': ClickHouse 26.x enforces that the query
+                 result cache (use_query_cache=1 below) is incompatible with any overflow
+                 mode other than 'throw'. With 'break' every exec() throws error 731
+                 (QUERY_CACHE_USED_WITH_NON_THROW_OVERFLOW_MODE) and ALL DDL migrations
+                 silently fail. 'throw' is also the correct UX: users get an explicit
+                 error when a search times out rather than silently empty results. -->
+            <timeout_overflow_mode>throw</timeout_overflow_mode>
 
             <!-- Query result cache — caches SELECT results for 30 s.
                  Identical searches (same SQL + params) return instantly on repeat.
-                 TTL short enough that fresh imports surface within 30 s. -->
+                 TTL short enough that fresh imports surface within 30 s.
+                 Requires timeout_overflow_mode=throw (see above).
+                 query_cache_system_table_handling=ignore: ClickHouse 26.x throws
+                 error 719 if use_query_cache=1 and the query touches system.* tables.
+                 'ignore' silently skips caching for system-table queries instead. -->
             <use_query_cache>1</use_query_cache>
             <query_cache_ttl>30</query_cache_ttl>
+            <query_cache_system_table_handling>ignore</query_cache_system_table_handling>
         </default>
     </profiles>
 </clickhouse>

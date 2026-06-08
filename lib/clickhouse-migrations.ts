@@ -24,7 +24,14 @@ let migrationsDone = false
 // v6: re-create the text indexes using the correct ClickHouse 26.x syntax:
 //     TYPE text(tokenizer = splitByNonAlpha, preprocessor = lower(col))
 //     preprocessor = lower(col) matches hasToken(col, lower(value)) in lib/ulp-search.ts.
-const DDL_VERSION = 6
+// v7: idempotent re-verify of the v6 text indexes.
+//     On ClickHouse 26.x installs where the user profile had
+//     timeout_overflow_mode=break AND use_query_cache=1, every exec() threw
+//     error 731 (QUERY_CACHE_USED_WITH_NON_THROW_OVERFLOW_MODE) and the v6
+//     DDL silently failed. ch_ddl_version was still saved as 6, so migrations
+//     were never retried. v7 forces a re-run using ADD INDEX IF NOT EXISTS so
+//     the indexes are created even on boxes that showed v6 as "done" but skipped.
+const DDL_VERSION = 7
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -380,6 +387,38 @@ export async function runClickHouseMigrations(): Promise<void> {
       `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_password`
     )
     console.warn('[ClickHouse migration] DDL v6 applied (text indexes on url/email/password — MATERIALIZE running in background)')
+  }
+
+  // v7 — idempotent re-verification of the v6 text indexes.
+  // On ClickHouse 26.x installs where ulp-profiles.xml had both
+  //   timeout_overflow_mode = break  AND  use_query_cache = 1
+  // every exec() threw error 731 (QUERY_CACHE_USED_WITH_NON_THROW_OVERFLOW_MODE)
+  // and all v6 DDL silently failed.  ch_ddl_version was still saved as '6' so
+  // migrations were skipped on every subsequent boot, leaving the table with no
+  // text skip indexes → full 1.46 B-row scan on every hasToken() search → 300 s
+  // timeout → search completely broken.
+  //
+  // v7 re-runs ADD INDEX IF NOT EXISTS for all three text indexes.  This is a
+  // safe no-op if the indexes already exist, and creates them if they are missing.
+  // The v6 DROP IF EXISTS is intentionally NOT repeated here to avoid destroying
+  // any valid index that was created on a clean install.
+  if (lastDdl < 7) {
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_url
+       url TYPE text(tokenizer = splitByNonAlpha, preprocessor = lower(url)) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_url`
+    )
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_email
+       email TYPE text(tokenizer = splitByNonAlpha, preprocessor = lower(email)) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_email`
+    )
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_password
+       password TYPE text(tokenizer = splitByNonAlpha, preprocessor = lower(password)) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_password`
+    )
+    console.warn('[ClickHouse migration] DDL v7 applied (re-verified text indexes — MATERIALIZE running in background)')
   }
 
   if (lastDdl < DDL_VERSION) {
