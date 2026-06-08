@@ -109,9 +109,10 @@ else
 fi
 echo ""
 
-# Step 5 — bring the stack back up
-echo "Step 5/5  Starting containers..."
-docker compose up -d
+# Step 5 — rebuild the app image (Dockerfile changed: better-sqlite3 + entrypoint
+#          fixes) and bring the full stack up
+echo "Step 5/5  Rebuilding app image and starting containers..."
+docker compose build app && docker compose up -d
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
 echo "Recovery complete.  Timeline after this point:"
