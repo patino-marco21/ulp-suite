@@ -1,3 +1,6 @@
+import fs from 'fs'
+import { pipeline } from 'stream/promises'
+import { Readable } from 'stream'
 import { type NextRequest, NextResponse } from 'next/server'
 import { validateRequest, requireAdminRole } from '@/lib/auth'
 import { makeRejectionMap, type RejectionReason } from '@/lib/ulp-parser'
@@ -5,7 +8,7 @@ import { matchBreach } from '@/lib/breach-matcher'
 import { runClickHouseMigrations } from '@/lib/clickhouse-migrations'
 import { createJob, getJob, updateJob, pushEvent } from '@/lib/upload-jobs'
 import { uploadQueue, setCurrentJob } from '@/lib/upload-queue'
-import { processTextStream, processZipBuffer, type ProcessResult } from '@/lib/upload-processor'
+import { processTextStream, processZipFile, type ProcessResult } from '@/lib/upload-processor'
 import { checkLimit, getClientIP } from '@/lib/rate-limiter'
 import { logJob } from '@/lib/processing-log'
 
@@ -166,19 +169,42 @@ export async function POST(request: NextRequest) {
     // ── ZIP archive ───────────────────────────────────────────────────────────
     if (filename.endsWith('.zip')) {
       const startAt = Date.now()
-      const buffer  = Buffer.from(await file.arrayBuffer())
       const results: ProcessResult[] = []
 
-      await uploadQueue(async () => {
-        setCurrentJob(file.name)
-        try {
-          await processZipBuffer(buffer, result => {
-            if (result.imported > 0) results.push(result)
-          })
-        } finally {
-          setCurrentJob(null)
-        }
-      })
+      // Stream the upload body to a temp file on disk BEFORE processing.
+      //
+      // The previous approach — Buffer.from(await file.arrayBuffer()) — copied
+      // the entire ZIP into the Node.js heap.  A 6 GB ZIP immediately exhausted
+      // the 6 GB heap limit (--max-old-space-size=6144) and OOM-crashed the app.
+      //
+      // Instead: pipe the Web ReadableStream → Node.js Writable → /tmp file,
+      // then call processZipFile() which uses yauzl.open() to read lazily from
+      // disk (lazyEntries: true).  Peak RAM stays at ~200 MB (one 500K-row
+      // batch at a time) regardless of archive size.  This matches exactly what
+      // the inbox watcher does for files that land in /app/inbox.
+      const tmpPath = `/tmp/ulp-zip-${crypto.randomUUID()}.zip`
+
+      try {
+        // Pipe Web ReadableStream → Node.js Writable (Node 18+ Readable.fromWeb)
+        await pipeline(
+          Readable.fromWeb(file.stream() as import('stream/web').ReadableStream<Uint8Array>),
+          fs.createWriteStream(tmpPath),
+        )
+
+        await uploadQueue(async () => {
+          setCurrentJob(file.name)
+          try {
+            await processZipFile(tmpPath, result => {
+              if (result.imported > 0) results.push(result)
+            })
+          } finally {
+            setCurrentJob(null)
+          }
+        })
+      } finally {
+        // Fire-and-forget: remove the temp file whether processing succeeded or failed.
+        fs.unlink(tmpPath, () => {})
+      }
 
       const totalBreakdown = makeRejectionMap()
       let totalImported = 0

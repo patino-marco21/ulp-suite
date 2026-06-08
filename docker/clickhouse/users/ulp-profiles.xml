@@ -16,9 +16,21 @@
             <async_insert_max_query_number>1000</async_insert_max_query_number>
             <!-- Flush cadence: each 500K-row batch (≈30 MB) is well under the 256 MB
                  size threshold, so the timeout governs flush cadence.
-                 100 ms max timeout keeps bulk import throughput high.
-                 Note: async_insert_busy_timeout_ms is the legacy alias; using the
-                 canonical 26.x names to avoid any "obsolete setting" warnings. -->
+
+                 async_insert_use_adaptive_busy_timeout (default 1 since 24.3) enables
+                 an adaptive algorithm that starts at async_insert_busy_timeout_min_ms
+                 and ramps up to async_insert_busy_timeout_max_ms as the server stays
+                 busy.  Explicitly set to 1 here so the behaviour is documented and
+                 not changed by future default changes.
+
+                 Our bounds: min=50 ms (fast flush at low load / start of import),
+                 max=100 ms (half the ClickHouse default of 200 ms — keeps bulk
+                 import latency low on our 32 GB machine).
+
+                 Note: async_insert_busy_timeout_ms is the legacy single-value alias;
+                 using the canonical 26.x min/max names to avoid "obsolete setting"
+                 warnings. -->
+            <async_insert_use_adaptive_busy_timeout>1</async_insert_use_adaptive_busy_timeout>
             <async_insert_busy_timeout_min_ms>50</async_insert_busy_timeout_min_ms>
             <async_insert_busy_timeout_max_ms>100</async_insert_busy_timeout_max_ms>
             <async_insert_stale_timeout_ms>0</async_insert_stale_timeout_ms>     <!-- no stale eviction -->
