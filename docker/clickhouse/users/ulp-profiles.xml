@@ -14,10 +14,13 @@
             <async_insert>1</async_insert>
             <async_insert_max_data_size>268435456</async_insert_max_data_size>   <!-- 256 MB -->
             <async_insert_max_query_number>1000</async_insert_max_query_number>
-            <!-- 100 ms busy timeout: each 500K-row batch (≈30 MB) is well under the
-                 256 MB flush threshold, so the timeout still controls flush cadence.
-                 Keeping at 100 ms for fast bulk import throughput. -->
-            <async_insert_busy_timeout_ms>100</async_insert_busy_timeout_ms>
+            <!-- Flush cadence: each 500K-row batch (≈30 MB) is well under the 256 MB
+                 size threshold, so the timeout governs flush cadence.
+                 100 ms max timeout keeps bulk import throughput high.
+                 Note: async_insert_busy_timeout_ms is the legacy alias; using the
+                 canonical 26.x names to avoid any "obsolete setting" warnings. -->
+            <async_insert_busy_timeout_min_ms>50</async_insert_busy_timeout_min_ms>
+            <async_insert_busy_timeout_max_ms>100</async_insert_busy_timeout_max_ms>
             <async_insert_stale_timeout_ms>0</async_insert_stale_timeout_ms>     <!-- no stale eviction -->
 
             <!-- Spill-to-disk thresholds for GROUP BY / ORDER BY.

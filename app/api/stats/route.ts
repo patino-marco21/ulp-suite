@@ -67,6 +67,8 @@ export async function GET(request: NextRequest) {
       // uniq() is ~5× faster than count(DISTINCT …) at the cost of <1% error.
       // Separated from total_count so it can run in parallel without blocking
       // the cheap metadata query above.
+      // .catch(): ClickHouse busy during MV backfill can push this past 60 s.
+      // Return empty so the rest of the stats page still renders.
       executeQuery(`
         SELECT
           uniq(domain)     AS unique_domains,
@@ -74,14 +76,15 @@ export async function GET(request: NextRequest) {
           max(imported_at) AS last_import
         FROM ulp.credentials
         SETTINGS max_execution_time = 60
-      `),
+      `).catch(() => [] as any[]),
       executeQuery(`
         SELECT count() AS total_sources, sum(line_count) AS total_lines
         FROM ulp.sources
       `),
       // top_domains — MV path: sum(count) over SummingMergeTree partials (<50 ms)
       // Fallback: full GROUP BY on credentials (30 s at 1.46 B rows)
-      domainReady
+      // .catch(): fallback scan can time out when ClickHouse is busy during backfill.
+      (domainReady
         ? executeQuery(`
             SELECT domain, sum(count) AS count
             FROM ulp.domain_counts
@@ -99,9 +102,10 @@ export async function GET(request: NextRequest) {
             ORDER BY count DESC
             LIMIT 15
             SETTINGS max_execution_time = 30
-          `),
+          `)).catch(() => [] as any[]),
       // top_passwords — MV path (<50 ms); fallback full scan (30 s)
-      passwordReady
+      // .catch(): same backfill-window timeout risk as topDomains above.
+      (passwordReady
         ? executeQuery(`
             SELECT password, sum(count) AS count
             FROM ulp.password_counts
@@ -119,7 +123,7 @@ export async function GET(request: NextRequest) {
             ORDER BY count DESC
             LIMIT 50
             SETTINGS max_execution_time = 30
-          `),
+          `)).catch(() => [] as any[]),
       executeQuery(`
         SELECT tld, count() AS count
         FROM ulp.credentials
@@ -203,7 +207,13 @@ export async function GET(request: NextRequest) {
       `),
       // reuse_stats — MV path: uniqMerge over AggregatingMergeTree (~200 ms)
       // Fallback: double GROUP BY on credentials (45–120 s at 1.46 B rows)
-      reuseReady
+      // .catch(): CRITICAL — fallback is a GROUP BY (email, password) on 52 M rows
+      // with very high cardinality (40–50 M unique pairs). At ClickHouse load during
+      // the MV backfill window this WILL exceed the 60 s timeout and throw
+      // TIMEOUT_EXCEEDED. Without this catch the entire Promise.all rejects and the
+      // stats page returns 500 for the whole 5–30 min backfill period.
+      // With catch: reuse stats show zeros temporarily; all other stats render normally.
+      (reuseReady
         ? executeQuery(`
             SELECT
               countIf(dc > 1) AS reused_pairs,
@@ -229,7 +239,7 @@ export async function GET(request: NextRequest) {
               LIMIT 5000000
             )
             SETTINGS max_execution_time = 60
-          `),
+          `)).catch(() => [] as any[]),
       // Corporate vs consumer — two countIf on a LowCardinality column → fast
       executeQuery(`
         SELECT
