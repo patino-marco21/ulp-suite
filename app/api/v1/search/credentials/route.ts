@@ -38,7 +38,8 @@ export async function GET(request: NextRequest) {
         `SELECT count() as total FROM ulp.credentials WHERE ${clause}
          SETTINGS optimize_trivial_count_query = 1,
                   max_execution_time = 300,
-                  timeout_overflow_mode = 'break'`,
+                  timeout_overflow_mode = 'break',
+                  use_query_cache = 0`,
         params
       ),
       // Data: throw mode on timeout so we return a 408 instead of silent 0 rows

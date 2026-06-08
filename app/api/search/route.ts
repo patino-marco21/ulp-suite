@@ -122,7 +122,8 @@ export async function GET(request: NextRequest) {
         `SELECT count() AS total FROM ulp.credentials WHERE ${clause}${allExtras}
          SETTINGS optimize_trivial_count_query = 1,
                   max_execution_time = 300,
-                  timeout_overflow_mode = 'break'`,
+                  timeout_overflow_mode = 'break',
+                  use_query_cache = 0`,
         mergedParams
       ),
       executeQuery(

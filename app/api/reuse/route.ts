@@ -54,7 +54,8 @@ export async function GET(request: NextRequest) {
         ORDER BY domain_count DESC
         LIMIT {limit:UInt32}
         OFFSET {offset:UInt32}
-        SETTINGS max_execution_time = 120, timeout_overflow_mode = 'break'
+        SETTINGS max_execution_time = 120, timeout_overflow_mode = 'break',
+                 use_query_cache = 0
       `, queryParams)
 
       const countParams: Record<string, unknown> = {}
@@ -70,7 +71,8 @@ export async function GET(request: NextRequest) {
           GROUP BY email, password
           HAVING uniq(domain) > 1
         )
-        SETTINGS max_execution_time = 120, timeout_overflow_mode = 'break'
+        SETTINGS max_execution_time = 120, timeout_overflow_mode = 'break',
+                 use_query_cache = 0
       `, countParams)
 
       const total = Number((countResult as any[])[0]?.total || 0)
@@ -111,7 +113,7 @@ export async function GET(request: NextRequest) {
         ORDER BY domain_count DESC
         LIMIT {limit:UInt32}
         OFFSET {offset:UInt32}
-        SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break',
+        SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw',
                  use_query_cache = 1, query_cache_ttl = 120
       `, mvQueryParams),
       executeQuery(`
@@ -123,7 +125,7 @@ export async function GET(request: NextRequest) {
           GROUP BY email, password
           HAVING uniqMerge(domain_hll) > 1
         )
-        SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break',
+        SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw',
                  use_query_cache = 1, query_cache_ttl = 120
       `, mvCountParams),
     ])

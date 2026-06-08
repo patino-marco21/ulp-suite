@@ -139,10 +139,14 @@ export async function GET(request: NextRequest) {
       // For filtered queries the setting is a no-op and the WHERE runs normally.
       executeQuery(
         // Count uses break so a partial count is returned rather than an error.
+        // use_query_cache = 0: ClickHouse 26.x throws error 731 when use_query_cache=1
+        // (active from the user profile) is combined with timeout_overflow_mode='break'.
+        // Partial/timed-out counts must not be cached anyway — they are not the real count.
         `SELECT count() AS total FROM ulp.credentials WHERE ${where}
          SETTINGS optimize_trivial_count_query = 1,
                   max_execution_time = 300,
-                  timeout_overflow_mode = 'break'`,
+                  timeout_overflow_mode = 'break',
+                  use_query_cache = 0`,
         params
       ),
       executeQuery(

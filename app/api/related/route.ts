@@ -38,7 +38,7 @@ export async function GET(request: NextRequest) {
         ? executeQuery(
             `SELECT ${SELECT} FROM ulp.credentials
              WHERE email = {email:String}
-             ORDER BY imported_at DESC LIMIT 25 SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break'`,
+             ORDER BY imported_at DESC LIMIT 25 SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break', use_query_cache = 0`,
             { email }
           )
         : Promise.resolve([]),
@@ -48,7 +48,7 @@ export async function GET(request: NextRequest) {
         ? executeQuery(
             `SELECT ${SELECT} FROM ulp.credentials
              WHERE domain = {domain:String} AND email != {email:String}
-             ORDER BY imported_at DESC LIMIT 25 SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break'`,
+             ORDER BY imported_at DESC LIMIT 25 SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break', use_query_cache = 0`,
             { domain, email }
           )
         : Promise.resolve([]),
@@ -58,7 +58,7 @@ export async function GET(request: NextRequest) {
         ? executeQuery(
             `SELECT ${SELECT} FROM ulp.credentials
              WHERE password = {password:String} AND email != {email:String}
-             ORDER BY imported_at DESC LIMIT 25 SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break'`,
+             ORDER BY imported_at DESC LIMIT 25 SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break', use_query_cache = 0`,
             { password, email }
           )
         : Promise.resolve([]),

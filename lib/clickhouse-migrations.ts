@@ -31,7 +31,7 @@ let migrationsDone = false
 //     DDL silently failed. ch_ddl_version was still saved as 6, so migrations
 //     were never retried. v7 forces a re-run using ADD INDEX IF NOT EXISTS so
 //     the indexes are created even on boxes that showed v6 as "done" but skipped.
-const DDL_VERSION = 7
+const DDL_VERSION = 8
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -419,6 +419,101 @@ export async function runClickHouseMigrations(): Promise<void> {
       `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_password`
     )
     console.warn('[ClickHouse migration] DDL v7 applied (re-verified text indexes — MATERIALIZE running in background)')
+  }
+
+  // v8 — re-create MV backing tables + MVs that silently failed in v3 due to error 731.
+  //
+  // On ClickHouse 26.x installs where ulp-profiles.xml had both
+  //   timeout_overflow_mode = break  AND  use_query_cache = 1
+  // the ClickHouse settings validator throws error 731
+  // (QUERY_CACHE_USED_WITH_NON_THROW_OVERFLOW_MODE) before executing ANY statement —
+  // including CREATE TABLE and CREATE MATERIALIZED VIEW.  All v3 DDL silently failed,
+  // leaving the MV infrastructure completely missing:
+  //
+  //   Tables:           ulp.domain_counts, ulp.password_counts,
+  //                     ulp.url_host_counts, ulp.reuse_pairs
+  //   Materialized views: ulp.mv_domain_counts, ulp.mv_password_counts,
+  //                       ulp.mv_url_host_counts, ulp.mv_reuse_pairs
+  //
+  // Consequence: /stats top-domains / top-passwords / top-url-hosts all fall back
+  // to full 52M-row scans; /reuse page throws UNKNOWN_TABLE on every load.
+  //
+  // IF NOT EXISTS guards make this a no-op when tables already exist.
+  // After ensuring the tables are in place, reset ch_mv_backfill_fired so the
+  // existing-data backfill section below populates the empty tables.
+  if (lastDdl < 8) {
+    // ── Backing tables ──────────────────────────────────────────────────────
+    await runMigration(`
+      CREATE TABLE IF NOT EXISTS ulp.domain_counts (
+        domain String,
+        count  UInt64
+      ) ENGINE = SummingMergeTree(count)
+      ORDER BY domain
+    `)
+    await runMigration(`
+      CREATE TABLE IF NOT EXISTS ulp.password_counts (
+        password String,
+        count    UInt64
+      ) ENGINE = SummingMergeTree(count)
+      ORDER BY password
+    `)
+    await runMigration(`
+      CREATE TABLE IF NOT EXISTS ulp.url_host_counts (
+        url_host String,
+        count    UInt64
+      ) ENGINE = SummingMergeTree(count)
+      ORDER BY url_host
+    `)
+    await runMigration(`
+      CREATE TABLE IF NOT EXISTS ulp.reuse_pairs (
+        email      String,
+        password   String,
+        domain_hll AggregateFunction(uniq, String)
+      ) ENGINE = AggregatingMergeTree()
+      ORDER BY (email, password)
+    `)
+    // ── Materialized views ──────────────────────────────────────────────────
+    await runMigration(`
+      CREATE MATERIALIZED VIEW IF NOT EXISTS ulp.mv_domain_counts
+      TO ulp.domain_counts AS
+      SELECT domain, count() AS count
+      FROM ulp.credentials
+      WHERE domain != ''
+      GROUP BY domain
+    `)
+    await runMigration(`
+      CREATE MATERIALIZED VIEW IF NOT EXISTS ulp.mv_password_counts
+      TO ulp.password_counts AS
+      SELECT password, count() AS count
+      FROM ulp.credentials
+      WHERE password != ''
+      GROUP BY password
+    `)
+    await runMigration(`
+      CREATE MATERIALIZED VIEW IF NOT EXISTS ulp.mv_url_host_counts
+      TO ulp.url_host_counts AS
+      SELECT if(url_host != '', url_host, domain) AS url_host, count() AS count
+      FROM ulp.credentials
+      WHERE (url_host != '' OR domain != '')
+      GROUP BY url_host
+    `)
+    await runMigration(`
+      CREATE MATERIALIZED VIEW IF NOT EXISTS ulp.mv_reuse_pairs
+      TO ulp.reuse_pairs AS
+      SELECT
+        email,
+        password,
+        uniqState(domain) AS domain_hll
+      FROM ulp.credentials
+      WHERE login_type = 'email' AND length(password) > 0
+      GROUP BY email, password
+    `)
+    // Reset the backfill gate so the existing-data backfill fires below.
+    // Tables created by this migration are empty; backfill is the only way to
+    // populate them for the 52M rows that already existed before the MVs existed.
+    // The gate is immediately re-set to '1' by the backfill section.
+    setSetting('ch_mv_backfill_fired', '0')
+    console.warn('[ClickHouse migration] DDL v8 applied (re-created missing v3 MV tables/views — backfill gate reset)')
   }
 
   if (lastDdl < DDL_VERSION) {

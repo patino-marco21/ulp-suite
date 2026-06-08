@@ -111,7 +111,8 @@ export async function GET(request: NextRequest) {
        WHERE email = {email:String}
        ORDER BY imported_at DESC
        LIMIT 500
-       SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break'`,
+       SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break',
+                use_query_cache = 0`,
       { email: rawEmail }
     ) as Array<{ breach_name: string; domain: string; imported_at: string }>
 

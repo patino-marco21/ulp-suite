@@ -32,7 +32,7 @@ export async function GET(request: NextRequest) {
     const [countResult, rows] = await Promise.all([
       executeQuery(
         `SELECT count() as total FROM ulp.credentials WHERE domain = {domain:String}
-         SETTINGS optimize_trivial_count_query = 1, max_execution_time = 30, timeout_overflow_mode = 'break'`,
+         SETTINGS optimize_trivial_count_query = 1, max_execution_time = 30, timeout_overflow_mode = 'break', use_query_cache = 0`,
         { domain }
       ),
       executeQuery(
