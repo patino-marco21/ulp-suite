@@ -43,12 +43,23 @@
                  Identical searches (same SQL + params) return instantly on repeat.
                  TTL short enough that fresh imports surface within 30 s.
                  Requires timeout_overflow_mode=throw (see above).
-                 query_cache_system_table_handling=ignore: ClickHouse 26.x throws
-                 error 719 if use_query_cache=1 and the query touches system.* tables.
-                 'ignore' silently skips caching for system-table queries instead. -->
+
+                 Three ClickHouse 26.x query-cache compatibility overrides:
+
+                 1. query_cache_system_table_handling=ignore: ClickHouse 26.x throws
+                    error 719 if use_query_cache=1 and the query touches system.* tables.
+                    'ignore' silently skips caching for system-table queries.
+
+                 2. query_cache_nondeterministic_function_handling=ignore: ClickHouse 26.x
+                    throws error 692 (QUERY_CACHE_USED_WITH_NONDETERMINISTIC_FUNCTIONS) if
+                    use_query_cache=1 and the SQL contains non-deterministic functions such
+                    as now(), today(), rand(), etc. app/api/stats/route.ts uses:
+                      WHERE imported_at >= now() - INTERVAL 90 DAY
+                    'ignore' silently skips caching for those queries instead of throwing. -->
             <use_query_cache>1</use_query_cache>
             <query_cache_ttl>30</query_cache_ttl>
             <query_cache_system_table_handling>ignore</query_cache_system_table_handling>
+            <query_cache_nondeterministic_function_handling>ignore</query_cache_nondeterministic_function_handling>
         </default>
     </profiles>
 </clickhouse>
