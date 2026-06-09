@@ -82,6 +82,15 @@ services:
     # Node.js 24 is container-aware — NODE_OPTIONS makes the limit explicit.
     mem_limit: 8g
     mem_reservation: 4g
+    ulimits:
+      # Docker's default nofile limit is 1024, which is too low for a service
+      # that maintains persistent ClickHouse HTTP keep-alive sockets, a SQLite
+      # file handle, and concurrently accepts HTTP connections.
+      # 65536 matches typical production Node.js deployments; well below the
+      # ClickHouse container's 262144 ceiling.
+      nofile:
+        soft: 65536
+        hard: 65536
     environment:
       NODE_ENV: production
       NODE_OPTIONS: "--max-old-space-size=6144"

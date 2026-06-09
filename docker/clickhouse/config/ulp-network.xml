@@ -1,4 +1,4 @@
-<!-- ULP Suite — ClickHouse network binding.
+<!-- ULP Suite — ClickHouse network binding and HTTP keepalive.
      ClickHouse 26.3 defaults to listening on ::1 / 127.0.0.1 only.
      In Docker, the app container reaches ClickHouse via the bridge network,
      so we must bind to all interfaces.                                        -->
@@ -6,4 +6,13 @@
     <!-- Bind to all IPv4 interfaces so the app container can reach us.
          Using 0.0.0.0 instead of :: for Windows Docker Desktop compatibility. -->
     <listen_host replace="true">0.0.0.0</listen_host>
+
+    <!-- HTTP keep-alive timeout.  ClickHouse default is 10 s.  The
+         @clickhouse/client sets keep_alive.idle_socket_ttl = 9 000 ms on the
+         Node.js side; the client-side TTL MUST always be lower than this
+         server-side value to prevent the server from closing a socket just
+         before the client tries to reuse it (produces "Socket hang-up").
+         Explicit value here so a ClickHouse default change can't silently
+         break the 9 s / 10 s invariant. -->
+    <keep_alive_timeout>10</keep_alive_timeout>
 </clickhouse>
