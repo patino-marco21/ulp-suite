@@ -192,6 +192,8 @@ function enqueueFile(filePath: string): void {
               `[inbox-watcher]   ${result.filename}: ` +
               `imported=${result.imported} skipped=${result.skipped}`
             )
+          } else if (result.errors > 0) {
+            console.warn(`[inbox-watcher]   ${result.filename}: skipped (entry error)`)
           }
         })
       } else {

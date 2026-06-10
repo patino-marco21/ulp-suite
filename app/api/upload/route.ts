@@ -183,6 +183,8 @@ export async function POST(request: NextRequest) {
       // batch at a time) regardless of archive size.  This matches exactly what
       // the inbox watcher does for files that land in /app/inbox.
       const tmpPath = `/tmp/ulp-zip-${crypto.randomUUID()}.zip`
+      let totalErrors = 0
+      const failedEntries: string[] = []
 
       try {
         // Pipe Web ReadableStream → Node.js Writable (Node 18+ Readable.fromWeb)
@@ -196,6 +198,10 @@ export async function POST(request: NextRequest) {
           try {
             await processZipFile(tmpPath, result => {
               if (result.imported > 0) results.push(result)
+              if (result.errors > 0) {
+                totalErrors += result.errors
+                failedEntries.push(result.filename)
+              }
             })
           } finally {
             setCurrentJob(null)
@@ -225,6 +231,9 @@ export async function POST(request: NextRequest) {
         imported:    totalImported,
         skipped:     totalSkipped,
         duration_ms: Date.now() - startAt,
+        ...(failedEntries.length > 0
+          ? { error_message: `${failedEntries.length} entr${failedEntries.length === 1 ? 'y' : 'ies'} skipped: ${failedEntries.join(', ')}` }
+          : {}),
       })
 
       const total = totalImported + totalSkipped
@@ -232,7 +241,7 @@ export async function POST(request: NextRequest) {
         success:             true,
         imported:            totalImported,
         skipped:             totalSkipped,
-        errors:              0,
+        errors:              totalErrors,
         import_pct:          total > 0 ? Math.round(totalImported / total * 1000) / 10 : 0,
         rejection_breakdown: totalBreakdown,
         files:               results.map(r => ({

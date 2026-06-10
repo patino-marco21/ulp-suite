@@ -93,6 +93,8 @@ export async function POST(request: NextRequest) {
     if (name.endsWith('.zip')) {
       const buffer  = Buffer.from(await file.arrayBuffer())
       const results: ProcessResult[] = []
+      let totalErrors = 0
+      const failedEntries: string[] = []
 
       await uploadQueue(async () => {
         // processZipBuffer (not processZipFile) because we have a Buffer,
@@ -100,6 +102,10 @@ export async function POST(request: NextRequest) {
         const { processZipBuffer } = await import('@/lib/upload-processor')
         await processZipBuffer(buffer, result => {
           if (result.imported > 0) results.push(result)
+          if (result.errors > 0) {
+            totalErrors += result.errors
+            failedEntries.push(result.filename)
+          }
         })
       })
 
@@ -114,13 +120,16 @@ export async function POST(request: NextRequest) {
         imported:    totalImported,
         skipped:     totalSkipped,
         duration_ms: Date.now() - startAt,
+        ...(failedEntries.length > 0
+          ? { error_message: `${failedEntries.length} entr${failedEntries.length === 1 ? 'y' : 'ies'} skipped: ${failedEntries.join(', ')}` }
+          : {}),
       })
 
       const response = NextResponse.json({
         success:  true,
         imported: totalImported,
         skipped:  totalSkipped,
-        errors:   0,
+        errors:   totalErrors,
         files:    results.map(r => ({ filename: r.filename, imported: r.imported })),
         filename: file.name,
       })

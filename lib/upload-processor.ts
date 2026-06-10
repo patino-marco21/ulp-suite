@@ -155,14 +155,76 @@ export async function processTextStream(
 // ─── ZIP processor (yauzl — lazy entry streaming) ────────────────────────────
 
 /**
- * Process a ZIP buffer by streaming its .txt/.csv entries one at a time.
+ * Drive a yauzl ZipFile through its .txt/.csv entries one at a time.
  *
  * yauzl with lazyEntries:true decompresses entries lazily — only one entry
  * lives in memory at once.  Peak RAM ≈ one entry's 500K-row batch (≈200 MB),
  * not the full decompressed archive size.
  *
- * onEntry is called after each successfully processed entry so the caller can
- * accumulate results incrementally.
+ * A single bad entry (encrypted, corrupted/CRC mismatch, etc.) only fails
+ * that entry — it's reported via onEntry with errors:1 and processing
+ * continues with the rest of the archive. Without this, ULP zips that bundle
+ * dozens of stealer-log files would abort entirely (and discard already-
+ * imported credentials' result counts) because of one bad file.
+ * zipfile-level errors (e.g. unreadable central directory) remain fatal.
+ *
+ * onEntry is called after each processed entry — successful or not — so the
+ * caller can accumulate results incrementally.
+ */
+function processZipEntries(
+  zipfile: yauzl.ZipFile,
+  onEntry: (result: ProcessResult) => void,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    zipfile.readEntry()
+
+    zipfile.on('entry', (entry: yauzl.Entry) => {
+      // Skip directory entries
+      if (/\/$/.test(entry.fileName)) { zipfile.readEntry(); return }
+
+      const lp = entry.fileName.toLowerCase()
+      if (!lp.endsWith('.txt') && !lp.endsWith('.csv')) {
+        zipfile.readEntry()
+        return
+      }
+
+      const entryName = entry.fileName.split('/').pop() || entry.fileName
+
+      const skipEntry = (entryErr: unknown) => {
+        console.error(
+          `[upload-processor] skipping zip entry "${entry.fileName}": ` +
+          (entryErr instanceof Error ? entryErr.message : String(entryErr))
+        )
+        onEntry({
+          imported:            0,
+          skipped:             0,
+          errors:              1,
+          filename:            entryName,
+          breach_name:         matchBreach(entryName),
+          rejection_breakdown: makeRejectionMap(),
+        })
+        zipfile.readEntry()
+      }
+
+      zipfile.openReadStream(entry, (streamErr, readStream) => {
+        if (streamErr) { skipEntry(streamErr); return }
+
+        // Convert Node.js Readable → Web ReadableStream for processTextStream
+        const webStream = Readable.toWeb(readStream) as ReadableStream<Uint8Array>
+
+        processTextStream(webStream, entryName)
+          .then(result => { onEntry(result); zipfile.readEntry() })
+          .catch(skipEntry)
+      })
+    })
+
+    zipfile.on('end', resolve)
+    zipfile.on('error', reject)
+  })
+}
+
+/**
+ * Process a ZIP buffer by streaming its .txt/.csv entries one at a time.
  */
 export async function processZipBuffer(
   buffer: Buffer,
@@ -171,34 +233,7 @@ export async function processZipBuffer(
   return new Promise<void>((resolve, reject) => {
     yauzl.fromBuffer(buffer, { lazyEntries: true }, (err, zipfile) => {
       if (err) return reject(err)
-
-      zipfile.readEntry()
-
-      zipfile.on('entry', (entry: yauzl.Entry) => {
-        // Skip directory entries
-        if (/\/$/.test(entry.fileName)) { zipfile.readEntry(); return }
-
-        const lp = entry.fileName.toLowerCase()
-        if (!lp.endsWith('.txt') && !lp.endsWith('.csv')) {
-          zipfile.readEntry()
-          return
-        }
-
-        zipfile.openReadStream(entry, (streamErr, readStream) => {
-          if (streamErr) { reject(streamErr); return }
-
-          const entryName = entry.fileName.split('/').pop() || entry.fileName
-          // Convert Node.js Readable → Web ReadableStream for processTextStream
-          const webStream = Readable.toWeb(readStream) as ReadableStream<Uint8Array>
-
-          processTextStream(webStream, entryName)
-            .then(result => { onEntry(result); zipfile.readEntry() })
-            .catch(reject)
-        })
-      })
-
-      zipfile.on('end', resolve)
-      zipfile.on('error', reject)
+      processZipEntries(zipfile, onEntry).then(resolve, reject)
     })
   })
 }
@@ -216,32 +251,7 @@ export async function processZipFile(
   return new Promise<void>((resolve, reject) => {
     yauzl.open(filepath, { lazyEntries: true }, (err, zipfile) => {
       if (err) return reject(err)
-
-      zipfile.readEntry()
-
-      zipfile.on('entry', (entry: yauzl.Entry) => {
-        if (/\/$/.test(entry.fileName)) { zipfile.readEntry(); return }
-
-        const lp = entry.fileName.toLowerCase()
-        if (!lp.endsWith('.txt') && !lp.endsWith('.csv')) {
-          zipfile.readEntry()
-          return
-        }
-
-        zipfile.openReadStream(entry, (streamErr, readStream) => {
-          if (streamErr) { reject(streamErr); return }
-
-          const entryName = entry.fileName.split('/').pop() || entry.fileName
-          const webStream = Readable.toWeb(readStream) as ReadableStream<Uint8Array>
-
-          processTextStream(webStream, entryName)
-            .then(result => { onEntry(result); zipfile.readEntry() })
-            .catch(reject)
-        })
-      })
-
-      zipfile.on('end', resolve)
-      zipfile.on('error', reject)
+      processZipEntries(zipfile, onEntry).then(resolve, reject)
     })
   })
 }
