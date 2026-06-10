@@ -1,0 +1,59 @@
+<!-- ULP Suite — TTL retention for ClickHouse system log tables.
+
+     ClickHouse enables query_log, query_thread_log, part_log, trace_log,
+     metric_log, asynchronous_metric_log, asynchronous_insert_log,
+     session_log and processors_profile_log by default with NO TTL — they
+     grow forever. On a long-running deployment this silently fills the
+     20 GB ClickHouse data volume (mem_limit/disk are separate; this is
+     disk), eventually causing every INSERT/SELECT to fail with
+     "DB::Exception: ... no space left on device".
+
+     Config-based <ttl> merges into ClickHouse's existing built-in block for
+     each log (database/table/partition_by are inherited), and is applied
+     the next time the table's schema is (re)created. On a fresh install the
+     table is created with TTL from the start. On an existing installation,
+     ClickHouse detects the schema change on restart, renames the old
+     untruncated table aside (e.g. query_log -> query_log_0) and creates a
+     new one with TTL applied going forward; the old table can be dropped
+     manually once confirmed unneeded.
+
+     Retention windows:
+       - query_log / asynchronous_insert_log: 14 days — covers the 24 h max
+         lookback of /api/monitoring/slow-queries and /api/monitoring/async-inserts
+         with headroom for manual debugging.
+       - part_log: 14 days — useful for diagnosing MATERIALIZE INDEX / MV
+         backfill merge behaviour after a deploy.
+       - session_log: 30 days — low-volume auth audit trail, kept longer.
+       - trace_log / metric_log / asynchronous_metric_log /
+         processors_profile_log: 3 days — extremely high-volume
+         (per-second or per-processor rows), not used by any monitoring
+         endpoint, kept short purely for emergency profiling. -->
+<clickhouse>
+    <query_log>
+        <ttl>event_date + INTERVAL 14 DAY DELETE</ttl>
+    </query_log>
+    <query_thread_log>
+        <ttl>event_date + INTERVAL 14 DAY DELETE</ttl>
+    </query_thread_log>
+    <part_log>
+        <ttl>event_date + INTERVAL 14 DAY DELETE</ttl>
+    </part_log>
+    <asynchronous_insert_log>
+        <ttl>event_date + INTERVAL 14 DAY DELETE</ttl>
+    </asynchronous_insert_log>
+    <session_log>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+    </session_log>
+    <trace_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </trace_log>
+    <metric_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </metric_log>
+    <asynchronous_metric_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </asynchronous_metric_log>
+    <processors_profile_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </processors_profile_log>
+</clickhouse>
