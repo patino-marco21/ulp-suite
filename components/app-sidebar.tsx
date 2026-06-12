@@ -1,6 +1,6 @@
 "use client"
 
-import { Upload, Database, Settings, Users, LucideIcon, Key, BookOpen, ClipboardList, FileText, Radio, BarChart2, AlertTriangle, Layers, ShieldAlert, Search, Shield, Inbox } from "lucide-react"
+import { Upload, Database, Settings, Users, LucideIcon, Key, BookOpen, ClipboardList, FileText, Radio, ShieldAlert, Search, Shield, Inbox } from "lucide-react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useTheme } from "next-themes"
@@ -39,10 +39,7 @@ const menuGroups: MenuGroup[] = [
     items: [
       { title: "Credentials", url: "/credentials", icon: Database },
       { title: "Batch Lookup",  url: "/lookup",      icon: Search },
-      { title: "Reuse", url: "/reuse", icon: AlertTriangle },
-      { title: "Similar", url: "/similar", icon: Layers },
       { title: "Breaches", url: "/breaches", icon: ShieldAlert },
-      { title: "Stats", url: "/stats", icon: BarChart2 },
     ],
   },
   {
