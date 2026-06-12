@@ -66,7 +66,6 @@ class RateLimiter {
   // Default configs for different endpoints
   private configs: Record<string, RateLimitConfig> = {
     '/api/search': { requests: 30, window: 60000 }, // 30 requests per minute
-    '/api/stats': { requests: 10, window: 60000 },   // 10 requests per minute
     '/api/upload': { requests: 5, window: 300000 },  // 5 uploads per 5 minutes
     '/api/auth': { requests: 5, window: 300000 },    // 5 auth attempts per 5 minutes
     'default': { requests: 20, window: 60000 }       // Default: 20 requests per minute
