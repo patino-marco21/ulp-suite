@@ -14,7 +14,6 @@ vi.mock('@/lib/clickhouse', () => ({
 vi.mock('@/lib/domain-monitor', () => ({
   checkMonitorsForULPUpload: vi.fn().mockResolvedValue(undefined),
 }))
-vi.mock('@/lib/stats-cache', () => ({ invalidateStatsCache: vi.fn() }))
 vi.mock('@/lib/upload-jobs', () => ({ updateJob: vi.fn() }))
 
 // ─── Fake yauzl ZipFile ───────────────────────────────────────────────────────
