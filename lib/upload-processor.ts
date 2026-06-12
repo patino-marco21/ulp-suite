@@ -17,7 +17,6 @@ import {
 import { getClient } from '@/lib/clickhouse'
 import { checkMonitorsForULPUpload } from '@/lib/domain-monitor'
 import { matchBreach } from '@/lib/breach-matcher'
-import { invalidateStatsCache } from '@/lib/stats-cache'
 import { updateJob } from '@/lib/upload-jobs'
 
 // ─── Public result type ───────────────────────────────────────────────────────
@@ -143,7 +142,6 @@ export async function processTextStream(
 
   if (imported > 0) {
     await recordSource(filename, imported)
-    invalidateStatsCache()
     checkMonitorsForULPUpload(filename).catch(err =>
       console.error('Domain monitor check error:', err)
     )

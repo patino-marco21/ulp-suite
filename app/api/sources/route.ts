@@ -1,7 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { executeQuery } from "@/lib/clickhouse"
 import { validateRequest, isAdmin } from "@/lib/auth"
-import { invalidateStatsCache } from "@/lib/stats-cache"
 
 export const dynamic = 'force-dynamic'
 
@@ -116,7 +115,6 @@ export async function DELETE(request: NextRequest) {
       `ALTER TABLE ulp.credentials DELETE WHERE source_file = {source_file:String}`,
       { source_file: filename }
     )
-    invalidateStatsCache()
 
     return NextResponse.json({
       success:             true,

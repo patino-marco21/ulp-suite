@@ -22,7 +22,6 @@
 import { type NextRequest, NextResponse } from 'next/server'
 import { validateRequest, requireAdminRole } from '@/lib/auth'
 import { getClient } from '@/lib/clickhouse'
-import { invalidateStatsCache } from '@/lib/stats-cache'
 
 export const dynamic = 'force-dynamic'
 
@@ -66,8 +65,6 @@ export async function POST(request: NextRequest) {
     const rows: Array<{ n: string }> = await res.json()
     rowsAfter = Number(rows[0]?.n ?? 0)
   } catch { /* non-fatal */ }
-
-  if (rowsAfter < rowsBefore) invalidateStatsCache()
 
   return NextResponse.json({
     success:            true,
