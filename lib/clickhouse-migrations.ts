@@ -561,7 +561,7 @@ export async function runClickHouseMigrations(): Promise<void> {
   //   each GROUP BY at 1.46 B rows uses 2–4 GB with disk spill.
   //
   // Gate: ch_mv_backfill_fired = '1' once the chain starts.
-  // Reset to '0' by POST /api/admin/rebuild-mv to allow re-backfill.
+  // Can be reset to '0' manually in the database to allow re-backfill.
   const mvBackfillFired = getSettingInt('ch_mv_backfill_fired', 0)
   if (mvBackfillFired >= 1) {
     console.warn('[MV backfill] already fired — skipping')
@@ -622,7 +622,7 @@ export async function runClickHouseMigrations(): Promise<void> {
       } catch (err) {
         console.error('[MV backfill] Error:', String(err).substring(0, 300))
         // ch_mv_backfill_fired stays '1' to prevent infinite retry.
-        // Use POST /api/admin/rebuild-mv to reset and retry.
+        // Reset manually in the database if needed to retry backfill.
       }
     })()
   }
