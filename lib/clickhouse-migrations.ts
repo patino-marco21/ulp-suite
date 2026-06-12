@@ -457,8 +457,9 @@ export async function runClickHouseMigrations(): Promise<void> {
   // to full 52M-row scans; /reuse page throws UNKNOWN_TABLE on every load.
   //
   // IF NOT EXISTS guards make this a no-op when tables already exist.
-  // After ensuring the tables are in place, reset ch_mv_backfill_fired so the
-  // existing-data backfill section below populates the empty tables.
+  // Note: v10 below immediately drops these tables/views again — this block now
+  // only matters for installs jumping straight from <v8 to v10 (CREATE then DROP,
+  // both idempotent and harmless).
   if (lastDdl < 8) {
     // ── Backing tables ──────────────────────────────────────────────────────
     await runMigration(`
@@ -526,12 +527,7 @@ export async function runClickHouseMigrations(): Promise<void> {
       WHERE login_type = 'email' AND length(password) > 0
       GROUP BY email, password
     `)
-    // Reset the backfill gate so the existing-data backfill fires below.
-    // Tables created by this migration are empty; backfill is the only way to
-    // populate them for the 52M rows that already existed before the MVs existed.
-    // The gate is immediately re-set to '1' by the backfill section.
-    setSetting('ch_mv_backfill_fired', '0')
-    console.warn('[ClickHouse migration] DDL v8 applied (re-created missing v3 MV tables/views — backfill gate reset)')
+    console.warn('[ClickHouse migration] DDL v8 applied (re-created missing v3 MV tables/views)')
   }
 
   // v9 — see DDL_VERSION comment above: re-add the v4 ngram skip indexes that never
