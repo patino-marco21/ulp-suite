@@ -19,10 +19,7 @@ ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores 
 ### Search & Discovery
 - **Credential search** — query by email, domain, URL, password, or breach name; combine terms with AND (`+`), OR (`,`), NOT (`-`)
 - **Batch lookup** — paste up to 100 emails and get all matches in one request; CSV export
-- **Similar passwords** — find accounts reusing passwords similar to a target credential
-- **Password reuse** — surface accounts sharing the same password across breaches
 - **Breach explorer** — browse all imported breach sources with credential counts and metadata
-- **Stats dashboard** — top domains, top emails, credential volume over time, TLD breakdown
 
 ### Upload & Ingestion
 - Upload `.txt` / `.csv` ULP files or `.zip` archives via drag-and-drop

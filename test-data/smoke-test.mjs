@@ -72,16 +72,8 @@ async function main() {
   }
   const auth = { Authorization: `Bearer ${jwt}` }
 
-  // ─── 3. Stats (before upload) ────────────────────────────────────────────────
-  console.log('\n3. Stats API (pre-upload)')
-  const stats = await req('GET', '/api/stats', null, auth)
-  check('Stats 200', stats.status === 200)
-  check('Stats success', stats.data?.success === true)
-  check('Stats structure', !!stats.data?.credentials && !!stats.data?.sources)
-  console.log(`     Credentials in DB: ${stats.data?.credentials?.total ?? 'n/a'}`)
-
-  // ─── 4. Upload test file ─────────────────────────────────────────────────────
-  console.log('\n4. Upload credentials (.txt)')
+  // ─── 3. Upload test file ─────────────────────────────────────────────────────
+  console.log('\n3. Upload credentials (.txt)')
   const sampleFile = join(__dir, 'sample-credentials.txt')
   if (!existsSync(sampleFile)) {
     console.log('  ⚠️  sample-credentials.txt not found — skipping upload')
@@ -101,8 +93,8 @@ async function main() {
     }
   }
 
-  // ─── 4b. Upload .csv (semicolon-separated) ───────────────────────────────────
-  console.log('\n4b. Upload credentials (.csv, semicolon-separated)')
+  // ─── 3b. Upload .csv (semicolon-separated) ───────────────────────────────────
+  console.log('\n3b. Upload credentials (.csv, semicolon-separated)')
   const csvFile = join(__dir, 'sample-credentials.csv')
   if (!existsSync(csvFile)) {
     console.log('  ⚠️  sample-credentials.csv not found — skipping upload')
@@ -120,8 +112,8 @@ async function main() {
     }
   }
 
-  // ─── 4c. Upload extra-format coverage (.txt with pipe/tab/android:// + rejects) ─
-  console.log('\n4c. Upload credentials (.txt, extra format coverage)')
+  // ─── 3c. Upload extra-format coverage (.txt with pipe/tab/android:// + rejects) ─
+  console.log('\n3c. Upload credentials (.txt, extra format coverage)')
   const formatsFile = join(__dir, 'sample-credentials-formats.txt')
   if (!existsSync(formatsFile)) {
     console.log('  ⚠️  sample-credentials-formats.txt not found — skipping upload')
@@ -142,8 +134,8 @@ async function main() {
     }
   }
 
-  // ─── 4d. Upload .zip (multi-entry archive) ───────────────────────────────────
-  console.log('\n4d. Upload credentials (.zip, multi-entry)')
+  // ─── 3d. Upload .zip (multi-entry archive) ───────────────────────────────────
+  console.log('\n3d. Upload credentials (.zip, multi-entry)')
   const zipFile = join(__dir, 'sample-credentials.zip')
   if (!existsSync(zipFile)) {
     console.log('  ⚠️  sample-credentials.zip not found — skipping upload')
@@ -168,8 +160,8 @@ async function main() {
   // Small wait for ClickHouse to flush
   await new Promise(r => setTimeout(r, 1500))
 
-  // ─── 5. Search ──────────────────────────────────────────────────────────────
-  console.log('\n5. Search')
+  // ─── 4. Search ──────────────────────────────────────────────────────────────
+  console.log('\n4. Search')
   const search = await req('GET', '/api/search?q=gmail.com&limit=10', null, auth)
   check('Search 200', search.status === 200)
   check('Search success', search.data?.success === true)
@@ -182,36 +174,20 @@ async function main() {
     check('Credential has breach_name field', 'breach_name' in first)
   }
 
-  // ─── 6. Stats (after upload) ─────────────────────────────────────────────────
-  console.log('\n6. Stats API (post-upload, cache busted)')
-  const stats2 = await req('GET', '/api/stats?bust=1', null, auth)
-  check('Stats with bust 200', stats2.status === 200)
-  const total = stats2.data?.credentials?.total ?? 0
-  check('Credentials count > 0', total > 0)
-  console.log(`     Total credentials: ${total}`)
-  check('Top domains populated', (stats2.data?.top_domains?.length ?? 0) > 0)
-  check('Password lengths populated', (stats2.data?.password_lengths?.length ?? 0) > 0)
-  check('Top TLDs populated', (stats2.data?.top_tlds?.length ?? 0) > 0)
-
-  // ─── 7. Breaches catalog ─────────────────────────────────────────────────────
-  console.log('\n7. Breaches catalog')
+  // ─── 5. Breaches catalog ─────────────────────────────────────────────────────
+  console.log('\n5. Breaches catalog')
   const breaches = await req('GET', '/api/breaches?limit=10', null, auth)
   check('Breaches 200', breaches.status === 200)
   check('Breaches success', breaches.data?.success === true)
   console.log(`     Breach records: ${breaches.data?.total ?? 0}`)
 
-  // ─── 8. Similar passwords ────────────────────────────────────────────────────
-  console.log('\n8. Similar passwords')
-  const similar = await req('GET', '/api/similar?q=hunter2&limit=5', null, auth)
-  check('Similar 200', similar.status === 200)
-
-  // ─── 9. Sources ──────────────────────────────────────────────────────────────
-  console.log('\n9. Sources')
+  // ─── 6. Sources ──────────────────────────────────────────────────────────────
+  console.log('\n6. Sources')
   const sources = await req('GET', '/api/sources?limit=5', null, auth)
   check('Sources 200', sources.status === 200)
 
-  // ─── 10. Export (small) ──────────────────────────────────────────────────────
-  console.log('\n10. Export')
+  // ─── 7. Export (small) ──────────────────────────────────────────────────────
+  console.log('\n7. Export')
   const exportResp = await fetch(`${BASE}/api/export`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...auth },
