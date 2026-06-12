@@ -40,7 +40,16 @@ let migrationsDone = false
 //     token). v9 unconditionally (re)adds both ngram indexes, and drops the legacy
 //     tokenbf_v1 indexes (idx_url/idx_email/idx_password) + idx_email_ngram that v5
 //     intended to remove but — for the same gate reason — never did on some installs.
-const DDL_VERSION = 9
+// v10: Reuse/Similar/Stats pages and APIs removed from the app. Drops the 4 MV
+//     backing tables from v3/v8 (ulp.domain_counts, ulp.password_counts,
+//     ulp.url_host_counts, ulp.reuse_pairs) and their 4 materialized views
+//     (mv_domain_counts, mv_password_counts, mv_url_host_counts, mv_reuse_pairs),
+//     which were only read by the now-deleted /api/reuse, /api/stats, and
+//     /api/admin/rebuild-mv. Views are dropped before their backing tables to
+//     avoid a race where a view tries to write to an already-dropped table.
+//     The materialized COLUMNS these MVs read from (country_tier, login_type,
+//     password_mask, etc.) are untouched — /credentials still filters on them.
+const DDL_VERSION = 10
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -546,85 +555,28 @@ export async function runClickHouseMigrations(): Promise<void> {
     console.warn('[ClickHouse migration] DDL v9 applied (added idx_ngram_url_host/idx_ngram_email_domain — MATERIALIZE running in background; dropped redundant legacy indexes)')
   }
 
+  // v10 — Reuse/Similar/Stats pages and APIs removed from the app. Drop the 4 MV
+  // backing tables + their materialized views (v3/v8) that were ONLY read by
+  // the now-deleted /api/reuse, /api/stats, and /api/admin/rebuild-mv. Views
+  // first, then backing tables, to avoid a race where a view tries to write to
+  // an already-dropped table.
+  if (lastDdl < 10) {
+    await runMigration(`DROP VIEW IF EXISTS ulp.mv_domain_counts`)
+    await runMigration(`DROP VIEW IF EXISTS ulp.mv_password_counts`)
+    await runMigration(`DROP VIEW IF EXISTS ulp.mv_url_host_counts`)
+    await runMigration(`DROP VIEW IF EXISTS ulp.mv_reuse_pairs`)
+    await runMigration(`DROP TABLE IF EXISTS ulp.domain_counts`)
+    await runMigration(`DROP TABLE IF EXISTS ulp.password_counts`)
+    await runMigration(`DROP TABLE IF EXISTS ulp.url_host_counts`)
+    await runMigration(`DROP TABLE IF EXISTS ulp.reuse_pairs`)
+    console.warn('[ClickHouse migration] DDL v10 applied (dropped stats/reuse MV tables + views)')
+  }
+
   if (lastDdl < DDL_VERSION) {
     setSetting('ch_ddl_version', String(DDL_VERSION))
     console.warn(`[ClickHouse migration] DDL now at v${DDL_VERSION}`)
   } else {
     console.warn(`[ClickHouse migration] DDL v${DDL_VERSION} already applied — skipping`)
-  }
-
-  // ── MV backfill (fire-and-forget, sequential, run exactly once) ──────────
-  // Placed BEFORE the repairFired early return so it runs on all deployments,
-  // including existing ones where ch_repair_mutations_fired is already '1'.
-  // MVs only capture inserts after creation; this covers the existing 1.46 B rows.
-  // Sequential (not parallel) to avoid OOM in a 6 GB container:
-  //   each GROUP BY at 1.46 B rows uses 2–4 GB with disk spill.
-  //
-  // Gate: ch_mv_backfill_fired = '1' once the chain starts.
-  // Can be reset to '0' manually in the database to allow re-backfill.
-  const mvBackfillFired = getSettingInt('ch_mv_backfill_fired', 0)
-  if (mvBackfillFired >= 1) {
-    console.warn('[MV backfill] already fired — skipping')
-    // No early return here: let the repairFired guard below run normally.
-  } else {
-    setSetting('ch_mv_backfill_fired', '1')
-    console.warn('[MV backfill] starting sequential backfill (fire-and-forget)')
-
-    // Fire-and-forget: do NOT await — this takes 5–30 min at 1.46 B rows.
-    // The server continues serving requests normally during the backfill.
-    ;(async () => {
-      try {
-        await client.exec({
-          query: `INSERT INTO ulp.domain_counts
-                  SELECT domain, count() AS count
-                  FROM ulp.credentials
-                  WHERE domain != ''
-                  GROUP BY domain
-                  SETTINGS max_bytes_before_external_group_by = 4294967296,
-                           max_execution_time = 3600`,
-        })
-        console.warn('[MV backfill] domain_counts done')
-
-        await client.exec({
-          query: `INSERT INTO ulp.password_counts
-                  SELECT password, count() AS count
-                  FROM ulp.credentials
-                  WHERE password != ''
-                  GROUP BY password
-                  SETTINGS max_bytes_before_external_group_by = 4294967296,
-                           max_execution_time = 3600`,
-        })
-        console.warn('[MV backfill] password_counts done')
-
-        await client.exec({
-          query: `INSERT INTO ulp.url_host_counts
-                  SELECT if(url_host != '', url_host, domain) AS url_host, count() AS count
-                  FROM ulp.credentials
-                  WHERE (url_host != '' OR domain != '')
-                  GROUP BY url_host
-                  SETTINGS max_bytes_before_external_group_by = 4294967296,
-                           max_execution_time = 3600`,
-        })
-        console.warn('[MV backfill] url_host_counts done')
-
-        await client.exec({
-          query: `INSERT INTO ulp.reuse_pairs
-                  SELECT email, password, uniqState(domain) AS domain_hll
-                  FROM ulp.credentials
-                  WHERE login_type = 'email' AND length(password) > 0
-                  GROUP BY email, password
-                  SETTINGS max_bytes_before_external_group_by = 4294967296,
-                           max_execution_time = 3600`,
-        })
-        console.warn('[MV backfill] reuse_pairs done')
-
-        console.warn('[MV backfill] All four MV tables backfilled successfully')
-      } catch (err) {
-        console.error('[MV backfill] Error:', String(err).substring(0, 300))
-        // ch_mv_backfill_fired stays '1' to prevent infinite retry.
-        // Reset manually in the database if needed to retry backfill.
-      }
-    })()
   }
 
   // ── Data-repair mutations (fire-and-forget, run exactly once) ────────────
