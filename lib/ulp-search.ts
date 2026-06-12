@@ -10,13 +10,15 @@
  *                   Skips entire 65 536-row granules that provably can't match.
  *                   Value is always lowercased: the index preprocessor lowercases stored
  *                   tokens; passing uppercase would silently return 0 results for 'GOOGLE'.
- *                → position(url_host, lower(value)) > 0
+ *                → url_host LIKE '%' || lower(value) || '%'
  *                   Catches compound-domain substrings: "ledger" matches
  *                   coinledger.com, ledgernano.com, etc.  url_host is a
- *                   lowercased materialized column so this is a fast vectorised
- *                   scan of short strings with no skip index overhead.
- *                → position(email_domain, lower(value)) > 0
- *                   Same logic for the email domain column.
+ *                   lowercased materialized column with an ngrambf_v1 skip index
+ *                   (idx_ngram_url_host), so LIKE both scans a compact column AND
+ *                   gets granule pruning ('_' in the value is escaped to '\_' since
+ *                   it's a LIKE wildcard).
+ *                → email_domain LIKE '%' || lower(value) || '%'
+ *                   Same logic for the email domain column (idx_ngram_email_domain).
  *
  *   email_full — full email e.g. john@gmail.com
  *                → email = lower(value)
@@ -112,19 +114,23 @@ export function buildULPWhere(tokens: ParsedToken[]): { clause: string; params: 
       //      always lowercase.  hasToken(url, 'GOOGLE') would return 0 rows even though
       //      google.com credentials exist — the token in the index is 'google', not
       //      'GOOGLE'.  Lowercasing normalises the needle to match stored tokens.
-      //   2. url_host and email_domain are lower()-materialised columns, so position()
-      //      already required a lowercase needle.  Using one shared lowercase param avoids
-      //      sending duplicate data and keeps the param namespace tidy.
+      //   2. url_host and email_domain are lower()-materialised columns, so the LIKE
+      //      needle below already required a lowercase value too.
       //
       // Compound-domain substring matching: "ledger" must ALSO match "coinledger.com",
       // "ledgerwallet.com", etc. where "ledger" is embedded within a larger token.
-      // position(url_host, value) > 0 performs a substring scan of the pre-extracted,
-      // lowercased hostname column — fast because url_host is compact.
-      // email_domain gets the same treatment so "ledger" also surfaces credentials whose
-      // login email is from a compound domain like staff@coinledger.com.
+      // url_host/email_domain LIKE '%value%' performs a substring scan of the
+      // pre-extracted, lowercased hostname/domain columns AND lets ClickHouse use the
+      // idx_ngram_url_host / idx_ngram_email_domain ngrambf_v1 skip indexes — unlike
+      // position(col, value) > 0, which the bloom-filter index analyzer never recognizes
+      // as prunable. '_' is escaped because it's a LIKE single-char wildcard and token
+      // values (matched by /^[\w-]+$/) can contain it.
       const p = `tok${i}`
-      params[p] = token.value.toLowerCase()
-      match = `(hasToken(url, {${p}:String}) OR hasToken(email, {${p}:String}) OR hasToken(password, {${p}:String}) OR position(url_host, {${p}:String}) > 0 OR position(email_domain, {${p}:String}) > 0)`
+      const lp = `tlk${i}`
+      const lower = token.value.toLowerCase()
+      params[p] = lower
+      params[lp] = `%${lower.replace(/_/g, '\\_')}%`
+      match = `(hasToken(url, {${p}:String}) OR hasToken(email, {${p}:String}) OR hasToken(password, {${p}:String}) OR url_host LIKE {${lp}:String} OR email_domain LIKE {${lp}:String})`
 
     } else {
       // LIKE fallback for tokens with special characters (no skip index)

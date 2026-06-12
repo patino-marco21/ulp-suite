@@ -369,14 +369,14 @@ describe('parseULPQuery + buildULPWhere integration', () => {
     expect(Object.values(params)[0]).toBe('example.com')
   })
 
-  test('three-term AND query generates three params (one per term)', () => {
+  test('three-term AND query generates four params (token type uses two)', () => {
     // @gmail.com → email_dom  → 1 param
-    // hunter2   → token      → 1 param (single lowercase value, shared by hasToken + position)
+    // hunter2   → token      → 2 params (lowercase value for hasToken, LIKE pattern for url_host/email_domain)
     // alice@…   → email_full → 1 param
-    // Total: 3 params
+    // Total: 4 params
     const tokens = parseULPQuery('@gmail.com, hunter2, alice@gmail.com')
     const { params } = buildULPWhere(tokens)
-    expect(Object.keys(params)).toHaveLength(3)
+    expect(Object.keys(params)).toHaveLength(4)
   })
 
   test('clause is valid ClickHouse-compatible SQL fragment', () => {
@@ -394,32 +394,39 @@ describe('parseULPQuery + buildULPWhere integration', () => {
     expect(clause).toMatch(/hasToken\(password, \{[a-z0-9]+:String\}\)/)
   })
 
-  test('token type includes position(url_host) for compound-domain substring matching', () => {
+  test('token type includes url_host LIKE for compound-domain substring matching', () => {
     // "ledger" must also match coinledger.com, ledgernano.com, etc.
     const tokens = parseULPQuery('ledger')
     const { clause, params } = buildULPWhere(tokens)
-    expect(clause).toContain('position(url_host,')
-    expect(clause).toContain('> 0')
-    // The lowercased copy of the term must be in params
+    expect(clause).toContain('url_host LIKE')
+    // The LIKE pattern must be in params
     const paramValues = Object.values(params)
-    expect(paramValues).toContain('ledger')
+    expect(paramValues).toContain('%ledger%')
   })
 
-  test('token type includes position(email_domain) for compound email-domain substring matching', () => {
+  test('token type includes email_domain LIKE for compound email-domain substring matching', () => {
     const tokens = parseULPQuery('ledger')
     const { clause } = buildULPWhere(tokens)
-    expect(clause).toContain('position(email_domain,')
+    expect(clause).toContain('email_domain LIKE')
   })
 
-  test('token search always lowercases the value (case-insensitive for hasToken + position)', () => {
+  test('token LIKE pattern escapes underscores so they are not treated as LIKE wildcards', () => {
+    const tokens = parseULPQuery('foo_bar')
+    const { params } = buildULPWhere(tokens)
+    const paramValues = Object.values(params)
+    expect(paramValues).toContain('%foo\\_bar%')
+  })
+
+  test('token search always lowercases the value (case-insensitive for hasToken + LIKE)', () => {
     // The text() inverted index uses preprocessor = lower(col), so stored tokens are
     // lowercase.  hasToken(url, 'GOOGLE') would return 0 rows even though google.com
     // credentials exist.  We always lowercase the needle so 'Google'→'google'.
     const tokens = parseULPQuery('Ledger')
     const { params } = buildULPWhere(tokens)
     const paramValues = Object.values(params)
-    // Only the lowercase form appears — shared by hasToken AND position()
+    // The lowercase form appears for hasToken, and the LIKE pattern is also lowercase
     expect(paramValues).toContain('ledger')
+    expect(paramValues).toContain('%ledger%')
     expect(paramValues).not.toContain('Ledger')
   })
 })

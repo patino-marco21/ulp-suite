@@ -31,7 +31,16 @@ let migrationsDone = false
 //     DDL silently failed. ch_ddl_version was still saved as 6, so migrations
 //     were never retried. v7 forces a re-run using ADD INDEX IF NOT EXISTS so
 //     the indexes are created even on boxes that showed v6 as "done" but skipped.
-const DDL_VERSION = 8
+// v9: idx_ngram_url_host / idx_ngram_email_domain (from v4) never took effect on
+//     installs where ch_ddl_version was already >= 4 — the `lastDdl < 4` gate is
+//     permanently closed for those installs. Without these, position(url_host,...)
+//     / position(email_domain,...) in lib/ulp-search.ts have no skip index, and
+//     since they're OR'd with the hasToken() conditions, NO pruning happens at all
+//     (verified via EXPLAIN: "Combined skip indexes: 800/800" even for a unique
+//     token). v9 unconditionally (re)adds both ngram indexes, and drops the legacy
+//     tokenbf_v1 indexes (idx_url/idx_email/idx_password) + idx_email_ngram that v5
+//     intended to remove but — for the same gate reason — never did on some installs.
+const DDL_VERSION = 9
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -514,6 +523,27 @@ export async function runClickHouseMigrations(): Promise<void> {
     // The gate is immediately re-set to '1' by the backfill section.
     setSetting('ch_mv_backfill_fired', '0')
     console.warn('[ClickHouse migration] DDL v8 applied (re-created missing v3 MV tables/views — backfill gate reset)')
+  }
+
+  // v9 — see DDL_VERSION comment above: re-add the v4 ngram skip indexes that never
+  // took effect, and drop the legacy indexes v5 intended to remove. All statements
+  // are idempotent (ADD/DROP ... IF [NOT] EXISTS).
+  if (lastDdl < 9) {
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_ngram_url_host
+       url_host TYPE ngrambf_v1(4, 1024, 1, 0) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_ngram_url_host`
+    )
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_ngram_email_domain
+       email_domain TYPE ngrambf_v1(4, 1024, 1, 0) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_ngram_email_domain`
+    )
+    await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_url`)
+    await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_email`)
+    await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_password`)
+    await runMigration(`ALTER TABLE ulp.credentials DROP INDEX IF EXISTS idx_email_ngram`)
+    console.warn('[ClickHouse migration] DDL v9 applied (added idx_ngram_url_host/idx_ngram_email_domain — MATERIALIZE running in background; dropped redundant legacy indexes)')
   }
 
   if (lastDdl < DDL_VERSION) {
