@@ -181,6 +181,15 @@ docker exec ulpsuite_clickhouse clickhouse-client \
 
 # Run dedup after large imports
 curl -s -b cookies.txt -X POST http://localhost:3000/api/admin/dedup | jq
+
+# Check ClickHouse async-insert health (failures + throughput, last 60 min)
+curl -s -b cookies.txt http://localhost:3000/api/monitoring/async-inserts | jq
+
+# Check ClickHouse mutation status (MATERIALIZE COLUMN/INDEX progress, stuck mutations)
+curl -s -b cookies.txt http://localhost:3000/api/monitoring/mutations | jq
+
+# Find slow/failed queries (last 60 min, duration >= 200ms)
+curl -s -b cookies.txt http://localhost:3000/api/monitoring/slow-queries | jq
 ```
 
 ### Development (hot reload)
