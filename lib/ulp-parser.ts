@@ -32,6 +32,27 @@ export interface ParseResult {
   rejection_breakdown: Record<string, number>
 }
 
+/**
+ * Maximum size (bytes) a single buffered "line" may reach before the
+ * streaming parsers (parseULPStream, parseBlockStream) force-flush it, even
+ * with no '\n' found yet.
+ *
+ * Without this cap, a long run of non-text data (no '\n' for hundreds of MB —
+ * e.g. an embedded binary blob in an otherwise-text file) makes `buffer +=
+ * chunk` grow unboundedly while `buffer.split('\n')` re-scans the entire
+ * (growing) buffer on every ~64KB read — O(n^2) — and once `buffer`
+ * approaches V8's ~512MB-1GB string limit, the `+=` itself throws
+ * "RangeError: Invalid string length", aborting the whole stream. Observed in
+ * production: a 1.9GB inbox file crashed with exactly this error after 20+
+ * minutes, having imported 0 rows.
+ *
+ * 1 MB is far larger than any real credential line (<1 KB) but keeps both the
+ * buffer and the per-iteration split() cost bounded — the oversized chunk is
+ * rejected like any other malformed line, and parsing continues normally with
+ * whatever follows it.
+ */
+const MAX_LINE_LENGTH = 1 << 20 // 1 MB
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /** Strip a trailing port (`:digits`) from a hostname. */
@@ -244,6 +265,17 @@ export async function* parseBlockStream(
 
         for (const line of lines) {
           const result = parseBlockLine(line, state)
+          if (result === 'separator') {
+            tryFlushBlock()
+            if (batch.length >= batchSize) yield flushBatch()
+          }
+        }
+
+        // No '\n' found (or a huge trailing partial line) — force-flush so
+        // buffer can't grow unboundedly. See MAX_LINE_LENGTH.
+        if (buffer.length > MAX_LINE_LENGTH) {
+          const result = parseBlockLine(buffer, state)
+          buffer = ''
           if (result === 'separator') {
             tryFlushBlock()
             if (batch.length >= batchSize) yield flushBatch()
@@ -758,6 +790,14 @@ export async function* parseULPStream(
 
         for (const line of lines) {
           processLine(line)
+          if (batch.length >= batchSize) yield flushBatch()
+        }
+
+        // No '\n' found (or a huge trailing partial line) — force-flush so
+        // buffer can't grow unboundedly. See MAX_LINE_LENGTH.
+        if (buffer.length > MAX_LINE_LENGTH) {
+          processLine(buffer)
+          buffer = ''
           if (batch.length >= batchSize) yield flushBatch()
         }
       }
