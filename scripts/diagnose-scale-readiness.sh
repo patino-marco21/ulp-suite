@@ -175,22 +175,24 @@ echo " of which make EXPLAIN indexes=1 misleading unless disabled for the"
 echo " explain — hence the SETTINGS clause on both queries below.)"
 echo "-- Query A (imported_at-first ORDER BY) --"
 $CH "
-EXPLAIN indexes = 1 SETTINGS use_query_condition_cache = 0, use_skip_indexes_on_data_read = 0
+EXPLAIN indexes = 1
 SELECT url, email, password, imported_at, domain
 FROM ulp.credentials
 WHERE 1=1
 ORDER BY imported_at DESC, domain ASC, email ASC, url ASC, password ASC
 LIMIT 50
+SETTINGS use_query_condition_cache = 0, use_skip_indexes_on_data_read = 0
 "
 echo ""
 echo "-- Query B (domain-prefix ORDER BY) --"
 $CH "
-EXPLAIN indexes = 1 SETTINGS use_query_condition_cache = 0, use_skip_indexes_on_data_read = 0
+EXPLAIN indexes = 1
 SELECT url, email, password, imported_at, domain
 FROM ulp.credentials
 WHERE 1=1
 ORDER BY domain ASC, email ASC, imported_at ASC
 LIMIT 50
+SETTINGS use_query_condition_cache = 0, use_skip_indexes_on_data_read = 0
 "
 echo ""
 
