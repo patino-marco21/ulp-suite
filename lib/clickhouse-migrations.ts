@@ -49,7 +49,16 @@ let migrationsDone = false
 //     avoid a race where a view tries to write to an already-dropped table.
 //     The materialized COLUMNS these MVs read from (country_tier, login_type,
 //     password_mask, etc.) are untouched — /credentials still filters on them.
-const DDL_VERSION = 10
+// v11: Retry the v10 drops. During the 2026-06-12/13 data-loss incident,
+//     ulp.domain_counts had 7 "broken-on-start" parts (TOO_MANY_UNEXPECTED_DATA_PARTS)
+//     at the time v10 ran, so it failed to load — DROP VIEW ulp.mv_domain_counts and
+//     DROP TABLE ulp.domain_counts both threw, caught as non-fatal by runMigration(),
+//     but ch_ddl_version was still bumped to 10, so v10 never retried.
+//     force_restore_data has since detached those broken parts, so domain_counts now
+//     loads fine and the drops should succeed. Repeats all 8 v10 drops (not just the
+//     2 that failed) for idempotent safety — every statement is IF EXISTS, so
+//     re-dropping already-gone objects is a harmless no-op.
+const DDL_VERSION = 11
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -566,6 +575,21 @@ export async function runClickHouseMigrations(): Promise<void> {
     await runMigration(`DROP TABLE IF EXISTS ulp.url_host_counts`)
     await runMigration(`DROP TABLE IF EXISTS ulp.reuse_pairs`)
     console.warn('[ClickHouse migration] DDL v10 applied (dropped stats/reuse MV tables + views)')
+  }
+
+  // v11 — retry the v10 drops (see DDL_VERSION comment above). Idempotent: all
+  // statements use IF EXISTS, so this is a no-op for objects v10 already dropped
+  // successfully.
+  if (lastDdl < 11) {
+    await runMigration(`DROP VIEW IF EXISTS ulp.mv_domain_counts`)
+    await runMigration(`DROP VIEW IF EXISTS ulp.mv_password_counts`)
+    await runMigration(`DROP VIEW IF EXISTS ulp.mv_url_host_counts`)
+    await runMigration(`DROP VIEW IF EXISTS ulp.mv_reuse_pairs`)
+    await runMigration(`DROP TABLE IF EXISTS ulp.domain_counts`)
+    await runMigration(`DROP TABLE IF EXISTS ulp.password_counts`)
+    await runMigration(`DROP TABLE IF EXISTS ulp.url_host_counts`)
+    await runMigration(`DROP TABLE IF EXISTS ulp.reuse_pairs`)
+    console.warn('[ClickHouse migration] DDL v11 applied (retried v10 drops after force_restore_data recovery)')
   }
 
   if (lastDdl < DDL_VERSION) {
