@@ -214,6 +214,11 @@ function enqueueFile(filePath: string): void {
       // between here and logJob (e.g. OOM), the file is already out of inbox/.
       // The next reconcile scan won't re-queue it, preventing double-processing
       // and duplicate credentials in ClickHouse.
+      // mkdirSync guards against done/ having been removed since startup (e.g.
+      // a host-side cleanup with no app restart) — without it, renameSync
+      // throws ENOENT, the file never leaves inbox/, and reconcile() re-queues
+      // (and re-imports) it on every 30s cycle, forever.
+      fs.mkdirSync(DONE, { recursive: true })
       fs.renameSync(filePath, path.join(DONE, filename))
       logJob({
         source:      'inbox',
@@ -234,7 +239,10 @@ function enqueueFile(filePath: string): void {
         duration_ms:   Date.now() - startAt,
         error_message: err instanceof Error ? err.message : String(err),
       })
-      try { fs.renameSync(filePath, path.join(FAIL, filename)) } catch {}
+      try {
+        fs.mkdirSync(FAIL, { recursive: true })
+        fs.renameSync(filePath, path.join(FAIL, filename))
+      } catch {}
     } finally {
       _currentProgress = null
       pendingTasks.delete(filename)   // task is done (success or fail)
