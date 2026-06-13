@@ -20,7 +20,7 @@ export async function GET(request: NextRequest) {
     // constraint.  If a file was processed twice (e.g. container OOM mid-rename),
     // it appears twice.  argMax picks the most-recent row per filename so the
     // count and UI show each file exactly once.
-    const [countResult, rows, credCounts] = await Promise.all([
+    const [countResult, rows] = await Promise.all([
       executeQuery(
         `SELECT count() AS total FROM (SELECT DISTINCT filename FROM ulp.sources)`
       ),
@@ -37,16 +37,26 @@ export async function GET(request: NextRequest) {
          LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         { limit, offset }
       ),
-      // Credential count per source file — fast because source_file is in ORDER BY
-      executeQuery(
-        `SELECT source_file, count() AS cred_count
-         FROM ulp.credentials
-         GROUP BY source_file
-         SETTINGS max_execution_time = 30`
-      ),
     ])
 
     const total = Number(countResult[0]?.total || 0)
+    const filenames = (rows as any[]).map(r => String(r.filename))
+
+    // Credential count per source file. Scoped to this page's filenames (≤100)
+    // so idx_bf_source_file (bloom filter) can skip granules — an unscoped
+    // `GROUP BY source_file` over ulp.credentials reads the whole table and
+    // times out past 30s once it's in the billions of rows (Code 159
+    // TIMEOUT_EXCEEDED, observed 2026-06-13 after reading 1.1B rows).
+    const credCounts = filenames.length
+      ? await executeQuery(
+          `SELECT source_file, count() AS cred_count
+           FROM ulp.credentials
+           WHERE source_file IN ({filenames:Array(String)})
+           GROUP BY source_file
+           SETTINGS max_execution_time = 30`,
+          { filenames }
+        )
+      : []
 
     // Build a lookup map: source_file → credential count
     const credMap = new Map<string, number>()
