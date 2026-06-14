@@ -662,7 +662,10 @@ export default function CredentialsPage() {
       const res  = await fetch(`/api/credentials?${buildParams(cursor, overrides)}`)
       const json = await res.json()
       if (json.success) {
-        setData(json)
+        // On deeper cursor pages the server skips the count() and returns
+        // total:null — carry the page-1 total forward so the header/footer keep
+        // showing the real count instead of flashing to 0.
+        setData(prev => (json.total == null ? { ...json, total: prev?.total ?? 0 } : json))
         setCurrentCursor(cursor)
       } else if (json.timed_out) {
         // 408 timeout: show the structured timeout response in the results panel

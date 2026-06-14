@@ -133,22 +133,33 @@ export async function GET(request: NextRequest) {
 
   try {
     const t0 = Date.now()
-    const [countResult, rows] = await Promise.all([
+
+    // The total only changes when the result SET changes (new filters/sort), not
+    // when paging through it. The first page is always cursor-less, so count() runs
+    // there; on deeper cursor pages we skip it entirely (total = null) and the client
+    // carries the page-1 total forward. At billions of rows a filtered search can
+    // match tens of millions, and count() has no LIMIT — re-counting all of them on
+    // every page turn is the single most expensive avoidable part of the request.
+    const countPromise: Promise<Array<{ total?: unknown }> | null> = cursorToken
+      ? Promise.resolve(null)
       // optimize_trivial_count_query: for WHERE-free queries ClickHouse reads
       // the partition metadata instead of scanning rows — nearly instant.
       // For filtered queries the setting is a no-op and the WHERE runs normally.
-      executeQuery(
-        // Count uses break so a partial count is returned rather than an error.
-        // use_query_cache = 0: ClickHouse 26.x throws error 731 when use_query_cache=1
-        // (active from the user profile) is combined with timeout_overflow_mode='break'.
-        // Partial/timed-out counts must not be cached anyway — they are not the real count.
-        `SELECT count() AS total FROM ulp.credentials WHERE ${where}
-         SETTINGS optimize_trivial_count_query = 1,
-                  max_execution_time = 300,
-                  timeout_overflow_mode = 'break',
-                  use_query_cache = 0`,
-        params
-      ),
+      // Count uses break so a partial count is returned rather than an error.
+      // use_query_cache = 0: ClickHouse 26.x throws error 731 when use_query_cache=1
+      // (active from the user profile) is combined with timeout_overflow_mode='break'.
+      // Partial/timed-out counts must not be cached anyway — they are not the real count.
+      : executeQuery(
+          `SELECT count() AS total FROM ulp.credentials WHERE ${where}
+           SETTINGS optimize_trivial_count_query = 1,
+                    max_execution_time = 300,
+                    timeout_overflow_mode = 'break',
+                    use_query_cache = 0`,
+          params
+        )
+
+    const [countResult, rows] = await Promise.all([
+      countPromise,
       executeQuery(
         // Data query uses throw so a timeout produces a clear error (caught below)
         // rather than silently returning 0 rows (timeout_overflow_mode=break with
@@ -164,7 +175,8 @@ export async function GET(request: NextRequest) {
       ),
     ])
     const query_ms = Date.now() - t0
-    const total = Number(countResult[0]?.total || 0)
+    // null on cursor pages (count skipped above) — the client keeps the page-1 total.
+    const total = countResult ? Number(countResult[0]?.total || 0) : null
     const timed_out = query_ms > 250_000
 
     const nextCursor = (rows as unknown[]).length === limit
