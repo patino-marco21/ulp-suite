@@ -5,21 +5,30 @@
  * automatically through the same streaming pipeline as the HTTP upload API.
  *
  * Directory layout (auto-created on startup):
- *   ./inbox/         — place files here
- *   ./inbox/done/    — successfully processed files are moved here
- *   ./inbox/failed/  — failed files are moved here
+ *   ./inbox/            — place files here
+ *   ./inbox/processing/ — a file lives here for the duration of its import
+ *   ./inbox/done/       — successfully processed files are moved here
+ *   ./inbox/failed/     — failed (or interrupted) files are moved here
  *
  * Uses the global uploadQueue (pLimit(1)) so inbox jobs and HTTP uploads
  * share the same single-at-a-time constraint and never compete for RAM.
  *
- * Reliability design:
+ * Reliability design (no double-processing -> no duplicate credential rows):
  *  - usePolling: true because Docker bind-mount inotify events don't propagate
  *    from host → container.
- *  - inFlight Set prevents the same file from being queued twice (polling can
- *    fire 'add' multiple times before a file is moved out of inbox/).
- *  - Reconciliation loop (every 30 s) re-queues any files that are still in
- *    inbox/ but not in inFlight.  This catches files that chokidar missed for
- *    any reason — large batch drops, host FS races, watcher startup gaps.
+ *  - inFlight Set prevents the same file from being queued twice WITHIN a
+ *    process (polling can fire 'add' repeatedly before a file is claimed).
+ *  - Filesystem claim (lib/inbox-claim.ts): each file is atomically renamed
+ *    inbox/X → processing/X BEFORE it is read. The rename is a single-winner
+ *    gate, so a second attempt OR a fresh reconcile after a restart finds the
+ *    file already gone and refuses to import it. This is what the in-memory
+ *    inFlight Set cannot guarantee — it dies on restart, leaving a file still
+ *    in inbox/ to be re-imported.
+ *  - Startup sweep: anything left in processing/ (interrupted mid-import) is
+ *    moved to failed/ for review, never silently re-imported.
+ *  - Reconciliation loop (every 30 s) re-queues any files still in inbox/ but
+ *    not in inFlight — catches files chokidar missed (large batch drops, host
+ *    FS races, watcher startup gaps).
  */
 
 import path from 'path'
@@ -28,15 +37,22 @@ import { Readable } from 'stream'
 import { uploadQueue, queueSize, setCurrentJob } from '@/lib/upload-queue'
 import { logJob } from '@/lib/processing-log'
 import { processTextStream, processZipFile } from '@/lib/upload-processor'
+import { claimFileForProcessing, sweepProcessingToFailed } from '@/lib/inbox-claim'
 
 const INBOX = path.resolve('./inbox')
 const DONE  = path.resolve('./inbox/done')
 const FAIL  = path.resolve('./inbox/failed')
+// processing/ holds a file for the duration of its import. A file is moved here
+// (atomic rename) BEFORE it is read, so a second attempt or a post-restart
+// reconcile can't re-pick it -- the filesystem is the dedup gate that the
+// in-memory inFlight Set can't be (it dies on restart). See lib/inbox-claim.ts.
+const PROC  = path.resolve('./inbox/processing')
 
 // Suffixes that mark subdirectory paths (with the OS separator so that
-// files whose NAMES start with 'done' or 'failed' are not excluded).
+// files whose NAMES start with 'done'/'failed'/'processing' are not excluded).
 const DONE_PREFIX = DONE + path.sep
 const FAIL_PREFIX = FAIL + path.sep
+const PROC_PREFIX = PROC + path.sep
 
 let started = false
 
@@ -164,7 +180,7 @@ function enqueueFile(filePath: string): void {
   if (!SUPPORTED_EXTS.has(ext))     return   // unsupported extension
   if (inFlight.has(filename))       return   // already queued or processing
   // Use path separator guards so 'done_batch.txt' is NOT excluded:
-  if (filePath.startsWith(DONE_PREFIX) || filePath.startsWith(FAIL_PREFIX)) return
+  if (filePath.startsWith(DONE_PREFIX) || filePath.startsWith(FAIL_PREFIX) || filePath.startsWith(PROC_PREFIX)) return
 
   inFlight.add(filename)
   pendingTasks.add(filename)   // mark as having a live pLimit task
@@ -172,18 +188,29 @@ function enqueueFile(filePath: string): void {
 
   uploadQueue(async () => {
     const startAt = Date.now()
-    console.log(`[inbox-watcher] processing: ${filename}`)
     setCurrentJob(filename)
-
-    // Capture file size for ETA calculation in the status API.
-    const fileSizeBytes = (() => { try { return fs.statSync(filePath).size } catch { return 0 } })()
-    _currentProgress = { filename, started_at: startAt, rows_imported: 0, file_size_bytes: fileSizeBytes }
 
     let imported = 0
     let skipped  = 0
+    let procPath: string | null = null
     try {
+      // CLAIM: atomically move the file out of inbox/ into processing/ BEFORE
+      // reading it. If the rename returns null the file is already gone (a
+      // concurrent attempt or a pre-restart claim won), so we must NOT import
+      // it -- that is exactly the double-import that produced duplicate rows.
+      procPath = claimFileForProcessing(filePath, PROC)
+      if (procPath === null) {
+        console.warn(`[inbox-watcher] claim skipped (already gone): ${filename}`)
+        return   // finally still clears inFlight; nothing imported
+      }
+
+      console.log(`[inbox-watcher] processing: ${filename}`)
+      // Capture file size (from the claimed path) for ETA in the status API.
+      const fileSizeBytes = (() => { try { return fs.statSync(procPath!).size } catch { return 0 } })()
+      _currentProgress = { filename, started_at: startAt, rows_imported: 0, file_size_bytes: fileSizeBytes }
+
       if (ext === '.zip') {
-        await processZipFile(filePath, result => {
+        await processZipFile(procPath, result => {
           imported += result.imported
           skipped  += result.skipped
           if (_currentProgress) _currentProgress.rows_imported = imported
@@ -197,7 +224,7 @@ function enqueueFile(filePath: string): void {
           }
         })
       } else {
-        const nodeStream = fs.createReadStream(filePath)
+        const nodeStream = fs.createReadStream(procPath)
         const webStream  = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>
         const result     = await processTextStream(webStream, filename, undefined, n => {
           // onBatch: update live progress after each 500 K-row batch
@@ -210,16 +237,10 @@ function enqueueFile(filePath: string): void {
           `imported=${result.imported} skipped=${result.skipped}`
         )
       }
-      // Rename to done/ BEFORE calling logJob so that if the process crashes
-      // between here and logJob (e.g. OOM), the file is already out of inbox/.
-      // The next reconcile scan won't re-queue it, preventing double-processing
-      // and duplicate credentials in ClickHouse.
-      // mkdirSync guards against done/ having been removed since startup (e.g.
-      // a host-side cleanup with no app restart) — without it, renameSync
-      // throws ENOENT, the file never leaves inbox/, and reconcile() re-queues
-      // (and re-imports) it on every 30s cycle, forever.
+      // Move processing/ -> done/ BEFORE logJob so a crash here still leaves the
+      // file out of inbox/ (it's in processing/, swept to failed/ on restart).
       fs.mkdirSync(DONE, { recursive: true })
-      fs.renameSync(filePath, path.join(DONE, filename))
+      fs.renameSync(procPath, path.join(DONE, filename))
       logJob({
         source:      'inbox',
         filename,
@@ -239,10 +260,13 @@ function enqueueFile(filePath: string): void {
         duration_ms:   Date.now() - startAt,
         error_message: err instanceof Error ? err.message : String(err),
       })
-      try {
-        fs.mkdirSync(FAIL, { recursive: true })
-        fs.renameSync(filePath, path.join(FAIL, filename))
-      } catch {}
+      // Move the claimed file (if we claimed it) to failed/ for review.
+      if (procPath) {
+        try {
+          fs.mkdirSync(FAIL, { recursive: true })
+          fs.renameSync(procPath, path.join(FAIL, filename))
+        } catch {}
+      }
     } finally {
       _currentProgress = null
       pendingTasks.delete(filename)   // task is done (success or fail)
@@ -283,7 +307,26 @@ export function startInboxWatcher(): void {
   started = true
 
   // Ensure directories exist before the watcher starts
-  ;[INBOX, DONE, FAIL].forEach(d => fs.mkdirSync(d, { recursive: true }))
+  ;[INBOX, DONE, FAIL, PROC].forEach(d => fs.mkdirSync(d, { recursive: true }))
+
+  // Sweep any files left in processing/ by a previous run that was interrupted
+  // mid-import (crash/OOM/redeploy). They may be partially imported, so move
+  // them to failed/ for review rather than re-importing (which would duplicate
+  // the partial rows). This MUST run before reconcile() so a leftover isn't
+  // somehow re-picked.
+  const interrupted = sweepProcessingToFailed(PROC, FAIL)
+  for (const name of interrupted) {
+    console.warn(`[inbox-watcher] interrupted mid-import, moved to failed/: ${name}`)
+    logJob({
+      source:        'inbox',
+      filename:      name,
+      status:        'failed',
+      imported:      0,
+      skipped:       0,
+      duration_ms:   0,
+      error_message: 'Interrupted mid-import (app restart) — may be partially imported; review before re-adding.',
+    })
+  }
 
   // Prune stale done/ files on startup (older than 7 days)
   cleanupOldFiles(DONE, DONE_MAX_AGE_MS)
