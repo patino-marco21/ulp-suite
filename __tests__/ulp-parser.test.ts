@@ -583,6 +583,60 @@ describe('parseLine — monster blank-first-tab (case D) is handled, not stored 
   })
 })
 
+describe('parseLine — garbage rejection (binary / mis-encoded / fake URLs)', () => {
+  // colonSplit will turn ANY "https://XX:..." into a credential, so binary or
+  // mis-encoded source data that merely contains "https://" was producing fake
+  // rows with nonsense hosts. These guards drop that junk.
+
+  test('fake host (no dot) is rejected: https://0Z:...', () => {
+    expect(why('https://0Z:junkuser:morepass')).toBe('garbage')
+  })
+
+  test('empty host is rejected: https:////site:...', () => {
+    expect(why('https:////34mix.com:8080:macaddrstuff')).toBe('garbage')
+  })
+
+  test('a control byte in any field is rejected', () => {
+    expect(why('https://x.com/a:user:password')).toBe('garbage')
+  })
+
+  test('a U+FFFD replacement char (invalid UTF-8) is rejected', () => {
+    expect(why('https://x.com/a:user:pass�word')).toBe('garbage')
+  })
+
+  test('a real web URL with a valid host is kept', () => {
+    const c = cred('https://www.epicgames.com/id/login:user@example.com:Hareedy12')
+    expect(c).not.toBeNull()
+    expect(c?.domain).toBe('epicgames.com')
+  })
+
+  test('android:// (app scheme) is NOT treated as a web URL — kept', () => {
+    const c = cred('android://-tok==@sg.technobiz.beemobile/:tekagemy6@gmail.com:0122358027')
+    expect(c).not.toBeNull()
+    expect(c?.url.startsWith('android://')).toBe(true)
+  })
+
+  test('garbage URL but real email login → salvaged as email:password (url dropped)', () => {
+    const c = cred('https://0Z:user@example.com:password')
+    expect(c).not.toBeNull()
+    expect(c?.url).toBe('')
+    expect(c?.email).toBe('user@example.com')
+    expect(c?.domain).toBe('example.com')
+  })
+
+  test('international (Cyrillic) password is NOT flagged as binary', () => {
+    const c = cred('https://site.ru/login:user@mail.ru:Пароль123')
+    expect(c).not.toBeNull()
+    expect(c?.password).toBe('Пароль123')
+  })
+
+  test('valid no-scheme host is kept', () => {
+    const c = cred('example.com:user@example.com:mypassword')
+    expect(c).not.toBeNull()
+    expect(c?.domain).toBe('example.com')
+  })
+})
+
 describe('parseULPContent — rejection_breakdown', () => {
   test('counts blank lines in rejection_breakdown', () => {
     const result = parseULPContent('valid@email.com:password123\n\n# comment\n', 'test.txt')

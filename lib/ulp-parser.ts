@@ -23,7 +23,7 @@ export interface ULPCredential {
   source_file: string
 }
 
-export type RejectionReason = 'blank' | 'no_fields' | 'no_password' | 'dedup'
+export type RejectionReason = 'blank' | 'no_fields' | 'no_password' | 'dedup' | 'garbage'
 
 export interface ParseResult {
   credentials:         ULPCredential[]
@@ -80,6 +80,39 @@ export function extractDomain(url: string): string {
     return stripPort(host).toLowerCase().replace(/^www\./, '')
   }
   return ''
+}
+
+/**
+ * Control characters (excluding tab/newline/CR) plus the Unicode replacement
+ * character U+FFFD. Neither ever appears in a legitimate credential: control
+ * bytes mean binary/non-text source data, and U+FFFD means invalid UTF-8 bytes
+ * were decoded (a mis-encoded or corrupted file). International text — Cyrillic,
+ * Thai, Arabic, emoji, etc. — consists of valid codepoints and is NOT matched.
+ */
+function hasBinaryOrReplacement(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    // control chars except tab(9)/LF(10)/CR(13), or U+FFFD replacement char
+    if ((c < 0x20 && c !== 9 && c !== 10 && c !== 13) || c === 0xFFFD) return true
+  }
+  return false
+}
+
+/**
+ * A plausible hostname: dot-separated labels of letters/digits/hyphen, at least
+ * one dot, labels not starting/ending with a hyphen. Unicode letters are
+ * allowed (\p{L}) so IDN domains like "münchen.de" pass; only the *structure*
+ * is checked. `extractDomain` has already lowercased the host and stripped port
+ * and leading "www.". Any userinfo ("user@") is stripped before the check.
+ *
+ * Rejects the nonsense hosts the parser otherwise manufactures from binary junk
+ * that contains "https://" — "0z" (no dot), "" (from "https:////..."), and
+ * mojibake hosts (which carry symbols/punctuation/spaces that aren't \p{L}/
+ * \p{N}/-/.) — while accepting real domains, IPv4, and basic-auth URLs.
+ */
+function isValidHost(host: string): boolean {
+  const h = host.includes('@') ? host.slice(host.lastIndexOf('@') + 1) : host
+  return /^[\p{L}\p{N}]([\p{L}\p{N}-]*[\p{L}\p{N}])?(\.[\p{L}\p{N}]([\p{L}\p{N}-]*[\p{L}\p{N}])?)+$/u.test(h)
 }
 
 // ── Block-format parser (Raccoon / Stealc / Meta / Vidar style) ──────────────
@@ -226,13 +259,13 @@ export async function* parseBlockStream(
   let   buffer  = ''
   let   batch:  ULPCredential[] = []
   let   batchRejected = 0
-  let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0, dedup: 0 }
+  let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0 }
   let   state   = makeBlockState()
 
   function flushBatch(): StreamBatch {
     const out: StreamBatch = { credentials: batch, rejected: batchRejected, breakdown: batchBreakdown }
     batch = []; batchRejected = 0
-    batchBreakdown = { blank: 0, no_fields: 0, no_password: 0, dedup: 0 }
+    batchBreakdown = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0 }
     return out
   }
 
@@ -514,6 +547,30 @@ export function parseLine(
   if (!password || password.length < 3) return { credential: null, reason: 'no_password' }
   if (login === password)               return { credential: null, reason: 'no_password' }
 
+  // Rule 3.5: binary / encoding-failure rejection. A control byte or a U+FFFD
+  // replacement char in any field means the source line was binary or
+  // mis-encoded, not a credential — colonSplit will still have produced
+  // url/login/password from the junk. Drop it. (International text is unharmed.)
+  if (hasBinaryOrReplacement(url) || hasBinaryOrReplacement(login) || hasBinaryOrReplacement(password)) {
+    return { credential: null, reason: 'garbage' }
+  }
+
+  // Rule 3.6: garbage-URL rejection. colonSplit accepts ANY "https://XX:..." as
+  // a credential, so binary/junk source data that merely contains "https://"
+  // yields fake rows with nonsense hosts (https://0Z, https:////..., mojibake).
+  // Only http(s) URLs are checked — that's where the junk concentrates; app
+  // schemes (android://, etc.) and scheme-less hosts (localhost, plain words)
+  // are left alone to avoid false positives. If the url is junk but the login
+  // is a real email, salvage the row as an email:password pair (drop the url);
+  // otherwise the whole line is junk.
+  if (/^https?:\/\//i.test(url) && !isValidHost(extractDomain(url))) {
+    if (/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(login)) {
+      url = ''
+    } else {
+      return { credential: null, reason: 'garbage' }
+    }
+  }
+
   // Rule 4: domain extraction
   const domain = url
     ? extractDomain(url)
@@ -528,7 +585,7 @@ export function parseLine(
 // ── Batch / stream parsers ────────────────────────────────────────────────────
 
 export function makeRejectionMap(): Record<string, number> {
-  return { blank: 0, no_fields: 0, no_password: 0, dedup: 0 }
+  return { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0 }
 }
 
 export function parseULPContent(content: string, sourceFile: string): ParseResult {
@@ -675,7 +732,7 @@ export async function* parseULPStream(
   let   buffer  = ''
   let   batch:  ULPCredential[] = []
   let   batchRejected = 0
-  let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0, dedup: 0 }
+  let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0 }
   let   blockState = makeBlockState()
   // Positional (label-free) state — mirrors the same logic in parseULPContent
   let   positionalUrl   = ''
@@ -691,7 +748,7 @@ export async function* parseULPStream(
   function flushBatch(): StreamBatch {
     const out: StreamBatch = { credentials: batch, rejected: batchRejected, breakdown: batchBreakdown }
     batch = []; batchRejected = 0
-    batchBreakdown = { blank: 0, no_fields: 0, no_password: 0, dedup: 0 }
+    batchBreakdown = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0 }
     return out
   }
 
