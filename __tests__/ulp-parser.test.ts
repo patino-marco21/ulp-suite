@@ -557,6 +557,32 @@ describe('parseLine — country-code URL prefix', () => {
   })
 })
 
+describe('parseLine — monster blank-first-tab (case D) is handled, not stored url=\'\'', () => {
+  // The ~45,529 case-D rows in the live table have url='' with the URL sitting
+  // in the email column — a shape NORM_COLS repairs at read time. These tests
+  // confirm the CURRENT parser does NOT produce that shape: the monster-fix
+  // re-routes a leading-blank-tab line into a proper url, so case-D rows are
+  // legacy backlog (a one-time repair), not something new imports keep adding.
+  test('leading blank tab + schemed URL + colon creds → non-empty url, real domain', () => {
+    const c = cred('\thttps://account.konami.net/connect/index.html\tjsessionid=ABC123:realpass')
+    expect(c?.url).toBe('https://account.konami.net/connect/index.html')
+    expect(c?.domain).toBe('account.konami.net')   // NOT '' — the case-D symptom
+  })
+
+  test('leading blank tab + multi-colon credential → non-empty url, real domain', () => {
+    const c = cred('\thttps://account.live.com/password/reset\tnighttrapyt:rich6888:OperaStable')
+    expect(c?.url).toBe('https://account.live.com/password/reset')
+    expect(c?.domain).toBe('account.live.com')
+  })
+
+  test('creds-embedded-in-URL with no colon in password field is rejected, not stored corrupt', () => {
+    // emofid shape: the credential is inside the email-column URL path and the
+    // password field has no colon → current parser rejects rather than storing
+    // a url='' row. (Minor data loss, but never corrupt data.)
+    expect(why('\thttps://account.emofid.com/Login:9127021903:vJft\tD7n5pass')).toBe('no_fields')
+  })
+})
+
 describe('parseULPContent — rejection_breakdown', () => {
   test('counts blank lines in rejection_breakdown', () => {
     const result = parseULPContent('valid@email.com:password123\n\n# comment\n', 'test.txt')
