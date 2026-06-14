@@ -101,6 +101,32 @@ echo "║   Verify proj_imported_desc usage (task #10 follow-up)        ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
+echo "═══ 0) Storage footprint: what $PROJ actually costs on disk ═══"
+echo "(You materialized it in the previous step -- this is the disk it added."
+echo " You need this for the keep-vs-drop call no matter how A/B below turn out:"
+echo " a projection that isn't used yet is pure cost until the table grows into"
+echo " it.)"
+$CH "
+SELECT
+  name AS projection,
+  sum(rows) AS rows,
+  formatReadableSize(sum(data_compressed_bytes))   AS compressed,
+  formatReadableSize(sum(data_uncompressed_bytes)) AS uncompressed,
+  count() AS parts
+FROM system.projection_parts
+WHERE database = 'ulp' AND table = 'credentials' AND active = 1
+GROUP BY name
+ORDER BY name
+" --format PrettyCompact 2>&1 || echo "(system.projection_parts unavailable on this version -- skipping)"
+echo ""
+echo "-- Base table compressed size, for comparison --"
+$CH "
+SELECT formatReadableSize(sum(data_compressed_bytes)) AS table_compressed
+FROM system.parts
+WHERE database = 'ulp' AND table = 'credentials' AND active = 1
+" --format PrettyCompact
+echo ""
+
 echo "═══ A) App's real query (ORDER BY $QUERY_ORDER_APP) ═══"
 echo "  + force_optimize_projection=1 -- errors if no projection applies"
 A_OK=1
