@@ -14,30 +14,35 @@
 # ── What gets repaired ───────────────────────────────────────────────────────
 #
 # CASE D  (~45,529 rows: url='' with the URL living in the email column)
-#   VALUE: HIGH. raw domain='' so the Credentials Browser domain filter
-#   (app/api/credentials/route.ts: WHERE domain = {x}, raw column for the
-#   bloom-filter index) silently MISSES all 45K. This step materializes the
-#   correct domain (extracted from the email-held URL, scheme-aware like
-#   NORM_COLS d_url) into raw `domain`, then re-materializes url_host (which
-#   derives from domain when url='').
-#   NON-LOSSY: url/email/password are left untouched, so url stays '' and
-#   NORM_COLS case-D keeps owning the DISPLAY (its login/password
-#   reconstruction is imperfect for some sub-shapes and is better left at read
-#   time than frozen into storage). Only the unambiguous `domain` is committed.
-#   Runs by default.
+#   raw domain='' so the Credentials Browser domain filter misses them. The
+#   correct fix is to materialize the right domain into raw `domain` -- BUT
+#   `domain` is the first column of ORDER BY (domain, email, imported_at), and
+#   ClickHouse refuses ALTER UPDATE on a sorting-key column (Code: 420,
+#   CANNOT_UPDATE_COLUMN -- confirmed on the live table 2026-06-14). So case D
+#   CANNOT be repaired in place. The only way to correct a key column is a full
+#   table rewrite (INSERT ... SELECT into a new table with the corrected domain,
+#   then RENAME swap -- the same pattern as fix-credentials-duplicates.sh).
+#   That is a 20.3M-row rewrite for a 0.22% filterability gain on rows that are
+#   ALREADY display-correct (NORM_COLS) and monitor-matchable (NORM_DOMAIN_EXPR
+#   in domain-monitor/monitor-rescan WHERE). Recommendation: LEAVE case D as-is
+#   unless a table rewrite is happening anyway for another reason, in which case
+#   fold the domain fix into that pass. This script therefore does NOT touch
+#   case D (it only reports the count).
 #
 # CASE B  (~196,624 rows: raw url = "XX https://..." country-code prefix)
 #   VALUE: COSMETIC. raw domain is ALREADY correct (extractDomain ignored the
 #   prefix), so domain= filters already work. Only `url` (display already fixed
-#   by NORM_COLS) and url_host / url_scheme carry the prefix. Repairing strips
-#   the prefix from raw `url`, then re-materializes url_host, url_scheme, tld
-#   and country_tier (its TLD fallback depends on tld). Four full-column
-#   rewrites for a cosmetic gain, so OPT-IN:
+#   by NORM_COLS) and url_host / url_scheme carry the prefix. `url` is NOT a key
+#   column, so an in-place ALTER UPDATE works. Repairing strips the prefix from
+#   raw `url`, then re-materializes url_host, url_scheme, tld and country_tier
+#   (its TLD fallback depends on tld). Four full-column rewrites for a cosmetic
+#   gain, so OPT-IN:
 #       INCLUDE_CASE_B=1 bash scripts/repair-norm-cols-backlog.sh
+#   The default run does nothing but the pre-flight report.
 #
 # ── Safety ───────────────────────────────────────────────────────────────────
-#   - Idempotent: each repair is gated on a pre-flight count of rows still
-#     needing it; a re-run after completion finds 0 and skips.
+#   - Idempotent: the case-B repair is gated on a pre-flight count; a re-run
+#     after completion finds 0 and skips.
 #   - mutations_sync=1: every ALTER blocks until finished -- visible, ordered.
 #   - Rollback: ALTER UPDATE is not transactional, BUT ulp.credentials_old (the
 #     untouched pre-dedup backup, 35.28M rows) is the fallback if anything looks
@@ -50,8 +55,8 @@
 # diagnostics). No regex is used where a plain function is clearer.
 #
 # Usage (from ~/ulp-suite on the Ubuntu Docker host running this stack):
-#   bash scripts/repair-norm-cols-backlog.sh                  # case D only
-#   INCLUDE_CASE_B=1 bash scripts/repair-norm-cols-backlog.sh # case D + case B
+#   bash scripts/repair-norm-cols-backlog.sh                  # report only
+#   INCLUDE_CASE_B=1 bash scripts/repair-norm-cols-backlog.sh # + case-B url fix
 # =============================================================================
 
 set -uo pipefail
@@ -74,15 +79,14 @@ echo "╚═══════════════════════�
 echo "Case B (cosmetic url/url_host/url_scheme): INCLUDE_CASE_B=$INCLUDE_CASE_B"
 echo ""
 
-did_materialize_urlhost=0
-did_materialize_urlcols=0
+did_caseB=0
 
 # ── 1/4  Pre-flight ──────────────────────────────────────────────────────────
 echo "═══ 1/4  Pre-flight counts ══════════════════════════════════════"
 $CH "$(cat <<'EOSQL'
 SELECT
   countIf(url='' AND position(email,'@')=0 AND position(email,'/')>0
-          AND lower(left(email,11))!='jsessionid=' AND domain='')  AS case_d_repairable,
+          AND lower(left(email,11))!='jsessionid=' AND domain='')  AS case_d_not_repairable_in_place,
   countIf(match(url, '^[A-Za-z]{1,3}\\s+https?://'))               AS case_b_repairable,
   count()                                                          AS total_rows
 FROM ulp.credentials
@@ -91,41 +95,18 @@ EOSQL
 )" --format Vertical
 echo ""
 
-# ── 2/4  Case D: materialize correct domain (always) ─────────────────────────
-echo "═══ 2/4  Case D — materialize correct domain (raw column) ═══════"
-D_TODO=$($CH "$(cat <<'EOSQL'
-SELECT countIf(url='' AND position(email,'@')=0 AND position(email,'/')>0
-               AND lower(left(email,11))!='jsessionid=' AND domain='')
-FROM ulp.credentials
-EOSQL
-)" --format TabSeparated)
-if [ "${D_TODO:-0}" = "0" ]; then
-  echo "No case-D rows with empty domain remain -- skipping."
-else
-  echo "Repairing $D_TODO case-D rows: domain <- host of the email-held URL"
-  echo "(url/email/password left untouched so NORM_COLS keeps the display)."
-  # domain(...) of the scheme-aware reconstructed URL; strip a leading 'www.'
-  # without regex (startsWith/substring) to match the parser's www handling.
-  if ! $CH "$(cat <<'EOSQL'
-ALTER TABLE ulp.credentials
-UPDATE domain =
-  if(startsWith(domain(if(startsWith(lower(email),'http://') OR startsWith(lower(email),'https://'), email, concat('https://',email))), 'www.'),
-     substring(domain(if(startsWith(lower(email),'http://') OR startsWith(lower(email),'https://'), email, concat('https://',email))), 5),
-     domain(if(startsWith(lower(email),'http://') OR startsWith(lower(email),'https://'), email, concat('https://',email))))
-WHERE url='' AND position(email,'@')=0 AND position(email,'/')>0
-  AND lower(left(email,11))!='jsessionid=' AND domain=''
-SETTINGS mutations_sync = 1
-EOSQL
-)"; then
-    echo "ERROR: case-D domain UPDATE failed. ulp.credentials_old is the backup."
-    exit 1
-  fi
-  did_materialize_urlhost=1
-  echo "Done."
-fi
+# ── 2/4  Case D: cannot be repaired in place (domain is a key column) ─────────
+echo "═══ 2/4  Case D — NOT repaired (domain is an ORDER BY key column) ═"
+echo 'ClickHouse refuses ALTER UPDATE on domain (first column of ORDER BY'
+echo '(domain, email, imported_at)) -- Code: 420, CANNOT_UPDATE_COLUMN.'
+echo 'Fixing it needs a full table rewrite (INSERT ... SELECT + RENAME swap),'
+echo 'a 20.3M-row operation for a 0.22% filterability gain on rows that are'
+echo 'already display-correct (NORM_COLS) and monitor-matchable. Left as-is by'
+echo 'design; fold the domain fix into a table rewrite only if one happens for'
+echo 'another reason. No change made here.'
 echo ""
 
-# ── 3/4  Case B: strip url prefix (opt-in) ───────────────────────────────────
+# ── 3/4  Case B: strip url prefix (opt-in; url is not a key column) ───────────
 echo "═══ 3/4  Case B — strip country-code url prefix (opt-in) ════════"
 if [ "$INCLUDE_CASE_B" != "1" ]; then
   echo "INCLUDE_CASE_B != 1 -- skipping (cosmetic; raw domain already correct)."
@@ -150,14 +131,13 @@ EOSQL
       echo "ERROR: case-B url UPDATE failed. ulp.credentials_old is the backup."
       exit 1
     fi
-    did_materialize_urlhost=1
-    did_materialize_urlcols=1
+    did_caseB=1
     echo "Done."
   fi
 fi
 echo ""
 
-# ── 4/4  Re-materialize derived columns + verify ─────────────────────────────
+# ── 4/4  Re-materialize url-derived columns + verify ─────────────────────────
 echo "═══ 4/4  Re-materialize derived columns + verify ═══════════════"
 materialize_col() {
   local col="$1"
@@ -168,51 +148,40 @@ materialize_col() {
   fi
 }
 
-if [ "$did_materialize_urlhost" = "1" ]; then
-  # url_host derives from url (case B) and from domain when url='' (case D).
+if [ "$did_caseB" = "1" ]; then
+  # All four derive from url (directly, or via tld for country_tier's fallback).
+  # Materialize tld before country_tier.
   materialize_col url_host
-fi
-if [ "$did_materialize_urlcols" = "1" ]; then
-  # url_scheme + tld derive from url; country_tier's TLD fallback derives from
-  # tld -- materialize tld before country_tier.
   materialize_col url_scheme
   materialize_col tld
   materialize_col country_tier
-fi
-if [ "$did_materialize_urlhost" = "0" ] && [ "$did_materialize_urlcols" = "0" ]; then
+else
   echo "Nothing was repaired -- no columns to re-materialize."
 fi
 echo ""
 
-echo "-- Verify: remaining repairable rows (expect ~0 for what ran; a small"
-echo "   case-D residual is rows whose email yields no extractable host) --"
+echo "-- Verify: case-B rows remaining (expect 0 if case B ran; case D is"
+echo "   unchanged by design and its count is informational) --"
 $CH "$(cat <<'EOSQL'
 SELECT
+  countIf(match(url, '^[A-Za-z]{1,3}\\s+https?://'))               AS case_b_remaining,
   countIf(url='' AND position(email,'@')=0 AND position(email,'/')>0
-          AND lower(left(email,11))!='jsessionid=' AND domain='')  AS case_d_remaining,
-  countIf(match(url, '^[A-Za-z]{1,3}\\s+https?://'))               AS case_b_remaining
+          AND lower(left(email,11))!='jsessionid=' AND domain='')  AS case_d_unchanged
 FROM ulp.credentials
 SETTINGS max_execution_time = 300
 EOSQL
 )" --format Vertical
 echo ""
 
-echo "-- Spot-check: 5 repaired case-D rows (url stays '', domain now set) --"
-$CH "$(cat <<'EOSQL'
-SELECT substring(email,1,50) AS email, domain, url_host
-FROM ulp.credentials
-WHERE url='' AND position(email,'@')=0 AND position(email,'/')>0
-  AND lower(left(email,11))!='jsessionid=' AND domain != ''
-LIMIT 5
-SETTINGS max_execution_time = 120
-EOSQL
-)" --format Vertical
-echo ""
-
 echo "═══════════════════════════════════════════════════════════════"
-echo "Repair complete. NORM_COLS still owns the DISPLAY for case D (url='')."
-echo "Storage now has a correct raw domain (+ url_host) for case-D rows, so"
-echo "domain= / url_host= filters find them."
-echo "Re-run any time -- the pre-flight gates make it idempotent."
+if [ "$did_caseB" = "1" ]; then
+  echo "Case-B url prefix stripped + url_host/url_scheme/tld/country_tier"
+  echo "re-materialized. case_b_remaining above should be 0."
+else
+  echo "No changes made (case D is not repairable in place; case B is opt-in"
+  echo "via INCLUDE_CASE_B=1)."
+fi
+echo "Case D is unchanged by design -- NORM_COLS still owns its display and the"
+echo "domain monitors still match it; only the raw domain= filter misses it."
 echo "Rollback fallback: ulp.credentials_old (untouched pre-dedup backup)."
 echo "═══════════════════════════════════════════════════════════════"
