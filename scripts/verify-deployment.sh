@@ -65,14 +65,23 @@ echo ""
 
 # ── 2  App reachability (end-to-end through ClickHouse) ──────────────────────
 echo "═══ 2  App reachable — GET /api/check (Next -> ClickHouse) ══════"
-CHECK_HTTP=$(curl -s -o /tmp/ulp-check-body -w '%{http_code}' \
-  "$APP_URL/api/check?email=deploytest@example.com" 2>/dev/null || echo "000")
+# Wait up to ~60s for the app to finish starting — the container may have just
+# been (re)built. Poll /api/check until it answers 200 or we time out, so a
+# rebuild-then-verify in one breath doesn't false-alarm on a cold start.
+CHECK_URL="$APP_URL/api/check?email=deploytest@example.com"
+CHECK_HTTP=000
+for _ in $(seq 1 30); do
+  CHECK_HTTP=$(curl -s -o /tmp/ulp-check-body -w '%{http_code}' --max-time 10 "$CHECK_URL" 2>/dev/null)
+  CHECK_HTTP=${CHECK_HTTP:-000}
+  [ "$CHECK_HTTP" = "200" ] && break
+  sleep 2
+done
 echo "HTTP $CHECK_HTTP"
 echo -n "body: "; head -c 300 /tmp/ulp-check-body 2>/dev/null; echo ""
 if [ "$CHECK_HTTP" = "200" ]; then
   echo ">>> OK: app served a query result through ClickHouse."
 else
-  echo ">>> CONCERN: expected HTTP 200 (got $CHECK_HTTP). Check: docker compose logs --tail=50 app"
+  echo ">>> CONCERN: expected HTTP 200 (got $CHECK_HTTP after ~60s). Check: docker compose logs --tail=50 app"
   concerns=$((concerns+1))
 fi
 echo ""
