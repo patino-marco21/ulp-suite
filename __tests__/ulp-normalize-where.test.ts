@@ -138,3 +138,35 @@ describe('case-A jsessionid guard', () => {
     expect(NORM_COLS).not.toMatch(/[^!]='jsessionid='\s*,/)
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// § 6  Case-D URL reconstruction is scheme-aware (regression — 2026-06-14)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('case-D scheme-aware URL reconstruction', () => {
+  // ~45,529 case-D rows hold the URL in the email column; most already carry a
+  // scheme. The old d_url = concat('https://', email) double-schemed those
+  // ("https://https://account...") so domain() returned the junk host "https",
+  // making the rows unmatchable by domain. d_url now prepends https:// only
+  // when no scheme is present.
+  test('d_url only prepends https:// when the email has no scheme', () => {
+    const guarded = "startsWith(lower(email),'https://'), email, concat('https://',email)"
+    expect(NORM_URL_EXPR).toContain(guarded)
+    expect(NORM_DOMAIN_EXPR).toContain(guarded)
+    expect(NORM_COLS).toContain(guarded)
+  })
+
+  test("concat('https://',email) only appears as the guard's else-branch", () => {
+    // The old bug used concat('https://',email) directly as d_url. It must now
+    // always be preceded by ", email," — i.e. the else-branch of the startsWith
+    // scheme guard, never standalone.
+    const bare = "concat('https://',email)"
+    for (const expr of [NORM_URL_EXPR, NORM_DOMAIN_EXPR, NORM_COLS]) {
+      let idx = expr.indexOf(bare)
+      while (idx !== -1) {
+        expect(expr.slice(Math.max(0, idx - 7), idx)).toBe('email, ')
+        idx = expr.indexOf(bare, idx + 1)
+      }
+    }
+  })
+})

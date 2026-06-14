@@ -77,10 +77,15 @@ const c3url = `concat(url,':',splitByChar(' ',email)[1])`
 const c3email = `splitByChar(' ',email)[2]`
 
 /**
- * For Case D: reconstruct URL from the email column (which holds a bare domain/path).
- * Prepend https:// so ClickHouse URL functions can extract the domain.
+ * For Case D: reconstruct URL from the email column (which holds the URL).
+ * The email may be a BARE domain/path ("site.com/path") OR already carry a
+ * scheme ("https://account.emofid.com/..."). Only prepend https:// in the bare
+ * case — blindly prepending double-schemed the already-schemed rows
+ * ("https://https://account...") so domain() returned the junk host "https"
+ * (diagnose-norm-cols-coverage.sh, 2026-06-14, ~45,529 case-D rows; most carry
+ * a scheme). With the guard, domain(d_url) extracts the real host either way.
  */
-const d_url = `concat('https://',email)`
+const d_url = `if(startsWith(lower(email),'http://') OR startsWith(lower(email),'https://'), email, concat('https://',email))`
 
 /**
  * For Case D: extract actual login from password column.
