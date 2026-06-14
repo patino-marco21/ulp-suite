@@ -98,15 +98,19 @@ Rejection (reason `garbage`, reused — no new reason type) fires when:
 2. `flushBlockState` — block-labeled credentials.
 3. Positional emit points in `parseULPContent` and `parseULPStream` — the placeholder-`password` class (class 2) arrives here.
 
-To avoid duplication, introduce one helper called from all four sites:
+To avoid duplication, introduce one emission gate that bundles **all** finalize-time junk checks (placeholder, marker, and the binary/mojibake check from Fix 3), called from every emission site:
 
 ```ts
 function isJunkCredential(login: string, password: string): boolean {
-  return isPlaceholderLogin(login) || hasJunkMarker(login) || hasJunkMarker(password)
+  return isPlaceholderLogin(login)
+      || hasJunkMarker(login)          || hasJunkMarker(password)
+      || hasBinaryOrReplacement(login) || hasBinaryOrReplacement(password)
 }
 ```
 
-`flushBlockState` and the positional emitters currently do **not** call any garbage check; wiring `isJunkCredential` (and, see Fix 3, the binary check) into them is part of this change.
+Wiring per site:
+- `parseLine` already runs `hasBinaryOrReplacement` (Rule 3.5) and the url-garbage check (Rule 3.6) inline; here we add only the **new** placeholder + marker checks (calling `isJunkCredential` is also fine — the binary overlap is harmless).
+- `flushBlockState` and the positional emitters in `parseULPContent` / `parseULPStream` currently run **no** garbage check at all; they call `isJunkCredential` to get the full gate (this is also what gives Fix 3 effect on those paths).
 
 ### Fix 3 — Double-encoded mojibake (`hasBinaryOrReplacement`)
 
@@ -116,7 +120,7 @@ Add one line to `hasBinaryOrReplacement` (~line 92): also return `true` when the
 if (s.includes('ï¿½')) return true
 ```
 
-Because `flushBlockState` / positional emitters don't currently call `hasBinaryOrReplacement`, this fix only takes full effect once those paths also run the binary check (folded into the Fix 2 emission-point wiring, e.g. an `isJunkCredential` that also calls `hasBinaryOrReplacement(login) || hasBinaryOrReplacement(password)`).
+Because `flushBlockState` / positional emitters don't currently call `hasBinaryOrReplacement`, this fix only takes full effect on those paths once they run the binary check — which the Fix 2 emission gate (`isJunkCredential`, which includes `hasBinaryOrReplacement`) provides.
 
 ## 4. Rejection reason
 
