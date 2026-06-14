@@ -520,6 +520,43 @@ describe('parseLine — validation rules', () => {
   })
 })
 
+describe('parseLine — country-code URL prefix', () => {
+  // Some source files (e.g. "VIP ULPP @Redline_Cl0ud4 (31).txt") prepend an
+  // ISO country code + space to the URL field: "DZ https://zr.express/...".
+  // The prefix is not part of the URL — strip it so the stored `url` column
+  // (and the url_host materialized from it) are clean, not just NORM_COLS-
+  // repaired at display time. extractDomain already ignored the prefix, so
+  // the domain was always correct; this fixes the url column to match.
+  test('strips a 2-letter country-code prefix from a tab-separated URL', () => {
+    const c = cred('DZ https://zr.express/ZREXPRESS_WEB/FR/Connexion\tuser@x.com\tpw123')
+    expect(c?.url).toBe('https://zr.express/ZREXPRESS_WEB/FR/Connexion')
+    expect(c?.domain).toBe('zr.express')
+  })
+
+  test('strips a 3-letter prefix and keeps http scheme', () => {
+    const c = cred('abc http://site.com/login\tuser@x.com\tpw123')
+    expect(c?.url).toBe('http://site.com/login')
+    expect(c?.domain).toBe('site.com')
+  })
+
+  test('strips the prefix on a colon-separated line too', () => {
+    const c = cred('IN https://zrtiudp.itfarmer.in/index:user@x.com:pw123')
+    expect(c?.url).toBe('https://zrtiudp.itfarmer.in/index')
+    expect(c?.domain).toBe('zrtiudp.itfarmer.in')
+  })
+
+  test('does NOT alter a normal URL with no prefix', () => {
+    const c = cred('https://example.com/login\tuser@x.com\tpw123')
+    expect(c?.url).toBe('https://example.com/login')
+  })
+
+  test('does NOT strip a leading path segment that resembles a word', () => {
+    // No scheme right after the short word → not a country-code prefix.
+    const c = cred('https://news.com/in/article\tuser@x.com\tpw123')
+    expect(c?.url).toBe('https://news.com/in/article')
+  })
+})
+
 describe('parseULPContent — rejection_breakdown', () => {
   test('counts blank lines in rejection_breakdown', () => {
     const result = parseULPContent('valid@email.com:password123\n\n# comment\n', 'test.txt')

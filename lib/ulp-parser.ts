@@ -493,6 +493,17 @@ export function parseLine(
     ;[url, login, password] = split
   }
 
+  // Country-code URL prefix: some source files prepend an ISO country code +
+  // space to the URL field ("DZ https://site/..."), which is not part of the
+  // URL. Strip it so the stored `url` (and the url_host materialized from it)
+  // are clean — not just NORM_COLS-repaired at display time. Gated on a scheme
+  // immediately following the short token, so real paths like
+  // "https://news.com/in/article" are never touched. extractDomain already
+  // ignored the prefix, so `domain` is unaffected.
+  if (/^[A-Za-z]{1,3}\s+https?:\/\//.test(url)) {
+    url = url.replace(/^[A-Za-z]{1,3}\s+/, '')
+  }
+
   // Percent-decode URL-encoded password (some stealers encode special chars)
   if (password.includes('%')) {
     try { password = decodeURIComponent(password) } catch { /* keep original if malformed */ }
