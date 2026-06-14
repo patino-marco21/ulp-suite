@@ -35,8 +35,28 @@
 #      password_length, password_mask, url_scheme, is_corporate_email,
 #      email_domain, url_host, password_entropy_band, imported_at) -- NOT
 #      `SELECT *`, which would ~double table storage at the current 10.51x
-#      compression ratio. ORDER BY matches SORT_MAP['imported_desc'] exactly:
-#      imported_at DESC, domain ASC, email ASC, url ASC, password ASC.
+#      compression ratio.
+#
+#      ORDER BY: a projection's ORDER BY (like a table's MergeTree sorting
+#      key) is a plain comma-separated expression list -- ASC/DESC are NOT
+#      accepted (confirmed 2026-06-13: "ADD PROJECTION ... ORDER BY
+#      imported_at DESC, ..." fails with Code: 62 Syntax error at "DESC",
+#      table left unchanged). To match SORT_MAP['imported_desc']
+#      (imported_at DESC, domain ASC, email ASC, url ASC, password ASC)
+#      exactly -- including the domain/email/url/password tiebreak
+#      direction, which matters because imported_at DEFAULT now() means a
+#      whole bulk import can share one imported_at value -- the projection's
+#      ORDER BY is:
+#        negate(toUnixTimestamp(imported_at)), domain, email, url, password
+#      negate(toUnixTimestamp(imported_at)) is ascending exactly when
+#      imported_at is descending, so a forward read of this projection visits
+#      rows in precisely SORT_MAP['imported_desc']'s order, term for term.
+#      Whether ClickHouse's optimizer actually matches the app's literal
+#      "imported_at DESC" query against this projection (a "monotonic
+#      function" inference) is what step 3's EXPLAIN + timing empirically
+#      tests -- if it doesn't, DROP PROJECTION (printed at the end) is cheap
+#      and a different approach (rewriting the app's ORDER BY to the negated
+#      expression directly) would be the next step.
 #
 #   2. ALTER TABLE ulp.credentials MATERIALIZE PROJECTION proj_imported_desc
 #      IN PARTITION '<partition>' SETTINGS mutations_sync = 1
@@ -83,7 +103,15 @@ cd "$PROJECT_DIR"
 CH="docker exec ulpsuite_clickhouse clickhouse-client --query"
 PROJ="proj_imported_desc"
 PROJ_COLS="url, email, password, source_file, breach_name, country_tier, login_type, password_length, password_mask, url_scheme, is_corporate_email, email_domain, url_host, password_entropy_band, imported_at, domain"
-PROJ_ORDER="imported_at DESC, domain ASC, email ASC, url ASC, password ASC"
+
+# The app's real ORDER BY (SORT_MAP['imported_desc'], lib/cursor-pagination.ts)
+# -- used for the default-view query and the EXPLAIN check below. NOT used
+# inside ADD PROJECTION (see header: projection ORDER BY rejects ASC/DESC).
+QUERY_ORDER="imported_at DESC, domain ASC, email ASC, url ASC, password ASC"
+
+# The projection's physical sort order -- see header for why
+# negate(toUnixTimestamp(imported_at)) stands in for "imported_at DESC".
+PROJ_ORDER="negate(toUnixTimestamp(imported_at)), domain, email, url, password"
 
 # Exact default-view query (app/api/credentials/route.ts, sort=imported_desc),
 # minus the NORM_COLS rewrite -- same raw-column shape as diagnose-scale-
@@ -92,7 +120,7 @@ read -r -d '' QUERY_DEFAULT <<EOF
 SELECT $PROJ_COLS
 FROM ulp.credentials
 WHERE 1=1
-ORDER BY $PROJ_ORDER
+ORDER BY $QUERY_ORDER
 LIMIT 50
 SETTINGS max_execution_time = 300, timeout_overflow_mode = 'throw'
 EOF
@@ -122,7 +150,7 @@ GROUP BY partition
 ORDER BY partition
 " --format PrettyCompact
 
-echo "-- BEFORE: default view query (ORDER BY $PROJ_ORDER), LIMIT 50 --"
+echo "-- BEFORE: default view query (ORDER BY $QUERY_ORDER), LIMIT 50 --"
 time $CH "$QUERY_DEFAULT" --format Null
 echo ""
 
@@ -211,7 +239,7 @@ EXPLAIN indexes = 1
 SELECT url, email, password, imported_at, domain
 FROM ulp.credentials
 WHERE 1=1
-ORDER BY $PROJ_ORDER
+ORDER BY $QUERY_ORDER
 LIMIT 50
 SETTINGS use_query_condition_cache = 0, use_skip_indexes_on_data_read = 0
 ")
@@ -226,13 +254,21 @@ else
 fi
 echo ""
 
-echo "-- AFTER: default view query (ORDER BY $PROJ_ORDER), LIMIT 50 --"
+echo "-- AFTER: default view query (ORDER BY $QUERY_ORDER), LIMIT 50 --"
 time $CH "$QUERY_DEFAULT" --format Null
 echo ""
 
 echo "═══════════════════════════════════════════════════════════════"
 echo "Done. Compare the BEFORE (step 1/4) and AFTER (step 4/4) 'real' times"
 echo "above for the same query -- that's the actual win from this projection."
+echo ""
+echo "If AFTER ~= BEFORE and $PROJ did NOT appear in the EXPLAIN output above,"
+echo "ClickHouse isn't matching the app's 'imported_at DESC' query against this"
+echo "projection's negate(toUnixTimestamp(...))-based order -- the projection"
+echo "is still harmless (DROP PROJECTION below is cheap). Next step would be"
+echo "rewriting the app's ORDER BY to use negate(toUnixTimestamp(imported_at))"
+echo "directly so it's a literal match instead of relying on monotonicity"
+echo "inference."
 echo ""
 echo "New parts (from future imports) get $PROJ automatically; nothing"
 echo "further to do for those."
