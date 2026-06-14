@@ -35,8 +35,22 @@
  * string parsing → whitespace in RE2.  Same logic: `\\.` → `\\\\.` in JS.
  */
 
-/** Condition: this row is a jsessionid bank-session entry */
-const JS = `lower(left(email,11))='jsessionid='`
+/**
+ * Condition: this row is an ORIGINAL-SHAPE jsessionid bank-session entry —
+ * the `url` field is EMPTY and the real URL + credentials are packed into the
+ * `password` column and the colon-joined `email` (jsessionid=TOKEN:SERVER:
+ * USER:PASS). The `url=''` guard is essential and was added 2026-06-14:
+ *
+ *   diagnose-norm-cols-coverage.sh found 2,984 rows with a perfectly good
+ *   `url` (e.g. https://www.billdesk.com/...) and correct `domain`, plus a
+ *   BARE `jsessionid=<token>` (no colons) in the email column. Without the
+ *   guard the case-A transform fired on those too and DESTROYED them: it
+ *   replaced the good url with password garbage, blanked the email, and
+ *   emptied the domain. Requiring url='' restricts the transform to rows that
+ *   actually match its design; good-url rows fall through to their raw
+ *   (correct) values for url/domain and keep their raw email/password.
+ */
+const JS = `(lower(left(email,11))='jsessionid=' AND url='')`
 
 /** Condition: this row has a country-code prefix in the url column */
 const CC = `match(url,'^[A-Za-z]{1,3}\\\\s+https?://')`

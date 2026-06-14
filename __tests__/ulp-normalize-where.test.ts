@@ -111,3 +111,30 @@ describe('NORM_COLS', () => {
     expect(NORM_COLS).toContain('if(')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// § 5  Case-A jsessionid guard (regression — 2026-06-14)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('case-A jsessionid guard', () => {
+  // 2,984 rows had a valid url + correct domain plus a bare 'jsessionid=token'
+  // email. The unguarded case-A transform fired on them and discarded the good
+  // url, blanked the email, and emptied the domain. The fix gates case A on
+  // url='' so only original-shape rows (empty url) are rewritten; good-url rows
+  // fall through to their raw values. These string-shape checks lock the guard
+  // in (the SQL semantics themselves can only be verified against ClickHouse).
+  test("jsessionid branch requires url='' in every expression that uses it", () => {
+    expect(NORM_URL_EXPR).toContain("jsessionid=' AND url=''")
+    expect(NORM_EMAIL_EXPR).toContain("jsessionid=' AND url=''")
+    expect(NORM_DOMAIN_EXPR).toContain("jsessionid=' AND url=''")
+    expect(NORM_COLS).toContain("jsessionid=' AND url=''")
+  })
+
+  test('no positive jsessionid equality is used unguarded as a condition', () => {
+    // Old bug: `lower(...)='jsessionid='` used directly as an if() condition,
+    // i.e. immediately followed by a comma. The guarded form is followed by
+    // " AND url=''"; the case-D form is a NOT-equals (!=). So a positive
+    // equality (`[^!]='jsessionid='`) directly followed by a comma is the bug.
+    expect(NORM_COLS).not.toMatch(/[^!]='jsessionid='\s*,/)
+  })
+})
