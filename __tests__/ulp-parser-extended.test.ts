@@ -1467,3 +1467,86 @@ describe('§21 Junk-marker rejection (block + positional)', () => {
     expect(r.credentials[0].email).toBe('realuser')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §22  Sentinel passwords + extended placeholder logins
+// A "sentinel" password is a no-password-could-be-extracted marker (browser
+// "not saved", extraction/decryption failures). These are not credentials.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§22 Sentinel passwords + extra placeholders', () => {
+  test('password "[NOT_SAVED]" → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:[NOT_SAVED]')).toBeNull()
+    expect(why('https://site.com:realuser:[NOT_SAVED]')).toBe('garbage')
+  })
+
+  test('password "*none*" → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:*none*')).toBeNull()
+    expect(why('https://site.com:realuser:*none*')).toBe('garbage')
+  })
+
+  test('password "[fail]" → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:[fail]')).toBeNull()
+  })
+
+  test('password "Decryptionfailed." → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:Decryptionfailed.')).toBeNull()
+  })
+
+  test('password "Old or unknown version." → rejected garbage', () => {
+    // tab-separated so the spaces stay in the password field
+    expect(cred('https://site.com\trealuser\tOld or unknown version.')).toBeNull()
+  })
+
+  test('password "none" → rejected garbage (none/None included)', () => {
+    expect(cred('https://site.com:realuser:none')).toBeNull()
+    expect(why('https://site.com:realuser:none')).toBe('garbage')
+  })
+
+  test('password "None" → rejected garbage (case-insensitive)', () => {
+    expect(cred('https://site.com:realuser:None')).toBeNull()
+  })
+
+  test('password "none123" KEPT (sentinel match is exact, not substring)', () => {
+    const c = cred('https://site.com:realuser:none123')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('none123')
+  })
+
+  test('real weak password "123456" still KEPT', () => {
+    const c = cred('https://site.com:realuser:123456')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('123456')
+  })
+
+  test('login "UNKNOWN" → rejected garbage', () => {
+    expect(cred('https://site.com:UNKNOWN:realpass123')).toBeNull()
+    expect(why('https://site.com:UNKNOWN:realpass123')).toBe('garbage')
+  })
+
+  test('login "{mail}" → rejected garbage', () => {
+    expect(cred('https://site.com:{mail}:realpass123')).toBeNull()
+  })
+
+  test('login "missing-user" → rejected garbage', () => {
+    expect(cred('https://site.com:missing-user:realpass123')).toBeNull()
+  })
+
+  test('login "false" → rejected garbage', () => {
+    expect(cred('https://site.com:false:realpass123')).toBeNull()
+  })
+
+  test('positional block with sentinel password "[NOT_SAVED]" → dropped (garbage)', () => {
+    const content = ['https://example.com/login', 'realuser', '[NOT_SAVED]'].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(0)
+    expect(r.rejection_breakdown.garbage).toBe(1)
+  })
+
+  test('block-format credential with sentinel password "*none*" → dropped (garbage)', () => {
+    const content = ['Host: https://site.com', 'Login: realuser', 'Password: *none*', '===='].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(0)
+    expect(r.rejection_breakdown.garbage).toBe(1)
+  })
+})
