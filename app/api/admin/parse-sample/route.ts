@@ -17,32 +17,12 @@ import {
   parseLine, makeRejectionMap,
   type RejectionReason,
 } from '@/lib/ulp-parser'
+import { REASON_LABELS, buildRecommendations, buildTopRejections } from '@/lib/rejection-report'
 
 export const dynamic = 'force-dynamic'
 
 const MAX_LINES   = 10_000
 const MAX_BYTES   = 1_024 * 1_024  // 1 MB
-
-/** Human-readable explanation for each rejection reason */
-const REASON_LABELS: Record<string, string> = {
-  blank:      'Empty / comment / section-header line',
-  no_fields:  'Cannot split into ≥2 fields',
-  no_password:'Login found but no valid password (too short or equals login)',
-}
-
-/** Recommendation thresholds */
-const RECS: Array<{ reason: RejectionReason; threshold: number; message: string }> = [
-  {
-    reason:    'no_fields',
-    threshold: 10,
-    message:   'Many lines cannot be split. Check for unusual separators (pipe, space) or binary/compressed data mixed into the text file.',
-  },
-  {
-    reason:    'no_password',
-    threshold: 5,
-    message:   'Many lines have no valid password. Passwords must be ≥3 characters and differ from the login.',
-  },
-]
 
 export async function POST(request: NextRequest) {
   const user = await validateRequest(request)
@@ -92,33 +72,11 @@ export async function POST(request: NextRequest) {
   const skipped = total - parsed
   const importPct = total > 0 ? Math.round(parsed / total * 1000) / 10 : 0
 
-  // Build recommendations based on breakdown percentages
-  const recommendations: string[] = []
-  for (const rec of RECS) {
-    const count = (breakdown as Record<string, number>)[rec.reason] ?? 0
-    const pct   = total > 0 ? count / total * 100 : 0
-    if (pct >= rec.threshold) {
-      recommendations.push(`[${rec.reason}] ${Math.round(pct)}% of lines: ${rec.message}`)
-    }
-  }
-  if (importPct < 50 && recommendations.length === 0) {
-    recommendations.push('Import rate is below 50%. Check that the file is a valid ULP/credential text file and not binary/compressed data.')
-  }
-  if (importPct >= 80) {
-    recommendations.push('Import rate looks healthy (≥80%). The parser is handling this file format well.')
-  }
+  // Build recommendations from the breakdown + import rate (see parse-sample-report)
+  const recommendations = buildRecommendations(breakdown, total, importPct)
 
-  // Top rejection reasons sorted by count
-  const topRejections = (Object.entries(breakdown) as [string, number][])
-    .filter(([, c]) => c > 0)
-    .sort(([, a], [, b]) => b - a)
-    .slice(0, 8)
-    .map(([reason, count]) => ({
-      reason,
-      count,
-      pct:   Math.round(count / total * 1000) / 10,
-      label: REASON_LABELS[reason] ?? reason,
-    }))
+  // Top rejection reasons sorted by count (see parse-sample-report)
+  const topRejections = buildTopRejections(breakdown, total)
 
   return NextResponse.json({
     success: true,

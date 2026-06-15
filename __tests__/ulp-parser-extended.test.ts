@@ -197,15 +197,15 @@ describe('§2 Port disambiguation', () => {
     expect(c!.domain).toBe('app.corp.com')
   })
 
-  test('no-scheme domain with port-like segment: domain:443:user:pass — 443 becomes login', () => {
-    // No scheme → colonSplit falls through to no-scheme branch.
-    // c1=domain:443 left=domain (no @) c2=next : → url=domain, login=443, pass=user:pass
-    // This is expected/documented behaviour for no-scheme lines.
+  test('no-scheme domain with bare port: domain:443:user:pass — 443 folds into URL', () => {
+    // Behaviour change (Fix 1, 2026-06-14): a digit-only middle field after a
+    // scheme-less host is treated as a PORT and absorbed into the URL, not as
+    // the login. Previously this asserted email='443'.
     const c = cred('mysite.com:443:admin:secret123')
     expect(c).not.toBeNull()
-    expect(c!.url).toBe('mysite.com')
-    expect(c!.email).toBe('443')
-    expect(c!.password).toBe('admin:secret123')
+    expect(c!.url).toBe('mysite.com:443')
+    expect(c!.email).toBe('admin')
+    expect(c!.password).toBe('secret123')
   })
 
   test('IPv4 URL with port + path: http://192.168.1.1:8080/admin:root:toor', () => {
@@ -462,14 +462,12 @@ describe('§6 Pipe-noise stripping', () => {
 
 describe('§7 Label-line false-positive audit (documented behaviour)', () => {
 
-  test('PASSWORD: value → parsed as email=PASSWORD, password=value (false positive)', () => {
-    // colonSplit: no scheme, no @ in "PASSWORD", 2-field → ['', 'PASSWORD', ' value']
-    // password has a leading space but length > 3 → accepted
-    const c = cred('PASSWORD: myPassword123')
-    expect(c).not.toBeNull()
-    expect(c!.email).toBe('PASSWORD')
-    // Password contains leading space (colonSplit does not trim colon fields)
-    expect(c!.password).toContain('myPassword123')
+  test('PASSWORD: value → login "PASSWORD" rejected as placeholder (Rule 3.7)', () => {
+    // Behaviour change (Fix 2 / Rule 3.7, 2026-06-14): this was a documented
+    // false positive (login=PASSWORD accepted). The placeholder-login check now
+    // rejects "PASSWORD" as garbage, so the label line is no longer mis-stored.
+    expect(cred('PASSWORD: myPassword123')).toBeNull()
+    expect(why('PASSWORD: myPassword123')).toBe('garbage')
   })
 
   test('Host: example.com → parsed as email=Host, password=example.com (false positive)', () => {
@@ -1271,4 +1269,367 @@ describe('§17 android:// credential parsing', () => {
     expect(why('# Soft: Chrome')).toBe('blank')
   })
 
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §18  Double-encoded mojibake (ï¿½) rejection
+// The streaming parsers decode bytes as latin1, so a UTF-8 replacement char
+// (EF BF BD) appears as the 3-char sequence U+00EF U+00BF U+00BD, never as
+// codepoint 0xFFFD. The garbage filter must catch that form.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§18 Double-encoded mojibake', () => {
+  test('ï¿½ in password → rejected as garbage', () => {
+    const line = 'https://site.com:realuser:paï¿½ss'
+    expect(cred(line)).toBeNull()
+    expect(why(line)).toBe('garbage')
+  })
+
+  test('ï¿½ in email/login → rejected as garbage', () => {
+    const line = 'https://site.com:reï¿½aluser:realpass123'
+    expect(cred(line)).toBeNull()
+    expect(why(line)).toBe('garbage')
+  })
+
+  test('valid Unicode password (Cyrillic/Chinese/emoji) still kept — no false positive', () => {
+    const c = cred('https://site.com:realuser:пароль密码🔑')
+    expect(c).not.toBeNull()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §19  Port/path-leak recovery (scheme-less host:port[/path]:login:pass)
+// The no-scheme colon-splitter used to make the port the login. Now host:port
+// (with or without a path) is absorbed into the URL.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§19 Port/path-leak recovery', () => {
+  test('localhost:port/ : login : pass → port+path folds into URL', () => {
+    const c = cred('localhost:10000/:admin:12345')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('localhost:10000/')
+    expect(c!.email).toBe('admin')
+    expect(c!.password).toBe('12345')
+  })
+
+  test('host:port/path.cgi : login : pass → full path preserved in URL', () => {
+    const c = cred('admin:10000/session_login.cgi:studioprint:3571nt62')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('admin:10000/session_login.cgi')
+    expect(c!.email).toBe('studioprint')
+    expect(c!.password).toBe('3571nt62')
+  })
+
+  test('hostname:port/ with backslash login preserved', () => {
+    const c = cred('psvm001:1000/:psdc001\\administrator:AAS@4770477')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('psvm001:1000/')
+    expect(c!.email).toBe('psdc001\\administrator')
+    expect(c!.password).toBe('AAS@4770477')
+  })
+
+  test('bare port (no path): host:443:login:pass → port folds into URL', () => {
+    const c = cred('mysite.com:443:admin:secret123')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('mysite.com:443')
+    expect(c!.email).toBe('admin')
+    expect(c!.password).toBe('secret123')
+    expect(c!.domain).toBe('mysite.com')
+  })
+
+  test('IPv4 no-scheme with port+path: ip:port/path:login:pass', () => {
+    const c = cred('192.168.1.1:8080/admin:root:toor')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('192.168.1.1:8080/admin')
+    expect(c!.email).toBe('root')
+    expect(c!.password).toBe('toor')
+  })
+
+  // ── Regressions: non-port middles must be untouched ──
+  test('regression: no-scheme domain:login:pass (non-numeric middle) unchanged', () => {
+    const c = cred('example.com:alice:hunter2pass')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('example.com')
+    expect(c!.email).toBe('alice')
+    expect(c!.password).toBe('hunter2pass')
+  })
+
+  test('regression: no-scheme host:email@domain:pass unchanged', () => {
+    const c = cred('netflix.com:user@gmail.com:netfl1x!')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('netflix.com')
+    expect(c!.email).toBe('user@gmail.com')
+    expect(c!.password).toBe('netfl1x!')
+  })
+
+  test('regression: numeric login 3-field host:12345:pass is KEPT (not dropped as a bare port)', () => {
+    // mid is digits but nothing after contains a ':' → not a port+creds shape.
+    // Must fall through to the plain 3-field split, NOT get dropped.
+    const c = cred('forum.com:12345:realpass')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('forum.com')
+    expect(c!.email).toBe('12345')
+    expect(c!.password).toBe('realpass')
+  })
+
+  test('bare port > 65535 is NOT absorbed (upper-bound guard)', () => {
+    // 99999 is 5 digits but exceeds the max TCP port, so it is treated as a
+    // numeric login, not a port — exercises the `<= 65535` half of the guard.
+    const c = cred('site.com:99999:admin:pass1')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('site.com')
+    expect(c!.email).toBe('99999')
+    expect(c!.password).toBe('admin:pass1')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §20  Junk-marker rejection (inline parseLine)
+// Placeholder logins and token/decryption blobs are not real credentials.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§20 Junk-marker rejection (inline)', () => {
+  test('placeholder login "Password" → rejected garbage', () => {
+    expect(cred('https://site.com:Password:realpass123')).toBeNull()
+    expect(why('https://site.com:Password:realpass123')).toBe('garbage')
+  })
+
+  test('placeholder login "N/A" → rejected garbage', () => {
+    // Scheme-less form: the "/" in "N/A" would otherwise be read as a URL path
+    // by the scheme branch; here N/A lands cleanly in the login field.
+    expect(cred('site.com:N/A:realpass123')).toBeNull()
+    expect(why('site.com:N/A:realpass123')).toBe('garbage')
+  })
+
+  test('placeholder login "[NOT_SAVED]" → rejected garbage', () => {
+    expect(cred('https://site.com:[NOT_SAVED]:realpass123')).toBeNull()
+    expect(why('https://site.com:[NOT_SAVED]:realpass123')).toBe('garbage')
+  })
+
+  test('real weak password "password" is KEPT (placeholder check is login-only)', () => {
+    const c = cred('https://site.com:realuser:password')
+    expect(c).not.toBeNull()
+    expect(c!.email).toBe('realuser')
+    expect(c!.password).toBe('password')
+  })
+
+  test('gmail_ps= token blob in password → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:gmail_ps=CrMBAAlriVxyz')).toBeNull()
+    expect(why('https://site.com:realuser:gmail_ps=CrMBAAlriVxyz')).toBe('garbage')
+  })
+
+  test('[Wrong padding] decryption junk in password → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:[Wrong padding] HEX: D4-75-C9')).toBeNull()
+    expect(why('https://site.com:realuser:[Wrong padding] HEX: D4-75-C9')).toBe('garbage')
+  })
+
+  test('legit android ==@com. credential still KEPT (marker is in URL, not login/pass)', () => {
+    const c = cred('android://HASH==@com.instagram.android:john_doe:SecretPass99')
+    expect(c).not.toBeNull()
+    expect(c!.email).toBe('john_doe')
+    expect(c!.password).toBe('SecretPass99')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §21  Junk-marker rejection on block + positional paths
+// The placeholder/token gate must also run where credentials are emitted
+// without going through parseLine.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§21 Junk-marker rejection (block + positional)', () => {
+  test('positional 3-line block with placeholder login "password" → dropped', () => {
+    const content = ['https://example.com/login', 'password', 'foo:barbaz'].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(0)
+    expect(r.rejection_breakdown.garbage).toBe(1)
+  })
+
+  test('positional 3-line block with real login → kept (regression)', () => {
+    const content = ['https://example.com/login', 'realuser', 'realpassword123'].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(1)
+    expect(r.credentials[0].email).toBe('realuser')
+    expect(r.credentials[0].password).toBe('realpassword123')
+  })
+
+  test('block-format credential with gmail_ps= token → dropped', () => {
+    const content = ['Host: https://site.com', 'Login: realuser', 'Password: gmail_ps=CrMBxyz', '===='].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(0)
+    expect(r.rejection_breakdown.garbage).toBe(1)
+  })
+
+  test('block-format normal credential → kept (regression)', () => {
+    const content = ['Host: https://site.com', 'Login: realuser', 'Password: GoodPass99', '===='].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(1)
+    expect(r.credentials[0].email).toBe('realuser')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §22  Sentinel passwords + extended placeholder logins
+// A "sentinel" password is a no-password-could-be-extracted marker (browser
+// "not saved", extraction/decryption failures). These are not credentials.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§22 Sentinel passwords + extra placeholders', () => {
+  test('password "[NOT_SAVED]" → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:[NOT_SAVED]')).toBeNull()
+    expect(why('https://site.com:realuser:[NOT_SAVED]')).toBe('garbage')
+  })
+
+  test('password "*none*" → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:*none*')).toBeNull()
+    expect(why('https://site.com:realuser:*none*')).toBe('garbage')
+  })
+
+  test('password "[fail]" → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:[fail]')).toBeNull()
+  })
+
+  test('password "Decryptionfailed." → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:Decryptionfailed.')).toBeNull()
+  })
+
+  test('password "Old or unknown version." → rejected garbage', () => {
+    // tab-separated so the spaces stay in the password field
+    expect(cred('https://site.com\trealuser\tOld or unknown version.')).toBeNull()
+  })
+
+  test('password "none" → rejected garbage (none/None included)', () => {
+    expect(cred('https://site.com:realuser:none')).toBeNull()
+    expect(why('https://site.com:realuser:none')).toBe('garbage')
+  })
+
+  test('password "None" → rejected garbage (case-insensitive)', () => {
+    expect(cred('https://site.com:realuser:None')).toBeNull()
+  })
+
+  test('password "none123" KEPT (sentinel match is exact, not substring)', () => {
+    const c = cred('https://site.com:realuser:none123')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('none123')
+  })
+
+  test('real weak password "123456" still KEPT', () => {
+    const c = cred('https://site.com:realuser:123456')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('123456')
+  })
+
+  test('login "UNKNOWN" → rejected garbage', () => {
+    expect(cred('https://site.com:UNKNOWN:realpass123')).toBeNull()
+    expect(why('https://site.com:UNKNOWN:realpass123')).toBe('garbage')
+  })
+
+  test('login "{mail}" → rejected garbage', () => {
+    expect(cred('https://site.com:{mail}:realpass123')).toBeNull()
+  })
+
+  test('login "missing-user" → rejected garbage', () => {
+    expect(cred('https://site.com:missing-user:realpass123')).toBeNull()
+  })
+
+  test('login "false" → rejected garbage', () => {
+    expect(cred('https://site.com:false:realpass123')).toBeNull()
+  })
+
+  test('positional block with sentinel password "[NOT_SAVED]" → dropped (garbage)', () => {
+    const content = ['https://example.com/login', 'realuser', '[NOT_SAVED]'].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(0)
+    expect(r.rejection_breakdown.garbage).toBe(1)
+  })
+
+  test('block-format credential with sentinel password "*none*" → dropped (garbage)', () => {
+    const content = ['Host: https://site.com', 'Login: realuser', 'Password: *none*', '===='].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(0)
+    expect(r.rejection_breakdown.garbage).toBe(1)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §23  URL-path-with-@ is not an email login
+// colonSplit's email-login shortcut only fires when '@' precedes any '/'. A '/'
+// before the '@' marks a URL path (e.g. discord.com/channels/@me/<id>), not an
+// email, so it must not be stored as the login.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§23 URL-path-with-@ vs email login', () => {
+  test('discord DM URL-path in login slot (2-field) → rejected, not stored as login', () => {
+    expect(cred('discord.com/channels/@me/935262015486824538:GATO')).toBeNull()
+    expect(why('discord.com/channels/@me/935262015486824538:GATO')).toBe('no_fields')
+  })
+
+  test('3-field URL-path-with-@ : login : pass → path becomes url, real login extracted', () => {
+    const c = cred('discord.com/channels/@me/123:realuser:realpass1')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('discord.com/channels/@me/123')
+    expect(c!.email).toBe('realuser')
+    expect(c!.password).toBe('realpass1')
+  })
+
+  test('real email login still kept (@ before any /)', () => {
+    const c = cred('user@example.com:supersecret')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('')
+    expect(c!.email).toBe('user@example.com')
+    expect(c!.password).toBe('supersecret')
+  })
+
+  test('email with trailing slash still kept (@ precedes /)', () => {
+    const c = cred('user@gmail.com/:mypassword1')
+    expect(c).not.toBeNull()
+    expect(c!.email).toBe('user@gmail.com/')
+    expect(c!.password).toBe('mypassword1')
+  })
+
+  test('email in the MIDDLE field is unaffected (left has no @)', () => {
+    // host:email@domain:pass — the @ is in the middle field, not `left`, so this
+    // code path is untouched by the email-shortcut change.
+    const c = cred('steamcommunity.com:player@gmail.com:steampass1')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('steamcommunity.com')
+    expect(c!.email).toBe('player@gmail.com')
+    expect(c!.password).toBe('steampass1')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §24  URL-scheme-fragment logins + masked passwords
+// "https"/"http"/"[unknown]" logins are fragments/placeholders, never a real
+// username; an all-asterisk password is a masked/redacted value.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§24 URL-fragment logins + masked passwords', () => {
+  test('login "https" → rejected garbage (URL scheme fragment)', () => {
+    expect(cred('https://site.com:https:realpass123')).toBeNull()
+    expect(why('https://site.com:https:realpass123')).toBe('garbage')
+  })
+
+  test('login "http" → rejected garbage', () => {
+    expect(cred('https://site.com:http:realpass123')).toBeNull()
+  })
+
+  test('login "[UNKNOWN]" → rejected garbage (case-insensitive)', () => {
+    expect(cred('https://site.com:[UNKNOWN]:realpass123')).toBeNull()
+  })
+
+  test('masked password "********" → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:********')).toBeNull()
+    expect(why('https://site.com:realuser:********')).toBe('garbage')
+  })
+
+  test('masked password "****" → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:****')).toBeNull()
+  })
+
+  test('password containing asterisks but not all-asterisk is KEPT', () => {
+    const c = cred('https://site.com:realuser:P@ss*1word')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('P@ss*1word')
+  })
 })

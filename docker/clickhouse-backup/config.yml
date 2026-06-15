@@ -1,0 +1,42 @@
+# ULP Suite — clickhouse-backup configuration
+# Docs: https://github.com/Altinity/clickhouse-backup
+#
+# This file is GENERIC and safe to commit. All deployment-specific values and
+# secrets (bucket, endpoint, keys) come from the environment via clickhouse-backup's
+# env-var overrides — see .env.example (S3_* vars) and the `clickhouse-backup`
+# service in docker-compose.yml.
+#
+# Backup model (your "local + S3" choice):
+#   LOCAL  — `create` makes a hardlink snapshot under /var/lib/clickhouse/backup.
+#            Instant and cheap, but lives on the SAME disk as the live data:
+#            great for fast restore after an accidental DROP or a bad migration,
+#            NOT a defense against disk failure.
+#   REMOTE — `upload` / `create_remote` ships that snapshot to S3: true off-host
+#            disaster recovery that survives total host/disk loss.
+
+general:
+  remote_storage: s3
+  # Retention: keep the 7 most recent snapshots locally, 30 on S3.
+  backups_to_keep_local: 7
+  backups_to_keep_remote: 30
+  log_level: info
+  # Parallelism for S3 transfer (modest — this is a single small box today).
+  upload_concurrency: 4
+  download_concurrency: 4
+
+clickhouse:
+  host: clickhouse          # docker-network alias of the clickhouse service
+  port: 9000                # native protocol; not exposed to host, same Docker network
+  username: default
+  password: ""              # empty by design — see docker/clickhouse/users/default-user.xml
+  data_path: /var/lib/clickhouse
+  # FREEZE + upload of a large table can take a while once you scale up.
+  timeout: 4h
+
+s3:
+  # access_key / secret_key / bucket / endpoint / region / path are injected from
+  # the environment (S3_* in .env) so this file stays generic.
+  force_path_style: false   # set true for MinIO and some self-hosted S3 gateways
+  disable_ssl: false
+  compression_format: zstd
+  compression_level: 3
