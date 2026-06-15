@@ -268,8 +268,9 @@ export function parseBlockContent(content: string, sourceFile: string): ParseRes
       // Classify: if no login found at all → no_fields; otherwise the credential
       // had a login but was rejected for a password reason (missing / too-short /
       // equals login) → no_password.
-      if (!state.login) breakdown.no_fields++
-      else              breakdown.no_password++
+      if (!state.login)                                       breakdown.no_fields++
+      else if (isJunkCredential(state.login, state.password)) breakdown.garbage++
+      else                                                    breakdown.no_password++
     }
     state = makeBlockState()
   }
@@ -322,8 +323,9 @@ export async function* parseBlockStream(
     } else if (state.url || state.login || state.password) {
       batchRejected++
       // no login at all → no_fields; login present but password issue → no_password
-      if (!state.login) batchBreakdown.no_fields++
-      else              batchBreakdown.no_password++
+      if (!state.login)                                       batchBreakdown.no_fields++
+      else if (isJunkCredential(state.login, state.password)) batchBreakdown.garbage++
+      else                                                    batchBreakdown.no_password++
     }
     state = makeBlockState()
   }
@@ -702,8 +704,9 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
       else { addSeen(fp, sourceFile); credentials.push(cred) }
     } else if (blockState.url || blockState.login || blockState.password) {
       skipped++
-      if (!blockState.login) breakdown.no_fields++
-      else                   breakdown.no_password++
+      if (!blockState.login)                                            breakdown.no_fields++
+      else if (isJunkCredential(blockState.login, blockState.password)) breakdown.garbage++
+      else                                                              breakdown.no_password++
     }
     blockState = makeBlockState()
   }
@@ -855,8 +858,9 @@ export async function* parseULPStream(
     } else if (blockState.url || blockState.login || blockState.password) {
       batchRejected++
       // no login at all → no_fields; login present but password issue → no_password
-      if (!blockState.login) batchBreakdown.no_fields++
-      else                   batchBreakdown.no_password++
+      if (!blockState.login)                                            batchBreakdown.no_fields++
+      else if (isJunkCredential(blockState.login, blockState.password)) batchBreakdown.garbage++
+      else                                                              batchBreakdown.no_password++
     }
     blockState = makeBlockState()
   }

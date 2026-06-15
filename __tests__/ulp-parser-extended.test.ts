@@ -1442,6 +1442,7 @@ describe('§21 Junk-marker rejection (block + positional)', () => {
     const content = ['https://example.com/login', 'password', 'foo:barbaz'].join('\n')
     const r = parseULPContent(content, 'src.txt')
     expect(r.credentials.length).toBe(0)
+    expect(r.rejection_breakdown.garbage).toBe(1)
   })
 
   test('positional 3-line block with real login → kept (regression)', () => {
@@ -1456,6 +1457,7 @@ describe('§21 Junk-marker rejection (block + positional)', () => {
     const content = ['Host: https://site.com', 'Login: realuser', 'Password: gmail_ps=CrMBxyz', '===='].join('\n')
     const r = parseULPContent(content, 'src.txt')
     expect(r.credentials.length).toBe(0)
+    expect(r.rejection_breakdown.garbage).toBe(1)
   })
 
   test('block-format normal credential → kept (regression)', () => {
