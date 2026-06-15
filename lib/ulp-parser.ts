@@ -130,11 +130,13 @@ function isValidHost(host: string): boolean {
  * so rejecting them caused false positives. The template tokens ({mail},{email})
  * and unknown/false/missing-user/pass are export/serialization placeholders;
  * "pass"/"false" carry a small real-username risk, accepted as a net win against
- * ~117k junk rows.
+ * ~117k junk rows. "https"/"http" are URL-scheme fragments that landed in the
+ * login slot, never a real username.
  */
 const PLACEHOLDER_LOGINS = new Set([
   'password', 'n/a', 'na', 'none', 'null', 'undefined', '[not_saved]', 'not_saved',
-  'unknown', '{mail}', '{email}', 'false', 'missing-user', 'pass',
+  'unknown', '[unknown]', '{mail}', '{email}', 'false', 'missing-user', 'pass',
+  'https', 'http',
 ])
 function isPlaceholderLogin(login: string): boolean {
   return PLACEHOLDER_LOGINS.has(login.trim().toLowerCase())
@@ -146,7 +148,8 @@ function isPlaceholderLogin(login: string): boolean {
  * extraction failures ([fail], [empty], [fetch_error]) and decryption failures
  * (Decryptionfailed., "Old or unknown version."). Exact match (trimmed,
  * case-insensitive) so a real password merely CONTAINING one of these as a
- * substring (e.g. "none123") is unaffected.
+ * substring (e.g. "none123") is unaffected. An all-asterisk value ("********")
+ * is a masked/redacted password, never a real secret.
  */
 const SENTINEL_PASSWORDS = new Set([
   '[not_saved]', 'not_saved', '*none*', 'none', '[fail]',
@@ -154,7 +157,8 @@ const SENTINEL_PASSWORDS = new Set([
   '[empty]', '*empty*', '[fetch_error]',
 ])
 function isSentinelPassword(password: string): boolean {
-  return SENTINEL_PASSWORDS.has(password.trim().toLowerCase())
+  const p = password.trim()
+  return SENTINEL_PASSWORDS.has(p.toLowerCase()) || /^\*+$/.test(p)
 }
 
 /**
