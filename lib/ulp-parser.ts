@@ -90,6 +90,12 @@ export function extractDomain(url: string): string {
  * Thai, Arabic, emoji, etc. — consists of valid codepoints and is NOT matched.
  */
 function hasBinaryOrReplacement(s: string): boolean {
+  // Double-encoded U+FFFD: the streaming parsers decode bytes with
+  // Buffer.toString('latin1'), so a real replacement char (UTF-8 EF BF BD)
+  // appears as the 3-char sequence U+00EF U+00BF U+00BD ("ï¿½"), never as
+  // codepoint 0xFFFD. Those bytes only exist after a decoder already gave up
+  // on invalid input, so they are always a corruption signal.
+  if (s.includes('ï¿½')) return true
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i)
     // control chars except tab(9)/LF(10)/CR(13), or U+FFFD replacement char
@@ -113,6 +119,45 @@ function hasBinaryOrReplacement(s: string): boolean {
 function isValidHost(host: string): boolean {
   const h = host.includes('@') ? host.slice(host.lastIndexOf('@') + 1) : host
   return /^[\p{L}\p{N}]([\p{L}\p{N}-]*[\p{L}\p{N}])?(\.[\p{L}\p{N}]([\p{L}\p{N}-]*[\p{L}\p{N}])?)+$/u.test(h)
+}
+
+/**
+ * Logins that are export placeholders, never a real identity — Chrome/stealer
+ * dumps emit these when no username was captured (password-reset pages, etc.).
+ * Checked case-insensitively, on the login field only (so a weak real PASSWORD
+ * like "password" is unaffected). NB: "user"/"username" are deliberately NOT
+ * listed — they are common REAL logins (router/admin panels, default accounts),
+ * so rejecting them caused false positives.
+ */
+const PLACEHOLDER_LOGINS = new Set([
+  'password', 'n/a', 'na', 'none', 'null', 'undefined', '[not_saved]', 'not_saved',
+])
+function isPlaceholderLogin(login: string): boolean {
+  return PLACEHOLDER_LOGINS.has(login.trim().toLowerCase())
+}
+
+/**
+ * Token / decryption blobs that never appear in a real login or password:
+ * Google GAIA recovery tokens (gmail_ps=, gmail=), digit-corrupted android
+ * token glue (==@com.), and AES/hex decryption failures ([Wrong padding]).
+ * Note: legit "android://HASH==@com.pkg" carries "==@com." in the URL field,
+ * which is never passed here — only login/password are checked.
+ */
+function hasJunkMarker(s: string): boolean {
+  return s.includes('gmail_ps=') || s.includes('gmail=')
+      || s.includes('==@com.')   || s.includes('[Wrong padding]')
+}
+
+/**
+ * Finalize-time junk gate, bundling every reject rule that applies to a built
+ * credential: placeholder login, token/decryption marker, and binary/mojibake.
+ * Called from credential-emission sites that don't otherwise run these checks
+ * (block + positional). `parseLine` runs the binary check inline already.
+ */
+function isJunkCredential(login: string, password: string): boolean {
+  return isPlaceholderLogin(login)
+      || hasJunkMarker(login)          || hasJunkMarker(password)
+      || hasBinaryOrReplacement(login) || hasBinaryOrReplacement(password)
 }
 
 // ── Block-format parser (Raccoon / Stealc / Meta / Vidar style) ──────────────
@@ -175,6 +220,7 @@ export function flushBlockState(
   if (!login)                           return null
   if (!password || password.length < 3) return null
   if (login === password)               return null
+  if (isJunkCredential(login, password)) return null
   const domain = url
     ? extractDomain(url)
     : (login.includes('@') ? login.split('@').pop()!.toLowerCase() : '')
@@ -222,8 +268,9 @@ export function parseBlockContent(content: string, sourceFile: string): ParseRes
       // Classify: if no login found at all → no_fields; otherwise the credential
       // had a login but was rejected for a password reason (missing / too-short /
       // equals login) → no_password.
-      if (!state.login) breakdown.no_fields++
-      else              breakdown.no_password++
+      if (!state.login)                                       breakdown.no_fields++
+      else if (isJunkCredential(state.login, state.password)) breakdown.garbage++
+      else                                                    breakdown.no_password++
     }
     state = makeBlockState()
   }
@@ -276,8 +323,9 @@ export async function* parseBlockStream(
     } else if (state.url || state.login || state.password) {
       batchRejected++
       // no login at all → no_fields; login present but password issue → no_password
-      if (!state.login) batchBreakdown.no_fields++
-      else              batchBreakdown.no_password++
+      if (!state.login)                                       batchBreakdown.no_fields++
+      else if (isJunkCredential(state.login, state.password)) batchBreakdown.garbage++
+      else                                                    batchBreakdown.no_password++
     }
     state = makeBlockState()
   }
@@ -397,6 +445,25 @@ function colonSplit(line: string): [string, string, string] | null {
     if (left.includes('/')) return null
     // "login:password" — signal no-URL with empty string
     return ['', left, line.slice(c1 + 1)]
+  }
+  // Port / port+path leak: scheme-less "host:port[/path]:login:pass". The
+  // segment between the first two colons is a port (digits, ≤65535) or a port
+  // followed by a path — part of the URL, NOT the login. Absorb "host:mid" into
+  // the URL and re-split the remainder as login:password. (e.g.
+  // "localhost:10000/:admin:12345" → url="localhost:10000/", login="admin".)
+  const mid = line.slice(c1 + 1, c2)
+  const isPortPath = /^\d+\//.test(mid)
+  const isBarePort = /^\d{1,5}$/.test(mid) && Number(mid) <= 65535
+  if (isPortPath || isBarePort) {
+    const rest = line.slice(c2 + 1)           // login:password (may have more colons)
+    const rc   = rest.indexOf(':')
+    // Only absorb the port when a real login:password follows it. If nothing
+    // after the port contains a ':', this is a plain 3-field "host:login:pass"
+    // with a numeric (or path-looking) login — fall through to the default
+    // split below rather than dropping the row.
+    if (rc !== -1) {
+      return [left + ':' + mid, rest.slice(0, rc), rest.slice(rc + 1)]
+    }
   }
   return [left, line.slice(c1 + 1, c2), line.slice(c2 + 1)]
 }
@@ -571,6 +638,14 @@ export function parseLine(
     }
   }
 
+  // Rule 3.7: placeholder identity / token-blob rejection. A login that is an
+  // export placeholder (Password, N/A, [NOT_SAVED], ...) is not a real identity;
+  // gmail_ps=/gmail=/==@com./[Wrong padding] are token or decryption junk.
+  // (Binary/mojibake already handled by Rule 3.5.)
+  if (isPlaceholderLogin(login) || hasJunkMarker(login) || hasJunkMarker(password)) {
+    return { credential: null, reason: 'garbage' }
+  }
+
   // Rule 4: domain extraction
   const domain = url
     ? extractDomain(url)
@@ -629,8 +704,9 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
       else { addSeen(fp, sourceFile); credentials.push(cred) }
     } else if (blockState.url || blockState.login || blockState.password) {
       skipped++
-      if (!blockState.login) breakdown.no_fields++
-      else                   breakdown.no_password++
+      if (!blockState.login)                                            breakdown.no_fields++
+      else if (isJunkCredential(blockState.login, blockState.password)) breakdown.garbage++
+      else                                                              breakdown.no_password++
     }
     blockState = makeBlockState()
   }
@@ -664,6 +740,11 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
 
     // Positional password: URL + login already collected → emit credential
     if (positionalUrl && positionalLogin) {
+      if (isJunkCredential(positionalLogin, trimmed)) {
+        skipped++; breakdown.garbage++
+        positionalUrl = positionalLogin = ''
+        continue
+      }
       const fp = `${positionalUrl}\0${positionalLogin}\0${trimmed}`
       if (seen.has(fp)) {
         skipped++; breakdown.dedup++
@@ -777,8 +858,9 @@ export async function* parseULPStream(
     } else if (blockState.url || blockState.login || blockState.password) {
       batchRejected++
       // no login at all → no_fields; login present but password issue → no_password
-      if (!blockState.login) batchBreakdown.no_fields++
-      else                   batchBreakdown.no_password++
+      if (!blockState.login)                                            batchBreakdown.no_fields++
+      else if (isJunkCredential(blockState.login, blockState.password)) batchBreakdown.garbage++
+      else                                                              batchBreakdown.no_password++
     }
     blockState = makeBlockState()
   }
@@ -810,6 +892,11 @@ export async function* parseULPStream(
 
     // Positional password: URL + login collected → emit credential
     if (positionalUrl && positionalLogin) {
+      if (isJunkCredential(positionalLogin, trimmed)) {
+        batchRejected++; batchBreakdown.garbage++
+        positionalUrl = positionalLogin = ''
+        return
+      }
       const fp = `${positionalUrl}\0${positionalLogin}\0${trimmed}`
       if (streamSeenCheck(fp)) {
         batchRejected++; batchBreakdown.dedup++
