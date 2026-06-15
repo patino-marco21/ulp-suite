@@ -13,6 +13,12 @@
 --   parts_to_delay_insert = 500 / throw = 1000 → prevent write stalls during bulk ingestion
 --
 -- Existing deployments: all new columns applied via lib/clickhouse-migrations.ts on startup.
+--
+-- Replication: tables are ReplicatedMergeTree so inserts participate in ClickHouse's
+-- dedup log and a 2nd replica can be added later with no migration. Requires the embedded
+-- Keeper + {shard}/{replica} macros from docker/clickhouse/config/ulp-keeper.xml (mounted
+-- on every deploy). Paths use {shard}, NOT {uuid} — the {uuid} macro is only resolvable by
+-- convert_to_replicated / Atomic internals, not a plain CREATE TABLE (Code 36).
 
 CREATE DATABASE IF NOT EXISTS ulp;
 
@@ -243,7 +249,7 @@ CREATE TABLE IF NOT EXISTS ulp.credentials
     -- minmax: date range on imported_at
     INDEX idx_mm_imported_at imported_at TYPE minmax GRANULARITY 1
 )
-ENGINE = MergeTree
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/ulp/credentials', '{replica}')
 ORDER BY (domain, email, imported_at)
 PARTITION BY toYYYYMM(imported_at)
 SETTINGS
@@ -271,7 +277,7 @@ CREATE TABLE IF NOT EXISTS ulp.sources
     line_count  UInt64,
     imported_at DateTime DEFAULT now() CODEC(Delta, ZSTD(1))
 )
-ENGINE = MergeTree
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/ulp/sources', '{replica}')
 ORDER BY imported_at;
 
 -- ── Domain summary (SummingMergeTree auto-sums on background merge) ───────────
@@ -282,5 +288,5 @@ CREATE TABLE IF NOT EXISTS ulp.domains
     first_seen DateTime CODEC(Delta, ZSTD(1)),
     last_seen  DateTime CODEC(Delta, ZSTD(1))
 )
-ENGINE = SummingMergeTree
+ENGINE = ReplicatedSummingMergeTree('/clickhouse/tables/{shard}/ulp/domains', '{replica}')
 ORDER BY domain;
