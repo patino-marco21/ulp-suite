@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'vitest'
-import { REASON_LABELS, buildRecommendations, buildTopRejections } from '@/lib/parse-sample-report'
+import { REASON_LABELS, buildRecommendations, buildTopRejections } from '@/lib/rejection-report'
 
 describe('parse-sample-report', () => {
   describe('REASON_LABELS', () => {

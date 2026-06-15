@@ -1,11 +1,14 @@
 /**
- * Pure reporting helpers for the /api/admin/parse-sample diagnostic endpoint —
- * rejection-reason labels, recommendation rules, and the top-rejections table.
+ * Pure, shared reporting helpers for parser rejection breakdowns —
+ * rejection-reason labels, the top-rejections table, and recommendation rules.
  *
- * Extracted from the route so the (data-only) reporting logic is unit-testable
- * without an HTTP/auth harness. Labels/recs cover every RejectionReason the
- * parser can emit, including `garbage` (the largest reject class after the
- * 2026-06 junk-rejection work) and `dedup`.
+ * Single source of truth consumed by both the /api/admin/parse-sample diagnostic
+ * endpoint and the upload UI's "why lines were skipped" panel, so labels stay
+ * consistent. Data-only, so it's unit-testable without an HTTP/auth harness and
+ * safe to import from a client component (the only ulp-parser dependency is a
+ * type-only import, erased at build). Covers every RejectionReason the parser
+ * can emit, including `garbage` (the largest reject class after the 2026-06
+ * junk-rejection work) and `dedup`.
  */
 
 import type { RejectionReason } from '@/lib/ulp-parser'

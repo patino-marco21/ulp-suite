@@ -10,19 +10,13 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { useAuth, isAdmin } from "@/hooks/useAuth"
 import { useToast } from "@/hooks/use-toast"
+import { buildTopRejections } from "@/lib/rejection-report"
 import Link from "next/link"
 
 interface ZipFileEntry {
   filename: string
   breach_name: string
   imported: number
-}
-
-interface RejectionEntry {
-  reason: string
-  count: number
-  pct: number
-  label: string
 }
 
 interface UploadResult {
@@ -409,7 +403,7 @@ export default function UploadPage() {
 
               {displayResult.rejection_breakdown && displayResult.skipped > 0 && (() => {
                 const rejTotal   = displayResult.imported + displayResult.skipped
-                const rejections = topRejections(displayResult.rejection_breakdown, rejTotal)
+                const rejections = buildTopRejections(displayResult.rejection_breakdown, rejTotal)
                 if (rejections.length === 0) return null
                 return (
                   <div>
@@ -509,36 +503,6 @@ export default function UploadPage() {
   )
 }
 
-/** Human-readable labels for rejection reasons returned by the parser */
-const REASON_LABELS: Record<string, string> = {
-  blank:                'Empty / comment line',
-  block_partial:        'Block-format line absorbed (mid-block)',
-  no_fields:            'Cannot split into ≥2 fields',
-  url_noscheme_no_pass: 'Domain:login pair — no password',
-  no_login:             'No email or username found',
-  no_password:          'Login found but no password',
-  url_in_login:         'URL ended up in login slot',
-  login_too_short:      'Login < 2 characters',
-  login_is_number:      'Login is a digit sequence marker',
-  login_eq_pass:        'Login equals password (noise)',
-  pass_too_short:       'Password < 3 characters',
-  pass_is_scheme:       'Password is bare "http"/"https"',
-  dedup:                'Exact duplicate line',
-  unclassified:         'Unclassified parse failure',
-}
-
-function topRejections(breakdown: Record<string, number>, total: number): RejectionEntry[] {
-  return Object.entries(breakdown)
-    .filter(([, c]) => c > 0)
-    .sort(([, a], [, b]) => b - a)
-    .slice(0, 6)
-    .map(([reason, count]) => ({
-      reason,
-      count,
-      pct:   total > 0 ? Math.round(count / total * 1000) / 10 : 0,
-      label: REASON_LABELS[reason] ?? reason,
-    }))
-}
 
 // ─── Parser Dry-Run Panel ─────────────────────────────────────────────────────
 

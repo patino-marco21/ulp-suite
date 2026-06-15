@@ -17,7 +17,7 @@ import {
   parseLine, makeRejectionMap,
   type RejectionReason,
 } from '@/lib/ulp-parser'
-import { REASON_LABELS, buildRecommendations, buildTopRejections } from '@/lib/parse-sample-report'
+import { REASON_LABELS, buildRecommendations, buildTopRejections } from '@/lib/rejection-report'
 
 export const dynamic = 'force-dynamic'
 
