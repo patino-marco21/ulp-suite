@@ -125,11 +125,12 @@ function isValidHost(host: string): boolean {
  * Logins that are export placeholders, never a real identity — Chrome/stealer
  * dumps emit these when no username was captured (password-reset pages, etc.).
  * Checked case-insensitively, on the login field only (so a weak real PASSWORD
- * like "password" is unaffected).
+ * like "password" is unaffected). NB: "user"/"username" are deliberately NOT
+ * listed — they are common REAL logins (router/admin panels, default accounts),
+ * so rejecting them caused false positives.
  */
 const PLACEHOLDER_LOGINS = new Set([
   'password', 'n/a', 'na', 'none', 'null', 'undefined', '[not_saved]', 'not_saved',
-  'user', 'username',
 ])
 function isPlaceholderLogin(login: string): boolean {
   return PLACEHOLDER_LOGINS.has(login.trim().toLowerCase())

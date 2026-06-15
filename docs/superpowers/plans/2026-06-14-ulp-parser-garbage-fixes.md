@@ -363,7 +363,8 @@ In `lib/ulp-parser.ts`, add immediately after `isValidHost` (~line 116):
  */
 const PLACEHOLDER_LOGINS = new Set([
   'password', 'n/a', 'na', 'none', 'null', 'undefined', '[not_saved]', 'not_saved',
-  'user', 'username',
+  // "user"/"username" deliberately excluded — common REAL logins, rejecting them
+  // collided with 42 existing tests and would drop real router/admin credentials.
 ])
 function isPlaceholderLogin(login: string): boolean {
   return PLACEHOLDER_LOGINS.has(login.trim().toLowerCase())

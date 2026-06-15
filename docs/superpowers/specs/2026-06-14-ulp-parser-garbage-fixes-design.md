@@ -76,7 +76,8 @@ Two new predicates plus a small constant set:
 // Logins that are export placeholders, never a real identity.
 const PLACEHOLDER_LOGINS = new Set([
   'password', 'n/a', 'na', 'none', 'null', 'undefined', '[not_saved]', 'not_saved',
-  'user', 'username',
+  // NB: "user"/"username" deliberately excluded — common REAL logins
+  // (router/admin panels), rejecting them caused false positives (42 test collisions).
 ])
 function isPlaceholderLogin(login: string): boolean {
   return PLACEHOLDER_LOGINS.has(login.trim().toLowerCase())

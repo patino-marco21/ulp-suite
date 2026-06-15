@@ -462,14 +462,12 @@ describe('§6 Pipe-noise stripping', () => {
 
 describe('§7 Label-line false-positive audit (documented behaviour)', () => {
 
-  test('PASSWORD: value → parsed as email=PASSWORD, password=value (false positive)', () => {
-    // colonSplit: no scheme, no @ in "PASSWORD", 2-field → ['', 'PASSWORD', ' value']
-    // password has a leading space but length > 3 → accepted
-    const c = cred('PASSWORD: myPassword123')
-    expect(c).not.toBeNull()
-    expect(c!.email).toBe('PASSWORD')
-    // Password contains leading space (colonSplit does not trim colon fields)
-    expect(c!.password).toContain('myPassword123')
+  test('PASSWORD: value → login "PASSWORD" rejected as placeholder (Rule 3.7)', () => {
+    // Behaviour change (Fix 2 / Rule 3.7, 2026-06-14): this was a documented
+    // false positive (login=PASSWORD accepted). The placeholder-login check now
+    // rejects "PASSWORD" as garbage, so the label line is no longer mis-stored.
+    expect(cred('PASSWORD: myPassword123')).toBeNull()
+    expect(why('PASSWORD: myPassword123')).toBe('garbage')
   })
 
   test('Host: example.com → parsed as email=Host, password=example.com (false positive)', () => {
@@ -1397,8 +1395,10 @@ describe('§20 Junk-marker rejection (inline)', () => {
   })
 
   test('placeholder login "N/A" → rejected garbage', () => {
-    expect(cred('https://site.com:N/A:realpass123')).toBeNull()
-    expect(why('https://site.com:N/A:realpass123')).toBe('garbage')
+    // Scheme-less form: the "/" in "N/A" would otherwise be read as a URL path
+    // by the scheme branch; here N/A lands cleanly in the login field.
+    expect(cred('site.com:N/A:realpass123')).toBeNull()
+    expect(why('site.com:N/A:realpass123')).toBe('garbage')
   })
 
   test('placeholder login "[NOT_SAVED]" → rejected garbage', () => {
