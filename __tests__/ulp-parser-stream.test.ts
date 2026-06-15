@@ -12,7 +12,7 @@
  */
 
 import { describe, test, expect } from 'vitest'
-import { parseULPStream } from '@/lib/ulp-parser'
+import { parseULPStream, parseULPContent } from '@/lib/ulp-parser'
 
 const FILE = 'stream-test.txt'
 
@@ -170,4 +170,33 @@ describe('parseULPStream — garbage rejection (production path)', () => {
     ]))
     expect(credentials).toHaveLength(0)
   })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// parseULPStream ≡ parseULPContent — the two parsers re-implement the same
+// inline/positional/block logic, so they must produce identical credentials for
+// the same input. This locks out silent drift between them.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('parseULPStream ≡ parseULPContent (dual-implementation consistency)', () => {
+  const fields = (c: { url: string; email: string; password: string }) =>
+    ({ url: c.url, email: c.email, password: c.password })
+
+  const cases: Array<[string, string]> = [
+    ['inline mixed',     'https://a.com:user@a.com:pass1\nb.com:user2:pass2'],
+    ['positional block', 'https://site.com/login\nrealuser\nrealpass123'],
+    ['labeled block',    'Host: https://x.com\nLogin: realu\nPassword: realp123\n===='],
+    ['port-leak',        'localhost:10000/:admin:12345'],
+    ['garbage drops',    'https://s.com:Password:realpass1\nhttps://s.com:realu:[NOT_SAVED]\nhttps://s.com:realu:goodpass1'],
+    ['url-path-@',       'discord.com/channels/@me/123:GATO\nhttps://ok.com:realu:realp1'],
+    ['comments+blanks',  '# header\nhttps://m.com:a@m.com:pass1\n\nuser@n.com:pass2\n[section]'],
+  ]
+
+  for (const [name, input] of cases) {
+    test(`identical credentials: ${name}`, async () => {
+      const contentCreds = parseULPContent(input, FILE).credentials.map(fields)
+      const { credentials: streamCreds } = await collect(streamFromChunks([input]), 1000)
+      expect(streamCreds.map(fields)).toEqual(contentCreds)
+    })
+  }
 })
