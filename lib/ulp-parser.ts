@@ -127,7 +127,10 @@ function isValidHost(host: string): boolean {
  * Checked case-insensitively, on the login field only (so a weak real PASSWORD
  * like "password" is unaffected). NB: "user"/"username" are deliberately NOT
  * listed — they are common REAL logins (router/admin panels, default accounts),
- * so rejecting them caused false positives.
+ * so rejecting them caused false positives. The template tokens ({mail},{email})
+ * and unknown/false/missing-user/pass are export/serialization placeholders;
+ * "pass"/"false" carry a small real-username risk, accepted as a net win against
+ * ~117k junk rows.
  */
 const PLACEHOLDER_LOGINS = new Set([
   'password', 'n/a', 'na', 'none', 'null', 'undefined', '[not_saved]', 'not_saved',
@@ -168,9 +171,10 @@ function hasJunkMarker(s: string): boolean {
 
 /**
  * Finalize-time junk gate, bundling every reject rule that applies to a built
- * credential: placeholder login, token/decryption marker, and binary/mojibake.
- * Called from credential-emission sites that don't otherwise run these checks
- * (block + positional). `parseLine` runs the binary check inline already.
+ * credential: placeholder login, sentinel password, token/decryption marker,
+ * and binary/mojibake. Called from credential-emission sites that don't
+ * otherwise run these checks (block + positional). `parseLine` runs the binary
+ * check inline already.
  */
 function isJunkCredential(login: string, password: string): boolean {
   return isPlaceholderLogin(login)     || isSentinelPassword(password)

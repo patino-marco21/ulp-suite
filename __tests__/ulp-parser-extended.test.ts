@@ -1542,4 +1542,11 @@ describe('§22 Sentinel passwords + extra placeholders', () => {
     expect(r.credentials.length).toBe(0)
     expect(r.rejection_breakdown.garbage).toBe(1)
   })
+
+  test('block-format credential with sentinel password "*none*" → dropped (garbage)', () => {
+    const content = ['Host: https://site.com', 'Login: realuser', 'Password: *none*', '===='].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(0)
+    expect(r.rejection_breakdown.garbage).toBe(1)
+  })
 })
