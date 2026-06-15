@@ -1272,3 +1272,29 @@ describe('§17 android:// credential parsing', () => {
   })
 
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §18  Double-encoded mojibake (ï¿½) rejection
+// The streaming parsers decode bytes as latin1, so a UTF-8 replacement char
+// (EF BF BD) appears as the 3-char sequence U+00EF U+00BF U+00BD, never as
+// codepoint 0xFFFD. The garbage filter must catch that form.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§18 Double-encoded mojibake', () => {
+  test('ï¿½ in password → rejected as garbage', () => {
+    const line = 'https://site.com:realuser:paï¿½ss'
+    expect(cred(line)).toBeNull()
+    expect(why(line)).toBe('garbage')
+  })
+
+  test('ï¿½ in email/login → rejected as garbage', () => {
+    const line = 'https://site.com:reï¿½aluser:realpass123'
+    expect(cred(line)).toBeNull()
+    expect(why(line)).toBe('garbage')
+  })
+
+  test('valid Unicode password (Cyrillic/Chinese/emoji) still kept — no false positive', () => {
+    const c = cred('https://site.com:realuser:пароль密码🔑')
+    expect(c).not.toBeNull()
+  })
+})

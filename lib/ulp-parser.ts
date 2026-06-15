@@ -90,6 +90,12 @@ export function extractDomain(url: string): string {
  * Thai, Arabic, emoji, etc. — consists of valid codepoints and is NOT matched.
  */
 function hasBinaryOrReplacement(s: string): boolean {
+  // Double-encoded U+FFFD: the streaming parsers decode bytes with
+  // Buffer.toString('latin1'), so a real replacement char (UTF-8 EF BF BD)
+  // appears as the 3-char sequence U+00EF U+00BF U+00BD ("ï¿½"), never as
+  // codepoint 0xFFFD. Those bytes only exist after a decoder already gave up
+  // on invalid input, so they are always a corruption signal.
+  if (s.includes('ï¿½')) return true
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i)
     // control chars except tab(9)/LF(10)/CR(13), or U+FFFD replacement char
