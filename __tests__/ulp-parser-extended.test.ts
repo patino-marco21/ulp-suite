@@ -1363,4 +1363,24 @@ describe('§19 Port/path-leak recovery', () => {
     expect(c!.email).toBe('user@gmail.com')
     expect(c!.password).toBe('netfl1x!')
   })
+
+  test('regression: numeric login 3-field host:12345:pass is KEPT (not dropped as a bare port)', () => {
+    // mid is digits but nothing after contains a ':' → not a port+creds shape.
+    // Must fall through to the plain 3-field split, NOT get dropped.
+    const c = cred('forum.com:12345:realpass')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('forum.com')
+    expect(c!.email).toBe('12345')
+    expect(c!.password).toBe('realpass')
+  })
+
+  test('bare port > 65535 is NOT absorbed (upper-bound guard)', () => {
+    // 99999 is 5 digits but exceeds the max TCP port, so it is treated as a
+    // numeric login, not a port — exercises the `<= 65535` half of the guard.
+    const c = cred('site.com:99999:admin:pass1')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('site.com')
+    expect(c!.email).toBe('99999')
+    expect(c!.password).toBe('admin:pass1')
+  })
 })
