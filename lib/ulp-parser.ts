@@ -131,9 +131,27 @@ function isValidHost(host: string): boolean {
  */
 const PLACEHOLDER_LOGINS = new Set([
   'password', 'n/a', 'na', 'none', 'null', 'undefined', '[not_saved]', 'not_saved',
+  'unknown', '{mail}', '{email}', 'false', 'missing-user', 'pass',
 ])
 function isPlaceholderLogin(login: string): boolean {
   return PLACEHOLDER_LOGINS.has(login.trim().toLowerCase())
+}
+
+/**
+ * Passwords that are "no password could be extracted" sentinels, not real
+ * secrets — browser "password not saved" markers ([NOT_SAVED], *none*, none),
+ * extraction failures ([fail], [empty], [fetch_error]) and decryption failures
+ * (Decryptionfailed., "Old or unknown version."). Exact match (trimmed,
+ * case-insensitive) so a real password merely CONTAINING one of these as a
+ * substring (e.g. "none123") is unaffected.
+ */
+const SENTINEL_PASSWORDS = new Set([
+  '[not_saved]', 'not_saved', '*none*', 'none', '[fail]',
+  'decryptionfailed.', 'old or unknown version.',
+  '[empty]', '*empty*', '[fetch_error]',
+])
+function isSentinelPassword(password: string): boolean {
+  return SENTINEL_PASSWORDS.has(password.trim().toLowerCase())
 }
 
 /**
@@ -155,7 +173,7 @@ function hasJunkMarker(s: string): boolean {
  * (block + positional). `parseLine` runs the binary check inline already.
  */
 function isJunkCredential(login: string, password: string): boolean {
-  return isPlaceholderLogin(login)
+  return isPlaceholderLogin(login)     || isSentinelPassword(password)
       || hasJunkMarker(login)          || hasJunkMarker(password)
       || hasBinaryOrReplacement(login) || hasBinaryOrReplacement(password)
 }
@@ -638,11 +656,13 @@ export function parseLine(
     }
   }
 
-  // Rule 3.7: placeholder identity / token-blob rejection. A login that is an
+  // Rule 3.7: placeholder / sentinel / token-blob rejection. A login that is an
   // export placeholder (Password, N/A, [NOT_SAVED], ...) is not a real identity;
-  // gmail_ps=/gmail=/==@com./[Wrong padding] are token or decryption junk.
-  // (Binary/mojibake already handled by Rule 3.5.)
-  if (isPlaceholderLogin(login) || hasJunkMarker(login) || hasJunkMarker(password)) {
+  // a sentinel password ([NOT_SAVED], *none*, Decryptionfailed., ...) means no
+  // password was captured; gmail_ps=/gmail=/==@com./[Wrong padding] are token or
+  // decryption junk. (Binary/mojibake already handled by Rule 3.5.)
+  if (isPlaceholderLogin(login) || isSentinelPassword(password)
+      || hasJunkMarker(login) || hasJunkMarker(password)) {
     return { credential: null, reason: 'garbage' }
   }
 
