@@ -128,6 +128,31 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  # ─── clickhouse-backup (P0: disaster recovery — local snapshots + S3) ──────
+  # Profile-gated: does NOT start with `docker compose up`. Invoke explicitly via
+  # the wrapper (./scripts/clickhouse-backup.sh ...) or directly:
+  #   docker compose run --rm --no-deps clickhouse-backup <subcommand>
+  # Shares the clickhouse data volume (needed for FREEZE/hardlink snapshots) and
+  # reaches the server over the internal network at clickhouse:9000.
+  # See docs/clickhouse-backup-runbook.md.
+  clickhouse-backup:
+    image: altinity/clickhouse-backup:2.7.2   # pinned — verified 2026-06-15 against ClickHouse 26.3
+    container_name: ulpsuite_clickhouse_backup
+    profiles: ["backup"]
+    restart: "no"
+    environment:
+      # S3 (off-host) target — values come from .env (see .env.example).
+      # These names are clickhouse-backup's env-var overrides for the s3.* config.
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_PATH: ${S3_PATH:-clickhouse-backups/ulpsuite}
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./docker/clickhouse-backup/config.yml:/etc/clickhouse-backup/config.yml:ro
+
 volumes:
   clickhouse_data:
     driver: local
