@@ -1550,3 +1550,50 @@ describe('§22 Sentinel passwords + extra placeholders', () => {
     expect(r.rejection_breakdown.garbage).toBe(1)
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §23  URL-path-with-@ is not an email login
+// colonSplit's email-login shortcut only fires when '@' precedes any '/'. A '/'
+// before the '@' marks a URL path (e.g. discord.com/channels/@me/<id>), not an
+// email, so it must not be stored as the login.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§23 URL-path-with-@ vs email login', () => {
+  test('discord DM URL-path in login slot (2-field) → rejected, not stored as login', () => {
+    expect(cred('discord.com/channels/@me/935262015486824538:GATO')).toBeNull()
+    expect(why('discord.com/channels/@me/935262015486824538:GATO')).toBe('no_fields')
+  })
+
+  test('3-field URL-path-with-@ : login : pass → path becomes url, real login extracted', () => {
+    const c = cred('discord.com/channels/@me/123:realuser:realpass1')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('discord.com/channels/@me/123')
+    expect(c!.email).toBe('realuser')
+    expect(c!.password).toBe('realpass1')
+  })
+
+  test('real email login still kept (@ before any /)', () => {
+    const c = cred('user@example.com:supersecret')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('')
+    expect(c!.email).toBe('user@example.com')
+    expect(c!.password).toBe('supersecret')
+  })
+
+  test('email with trailing slash still kept (@ precedes /)', () => {
+    const c = cred('user@gmail.com/:mypassword1')
+    expect(c).not.toBeNull()
+    expect(c!.email).toBe('user@gmail.com/')
+    expect(c!.password).toBe('mypassword1')
+  })
+
+  test('email in the MIDDLE field is unaffected (left has no @)', () => {
+    // host:email@domain:pass — the @ is in the middle field, not `left`, so this
+    // code path is untouched by the email-shortcut change.
+    const c = cred('steamcommunity.com:player@gmail.com:steampass1')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('steamcommunity.com')
+    expect(c!.email).toBe('player@gmail.com')
+    expect(c!.password).toBe('steampass1')
+  })
+})
