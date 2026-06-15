@@ -220,6 +220,7 @@ export function flushBlockState(
   if (!login)                           return null
   if (!password || password.length < 3) return null
   if (login === password)               return null
+  if (isJunkCredential(login, password)) return null
   const domain = url
     ? extractDomain(url)
     : (login.includes('@') ? login.split('@').pop()!.toLowerCase() : '')
@@ -736,6 +737,11 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
 
     // Positional password: URL + login already collected → emit credential
     if (positionalUrl && positionalLogin) {
+      if (isJunkCredential(positionalLogin, trimmed)) {
+        skipped++; breakdown.garbage++
+        positionalUrl = positionalLogin = ''
+        continue
+      }
       const fp = `${positionalUrl}\0${positionalLogin}\0${trimmed}`
       if (seen.has(fp)) {
         skipped++; breakdown.dedup++
@@ -882,6 +888,11 @@ export async function* parseULPStream(
 
     // Positional password: URL + login collected → emit credential
     if (positionalUrl && positionalLogin) {
+      if (isJunkCredential(positionalLogin, trimmed)) {
+        batchRejected++; batchBreakdown.garbage++
+        positionalUrl = positionalLogin = ''
+        return
+      }
       const fp = `${positionalUrl}\0${positionalLogin}\0${trimmed}`
       if (streamSeenCheck(fp)) {
         batchRejected++; batchBreakdown.dedup++

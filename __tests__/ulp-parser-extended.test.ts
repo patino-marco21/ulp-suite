@@ -1430,3 +1430,38 @@ describe('§20 Junk-marker rejection (inline)', () => {
     expect(c!.password).toBe('SecretPass99')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §21  Junk-marker rejection on block + positional paths
+// The placeholder/token gate must also run where credentials are emitted
+// without going through parseLine.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§21 Junk-marker rejection (block + positional)', () => {
+  test('positional 3-line block with placeholder login "password" → dropped', () => {
+    const content = ['https://example.com/login', 'password', 'foo:barbaz'].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(0)
+  })
+
+  test('positional 3-line block with real login → kept (regression)', () => {
+    const content = ['https://example.com/login', 'realuser', 'realpassword123'].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(1)
+    expect(r.credentials[0].email).toBe('realuser')
+    expect(r.credentials[0].password).toBe('realpassword123')
+  })
+
+  test('block-format credential with gmail_ps= token → dropped', () => {
+    const content = ['Host: https://site.com', 'Login: realuser', 'Password: gmail_ps=CrMBxyz', '===='].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(0)
+  })
+
+  test('block-format normal credential → kept (regression)', () => {
+    const content = ['Host: https://site.com', 'Login: realuser', 'Password: GoodPass99', '===='].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(1)
+    expect(r.credentials[0].email).toBe('realuser')
+  })
+})
