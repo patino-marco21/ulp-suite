@@ -42,7 +42,6 @@ export default function UploadPage() {
 
   const [state, setState] = useState<UploadState>('idle')
   const [progress, setProgress] = useState(0)
-  const [result, setResult] = useState<UploadResult | null>(null)
   const [errorMsg, setErrorMsg] = useState('')
   const [dragOver, setDragOver] = useState(false)
 
@@ -87,7 +86,6 @@ export default function UploadPage() {
 
       setState('uploading')
       setProgress(20)
-      setResult(null)
       setErrorMsg('')
 
       const formData = new FormData()
@@ -131,7 +129,6 @@ export default function UploadPage() {
                   breach_name:         '',
                   rejection_breakdown: d.rejection_breakdown ?? {},
                 }
-                setResult(r)
                 setAllResults(prev => [...prev, r])
                 settle(r)
               }
@@ -148,7 +145,6 @@ export default function UploadPage() {
           } else {
             // Sync path (ZIP) — server already processed and returned results
             const r = data as UploadResult
-            setResult(r)
             setAllResults(prev => [...prev, r])
             resolve(r)
           }
@@ -213,7 +209,6 @@ export default function UploadPage() {
   const reset = () => {
     setState('idle')
     setProgress(0)
-    setResult(null)
     setErrorMsg('')
     setFileQueue([])
     setQueueIndex(0)
