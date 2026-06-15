@@ -1597,3 +1597,39 @@ describe('§23 URL-path-with-@ vs email login', () => {
     expect(c!.password).toBe('steampass1')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §24  URL-scheme-fragment logins + masked passwords
+// "https"/"http"/"[unknown]" logins are fragments/placeholders, never a real
+// username; an all-asterisk password is a masked/redacted value.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§24 URL-fragment logins + masked passwords', () => {
+  test('login "https" → rejected garbage (URL scheme fragment)', () => {
+    expect(cred('https://site.com:https:realpass123')).toBeNull()
+    expect(why('https://site.com:https:realpass123')).toBe('garbage')
+  })
+
+  test('login "http" → rejected garbage', () => {
+    expect(cred('https://site.com:http:realpass123')).toBeNull()
+  })
+
+  test('login "[UNKNOWN]" → rejected garbage (case-insensitive)', () => {
+    expect(cred('https://site.com:[UNKNOWN]:realpass123')).toBeNull()
+  })
+
+  test('masked password "********" → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:********')).toBeNull()
+    expect(why('https://site.com:realuser:********')).toBe('garbage')
+  })
+
+  test('masked password "****" → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:****')).toBeNull()
+  })
+
+  test('password containing asterisks but not all-asterisk is KEPT', () => {
+    const c = cred('https://site.com:realuser:P@ss*1word')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('P@ss*1word')
+  })
+})
