@@ -404,6 +404,21 @@ function colonSplit(line: string): [string, string, string] | null {
     // "login:password" — signal no-URL with empty string
     return ['', left, line.slice(c1 + 1)]
   }
+  // Port / port+path leak: scheme-less "host:port[/path]:login:pass". The
+  // segment between the first two colons is a port (digits, ≤65535) or a port
+  // followed by a path — part of the URL, NOT the login. Absorb "host:mid" into
+  // the URL and re-split the remainder as login:password. (e.g.
+  // "localhost:10000/:admin:12345" → url="localhost:10000/", login="admin".)
+  const mid = line.slice(c1 + 1, c2)
+  const isPortPath = /^\d+\//.test(mid)
+  const isBarePort = /^\d{1,5}$/.test(mid) && Number(mid) <= 65535
+  if (isPortPath || isBarePort) {
+    const portUrl = left + ':' + mid
+    const rest    = line.slice(c2 + 1)        // login:password (may have more colons)
+    const rc      = rest.indexOf(':')
+    if (rc === -1) return null                // host:port with no password after
+    return [portUrl, rest.slice(0, rc), rest.slice(rc + 1)]
+  }
   return [left, line.slice(c1 + 1, c2), line.slice(c2 + 1)]
 }
 

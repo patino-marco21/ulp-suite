@@ -197,15 +197,15 @@ describe('§2 Port disambiguation', () => {
     expect(c!.domain).toBe('app.corp.com')
   })
 
-  test('no-scheme domain with port-like segment: domain:443:user:pass — 443 becomes login', () => {
-    // No scheme → colonSplit falls through to no-scheme branch.
-    // c1=domain:443 left=domain (no @) c2=next : → url=domain, login=443, pass=user:pass
-    // This is expected/documented behaviour for no-scheme lines.
+  test('no-scheme domain with bare port: domain:443:user:pass — 443 folds into URL', () => {
+    // Behaviour change (Fix 1, 2026-06-14): a digit-only middle field after a
+    // scheme-less host is treated as a PORT and absorbed into the URL, not as
+    // the login. Previously this asserted email='443'.
     const c = cred('mysite.com:443:admin:secret123')
     expect(c).not.toBeNull()
-    expect(c!.url).toBe('mysite.com')
-    expect(c!.email).toBe('443')
-    expect(c!.password).toBe('admin:secret123')
+    expect(c!.url).toBe('mysite.com:443')
+    expect(c!.email).toBe('admin')
+    expect(c!.password).toBe('secret123')
   })
 
   test('IPv4 URL with port + path: http://192.168.1.1:8080/admin:root:toor', () => {
@@ -1296,5 +1296,71 @@ describe('§18 Double-encoded mojibake', () => {
   test('valid Unicode password (Cyrillic/Chinese/emoji) still kept — no false positive', () => {
     const c = cred('https://site.com:realuser:пароль密码🔑')
     expect(c).not.toBeNull()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §19  Port/path-leak recovery (scheme-less host:port[/path]:login:pass)
+// The no-scheme colon-splitter used to make the port the login. Now host:port
+// (with or without a path) is absorbed into the URL.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§19 Port/path-leak recovery', () => {
+  test('localhost:port/ : login : pass → port+path folds into URL', () => {
+    const c = cred('localhost:10000/:admin:12345')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('localhost:10000/')
+    expect(c!.email).toBe('admin')
+    expect(c!.password).toBe('12345')
+  })
+
+  test('host:port/path.cgi : login : pass → full path preserved in URL', () => {
+    const c = cred('admin:10000/session_login.cgi:studioprint:3571nt62')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('admin:10000/session_login.cgi')
+    expect(c!.email).toBe('studioprint')
+    expect(c!.password).toBe('3571nt62')
+  })
+
+  test('hostname:port/ with backslash login preserved', () => {
+    const c = cred('psvm001:1000/:psdc001\\administrator:AAS@4770477')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('psvm001:1000/')
+    expect(c!.email).toBe('psdc001\\administrator')
+    expect(c!.password).toBe('AAS@4770477')
+  })
+
+  test('bare port (no path): host:443:login:pass → port folds into URL', () => {
+    const c = cred('mysite.com:443:admin:secret123')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('mysite.com:443')
+    expect(c!.email).toBe('admin')
+    expect(c!.password).toBe('secret123')
+    expect(c!.domain).toBe('mysite.com')
+  })
+
+  test('IPv4 no-scheme with port+path: ip:port/path:login:pass', () => {
+    const c = cred('192.168.1.1:8080/admin:root:toor')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('192.168.1.1:8080/admin')
+    expect(c!.email).toBe('root')
+    expect(c!.password).toBe('toor')
+  })
+
+  // ── Regressions: non-port middles must be untouched ──
+  test('regression: no-scheme domain:login:pass (non-numeric middle) unchanged', () => {
+    const c = cred('example.com:alice:hunter2pass')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('example.com')
+    expect(c!.email).toBe('alice')
+    expect(c!.password).toBe('hunter2pass')
+  })
+
+  test('regression: no-scheme host:email@domain:pass unchanged', () => {
+    const c = cred('netflix.com:user@gmail.com:netfl1x!')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('netflix.com')
+    expect(c!.email).toBe('user@gmail.com')
+    expect(c!.password).toBe('netfl1x!')
   })
 })
