@@ -454,8 +454,14 @@ function colonSplit(line: string): [string, string, string] | null {
   if (c1 === -1) return null
   const left = line.slice(0, c1)
 
-  // Email login: "user@domain.com:password" → ['', email, password]
-  if (left.includes('@')) {
+  // Email login: "user@domain.com:password" → ['', email, password]. Only when
+  // the '@' precedes any '/', i.e. real email structure (localpart@domain[/junk]).
+  // A '/' BEFORE the '@' means the segment is a URL path that merely contains
+  // '@' (e.g. "discord.com/channels/@me/<id>"), not an email — fall through so a
+  // 2-field path:value line is rejected and a 3-field one keeps the path as url.
+  const atPos    = left.indexOf('@')
+  const slashPos = left.indexOf('/')
+  if (atPos !== -1 && (slashPos === -1 || atPos < slashPos)) {
     return ['', left, line.slice(c1 + 1)]
   }
 
