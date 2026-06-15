@@ -1,0 +1,54 @@
+<!-- ULP Suite — ClickHouse Keeper (embedded) + replication settings.
+     P0 #2: enables ReplicatedMergeTree → block-level insert dedup + replication-readiness.
+
+     SINGLE-NODE REALITY: with one ClickHouse host and a 1-node embedded Keeper this gives
+     you insert_deduplicate (kills the re-import duplicate bug) and the ability to ADD a
+     real replica later with no further table migration. It does NOT give true HA yet —
+     one host/disk is still a single point of failure and the embedded Keeper shares it.
+     True HA needs a 2nd replica on a SEPARATE machine (and ideally a 3-node Keeper
+     ensemble). See docs/clickhouse-replication-runbook.md.
+
+     keeper_server cannot be hot-reloaded — it starts with the server. Adding this file to
+     a running server is inert until the next restart; that restart IS the conversion step. -->
+<clickhouse>
+    <keeper_server>
+        <tcp_port>9181</tcp_port>
+        <server_id>1</server_id>
+        <log_storage_path>/var/lib/clickhouse/coordination/log</log_storage_path>
+        <snapshot_storage_path>/var/lib/clickhouse/coordination/snapshots</snapshot_storage_path>
+        <coordination_settings>
+            <operation_timeout_ms>10000</operation_timeout_ms>
+            <session_timeout_ms>30000</session_timeout_ms>
+            <raft_logs_level>warning</raft_logs_level>
+        </coordination_settings>
+        <raft_configuration>
+            <server>
+                <id>1</id>
+                <hostname>localhost</hostname>
+                <port>9234</port>
+            </server>
+        </raft_configuration>
+    </keeper_server>
+
+    <!-- The server coordinates through its own embedded Keeper. -->
+    <zookeeper>
+        <node>
+            <host>localhost</host>
+            <port>9181</port>
+        </node>
+    </zookeeper>
+
+    <!-- Replica identity. {uuid} gives every table a unique Keeper path (Atomic database). -->
+    <macros>
+        <shard>01</shard>
+        <replica>replica-1</replica>
+    </macros>
+
+    <!-- Used by `convert_to_replicated` and by ReplicatedMergeTree() with no explicit args. -->
+    <default_replica_path>/clickhouse/tables/{uuid}/{shard}</default_replica_path>
+    <default_replica_name>{replica}</default_replica_name>
+
+    <!-- WHEN YOU ADD A 2ND REPLICA (real HA), on BOTH nodes also set:
+           <interserver_http_host>this-node's-reachable-hostname</interserver_http_host>
+         and grow <raft_configuration> + <zookeeper> to a 3-node Keeper ensemble. -->
+</clickhouse>
