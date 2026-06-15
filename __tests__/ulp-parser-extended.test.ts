@@ -1384,3 +1384,49 @@ describe('§19 Port/path-leak recovery', () => {
     expect(c!.password).toBe('admin:pass1')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §20  Junk-marker rejection (inline parseLine)
+// Placeholder logins and token/decryption blobs are not real credentials.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§20 Junk-marker rejection (inline)', () => {
+  test('placeholder login "Password" → rejected garbage', () => {
+    expect(cred('https://site.com:Password:realpass123')).toBeNull()
+    expect(why('https://site.com:Password:realpass123')).toBe('garbage')
+  })
+
+  test('placeholder login "N/A" → rejected garbage', () => {
+    expect(cred('https://site.com:N/A:realpass123')).toBeNull()
+    expect(why('https://site.com:N/A:realpass123')).toBe('garbage')
+  })
+
+  test('placeholder login "[NOT_SAVED]" → rejected garbage', () => {
+    expect(cred('https://site.com:[NOT_SAVED]:realpass123')).toBeNull()
+    expect(why('https://site.com:[NOT_SAVED]:realpass123')).toBe('garbage')
+  })
+
+  test('real weak password "password" is KEPT (placeholder check is login-only)', () => {
+    const c = cred('https://site.com:realuser:password')
+    expect(c).not.toBeNull()
+    expect(c!.email).toBe('realuser')
+    expect(c!.password).toBe('password')
+  })
+
+  test('gmail_ps= token blob in password → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:gmail_ps=CrMBAAlriVxyz')).toBeNull()
+    expect(why('https://site.com:realuser:gmail_ps=CrMBAAlriVxyz')).toBe('garbage')
+  })
+
+  test('[Wrong padding] decryption junk in password → rejected garbage', () => {
+    expect(cred('https://site.com:realuser:[Wrong padding] HEX: D4-75-C9')).toBeNull()
+    expect(why('https://site.com:realuser:[Wrong padding] HEX: D4-75-C9')).toBe('garbage')
+  })
+
+  test('legit android ==@com. credential still KEPT (marker is in URL, not login/pass)', () => {
+    const c = cred('android://HASH==@com.instagram.android:john_doe:SecretPass99')
+    expect(c).not.toBeNull()
+    expect(c!.email).toBe('john_doe')
+    expect(c!.password).toBe('SecretPass99')
+  })
+})

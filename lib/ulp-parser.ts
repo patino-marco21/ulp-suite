@@ -121,6 +121,44 @@ function isValidHost(host: string): boolean {
   return /^[\p{L}\p{N}]([\p{L}\p{N}-]*[\p{L}\p{N}])?(\.[\p{L}\p{N}]([\p{L}\p{N}-]*[\p{L}\p{N}])?)+$/u.test(h)
 }
 
+/**
+ * Logins that are export placeholders, never a real identity — Chrome/stealer
+ * dumps emit these when no username was captured (password-reset pages, etc.).
+ * Checked case-insensitively, on the login field only (so a weak real PASSWORD
+ * like "password" is unaffected).
+ */
+const PLACEHOLDER_LOGINS = new Set([
+  'password', 'n/a', 'na', 'none', 'null', 'undefined', '[not_saved]', 'not_saved',
+  'user', 'username',
+])
+function isPlaceholderLogin(login: string): boolean {
+  return PLACEHOLDER_LOGINS.has(login.trim().toLowerCase())
+}
+
+/**
+ * Token / decryption blobs that never appear in a real login or password:
+ * Google GAIA recovery tokens (gmail_ps=, gmail=), digit-corrupted android
+ * token glue (==@com.), and AES/hex decryption failures ([Wrong padding]).
+ * Note: legit "android://HASH==@com.pkg" carries "==@com." in the URL field,
+ * which is never passed here — only login/password are checked.
+ */
+function hasJunkMarker(s: string): boolean {
+  return s.includes('gmail_ps=') || s.includes('gmail=')
+      || s.includes('==@com.')   || s.includes('[Wrong padding]')
+}
+
+/**
+ * Finalize-time junk gate, bundling every reject rule that applies to a built
+ * credential: placeholder login, token/decryption marker, and binary/mojibake.
+ * Called from credential-emission sites that don't otherwise run these checks
+ * (block + positional). `parseLine` runs the binary check inline already.
+ */
+function isJunkCredential(login: string, password: string): boolean {
+  return isPlaceholderLogin(login)
+      || hasJunkMarker(login)          || hasJunkMarker(password)
+      || hasBinaryOrReplacement(login) || hasBinaryOrReplacement(password)
+}
+
 // ── Block-format parser (Raccoon / Stealc / Meta / Vidar style) ──────────────
 
 export type BlockField = 'url' | 'login' | 'password' | 'soft'
@@ -594,6 +632,14 @@ export function parseLine(
     } else {
       return { credential: null, reason: 'garbage' }
     }
+  }
+
+  // Rule 3.7: placeholder identity / token-blob rejection. A login that is an
+  // export placeholder (Password, N/A, [NOT_SAVED], ...) is not a real identity;
+  // gmail_ps=/gmail=/==@com./[Wrong padding] are token or decryption junk.
+  // (Binary/mojibake already handled by Rule 3.5.)
+  if (isPlaceholderLogin(login) || hasJunkMarker(login) || hasJunkMarker(password)) {
+    return { credential: null, reason: 'garbage' }
   }
 
   // Rule 4: domain extraction
