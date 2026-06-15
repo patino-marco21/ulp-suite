@@ -29,6 +29,8 @@ export interface ProcessResult {
   filename:            string
   breach_name:         string
   rejection_breakdown: Record<RejectionReason, number>
+  /** True when the file was skipped because its filename is already in ulp.sources. */
+  alreadyImported:     boolean
 }
 
 // ─── ClickHouse helpers ───────────────────────────────────────────────────────
@@ -36,6 +38,22 @@ export interface ProcessResult {
 /** Escape a value for ClickHouse CSV: wrap in double-quotes, double internal quotes. */
 function csvField(v: string): string {
   return '"' + v.replace(/"/g, '""') + '"'
+}
+
+/**
+ * Authoritative "already imported" check. ulp.sources is written by recordSource
+ * ONLY after a file fully imports, so its presence means the whole file is already
+ * in ulp.credentials. Used both to skip re-imports (processTextStream) and to keep
+ * recordSource idempotent.
+ */
+export async function sourceAlreadyImported(filename: string): Promise<boolean> {
+  const res = await getClient().query({
+    query:        `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1`,
+    query_params: { f: filename },
+    format:       'JSONEachRow',
+  })
+  const rows = await res.json() as Array<{ c: string | number }>
+  return Number(rows[0]?.c ?? 0) > 0
 }
 
 /**
@@ -100,13 +118,7 @@ export async function recordSource(filename: string, lineCount: number): Promise
   // Prevents duplicate source rows when a file is re-processed (e.g. after an
   // OOM crash between processTextStream and renameSync, or a Force Scan race).
   // Safe because inbox processing is serialised via uploadQueue (pLimit 1).
-  const existing = await chClient.query({
-    query:        `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1`,
-    query_params: { f: filename },
-    format:       'JSONEachRow',
-  })
-  const rows = await existing.json() as Array<{ c: string | number }>
-  if (Number(rows[0]?.c ?? 0) > 0) {
+  if (await sourceAlreadyImported(filename)) {
     console.log(`[upload-processor] recordSource: ${filename} already in ulp.sources — skipping`)
     return
   }
@@ -134,6 +146,20 @@ export async function processTextStream(
   onBatch?: (imported: number) => void,
 ): Promise<ProcessResult> {
   const breach_name        = matchBreach(filename)
+
+  // Durable re-upload guard: if this filename is already in ulp.sources it was
+  // fully imported before, so skip re-reading/inserting it entirely. This is the
+  // authoritative, time-unbounded guard against the inbox watcher reprocessing a
+  // file or a duplicate re-upload — complementary to ClickHouse's insert-dedup
+  // token, which only covers re-inserts within its (1h default) dedup window.
+  if (await sourceAlreadyImported(filename)) {
+    console.log(`[upload-processor] ${filename} already in ulp.sources — skipping re-import`)
+    return {
+      imported: 0, skipped: 0, errors: 0, filename, breach_name,
+      rejection_breakdown: makeRejectionMap(), alreadyImported: true,
+    }
+  }
+
   let imported             = 0
   let skipped              = 0
   const rejection_breakdown = makeRejectionMap()
@@ -157,7 +183,7 @@ export async function processTextStream(
     )
   }
 
-  return { imported, skipped, errors: 0, filename, breach_name, rejection_breakdown }
+  return { imported, skipped, errors: 0, filename, breach_name, rejection_breakdown, alreadyImported: false }
 }
 
 // ─── ZIP processor (yauzl — lazy entry streaming) ────────────────────────────
@@ -210,6 +236,7 @@ function processZipEntries(
           filename:            entryName,
           breach_name:         matchBreach(entryName),
           rejection_breakdown: makeRejectionMap(),
+          alreadyImported:     false,
         })
         zipfile.readEntry()
       }
