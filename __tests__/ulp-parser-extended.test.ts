@@ -1586,4 +1586,14 @@ describe('§23 URL-path-with-@ vs email login', () => {
     expect(c!.email).toBe('user@gmail.com/')
     expect(c!.password).toBe('mypassword1')
   })
+
+  test('email in the MIDDLE field is unaffected (left has no @)', () => {
+    // host:email@domain:pass — the @ is in the middle field, not `left`, so this
+    // code path is untouched by the email-shortcut change.
+    const c = cred('steamcommunity.com:player@gmail.com:steampass1')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('steamcommunity.com')
+    expect(c!.email).toBe('player@gmail.com')
+    expect(c!.password).toBe('steampass1')
+  })
 })
