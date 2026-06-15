@@ -15,6 +15,7 @@ import {
   type RejectionReason,
 } from '@/lib/ulp-parser'
 import { getClient } from '@/lib/clickhouse'
+import { batchDedupToken } from '@/lib/upload-dedup'
 import { checkMonitorsForULPUpload } from '@/lib/domain-monitor'
 import { matchBreach } from '@/lib/breach-matcher'
 import { updateJob } from '@/lib/upload-jobs'
@@ -48,6 +49,9 @@ export async function insertBatch(
   if (credentials.length === 0) return
   const chClient = getClient()
 
+  // Deterministic content hash of this exact batch — see lib/upload-dedup.ts.
+  const token = batchDedupToken(credentials, breach_name)
+
   const readable = Readable.from(
     (function* () {
       for (const c of credentials) {
@@ -73,9 +77,15 @@ export async function insertBatch(
       async_insert:          1 as any,
       wait_for_async_insert: 1 as any,
       max_execution_time:    0,
-      // Disable row-level insert deduplication — we already dedup in the parser
-      // (seen Set cap) so ClickHouse doesn't need to re-check.  Saves CPU per batch.
-      insert_deduplicate:    0 as any,
+      // Block-level insert dedup. ulp.credentials is ReplicatedMergeTree, so a
+      // re-inserted byte-identical batch (inbox reprocess, retry, or request race)
+      // is dropped by ClickHouse within its dedup window instead of appending
+      // duplicate rows. The token is a content hash of this exact batch, so any
+      // changed/new row still inserts. NOTE: ClickHouse requires async_insert
+      // dedup to be on too, or the token is ignored under async_insert=1.
+      insert_deduplicate:          1 as any,
+      async_insert_deduplicate:    1 as any,
+      insert_deduplication_token:  token as any,
       // Allow ClickHouse to use multiple threads for column compression per insert.
       // Default is 1; 4 uses spare CPU to speed up bulk loads.
       max_insert_threads:    4 as any,
