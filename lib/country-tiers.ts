@@ -263,6 +263,60 @@ export function buildCountryTierExpression(): string {
   ].join('\n')
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// TypeScript classifier — the in-process twin of buildCountryTierExpression().
+// Reuses the SAME arrays above, so ingest-time tiering can never drift from the
+// ClickHouse country_tier column. Used by lib/ingest-filter.ts to drop low-tier
+// rows BEFORE insert (so they never cost storage / dedup / query compute).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Email domain (lowercased): everything after the last '@'. Mirrors the SQL ED. */
+export function emailDomainOf(email: string): string {
+  const at = email.lastIndexOf('@')
+  return at === -1 ? '' : email.slice(at + 1).toLowerCase()
+}
+
+/** Host of a URL: scheme/userinfo/port/path stripped, lowercased. */
+function hostOf(url: string): string {
+  let s = url
+  const scheme = s.indexOf('://')
+  if (scheme !== -1) s = s.slice(scheme + 3)
+  s = s.split(/[/?#]/)[0]                          // drop path/query/fragment
+  const at = s.lastIndexOf('@')
+  if (at !== -1) s = s.slice(at + 1)               // drop userinfo
+  s = s.split(':')[0]                              // drop port
+  return s.toLowerCase()
+}
+
+/** URL top-level domain (last dotted label of the host). Mirrors lower(topLevelDomain(url)). */
+export function urlTldOf(url: string): string {
+  const h = hostOf(url)
+  if (!h.includes('.')) return ''
+  const parts = h.split('.')
+  return parts[parts.length - 1]
+}
+
+function matchesEmail(ed: string, suffixes: string[], providers: string[]): boolean {
+  return suffixes.some(suf => ed.endsWith(suf)) || providers.includes(ed)
+}
+
+/**
+ * Classify a credential's country tier from its email + URL — identical logic and
+ * precedence to buildCountryTierExpression() (email signal first: T1→T2→T3, then
+ * URL-TLD fallback: T1→T2→T3, else untiered '').
+ */
+export function classifyTier(email: string, url: string): Tier {
+  const ed = emailDomainOf(email)
+  if (matchesEmail(ed, T1_EMAIL_SUFFIXES, T1_EMAIL_PROVIDERS)) return 'T1'
+  if (matchesEmail(ed, T2_EMAIL_SUFFIXES, T2_EMAIL_PROVIDERS)) return 'T2'
+  if (matchesEmail(ed, T3_EMAIL_SUFFIXES, T3_EMAIL_PROVIDERS)) return 'T3'
+  const tld = urlTldOf(url)
+  if (T1_URL_TLDS.includes(tld)) return 'T1'
+  if (T2_URL_TLDS.includes(tld)) return 'T2'
+  if (T3_URL_TLDS.includes(tld)) return 'T3'
+  return ''
+}
+
 /** All valid tier values (including empty = untiered) */
 export const VALID_TIERS: ReadonlyArray<string> = ['T1', 'T2', 'T3', '']
 

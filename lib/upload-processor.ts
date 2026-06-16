@@ -17,6 +17,7 @@ import {
 import { getClient } from '@/lib/clickhouse'
 import { batchDedupToken } from '@/lib/upload-dedup'
 import { runContentDedupTick } from '@/lib/content-dedup'
+import { parseIngestPolicy, policyActive, shouldDropAtIngest } from '@/lib/ingest-filter'
 import { checkMonitorsForULPUpload } from '@/lib/domain-monitor'
 import { matchBreach } from '@/lib/breach-matcher'
 import { updateJob } from '@/lib/upload-jobs'
@@ -32,6 +33,8 @@ export interface ProcessResult {
   rejection_breakdown: Record<RejectionReason, number>
   /** True when the file was skipped because its filename is already in ulp.sources. */
   alreadyImported:     boolean
+  /** Rows dropped pre-insert by the ingest tier filter (lib/ingest-filter.ts). */
+  tierDropped:         number
 }
 
 // ─── ClickHouse helpers ───────────────────────────────────────────────────────
@@ -157,17 +160,29 @@ export async function processTextStream(
     console.log(`[upload-processor] ${filename} already in ulp.sources — skipping re-import`)
     return {
       imported: 0, skipped: 0, errors: 0, filename, breach_name,
-      rejection_breakdown: makeRejectionMap(), alreadyImported: true,
+      rejection_breakdown: makeRejectionMap(), alreadyImported: true, tierDropped: 0,
     }
   }
 
   let imported             = 0
   let skipped              = 0
+  let tierDropped          = 0
   const rejection_breakdown = makeRejectionMap()
 
+  // Ingest tier filter — drops low-value rows BEFORE insert. Off unless
+  // INGEST_FILTER_DROP_TIERS / INGEST_FILTER_DROP_SUFFIXES is configured.
+  const dropPolicy = parseIngestPolicy()
+  const filterOn   = policyActive(dropPolicy)
+
   for await (const batch of parseULPStream(stream, filename, 500_000)) {
-    await insertBatch(batch.credentials, breach_name)
-    imported += batch.credentials.length
+    let creds = batch.credentials
+    if (filterOn) {
+      const kept = creds.filter(c => !shouldDropAtIngest(c.email, c.url, dropPolicy))
+      tierDropped += creds.length - kept.length
+      creds = kept
+    }
+    await insertBatch(creds, breach_name)
+    imported += creds.length
     skipped  += batch.rejected
     for (const [k, v] of Object.entries(batch.breakdown)) {
       rejection_breakdown[k as RejectionReason] =
@@ -175,6 +190,10 @@ export async function processTextStream(
     }
     if (jobId)   updateJob(jobId, { imported, skipped })
     if (onBatch) onBatch(imported)
+  }
+
+  if (filterOn && tierDropped > 0) {
+    console.log(`[ingest-filter] ${filename}: dropped ${tierDropped} low-tier rows pre-insert`)
   }
 
   if (imported > 0) {
@@ -190,7 +209,7 @@ export async function processTextStream(
     )
   }
 
-  return { imported, skipped, errors: 0, filename, breach_name, rejection_breakdown, alreadyImported: false }
+  return { imported, skipped, errors: 0, filename, breach_name, rejection_breakdown, alreadyImported: false, tierDropped }
 }
 
 // ─── ZIP processor (yauzl — lazy entry streaming) ────────────────────────────
@@ -244,6 +263,7 @@ function processZipEntries(
           breach_name:         matchBreach(entryName),
           rejection_breakdown: makeRejectionMap(),
           alreadyImported:     false,
+          tierDropped:         0,
         })
         zipfile.readEntry()
       }
