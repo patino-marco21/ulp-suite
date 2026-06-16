@@ -6,6 +6,7 @@ import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS } from "@/lib/ulp-normalize"
 import { noiseWhere } from "@/lib/ulp-noise"
+import { dedupeLimitBy } from "@/lib/ulp-dedupe"
 
 export const dynamic = 'force-dynamic'
 
@@ -70,7 +71,9 @@ export async function POST(request: NextRequest) {
     sort         = 'imported_desc',
     regex_mode   = false,
     exclude_noise = '',
+    dedupe        = '',
   } = await request.json()
+  const dedupeOn = dedupe === '1' || dedupe === true
 
   const { include: incTiers, exclude: excTiers } = parseTierParams(tier_include, tier_exclude)
   const loginTypes = parseLoginTypeParam(login_type)
@@ -138,6 +141,7 @@ export async function POST(request: NextRequest) {
        FROM ulp.credentials
        WHERE ${clause}${allExtras}
        ORDER BY ${orderBy}
+       ${dedupeLimitBy(dedupeOn)}
        LIMIT 10000`,
       mergedParams
     ) as Array<Record<string, string>>
