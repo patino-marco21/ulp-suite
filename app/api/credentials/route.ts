@@ -6,6 +6,7 @@ import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS } from "@/lib/ulp-normalize"
 import { NOISE_FILTER } from "@/lib/ulp-noise"
+import { dedupeLimitBy, dedupeCountExpr } from "@/lib/ulp-dedupe"
 import { SORT_MAP, type SortKey, encodeCursor, decodeCursor, buildCursorWhere } from "@/lib/cursor-pagination"
 
 export const dynamic = 'force-dynamic'
@@ -45,6 +46,7 @@ const SELECT = `${NORM_COLS},
  *   date_from     string    ISO date e.g. 2024-01-01
  *   date_to       string    ISO date e.g. 2024-12-31
  *   exclude_noise '1'       hide low-signal rows: IP-host / :port / .php / localhost URLs
+ *   dedupe        '1'       collapse exact (url,email,password) duplicates (one row each)
  */
 export async function GET(request: NextRequest) {
   const user = await validateRequest(request)
@@ -78,6 +80,9 @@ export async function GET(request: NextRequest) {
   // Default-on in the UI, but absent param = off here so other API callers and
   // raw /api/credentials hits keep their existing (unfiltered) behavior.
   const excludeNoise = sp.get('exclude_noise') === '1'
+  // Dedupe: collapse exact (url,email,password) duplicates in the view (one row
+  // per unique credential). Default-on in the UI; absent param = off here.
+  const dedupe = sp.get('dedupe') === '1'
 
   const orderBy    = SORT_MAP[sortKey as SortKey] ?? SORT_MAP['imported_desc']
   const { include: incTiers, exclude: excTiers } = parseTierParams(tierInclude, tierExclude)
@@ -160,7 +165,8 @@ export async function GET(request: NextRequest) {
       // (active from the user profile) is combined with timeout_overflow_mode='break'.
       // Partial/timed-out counts must not be cached anyway — they are not the real count.
       : executeQuery(
-          `SELECT count() AS total FROM ulp.credentials WHERE ${where}
+          // When deduping, total = distinct credentials via uniq() (HLL, cheap).
+          `SELECT ${dedupeCountExpr(dedupe)} AS total FROM ulp.credentials WHERE ${where}
            SETTINGS optimize_trivial_count_query = 1,
                     max_execution_time = 300,
                     timeout_overflow_mode = 'break',
@@ -178,6 +184,7 @@ export async function GET(request: NextRequest) {
          FROM ulp.credentials
          WHERE ${where}${cursorClause}
          ORDER BY ${orderBy}
+         ${dedupeLimitBy(dedupe)}
          LIMIT {limit:UInt32}
          SETTINGS max_execution_time = 300,
                   timeout_overflow_mode = 'throw'`,
