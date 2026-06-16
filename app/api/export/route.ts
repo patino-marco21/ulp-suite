@@ -5,6 +5,7 @@ import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-sear
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS } from "@/lib/ulp-normalize"
+import { noiseWhere } from "@/lib/ulp-noise"
 
 export const dynamic = 'force-dynamic'
 
@@ -68,6 +69,7 @@ export async function POST(request: NextRequest) {
     source_file  = '',
     sort         = 'imported_desc',
     regex_mode   = false,
+    exclude_noise = '',
   } = await request.json()
 
   const { include: incTiers, exclude: excTiers } = parseTierParams(tier_include, tier_exclude)
@@ -107,7 +109,10 @@ export async function POST(request: NextRequest) {
 
   const tierExtra      = tierWhereMulti(incTiers, excTiers)
   const loginTypeExtra = loginTypeWhere(loginTypes)
-  const allExtras      = extras.join('') + tierExtra + loginTypeExtra
+  // Declutter parity with the browser view — append last so it flows into every
+  // downstream format (csv/ulp/json, hcmask, emails/domains, spray).
+  const noiseExtra     = noiseWhere(exclude_noise === '1' || exclude_noise === true)
+  const allExtras      = extras.join('') + tierExtra + loginTypeExtra + noiseExtra
 
   // For hcmask, we only need passwords — handled specially
   if (format === 'hcmask') {

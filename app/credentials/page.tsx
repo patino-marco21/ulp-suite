@@ -7,7 +7,7 @@ import {
   Copy, Filter, X, Globe, Download, ArrowUpDown,
   ExternalLink, FileText, Shield, Clock, Building2,
   Mail, Lock, AtSign, CheckCheck, SlidersHorizontal,
-  Link2, KeyRound, Users,
+  Link2, KeyRound, Users, Sparkles,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -605,6 +605,9 @@ export default function CredentialsPage() {
   const [tierInclude, setTierInclude] = useState<string[]>([])
   const [tierExclude, setTierExclude] = useState<string[]>([])
   const [tierOpen, setTierOpen]       = useState(false)
+  // Declutter: hide low-signal rows (IP-host / :port / .php / localhost URLs).
+  // On by default — non-destructive, toggle off to reveal everything.
+  const [excludeNoise, setExcludeNoise] = useState(true)
 
   // Advanced filters (hidden behind toggle)
   const [advOpen, setAdvOpen]               = useState(false)
@@ -624,11 +627,12 @@ export default function CredentialsPage() {
 
   const { toast } = useToast()
 
-  const buildParams = useCallback((cursor: string | null, overrides?: { sort?: string; limit?: number; q?: string; domain?: string }) => {
+  const buildParams = useCallback((cursor: string | null, overrides?: { sort?: string; limit?: number; q?: string; domain?: string; excludeNoise?: boolean }) => {
     const effectiveSort  = overrides?.sort   ?? sortKey
     const effectiveLimit = overrides?.limit  ?? limit
     const effectiveQ     = overrides?.q      ?? q
     const effectiveDomain = overrides?.domain ?? domain
+    const effectiveExcludeNoise = overrides?.excludeNoise ?? excludeNoise
     const ps = new URLSearchParams({ limit: String(effectiveLimit), sort: effectiveSort })
     if (cursor) ps.set('cursor', cursor)
     if (effectiveQ.trim())     ps.set('q', effectiveQ.trim())
@@ -640,6 +644,7 @@ export default function CredentialsPage() {
     if (urlScheme)            ps.set('url_scheme', urlScheme)
     if (tierInclude.length)   ps.set('tier_include', tierInclude.join(','))
     if (tierExclude.length)   ps.set('tier_exclude', tierExclude.join(','))
+    if (effectiveExcludeNoise) ps.set('exclude_noise', '1')
     // Advanced
     if (dateFrom)           ps.set('date_from', dateFrom)
     if (dateTo)             ps.set('date_to', dateTo)
@@ -651,12 +656,12 @@ export default function CredentialsPage() {
     if (regexMode)          ps.set('regex', '1')
     return ps
   }, [
-    q, domain, breach, loginType, pwMask, isCorporate, urlScheme, tierInclude, tierExclude,
+    q, domain, breach, loginType, pwMask, isCorporate, urlScheme, tierInclude, tierExclude, excludeNoise,
     dateFrom, dateTo, pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode,
     sortKey, limit,
   ])
 
-  const load = useCallback(async (cursor: string | null, overrides?: { sort?: string; limit?: number; q?: string; domain?: string }) => {
+  const load = useCallback(async (cursor: string | null, overrides?: { sort?: string; limit?: number; q?: string; domain?: string; excludeNoise?: boolean }) => {
     setLoading(true)
     try {
       const res  = await fetch(`/api/credentials?${buildParams(cursor, overrides)}`)
@@ -692,12 +697,14 @@ export default function CredentialsPage() {
     setDateFrom(''); setDateTo(''); setPwLenMin(''); setPwLenMax('')
     setEmailDomainFilter(''); setSourceFileFilter(''); setUrlHostFilter('')
     setRegexMode(false)
+    setExcludeNoise(true)
     setSortKey('imported_desc'); setLimit(50)
     // Fetch directly with hardcoded defaults — all state setters above are async,
     // so calling load() here would still see the old values via its closure.
+    // exclude_noise=1 keeps the default-on declutter after a clear.
     setLoading(true)
     setCursorStack([]); setCurrentCursor(null)
-    fetch('/api/credentials?limit=50&sort=imported_desc')
+    fetch('/api/credentials?limit=50&sort=imported_desc&exclude_noise=1')
       .then(r => r.json())
       .then(json => { if (json.success) { setData(json); setCurrentCursor(null) } })
       .catch(() => { toast({ title: 'Failed to load', variant: 'destructive' }) })
@@ -765,6 +772,7 @@ export default function CredentialsPage() {
           email_domain:  emailDomainFilter,
           source_file:   sourceFileFilter,
           regex_mode:    regexMode,
+          exclude_noise: excludeNoise ? '1' : '',
         }),
       })
       if (!res.ok) throw new Error('Export failed')
@@ -787,7 +795,7 @@ export default function CredentialsPage() {
       setExportLoading(false)
     }
   }, [q, domain, breach, tierInclude, tierExclude, loginType, pwMask, urlScheme, isCorporate, sortKey, exportFmt,
-      dateFrom, dateTo, pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode,
+      dateFrom, dateTo, pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode, excludeNoise,
       toast])
 
   const tierBadgeClass = (t: string) =>
@@ -1059,6 +1067,18 @@ export default function CredentialsPage() {
             className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${isCorporate ? 'border-orange-400/40 bg-orange-500/10 text-orange-600 font-medium' : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted'}`}
           >
             🏢 Corporate only
+          </button>
+
+          <div className="h-4 w-px bg-border" />
+
+          {/* Declutter — hide IP-host / :port / .php / localhost noise (non-destructive) */}
+          <button
+            onClick={() => { const v = !excludeNoise; setExcludeNoise(v); resetCursor(); load(null, { excludeNoise: v }) }}
+            title="Hide low-signal rows: IP-address hosts, URLs with a :port, .php login pages, and localhost. Non-destructive — toggle off to show every row."
+            className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${excludeNoise ? 'border-primary/30 bg-primary/10 text-primary font-medium' : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted'}`}
+          >
+            <Sparkles className="h-3 w-3" />
+            {excludeNoise ? 'Decluttered' : 'Declutter'}
           </button>
 
           <div className="h-4 w-px bg-border" />
