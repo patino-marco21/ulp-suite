@@ -5,6 +5,7 @@ import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-sear
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS } from "@/lib/ulp-normalize"
+import { NOISE_PREDICATE } from "@/lib/ulp-noise"
 import { SORT_MAP, type SortKey, encodeCursor, decodeCursor, buildCursorWhere } from "@/lib/cursor-pagination"
 
 export const dynamic = 'force-dynamic'
@@ -43,6 +44,7 @@ const SELECT = `${NORM_COLS},
  *   pw_len_max    number    maximum password length
  *   date_from     string    ISO date e.g. 2024-01-01
  *   date_to       string    ISO date e.g. 2024-12-31
+ *   exclude_noise '1'       hide low-signal rows: IP-host / :port / .php / localhost URLs
  */
 export async function GET(request: NextRequest) {
   const user = await validateRequest(request)
@@ -72,6 +74,10 @@ export async function GET(request: NextRequest) {
   const dateTo      = sp.get('date_to')       || ''
   const tierInclude = sp.get('tier_include')  || ''
   const tierExclude = sp.get('tier_exclude')  || ''
+  // Declutter: hide low-signal rows (IP-host / :port / .php / localhost URLs).
+  // Default-on in the UI, but absent param = off here so other API callers and
+  // raw /api/credentials hits keep their existing (unfiltered) behavior.
+  const excludeNoise = sp.get('exclude_noise') === '1'
 
   const orderBy    = SORT_MAP[sortKey as SortKey] ?? SORT_MAP['imported_desc']
   const { include: incTiers, exclude: excTiers } = parseTierParams(tierInclude, tierExclude)
@@ -108,6 +114,8 @@ export async function GET(request: NextRequest) {
   if (pwMasks.length) {
     conditions.push(`password_mask IN (${pwMasks.map(m => `'${m}'`).join(',')})`)
   }
+  // Non-destructive: hides the row from this result set, never deletes it.
+  if (excludeNoise) conditions.push(`NOT ${NOISE_PREDICATE}`)
 
   const tierExtra      = tierWhereMulti(incTiers, excTiers)
   const loginTypeExtra = loginTypeWhere(loginTypes)
