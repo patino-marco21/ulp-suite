@@ -19,7 +19,7 @@ import {
 import { Separator } from "@/components/ui/separator"
 import { useToast } from "@/hooks/use-toast"
 import { useAuth } from "@/hooks/useAuth"
-import { TIER_LABELS, VALID_TIERS } from "@/lib/country-tiers"
+import { TIER_LABELS } from "@/lib/country-tiers"
 import { LOGIN_TYPE_SHORT } from "@/lib/login-type"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -1344,7 +1344,7 @@ export default function CredentialsPage() {
                       ⚠ Results timed out on this page
                     </p>
                     <p className="text-sm text-muted-foreground">
-                      {data.total.toLocaleString()} records were found but couldn't be loaded — go back to the first page or add a more specific filter.
+                      {data.total.toLocaleString()} records were found but could not be loaded — go back to the first page or add a more specific filter.
                     </p>
                   </div>
                 )
