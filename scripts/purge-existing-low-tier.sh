@@ -36,9 +36,13 @@ APPLY="${APPLY:-0}"
 # ── Resolve policy: explicit env → INGEST_FILTER_* → ./.env file ──────────────
 TIERS_RAW="${INGEST_FILTER_DROP_TIERS:-${TIERS:-}}"
 SUFFIXES_RAW="${INGEST_FILTER_DROP_SUFFIXES:-${SUFFIXES:-}}"
+KEEP_RAW="${INGEST_FILTER_KEEP_SUFFIXES:-${KEEP:-}}"
 if [ -z "$TIERS_RAW" ] && [ -z "$SUFFIXES_RAW" ] && [ -f .env ]; then
   TIERS_RAW=$(grep -E '^INGEST_FILTER_DROP_TIERS=' .env | tail -1 | cut -d= -f2- | tr -d "\"' ")
   SUFFIXES_RAW=$(grep -E '^INGEST_FILTER_DROP_SUFFIXES=' .env | tail -1 | cut -d= -f2- | tr -d "\"' ")
+fi
+if [ -z "$KEEP_RAW" ] && [ -f .env ]; then
+  KEEP_RAW=$(grep -E '^INGEST_FILTER_KEEP_SUFFIXES=' .env | tail -1 | cut -d= -f2- | tr -d "\"' ")
 fi
 
 # ── Build the WHERE predicate (mirrors shouldDropAtIngest) ───────────────────
@@ -75,6 +79,22 @@ if [ -z "$PRED" ]; then
   exit 1
 fi
 
+# Keep-override (mirrors INGEST_FILTER_KEEP_SUFFIXES): never purge these countries,
+# even if their tier/suffix is dropped. Wraps the drop predicate as (drop) AND NOT (keep).
+KEEP_CLAUSE=""
+if [ -n "$KEEP_RAW" ]; then
+  IFS=',' read -ra KARR <<< "$KEEP_RAW"
+  for s in "${KARR[@]}"; do
+    s=$(echo "$s" | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+    [ -z "$s" ] && continue
+    case "$s" in .*) suf="$s";; *) suf=".$s";; esac
+    tld="${suf#.}"
+    cond="endsWith(email_domain, '$suf') OR tld = '$tld'"
+    KEEP_CLAUSE="${KEEP_CLAUSE:+$KEEP_CLAUSE OR }$cond"
+  done
+fi
+[ -n "$KEEP_CLAUSE" ] && PRED="($PRED) AND NOT ($KEEP_CLAUSE)"
+
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║   ULP Suite — purge EXISTING low-tier rows                   ║"
@@ -82,6 +102,7 @@ echo "╚═══════════════════════�
 echo "APPLY=$APPLY  (0 = dry-run)"
 echo "DROP_TIERS    = ${TIERS_RAW:-(none)}"
 echo "DROP_SUFFIXES = ${SUFFIXES_RAW:-(none)}"
+echo "KEEP_SUFFIXES = ${KEEP_RAW:-(none)}"
 echo "WHERE $PRED"
 echo ""
 
@@ -114,7 +135,7 @@ echo ""
 echo "═══ 3/3  Delete ═════════════════════════════════════════════════"
 if [ "$APPLY" != "1" ]; then
   echo "Dry-run. Review the count + sample above. To delete:"
-  echo "  APPLY=1 INGEST_FILTER_DROP_TIERS='${TIERS_RAW}' INGEST_FILTER_DROP_SUFFIXES='${SUFFIXES_RAW}' bash scripts/purge-existing-low-tier.sh"
+  echo "  APPLY=1 INGEST_FILTER_DROP_TIERS='${TIERS_RAW}' INGEST_FILTER_DROP_SUFFIXES='${SUFFIXES_RAW}' INGEST_FILTER_KEEP_SUFFIXES='${KEEP_RAW}' bash scripts/purge-existing-low-tier.sh"
 else
   echo "Firing ALTER TABLE ulp.credentials DELETE WHERE <policy> (async mutation)..."
   if ! $CH "ALTER TABLE ulp.credentials DELETE WHERE $PRED SETTINGS mutations_sync = 0"; then
