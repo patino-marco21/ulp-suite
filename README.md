@@ -213,6 +213,63 @@ Open [http://localhost:3000](http://localhost:3000). Changes apply instantly wit
 
 ---
 
+## Filtering & deduplication
+
+Three layers, from non-destructive view filters to permanent ingest-time drops.
+
+### Browser view toggles (non-destructive, default-on)
+
+In the Credentials Browser:
+
+- **Declutter** — hides low-signal rows (IP-host / `:port` / `.php` / `localhost` URLs). Backed by a precomputed `is_noise` column, so it's a cheap filter, not a per-row scan.
+- **Unique** — collapses exact `(url, email, password)` duplicates to one row each (`LIMIT 1 BY`).
+
+Both are view-only — storage is untouched; toggle off to see everything.
+
+### Content deduplication (storage)
+
+Exact `(url,email,password)` duplicates accumulate when the same credential arrives across different combolist files. To remove them from storage:
+
+```bash
+# one-time (dry-run, then apply)
+bash scripts/dedup-credentials-content.sh
+APPLY=1 bash scripts/dedup-credentials-content.sh
+```
+
+To keep it lean automatically, the app runs a scheduled + post-import dedup — **report-only until you opt in**:
+
+```bash
+CONTENT_DEDUP_APPLY=true   # allow the background ALTER … DELETE
+DEDUP_CRON_HOURS=24        # 0 disables the scheduled job
+DEDUP_MIN_EXCESS=1000      # skip the (heavy) mutation below this many excess rows
+```
+
+### Ingest tier filter — keep only the countries you care about
+
+Drops low-value rows **before insert**, so they never cost storage / dedup / index / query compute (see `lib/ingest-filter.ts`). **Off by default**; enabling permanently discards matching rows on new imports (re-import to recover). Untiered (`@gmail`/`.com`, no country signal) is never tier-dropped.
+
+```bash
+# Recommended "wealthy / English-speaking / Gulf-oil" target:
+INGEST_FILTER_DROP_TIERS=T2,T3
+INGEST_FILTER_KEEP_SUFFIXES=.ie,.mt,.ae,.sa,.qa,.kw,.bh,.om   # + optional .sg,.lu
+# → keeps T1 (US/UK/CA/AU/NZ) + untiered + Ireland/Malta + the 6 GCC oil states.
+```
+
+Companion scripts:
+
+```bash
+# see your data's tier / country breakdown (read-only)
+bash scripts/tier-distribution.sh
+
+# purge the EXISTING backlog matching the same policy (dry-run, then apply)
+bash scripts/purge-existing-low-tier.sh
+APPLY=1 bash scripts/purge-existing-low-tier.sh
+```
+
+Tiers: **T1** = US/UK/CA/AU/NZ · **T2** = W.Europe/JP/KR/SG/IL/AE · **T3** = RU/CN/BR/LATAM/SEA.
+
+---
+
 ## API
 
 Authentication: `Authorization: Bearer <api-key>` header.
