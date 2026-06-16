@@ -22,6 +22,8 @@ interface ZipFileEntry {
 interface UploadResult {
   imported: number
   skipped: number
+  /** Rows dropped pre-insert by the ingest tier filter (0 unless configured). */
+  tierDropped?: number
   errors: number
   import_pct?: number
   /** For ZIP uploads: per-file breakdown. */
@@ -47,6 +49,7 @@ export default function UploadPage() {
 
   const [liveImported, setLiveImported] = useState(0)
   const [liveSkipped, setLiveSkipped]   = useState(0)
+  const [liveTierDropped, setLiveTierDropped] = useState(0)
   const [livePct, setLivePct]           = useState(0)
   const [elapsedMs, setElapsedMs]       = useState(0)
   const eventSourceRef                  = useRef<EventSource | null>(null)
@@ -99,7 +102,7 @@ export default function UploadPage() {
 
           if (data.jobId) {
             // SSE path — resolve when server signals done or error
-            setLiveImported(0); setLiveSkipped(0); setLivePct(0); setElapsedMs(0)
+            setLiveImported(0); setLiveSkipped(0); setLiveTierDropped(0); setLivePct(0); setElapsedMs(0)
             const es = new EventSource(`/api/upload/progress/${data.jobId}`)
             eventSourceRef.current = es
 
@@ -117,6 +120,7 @@ export default function UploadPage() {
               const d = JSON.parse(e.data)
               setLiveImported(d.imported ?? 0)
               setLiveSkipped(d.skipped   ?? 0)
+              setLiveTierDropped(d.tierDropped ?? 0)
               setLivePct(d.pct           ?? 0)
               setElapsedMs(d.elapsed_ms  ?? 0)
 
@@ -124,6 +128,7 @@ export default function UploadPage() {
                 const r: UploadResult = {
                   imported:            d.imported,
                   skipped:             d.skipped,
+                  tierDropped:         d.tierDropped ?? 0,
                   errors:              0,
                   filename:            file.name,
                   breach_name:         '',
@@ -310,6 +315,11 @@ export default function UploadPage() {
                   <span>{livePct}%</span>
                   <span>{liveSkipped.toLocaleString()} skipped</span>
                 </div>
+                {liveTierDropped > 0 && (
+                  <p className="text-center text-xs text-muted-foreground tabular-nums">
+                    {liveTierDropped.toLocaleString()} filtered (low-tier)
+                  </p>
+                )}
               </>
             ) : (
               <Progress value={progress} className="h-2" />
@@ -323,6 +333,7 @@ export default function UploadPage() {
         const totalImported = allResults.reduce((s, r) => s + r.imported, 0)
         const totalSkipped  = allResults.reduce((s, r) => s + r.skipped,  0)
         const totalErrors   = allResults.reduce((s, r) => s + r.errors,   0)
+        const totalTierDropped = allResults.reduce((s, r) => s + (r.tierDropped ?? 0), 0)
         const mergedBreakdown = allResults.reduce((acc, r) => {
           for (const [k, v] of Object.entries(r.rejection_breakdown ?? {}))
             acc[k] = (acc[k] ?? 0) + v
@@ -338,6 +349,7 @@ export default function UploadPage() {
         const displayResult: UploadResult = {
           imported:            totalImported,
           skipped:             totalSkipped,
+          tierDropped:         totalTierDropped,
           errors:              totalErrors,
           import_pct,
           filename:            allResults.length === 1
@@ -363,10 +375,13 @@ export default function UploadPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="grid grid-cols-3 gap-3">
+              <div className={(displayResult.tierDropped ?? 0) > 0 ? "grid grid-cols-4 gap-3" : "grid grid-cols-3 gap-3"}>
                 <StatBox label="Imported" value={displayResult.imported.toLocaleString()} color="green" />
                 <StatBox label="Skipped"  value={displayResult.skipped.toLocaleString()}  color="yellow" />
                 <StatBox label="Errors"   value={displayResult.errors.toLocaleString()}   color="red" />
+                {(displayResult.tierDropped ?? 0) > 0 && (
+                  <StatBox label="Filtered" value={(displayResult.tierDropped ?? 0).toLocaleString()} color="yellow" />
+                )}
               </div>
 
               {displayResult.import_pct !== undefined && (
