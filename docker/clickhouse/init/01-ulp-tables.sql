@@ -227,6 +227,22 @@ CREATE TABLE IF NOT EXISTS ulp.credentials
         )
     ),
 
+    -- is_noise: precomputed flag for the browser's default-on "Declutter" filter
+    -- (mirrors lib/ulp-noise.ts NOISE_EXPR). Computed ONCE here instead of as a
+    -- per-row WHERE predicate, so /credentials filters on a cheap `is_noise = 0`
+    -- PREWHERE compare rather than running match()/port()/isIPv4String() over the
+    -- wide url column for every scanned row. References url_host (materialized
+    -- above), the same way country_tier references tld.
+    is_noise UInt8 MATERIALIZED toUInt8(
+        isIPv4String(url_host)
+        OR isIPv6String(url_host)
+        OR match(url_host, '^[0-9]{1,3}(\\.[0-9]{1,3}){3}')
+        OR url_host = 'localhost'
+        OR endsWith(url_host, '.local')
+        OR port(url) != 0
+        OR match(lower(url), '\\.php($|[?#])')
+    ),
+
     -- ── Skip indexes ──────────────────────────────────────────────────────────
     -- text() inverted indexes on url/email/password are added by DDL v6 in
     -- lib/clickhouse-migrations.ts (requires ClickHouse 26.2+; not defined here

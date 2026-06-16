@@ -5,7 +5,7 @@ import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-sear
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS } from "@/lib/ulp-normalize"
-import { NOISE_PREDICATE } from "@/lib/ulp-noise"
+import { NOISE_FILTER } from "@/lib/ulp-noise"
 import { SORT_MAP, type SortKey, encodeCursor, decodeCursor, buildCursorWhere } from "@/lib/cursor-pagination"
 
 export const dynamic = 'force-dynamic'
@@ -115,7 +115,9 @@ export async function GET(request: NextRequest) {
     conditions.push(`password_mask IN (${pwMasks.map(m => `'${m}'`).join(',')})`)
   }
   // Non-destructive: hides the row from this result set, never deletes it.
-  if (excludeNoise) conditions.push(`NOT ${NOISE_PREDICATE}`)
+  // Filters the precomputed is_noise column (cheap UInt8 → PREWHERE), NOT a
+  // per-row function chain — see lib/ulp-noise.ts for why.
+  if (excludeNoise) conditions.push(NOISE_FILTER)
 
   const tierExtra      = tierWhereMulti(incTiers, excTiers)
   const loginTypeExtra = loginTypeWhere(loginTypes)
