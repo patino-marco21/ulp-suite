@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'vitest'
-import { isNoiseUrl, noiseWhere, NOISE_PREDICATE } from '@/lib/ulp-noise'
+import { isNoiseUrl, noiseWhere, NOISE_FILTER, NOISE_EXPR } from '@/lib/ulp-noise'
 
 describe('ulp-noise', () => {
   describe('isNoiseUrl — hides low-signal rows', () => {
@@ -37,10 +37,10 @@ describe('ulp-noise', () => {
   })
 
   describe('noiseWhere', () => {
-    test('returns an appendable AND NOT (...) fragment when excluding', () => {
+    test('returns an appendable `AND is_noise = 0` fragment when excluding', () => {
       const w = noiseWhere(true)
-      expect(w.startsWith(' AND NOT (')).toBe(true)
-      expect(w).toContain(NOISE_PREDICATE)
+      expect(w).toBe(' AND is_noise = 0')
+      expect(w).toContain(NOISE_FILTER)
     })
 
     test('returns empty string when not excluding (keep everything)', () => {
@@ -48,18 +48,18 @@ describe('ulp-noise', () => {
     })
   })
 
-  describe('NOISE_PREDICATE — SQL references every signal', () => {
-    test('covers IP, port, and .php signals', () => {
-      expect(NOISE_PREDICATE).toContain('isIPv4String(domain)')
-      expect(NOISE_PREDICATE).toContain('port(url) != 0')
-      expect(NOISE_PREDICATE).toContain('.php')
-      expect(NOISE_PREDICATE).toContain("'localhost'")
+  describe('NOISE_EXPR — materialized-column SQL references every signal', () => {
+    test('covers IP, port, .php, and localhost signals (over url_host/url)', () => {
+      expect(NOISE_EXPR).toContain('isIPv4String(url_host)')
+      expect(NOISE_EXPR).toContain('port(url) != 0')
+      expect(NOISE_EXPR).toContain('.php')
+      expect(NOISE_EXPR).toContain("'localhost'")
     })
 
     test('regex backslashes are doubled for ClickHouse string-literal parsing', () => {
       // SQL text must contain "\\." so ClickHouse delivers RE2 "\." (literal dot).
-      expect(NOISE_PREDICATE).toContain('\\\\.[0-9]')
-      expect(NOISE_PREDICATE).toContain('\\\\.php')
+      expect(NOISE_EXPR).toContain('\\\\.[0-9]')
+      expect(NOISE_EXPR).toContain('\\\\.php')
     })
   })
 })

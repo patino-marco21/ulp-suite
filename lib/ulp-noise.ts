@@ -1,59 +1,66 @@
 /**
  * "Noise" / low-signal URL classification for the credential browser.
  *
- * These rows almost always carry a REAL email + password — they are NOT garbage
- * in the binary/mojibake sense (that is handled, and DELETED, by the parser reject
- * machinery and scripts/diagnose-and-purge-garbage.sh, which deliberately PRESERVE
- * any row with a real email). They are simply low value for a human browsing by
- * target domain, and clutter the results:
+ * Hides rows that clutter a human browse-by-domain view but usually carry a REAL
+ * email + password (so they are filtered, never deleted — see
+ * scripts/diagnose-and-purge-garbage.sh, which preserves any row with a real email):
+ *   - the URL host is a bare IP address (incl. private/LAN + IP-prefixed corruption)
+ *   - the URL carries an explicit :port (router / Odoo :8069 / cPanel :2083)
+ *   - the URL is a generic login script ending in .php (wp-login.php, …)
+ *   - host is localhost / *.local
  *
- *   - the URL host is a bare IP address (no real domain) — includes private/LAN
- *     IPs (192.168.x, 10.x) and IP-prefixed corruption ("192.168.31.180:5000:x")
- *   - the URL carries an explicit :port — router / Odoo (:8069) / cPanel (:2083)
- *     and other panel endpoints
- *   - the URL is a generic login script ending in .php (wp-login.php, etc.)
- *   - localhost / *.local
+ * ── PERFORMANCE (why this is a column, not an inline WHERE predicate) ──────────
+ * The first version inlined this as `AND NOT (isIPv4String(domain) OR port(url) !=
+ * 0 OR match(lower(url), …) OR …)`. Every one of those is a NON-INDEXABLE per-row
+ * function over the wide ZSTD(3) `url`/`domain` columns, and the predicate keeps
+ * most rows (not selective) so it can prune nothing. On a Ledger-themed search the
+ * token/ngram indexes barely prune (the term is everywhere), so the functions ran
+ * over millions of rows — a 78.9 s browse. The default sort (`imported_at DESC`)
+ * also isn't the table's ORDER BY prefix, so there's no early-termination from the
+ * LIMIT, and the parallel count() (no LIMIT) pays full freight.
  *
- * Filtering here is therefore NON-destructive and view-only: it hides rows from
- * the browser/export, it never deletes them. The UI exposes it as a default-on
- * "Declutter" toggle so the operator can always reveal the full set.
+ * Fix: bake the logic into a MATERIALIZED `is_noise UInt8` column (DDL v12,
+ * computed ONCE at insert from url_host + url), exactly like the other 10
+ * materialized columns. The browser/export filter is then a trivial `is_noise = 0`
+ * integer compare that ClickHouse auto-moves to PREWHERE — no per-row regex/port
+ * parsing, no wide-column read for the filter.
  *
- * The predicate runs against the RAW storage columns (`url`, `domain`). With all
- * data-repair mutations complete those equal the normalized display values, and
- * raw columns keep ClickHouse's primary-key / skip indexes usable (wrapping the
- * NORM_*_EXPR around them would defeat index pruning — see lib/ulp-normalize.ts).
+ * {@link NOISE_EXPR} is the single source of truth for the column's MATERIALIZED
+ * definition (lib/clickhouse-migrations.ts DDL v12 + the init schema mirror it).
+ * {@link isNoiseUrl} mirrors it in JS for unit tests.
  *
- * ClickHouse semantics relied on:
- *   - port(url)        → the explicit port, or 0 when none (does NOT infer 80/443)
- *   - isIPv4String(s)  → 1 iff s is a valid dotted-quad
- *   - domain column    → host with the port and leading "www." already stripped
+ * Escaping: NOISE_EXPR is interpolated into the migration's DDL text. An RE2 `\.`
+ * must survive ClickHouse string-literal parsing (`\\` → `\`), so it is written
+ * `\\.` in the SQL text → `\\\\.` in this TS template literal — the same convention
+ * as the url_host MATERIALIZED expression in lib/clickhouse-migrations.ts.
  *
- * Escaping: this string is interpolated directly into the SQL text (not a bound
- * parameter), exactly like tierWhereMulti() and the pw_mask IN-list. An RE2 `\.`
- * must survive ClickHouse string-literal parsing, which collapses `\\` → `\`, so
- * the SQL text needs `\\.` — written `\\\\.` in this TS template literal. This is
- * the same convention documented in lib/ulp-normalize.ts.
+ * Host checks use `url_host` (materialized, lowercased, port/path-stripped); the
+ * :port and .php checks need the raw `url`.
  */
-export const NOISE_PREDICATE = `(
-       isIPv4String(domain)
-    OR isIPv6String(domain)
-    OR match(domain, '^[0-9]{1,3}(\\\\.[0-9]{1,3}){3}')
-    OR domain = 'localhost'
-    OR endsWith(domain, '.local')
-    OR port(url) != 0
-    OR match(lower(url), '\\\\.php($|[?#])')
-  )`
+export const NOISE_EXPR = `isIPv4String(url_host)
+  OR isIPv6String(url_host)
+  OR match(url_host, '^[0-9]{1,3}(\\\\.[0-9]{1,3}){3}')
+  OR url_host = 'localhost'
+  OR endsWith(url_host, '.local')
+  OR port(url) != 0
+  OR match(lower(url), '\\\\.php($|[?#])')`
 
 /**
- * SQL WHERE fragment that removes noise rows when `excludeNoise` is true.
- * Returns ` AND NOT (<noise>)` for appending to an existing WHERE, or '' to keep
- * every row. Mirror of {@link isNoiseUrl} — keep the two in sync.
+ * WHERE term that selects non-noise rows. Reads the precomputed `is_noise` column
+ * — a cheap UInt8 compare, NOT the per-row function chain in {@link NOISE_EXPR}.
+ */
+export const NOISE_FILTER = 'is_noise = 0'
+
+/**
+ * SQL fragment that removes noise rows when `excludeNoise` is true.
+ * Returns ` AND is_noise = 0` for appending to an existing WHERE, or '' to keep
+ * every row.
  */
 export function noiseWhere(excludeNoise: boolean): string {
-  return excludeNoise ? ` AND NOT ${NOISE_PREDICATE}` : ''
+  return excludeNoise ? ` AND ${NOISE_FILTER}` : ''
 }
 
-// ── JS mirror (executable spec + reusable client-side hint) ─────────────────────
+// ── JS mirror of NOISE_EXPR (executable spec for unit tests) ────────────────────
 
 /** Leading dotted-quad — anchored, allows trailing junk (":5000:x"). Mirrors the
  *  SQL isIPv4String + IP-prefix match. Deliberately does NOT match real domains
@@ -71,16 +78,15 @@ function hasExplicitPort(url: string): boolean {
 }
 
 /**
- * JS mirror of {@link NOISE_PREDICATE}. `domain` is the port-stripped host (the
- * stored `domain` column); `url` is the full raw URL. Pure + side-effect free so
- * it can be unit-tested and reused for client-side "noisy URL" hints.
+ * JS mirror of {@link NOISE_EXPR}. `host` is the port-stripped host (the stored
+ * `url_host`/`domain` column); `url` is the full raw URL. Pure + side-effect free.
  */
-export function isNoiseUrl(url: string, domain: string): boolean {
-  const d = (domain || '').toLowerCase()
+export function isNoiseUrl(url: string, host: string): boolean {
+  const h = (host || '').toLowerCase()
   const u = (url || '').toLowerCase()
-  if (!d && !u) return false
-  if (IPV4_PREFIX_RE.test(d)) return true
-  if (d === 'localhost' || d.endsWith('.local')) return true
+  if (!h && !u) return false
+  if (IPV4_PREFIX_RE.test(h)) return true
+  if (h === 'localhost' || h.endsWith('.local')) return true
   if (hasExplicitPort(u)) return true
   if (PHP_ENDPOINT_RE.test(u)) return true
   return false

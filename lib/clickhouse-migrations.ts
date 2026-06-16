@@ -7,6 +7,7 @@ import { getClient } from './clickhouse'
 import { buildCountryTierExpression } from './country-tiers'
 import { buildLoginTypeExpression } from './login-type'
 import { buildFreeWebmailInClause } from './webmail-providers'
+import { NOISE_EXPR } from './ulp-noise'
 import { dbGet, dbRun } from './sqlite'
 
 // Per-process guard (still useful to avoid redundant calls within one process)
@@ -58,7 +59,15 @@ let migrationsDone = false
 //     loads fine and the drops should succeed. Repeats all 8 v10 drops (not just the
 //     2 that failed) for idempotent safety — every statement is IF EXISTS, so
 //     re-dropping already-gone objects is a harmless no-op.
-const DDL_VERSION = 11
+// v12: is_noise UInt8 MATERIALIZED column for the browser's default-on "Declutter"
+//     filter. Flags low-signal rows (IP-host / :port / .php / localhost URLs — see
+//     lib/ulp-noise.ts NOISE_EXPR). The filter was first shipped as an inline WHERE
+//     predicate of non-indexable per-row functions (match/port/isIPv4String) over
+//     the wide url/domain columns; on a broad (non-prunable) search it scanned for
+//     ~79 s. Precomputing it once at insert turns the query filter into a cheap
+//     `is_noise = 0` PREWHERE compare. MATERIALIZE COLUMN backfills existing parts
+//     in the background — the speedup lands once that mutation completes.
+const DDL_VERSION = 12
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -590,6 +599,21 @@ export async function runClickHouseMigrations(): Promise<void> {
     await runMigration(`DROP TABLE IF EXISTS ulp.url_host_counts`)
     await runMigration(`DROP TABLE IF EXISTS ulp.reuse_pairs`)
     console.warn('[ClickHouse migration] DDL v11 applied (retried v10 drops after force_restore_data recovery)')
+  }
+
+  // v12 — is_noise materialized column for the default-on "Declutter" browse
+  // filter. ADD COLUMN is metadata-only/instant; new inserts compute it for free.
+  // MATERIALIZE COLUMN backfills existing parts as a background mutation — until it
+  // finishes, is_noise is computed on the fly for old parts (i.e. the filter stays
+  // slow), so monitor system.mutations and expect the speedup once it completes.
+  // is_noise references url_host (itself materialized), mirroring how country_tier
+  // references tld. NOISE_EXPR is the single source of truth (lib/ulp-noise.ts).
+  if (lastDdl < 12) {
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD COLUMN IF NOT EXISTS is_noise UInt8 MATERIALIZED toUInt8(${NOISE_EXPR})`,
+      `ALTER TABLE ulp.credentials MATERIALIZE COLUMN is_noise`
+    )
+    console.warn('[ClickHouse migration] DDL v12 applied (added is_noise column — MATERIALIZE running in background)')
   }
 
   if (lastDdl < DDL_VERSION) {
