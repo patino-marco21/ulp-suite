@@ -16,6 +16,7 @@ export interface UploadJob {
   status:      JobStatus
   imported:    number
   skipped:     number
+  tierDropped: number      // rows dropped pre-insert by the ingest tier filter
   total_lines: number      // estimated from file size / 60 bytes per line
   breach_name: string
   started_at:  number      // Date.now()
@@ -34,6 +35,7 @@ export function createJob(id: string, totalLines: number, breachName: string): U
     status:      'running',
     imported:    0,
     skipped:     0,
+    tierDropped: 0,
     total_lines: totalLines,
     breach_name: breachName,
     started_at:  Date.now(),
@@ -62,6 +64,7 @@ export async function pushEvent(job: UploadJob): Promise<void> {
   const payload = JSON.stringify({
     imported:            job.imported,
     skipped:             job.skipped,
+    tierDropped:         job.tierDropped,
     pct,
     elapsed_ms:          elapsed,
     status:              job.status,

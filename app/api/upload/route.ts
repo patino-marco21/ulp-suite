@@ -48,6 +48,7 @@ async function runWithProgress(
       status:              'done',
       imported:            result.imported,
       skipped:             result.skipped,
+      tierDropped:         result.tierDropped,
       rejection_breakdown: result.rejection_breakdown,
     })
     const j = getJob(jobId)
@@ -215,10 +216,12 @@ export async function POST(request: NextRequest) {
       const totalBreakdown = makeRejectionMap()
       let totalImported = 0
       let totalSkipped  = 0
+      let totalTierDropped = 0
 
       for (const r of results) {
         totalImported += r.imported
         totalSkipped  += r.skipped
+        totalTierDropped += r.tierDropped
         for (const [k, v] of Object.entries(r.rejection_breakdown)) {
           totalBreakdown[k as RejectionReason] += v
         }
@@ -241,6 +244,7 @@ export async function POST(request: NextRequest) {
         success:             true,
         imported:            totalImported,
         skipped:             totalSkipped,
+        tierDropped:         totalTierDropped,
         errors:              totalErrors,
         import_pct:          total > 0 ? Math.round(totalImported / total * 1000) / 10 : 0,
         rejection_breakdown: totalBreakdown,
