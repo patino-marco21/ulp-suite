@@ -16,6 +16,7 @@ import {
 } from '@/lib/ulp-parser'
 import { getClient } from '@/lib/clickhouse'
 import { batchDedupToken } from '@/lib/upload-dedup'
+import { runContentDedupTick } from '@/lib/content-dedup'
 import { checkMonitorsForULPUpload } from '@/lib/domain-monitor'
 import { matchBreach } from '@/lib/breach-matcher'
 import { updateJob } from '@/lib/upload-jobs'
@@ -180,6 +181,12 @@ export async function processTextStream(
     await recordSource(filename, imported)
     checkMonitorsForULPUpload(filename).catch(err =>
       console.error('Domain monitor check error:', err)
+    )
+    // Import-time prevention: clean up any exact (url,email,password) duplicates
+    // this import added (cross-file copies the per-stream Set can't catch).
+    // Fire-and-forget; report-only unless CONTENT_DEDUP_APPLY=true.
+    runContentDedupTick({ trigger: 'import' }).catch(err =>
+      console.error('Content-dedup post-import error:', err)
     )
   }
 

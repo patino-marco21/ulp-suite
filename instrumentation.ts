@@ -49,6 +49,14 @@ export async function register() {
       } catch (err) {
         console.error('[instrumentation] Inbox watcher failed to start:', err)
       }
+
+      // Scheduled content-dedup (report-only unless CONTENT_DEDUP_APPLY=true).
+      try {
+        const { startDedupCron } = await import('./lib/dedup-cron')
+        startDedupCron()
+      } catch (err) {
+        console.error('[instrumentation] Content-dedup cron failed to start:', err)
+      }
     }
   }
 }
