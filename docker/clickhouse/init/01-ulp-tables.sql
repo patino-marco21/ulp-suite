@@ -239,8 +239,10 @@ CREATE TABLE IF NOT EXISTS ulp.credentials
         OR match(url_host, '^[0-9]{1,3}(\\.[0-9]{1,3}){3}')
         OR url_host = 'localhost'
         OR endsWith(url_host, '.local')
+        OR (url != '' AND url_host != '' AND position(url_host, '.') = 0)
         OR port(url) != 0
         OR match(lower(url), '\\.php($|[?#])')
+        OR match(lower(url), '^(chrome|chrome-extension|moz-extension|edge|opera|brave|vivaldi|about|file|ftp|view-source|data|javascript|mailto):')
     ),
 
     -- ── Skip indexes ──────────────────────────────────────────────────────────
