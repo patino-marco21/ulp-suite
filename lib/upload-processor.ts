@@ -177,7 +177,7 @@ export async function processTextStream(
   for await (const batch of parseULPStream(stream, filename, 500_000)) {
     let creds = batch.credentials
     if (filterOn) {
-      const kept = creds.filter(c => !shouldDropAtIngest(c.email, c.url, dropPolicy))
+      const kept = creds.filter(c => !shouldDropAtIngest(c.email, c.url, c.domain, dropPolicy))
       tierDropped += creds.length - kept.length
       creds = kept
     }

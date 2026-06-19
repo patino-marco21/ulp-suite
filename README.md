@@ -249,11 +249,14 @@ DEDUP_MIN_EXCESS=1000      # skip the (heavy) mutation below this many excess ro
 Drops low-value rows **before insert**, so they never cost storage / dedup / index / query compute (see `lib/ingest-filter.ts`). **Off by default**; enabling permanently discards matching rows on new imports (re-import to recover). Untiered (`@gmail`/`.com`, no country signal) is never tier-dropped.
 
 ```bash
-# Recommended "wealthy / English-speaking / Gulf-oil" target:
+# Recommended "wealthy / English-speaking / Gulf-oil" target, no junk:
 INGEST_FILTER_DROP_TIERS=T2,T3
 INGEST_FILTER_KEEP_SUFFIXES=.ie,.mt,.ae,.sa,.qa,.kw,.bh,.om   # + optional .sg,.lu
+INGEST_FILTER_DROP_NOISE=true   # also drop junk URLs (same isNoiseUrl as Declutter)
 # → keeps T1 (US/UK/CA/AU/NZ) + untiered + Ireland/Malta + the 6 GCC oil states.
 ```
+
+Evaluated noise-first → keep → tier → suffix. `DROP_NOISE` drops IP/`:port`/`.php`/`localhost`/single-label/non-web-scheme URLs at ingest regardless of country (junk is junk); `android://` is kept.
 
 Companion scripts:
 
