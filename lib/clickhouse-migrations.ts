@@ -67,7 +67,12 @@ let migrationsDone = false
 //     ~79 s. Precomputing it once at insert turns the query filter into a cheap
 //     `is_noise = 0` PREWHERE compare. MATERIALIZE COLUMN backfills existing parts
 //     in the background — the speedup lands once that mutation completes.
-const DDL_VERSION = 12
+// v13: broaden is_noise to also flag single-label/no-TLD hosts (http://dev, the
+//     'http'/'https'-only scheme-split corruption) and browser/non-web-scheme URLs
+//     (chrome://, chrome-extension://, file://, ftp://, data:, javascript:, …) on
+//     top of v12's IP/:port/.php/localhost set. MODIFY COLUMN swaps the MATERIALIZED
+//     expression; MATERIALIZE COLUMN recomputes existing parts in the background.
+const DDL_VERSION = 13
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -614,6 +619,17 @@ export async function runClickHouseMigrations(): Promise<void> {
       `ALTER TABLE ulp.credentials MATERIALIZE COLUMN is_noise`
     )
     console.warn('[ClickHouse migration] DDL v12 applied (added is_noise column — MATERIALIZE running in background)')
+  }
+
+  // v13 — broaden is_noise (see DDL_VERSION comment). MODIFY swaps the MATERIALIZED
+  // expression to the expanded NOISE_EXPR; MATERIALIZE COLUMN recomputes in the
+  // background (filter stays correct meanwhile — old parts compute is_noise on read).
+  if (lastDdl < 13) {
+    await runMigration(
+      `ALTER TABLE ulp.credentials MODIFY COLUMN is_noise UInt8 MATERIALIZED toUInt8(${NOISE_EXPR})`,
+      `ALTER TABLE ulp.credentials MATERIALIZE COLUMN is_noise`
+    )
+    console.warn('[ClickHouse migration] DDL v13 applied (broadened is_noise — MATERIALIZE running in background)')
   }
 
   if (lastDdl < DDL_VERSION) {

@@ -14,6 +14,13 @@ describe('ulp-noise', () => {
       ['http://10.0.0.5/admin', '10.0.0.5', 'private LAN IP'],
       ['http://localhost/login', 'localhost', 'localhost'],
       ['https://printer.local/', 'printer.local', '.local mDNS host'],
+      ['chrome://settings/passwords', 'chrome', 'browser-internal scheme'],
+      ['chrome-extension://aabbccddee/popup.html', 'aabbccddee', 'browser extension URL'],
+      ['file:///C:/Users/x/passwords.txt', '', 'local file URL'],
+      ['ftp://ftp.example.com/', 'ftp.example.com', 'non-web ftp scheme'],
+      ['mailto:someone@example.com', 'example.com', 'mailto link'],
+      ['http://dev/login', 'dev', 'single-label host (no TLD)'],
+      ['https', 'https', 'scheme-split corruption (url is just the scheme)'],
     ])('noise: %s (%s)', (url, domain) => {
       expect(isNoiseUrl(url, domain)).toBe(true)
     })
@@ -30,6 +37,7 @@ describe('ulp-noise', () => {
       ['http://wiki.ledgersmb.org', 'wiki.ledgersmb.org', 'http but real host'],
       ['https://x.com/info.phpx', 'x.com', '.php must be the ending, not a prefix'],
       ['https://x.com/checkout?next=http://y:8080', 'x.com', 'port only inside query, not the host'],
+      ['android://Mo94hjn8SQ==@zw.co.ledger.ecocash/', 'zw.co.ledger.ecocash', 'android app credential — kept (can be high value)'],
       ['', '', 'salvaged email:pass row with no URL'],
     ])('keep: %s (%s)', (url, domain) => {
       expect(isNoiseUrl(url, domain)).toBe(false)
@@ -60,6 +68,12 @@ describe('ulp-noise', () => {
       // SQL text must contain "\\." so ClickHouse delivers RE2 "\." (literal dot).
       expect(NOISE_EXPR).toContain('\\\\.[0-9]')
       expect(NOISE_EXPR).toContain('\\\\.php')
+    })
+
+    test('covers the v13 additions: non-web schemes + single-label hosts', () => {
+      expect(NOISE_EXPR).toContain('chrome-extension')
+      expect(NOISE_EXPR).toContain('mailto')
+      expect(NOISE_EXPR).toContain("position(url_host, '.') = 0")
     })
   })
 })
