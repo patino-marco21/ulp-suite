@@ -119,4 +119,3 @@ Runtime verification will run the focused tests, full test suite, lint, typechec
 - [ClickHouse lightweight `DELETE`](https://clickhouse.com/docs/sql-reference/statements/delete)
 - [OWASP Input Validation Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html)
 - [IANA Root Zone Database](https://www.iana.org/domains/root/db)
-
