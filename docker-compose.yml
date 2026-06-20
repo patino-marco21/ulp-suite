@@ -117,6 +117,7 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
       # Import filtering — optional, configured in .env. These must be forwarded
       # explicitly because Compose does not inject arbitrary .env keys.
+      INGEST_FILTER_HARD_DROP_TIERS: ${INGEST_FILTER_HARD_DROP_TIERS:-T3}
       INGEST_FILTER_DROP_NOISE: ${INGEST_FILTER_DROP_NOISE:-}
       INGEST_FILTER_DROP_TIERS: ${INGEST_FILTER_DROP_TIERS:-}
       INGEST_FILTER_KEEP_SUFFIXES: ${INGEST_FILTER_KEEP_SUFFIXES:-}

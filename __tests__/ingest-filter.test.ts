@@ -46,9 +46,33 @@ describe('parseIngestPolicy', () => {
   test('ignores unknown tier tokens', () => {
     expect(parseIngestPolicy({ INGEST_FILTER_DROP_TIERS: 'T9,foo' }).tiers.size).toBe(0)
   })
+  test('parses valid hard tiers and activates a hard-tier-only policy', () => {
+    const p = parseIngestPolicy({ INGEST_FILTER_HARD_DROP_TIERS: 't3, T9' })
+    expect([...p.hardTiers]).toEqual(['T3'])
+    expect(policyActive(p)).toBe(true)
+  })
+  test('has no hard tiers when the variable is absent', () => {
+    expect(parseIngestPolicy({}).hardTiers.size).toBe(0)
+  })
 })
 
 describe('shouldDropAtIngest', () => {
+  test('hard T3 drop cannot be rescued by a keep suffix', () => {
+    const p = parseIngestPolicy({
+      INGEST_FILTER_HARD_DROP_TIERS: 'T3',
+      INGEST_FILTER_KEEP_SUFFIXES: '.sa',
+    })
+    expect(shouldDropAtIngest('a@x.sa', 'https://x.com', 'x.com', p)).toBe(true)
+  })
+
+  test('hard T3-only policy preserves T1, T2, and unknown rows', () => {
+    const p = parseIngestPolicy({ INGEST_FILTER_HARD_DROP_TIERS: 'T3' })
+    expect(shouldDropAtIngest('a@foo.co.uk', 'https://x.com', 'x.com', p)).toBe(false)
+    expect(shouldDropAtIngest('a@web.de', 'https://x.com', 'x.com', p)).toBe(false)
+    expect(shouldDropAtIngest('a@gmail.com', 'https://x.com', 'x.com', p)).toBe(false)
+    expect(shouldDropAtIngest('a@mail.ru', 'https://x.com', 'x.com', p)).toBe(true)
+  })
+
   test('drops by tier (T3), keeps T2 and untiered', () => {
     const p = parseIngestPolicy({ INGEST_FILTER_DROP_TIERS: 'T3' })
     expect(shouldDropAtIngest('a@mail.ru', 'https://x.com', 'x.com', p)).toBe(true)
