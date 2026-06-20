@@ -41,6 +41,7 @@ tmp/
 .devtasks
 docs/generated
 docs/api
+.worktrees/
 # curl cookie jars — contain live session tokens, never commit
 cookies.txt
 *.cookie
