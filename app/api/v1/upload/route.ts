@@ -16,7 +16,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
 import { uploadQueue } from "@/lib/upload-queue"
-import { processTextStream, processZipFile, type ProcessResult } from "@/lib/upload-processor"
+import { processTextStream, type ProcessResult } from "@/lib/upload-processor"
 import { logJob } from "@/lib/processing-log"
 
 export const dynamic    = "force-dynamic"

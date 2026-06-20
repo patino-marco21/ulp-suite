@@ -14,8 +14,7 @@
  * the single row with the smallest full-row hash and deletes the rest.
  *
  * SAFETY: report-only by default. It logs how many rows it WOULD delete; nothing
- * is removed unless CONTENT_DEDUP_APPLY=true. Verify the reported `deletable`
- * count equals `excess` (it should) before enabling apply. Two triggers share this
+ * is removed unless CONTENT_DEDUP_APPLY=true. Two triggers share this
  * routine: the scheduled cron (lib/dedup-cron.ts) and a post-import hook
  * (lib/upload-processor.ts) — the latter cleans up duplicates an import just added.
  *
@@ -47,8 +46,7 @@ export function buildStatsSql(): string {
   return `SELECT
     count() AS total,
     uniqExact(cityHash64(${CONTENT_KEY})) AS distinct_creds,
-    count() - uniqExact(cityHash64(${CONTENT_KEY})) AS excess,
-    countIf(${CONTENT_DUPLICATE_PREDICATE}) AS deletable
+    total - distinct_creds AS excess
   FROM ulp.credentials
   SETTINGS max_execution_time = 300`
 }
@@ -97,7 +95,7 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
   try {
     const client = getClient()
     const statsRes = await client.query({ query: buildStatsSql(), format: 'JSONEachRow' })
-    const [stats] = (await statsRes.json()) as Array<{ total: string; excess: string; deletable: string }>
+    const [stats] = (await statsRes.json()) as Array<{ total: string; excess: string }>
     const total = Number(stats?.total ?? 0)
     const excess = Number(stats?.excess ?? 0)
     const applyOn = contentDedupApplyEnabled()

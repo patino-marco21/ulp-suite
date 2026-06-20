@@ -38,7 +38,7 @@ export async function GET(request: NextRequest) {
         count()            AS occurrences,
         max(event_time)    AS last_seen,
         any(query_id)      AS sample_query_id,
-        any(table)         AS table
+        table
       FROM system.asynchronous_insert_log
       WHERE event_time >= now() - INTERVAL {m:UInt32} MINUTE
         AND status != 'Ok'
@@ -65,7 +65,7 @@ export async function GET(request: NextRequest) {
         countIf(status != 'Ok')             AS flushes_failed,
         sumIf(rows, status = 'Ok')          AS rows_inserted,
         max(event_time)                     AS last_flush,
-        avg(flush_time_microseconds) / 1000 AS avg_flush_ms
+        avg(dateDiff('microsecond', event_time_microseconds, flush_time_microseconds)) / 1000 AS avg_flush_ms
       FROM system.asynchronous_insert_log
       WHERE event_time >= now() - INTERVAL {m:UInt32} MINUTE
       GROUP BY table

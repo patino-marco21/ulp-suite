@@ -115,6 +115,16 @@ services:
       # Default admin (seeded on first startup if no users exist)
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@ulpsuite.local}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+      # Import filtering — optional, configured in .env. These must be forwarded
+      # explicitly because Compose does not inject arbitrary .env keys.
+      INGEST_FILTER_DROP_NOISE: ${INGEST_FILTER_DROP_NOISE:-}
+      INGEST_FILTER_DROP_TIERS: ${INGEST_FILTER_DROP_TIERS:-}
+      INGEST_FILTER_KEEP_SUFFIXES: ${INGEST_FILTER_KEEP_SUFFIXES:-}
+      INGEST_FILTER_DROP_SUFFIXES: ${INGEST_FILTER_DROP_SUFFIXES:-}
+      # Exact-content dedup worker — report-only unless explicitly enabled.
+      CONTENT_DEDUP_APPLY: ${CONTENT_DEDUP_APPLY:-false}
+      DEDUP_CRON_HOURS: ${DEDUP_CRON_HOURS:-24}
+      DEDUP_MIN_EXCESS: ${DEDUP_MIN_EXCESS:-1000}
     volumes:
       - ./uploads:/app/uploads
       - ./data:/app/data
