@@ -19,6 +19,7 @@ describe('hard T3 deployment policy', () => {
     const script = readFileSync('scripts/purge-existing-t3.sh', 'utf8')
     expect(script).toContain("country_tier = 'T3'")
     expect(script).toContain('APPLY="${APPLY:-0}"')
+    expect(script).toContain('BACKUP_VERIFIED="${BACKUP_VERIFIED:-0}"')
     expect(script).toContain('system.mutations')
     expect(script).toContain('latest_fail_reason')
     expect(script).toContain('remaining_t3')

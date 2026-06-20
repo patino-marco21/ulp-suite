@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Permanently remove the existing T3 backlog after the ingest hard-drop is live.
 # Dry-run by default. Run only after an off-host backup has been verified:
-#   APPLY=1 bash scripts/purge-existing-t3.sh
+#   BACKUP_VERIFIED=1 APPLY=1 bash scripts/purge-existing-t3.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 APPLY="${APPLY:-0}"
+BACKUP_VERIFIED="${BACKUP_VERIFIED:-0}"
 POLL_SECONDS="${POLL_SECONDS:-5}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-7200}"
 PREDICATE="country_tier = 'T3'"
@@ -67,8 +68,14 @@ if [[ "$APPLY" != "1" ]]; then
   echo
   echo "Dry-run complete; no mutation submitted."
   echo "After verifying an off-host backup, run:"
-  echo "  APPLY=1 bash scripts/purge-existing-t3.sh"
+  echo "  BACKUP_VERIFIED=1 APPLY=1 bash scripts/purge-existing-t3.sh"
   exit 0
+fi
+
+if [[ "$BACKUP_VERIFIED" != "1" ]]; then
+  echo "ERROR: refusing permanent deletion without BACKUP_VERIFIED=1." >&2
+  echo "Run the off-host full backup and restore verification first." >&2
+  exit 1
 fi
 
 active="$(ch "

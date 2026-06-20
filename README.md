@@ -266,7 +266,7 @@ bash scripts/tier-distribution.sh
 
 # purge the existing T3 backlog (dry-run, then apply after verified backup)
 bash scripts/purge-existing-t3.sh
-APPLY=1 bash scripts/purge-existing-t3.sh
+BACKUP_VERIFIED=1 APPLY=1 bash scripts/purge-existing-t3.sh
 ```
 
 Tiers: **T1** = US/UK/CA/AU/NZ · **T2** = W.Europe/JP/KR/SG/IL/AE · **T3** = RU/CN/BR/LATAM/SEA.
