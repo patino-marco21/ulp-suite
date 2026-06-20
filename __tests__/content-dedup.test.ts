@@ -26,10 +26,11 @@ describe('content-dedup', () => {
 
   describe('buildStatsSql', () => {
     const sql = buildStatsSql()
-    test('reports total, excess, and the deletable count (sanity-check before apply)', () => {
+    test('reports total and excess in one pass without the duplicate subquery', () => {
       expect(sql).toContain('uniqExact(cityHash64(url, email, password))')
       expect(sql).toContain('AS excess')
-      expect(sql).toContain('AS deletable')
+      expect(sql).not.toContain('AS deletable')
+      expect(sql).not.toContain('countIf(')
     })
   })
 
