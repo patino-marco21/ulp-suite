@@ -119,4 +119,3 @@ Existing files in `inbox/failed` are not retried automatically. After ClickHouse
 - Removing the browser's other sort modes.
 - Automatically retrying semantic ClickHouse failures.
 - Automatically moving all existing failed files back into the inbox during deployment.
-
