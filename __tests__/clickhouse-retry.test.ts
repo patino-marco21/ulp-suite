@@ -17,6 +17,16 @@ describe('isTransientClickHouseError', () => {
     expect(isTransientClickHouseError(Object.assign(new Error('bad query'), { code: '62' }))).toBe(false)
     expect(isTransientClickHouseError({ status: 500, message: 'memory limit exceeded' })).toBe(false)
   })
+
+  it('rejects mixed-signal semantic errors even when they look transient', () => {
+    expect(isTransientClickHouseError({ statusCode: 503, message: 'bad query' })).toBe(false)
+    expect(
+      isTransientClickHouseError({
+        message: 'memory limit exceeded',
+        cause: { code: 'ECONNRESET' },
+      })
+    ).toBe(false)
+  })
 })
 
 describe('withClickHouseRetry', () => {

@@ -17,6 +17,16 @@ const TRANSIENT_MESSAGES = [
   'econnrefused',
 ]
 
+const SEMANTIC_CODES = new Set(['62'])
+const SEMANTIC_MESSAGES = [
+  'bad query',
+  'memory limit',
+  'syntax error',
+  'sql error',
+  'parse error',
+  'too many parts',
+]
+
 const DEFAULT_INITIAL_DELAY_MS = 1_000
 const DEFAULT_MAX_DELAY_MS = 30_000
 const DEFAULT_MAX_ELAPSED_MS = 30 * 60 * 1_000
@@ -71,13 +81,35 @@ function getMessage(value: unknown): string {
   return typeof message === 'string' ? message : String(value)
 }
 
-function isMemoryOrSqlError(error: unknown): boolean {
+function hasSemanticClickHouseSignal(error: unknown): boolean {
   const message = getMessage(error).toLowerCase()
-  return message.includes('memory limit') || message.includes('syntax error') || message.includes('bad query')
+  const code = getCode(error)
+
+  if (SEMANTIC_CODES.has(String(code))) {
+    return true
+  }
+
+  return SEMANTIC_MESSAGES.some(fragment => message.includes(fragment))
+}
+
+function hasSemanticClickHouseError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false
+  }
+
+  if (hasSemanticClickHouseSignal(error)) {
+    return true
+  }
+
+  return hasSemanticClickHouseSignal((error as { cause?: unknown }).cause)
 }
 
 export function isTransientClickHouseError(error: unknown): boolean {
   if (!error || (typeof error !== 'object' && typeof error !== 'string')) {
+    return false
+  }
+
+  if (hasSemanticClickHouseError(error)) {
     return false
   }
 
@@ -133,7 +165,7 @@ export async function withClickHouseRetry<T>(
     try {
       return await operation()
     } catch (error) {
-      if (!isTransientClickHouseError(error) || isMemoryOrSqlError(error)) {
+      if (!isTransientClickHouseError(error)) {
         throw error
       }
 
