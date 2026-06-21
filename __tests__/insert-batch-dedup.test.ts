@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { ULPCredential } from '@/lib/ulp-parser'
+import { Readable } from 'stream'
 
 const { insertSpy } = vi.hoisted(() => ({ insertSpy: vi.fn().mockResolvedValue(undefined) }))
 vi.mock('@/lib/clickhouse', () => ({
@@ -9,6 +10,14 @@ vi.mock('@/lib/clickhouse', () => ({
 const cred = (o: Partial<ULPCredential>): ULPCredential => ({
   url: '', email: '', password: '', domain: '', source_file: 'f.txt', ...o,
 })
+
+const readAll = async (stream: Readable): Promise<string> => {
+  const chunks: Buffer[] = []
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
 
 beforeEach(() => {
   insertSpy.mockReset()
@@ -38,10 +47,15 @@ describe('insertBatch deduplication settings', () => {
     const batch = [cred({ url: 'https://a.com', email: 'a@a.com', password: 'p1', domain: 'a.com' })]
     let nowMs = 0
     let retryLog = ''
+    const payloads: string[] = []
 
-    insertSpy
-      .mockRejectedValueOnce(Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }))
-      .mockResolvedValueOnce(undefined)
+    insertSpy.mockImplementation(async ({ values }: { values: Readable }) => {
+      payloads.push(await readAll(values))
+
+      if (payloads.length === 1) {
+        throw Object.assign(new Error('refused'), { code: 'ECONNREFUSED' })
+      }
+    })
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
@@ -65,6 +79,9 @@ describe('insertBatch deduplication settings', () => {
     expect(firstCall.clickhouse_settings.insert_deduplication_token)
       .toBe(secondCall.clickhouse_settings.insert_deduplication_token)
     expect(firstCall.values).not.toBe(secondCall.values)
+    expect(payloads).toHaveLength(2)
+    expect(payloads[0]).toBe(payloads[1])
+    expect(payloads[0]).toBe('"https://a.com","a@a.com","p1","a.com","f.txt","breachX"\n')
 
     expect(retryLog).toContain('1000')
     expect(retryLog).not.toContain('https://a.com')

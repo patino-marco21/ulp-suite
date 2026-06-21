@@ -94,6 +94,9 @@ export async function sourceAlreadyImported(filename: string): Promise<boolean> 
         query:        `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1`,
         query_params: { f: filename },
         format:       'JSONEachRow',
+        clickhouse_settings: {
+          use_query_cache: 0,
+        },
       })
       return await res.json() as Array<{ c: string | number }>
     },

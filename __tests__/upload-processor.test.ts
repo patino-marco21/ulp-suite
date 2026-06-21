@@ -77,6 +77,37 @@ describe('upload processor source contract', () => {
     expect(source).not.toContain("runContentDedupTick({ trigger: 'import' })")
   })
 
+  it('passes UPLOAD_BATCH_SIZE to parseULPStream during text imports', async () => {
+    vi.resetModules()
+    let receivedBatchSize: number | undefined
+
+    vi.doMock('@/lib/ulp-parser', async () => {
+      const actual = await vi.importActual<typeof import('@/lib/ulp-parser')>('@/lib/ulp-parser')
+      return {
+        ...actual,
+        parseULPStream: async function* () {
+          receivedBatchSize = arguments[2] as number
+          yield {
+            credentials: [],
+            rejected: 0,
+            breakdown: actual.makeRejectionMap(),
+          }
+        },
+      }
+    })
+
+    try {
+      const { processTextStream, UPLOAD_BATCH_SIZE } = await import('@/lib/upload-processor')
+      await processTextStream(Readable.toWeb(Readable.from([])) as ReadableStream<Uint8Array>, 'batch-size.txt')
+
+      expect(receivedBatchSize).toBe(UPLOAD_BATCH_SIZE)
+      expect(receivedBatchSize).toBe(100_000)
+    } finally {
+      vi.doUnmock('@/lib/ulp-parser')
+      vi.resetModules()
+    }
+  })
+
   it('retries transient source existence checks', async () => {
     vi.useFakeTimers()
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -120,6 +151,38 @@ describe('upload processor source contract', () => {
       expect(h.query).toHaveBeenCalledTimes(2)
       expect(h.insert).toHaveBeenCalledTimes(2)
       expect(warnSpy.mock.calls.flat().join(' ')).toContain('retry-record.txt')
+    } finally {
+      warnSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('avoids duplicate source inserts after an ambiguous committed retry by bypassing stale query-cache results', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    h.query.mockImplementation(({ clickhouse_settings }: { clickhouse_settings?: Record<string, unknown> }) => {
+      const useQueryCache = clickhouse_settings?.use_query_cache
+      const c = h.query.mock.calls.length === 1 ? 0 : (useQueryCache === 0 ? 1 : 0)
+      return Promise.resolve({ json: async () => [{ c }] })
+    })
+
+    h.insert
+      .mockRejectedValueOnce(Object.assign(new Error('response failed after commit'), { code: 'ECONNRESET' }))
+      .mockResolvedValue(undefined)
+
+    try {
+      const { recordSource } = await import('@/lib/upload-processor')
+      const expectation = expect(recordSource('stale-cache.txt', 42)).resolves.toBeUndefined()
+
+      await vi.advanceTimersByTimeAsync(1000)
+      await expectation
+
+      expect(h.query).toHaveBeenCalledTimes(2)
+      expect(h.insert).toHaveBeenCalledTimes(1)
+      expect(h.query.mock.calls[0][0].clickhouse_settings?.use_query_cache).toBe(0)
+      expect(h.query.mock.calls[1][0].clickhouse_settings?.use_query_cache).toBe(0)
+      expect(warnSpy.mock.calls.flat().join(' ')).toContain('stale-cache.txt')
     } finally {
       warnSpy.mockRestore()
       vi.useRealTimers()
