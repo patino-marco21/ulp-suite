@@ -2,6 +2,13 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, test } from 'vitest'
 
 describe('hard T3 deployment policy', () => {
+  test('README documents Ubuntu no-backup purge usage', () => {
+    const readme = readFileSync('README.md', 'utf8')
+    expect(readme).toContain(
+      'ACCEPT_PERMANENT_DATA_LOSS=1 APPLY=1 bash scripts/purge-existing-t3.sh',
+    )
+  })
+
   test('Compose defaults hard-drop tiers to T3', () => {
     const compose = readFileSync('docker-compose.yml', 'utf8')
     expect(compose).toContain(
