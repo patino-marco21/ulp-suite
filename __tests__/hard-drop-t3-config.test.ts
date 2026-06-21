@@ -7,6 +7,9 @@ describe('hard T3 deployment policy', () => {
     expect(readme).toContain(
       'ACCEPT_PERMANENT_DATA_LOSS=1 APPLY=1 bash scripts/purge-existing-t3.sh',
     )
+    expect(readme).toContain('cancels only a failed exact T3 mutation')
+    expect(readme).toContain('bounded-memory lightweight delete')
+    expect(readme).toContain('background merges reclaim physical disk space gradually')
   })
 
   test('Compose defaults hard-drop tiers to T3', () => {
