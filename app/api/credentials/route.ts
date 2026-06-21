@@ -31,10 +31,10 @@ const SELECT = `${NORM_COLS},
  *
  * Query params:
  *   cursor        string    opaque pagination token (absent = first page)
- *   limit         number    (default 50, max 200)
+ *   limit         number    (default 200, max 200)
  *   q             string    text search (indexed — hasToken / bloom-filter, NOT LIKE)
  *   regex         '1'       treat q as RE2 regex
- *   sort          string    see SORT_MAP keys (default imported_desc)
+ *   sort          string    see SORT_MAP keys (default domain_asc)
  *   domain        string    exact domain match
  *   breach        string    exact breach_name match
  *   source_file   string    exact source_file match
