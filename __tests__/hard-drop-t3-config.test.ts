@@ -20,6 +20,12 @@ describe('hard T3 deployment policy', () => {
     expect(script).toContain("country_tier = 'T3'")
     expect(script).toContain('APPLY="${APPLY:-0}"')
     expect(script).toContain('BACKUP_VERIFIED="${BACKUP_VERIFIED:-0}"')
+    expect(script).toContain(
+      'ACCEPT_PERMANENT_DATA_LOSS="${ACCEPT_PERMANENT_DATA_LOSS:-0}"',
+    )
+    expect(script).toContain(
+      '"$BACKUP_VERIFIED" != "1" && "$ACCEPT_PERMANENT_DATA_LOSS" != "1"',
+    )
     expect(script).toContain('system.mutations')
     expect(script).toContain('latest_fail_reason')
     expect(script).toContain('remaining_t3')
