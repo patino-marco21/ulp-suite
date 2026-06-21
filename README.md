@@ -264,9 +264,14 @@ Companion scripts:
 # see your data's tier / country breakdown (read-only)
 bash scripts/tier-distribution.sh
 
-# purge the existing T3 backlog (dry-run, then apply after verified backup)
+# purge the existing T3 backlog (dry-run first)
 bash scripts/purge-existing-t3.sh
+
+# destructive mode with a verified backup
 BACKUP_VERIFIED=1 APPLY=1 bash scripts/purge-existing-t3.sh
+
+# destructive mode without a backup — irreversible
+ACCEPT_PERMANENT_DATA_LOSS=1 APPLY=1 bash scripts/purge-existing-t3.sh
 ```
 
 Tiers: **T1** = US/UK/CA/AU/NZ · **T2** = W.Europe/JP/KR/SG/IL/AE · **T3** = RU/CN/BR/LATAM/SEA.
