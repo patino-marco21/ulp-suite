@@ -15,8 +15,8 @@ import {
   type RejectionReason,
 } from '@/lib/ulp-parser'
 import { getClient } from '@/lib/clickhouse'
+import { withClickHouseRetry, type ClickHouseRetryOptions } from '@/lib/clickhouse-retry'
 import { batchDedupToken } from '@/lib/upload-dedup'
-import { runContentDedupTick } from '@/lib/content-dedup'
 import { parseIngestPolicy, policyActive, shouldDropAtIngest } from '@/lib/ingest-filter'
 import { checkMonitorsForULPUpload } from '@/lib/domain-monitor'
 import { matchBreach } from '@/lib/breach-matcher'
@@ -37,11 +37,48 @@ export interface ProcessResult {
   tierDropped:         number
 }
 
+export const UPLOAD_BATCH_SIZE = 100_000
+
 // ─── ClickHouse helpers ───────────────────────────────────────────────────────
 
 /** Escape a value for ClickHouse CSV: wrap in double-quotes, double internal quotes. */
 function csvField(v: string): string {
   return '"' + v.replace(/"/g, '""') + '"'
+}
+
+function retryErrorSummary(error: unknown): string {
+  if (error && typeof error === 'object') {
+    const code = (error as { code?: unknown }).code
+    if (code !== undefined) {
+      return `code=${String(code)}`
+    }
+
+    const status = (error as { status?: unknown; statusCode?: unknown }).status
+      ?? (error as { status?: unknown; statusCode?: unknown }).statusCode
+    if (status !== undefined) {
+      return `status=${String(status)}`
+    }
+
+    if (error instanceof Error && error.name) {
+      return error.name
+    }
+  }
+
+  return 'transient error'
+}
+
+function makeRetryLogger(
+  operation: string,
+  target: string,
+  forward?: ClickHouseRetryOptions['onRetry'],
+): NonNullable<ClickHouseRetryOptions['onRetry']> {
+  return event => {
+    console.warn(
+      `[upload-processor] retrying ${operation} for ${target} ` +
+      `(attempt ${event.attempt}, next delay ${event.delayMs}ms, ${retryErrorSummary(event.error)})`
+    )
+    forward?.(event)
+  }
 }
 
 /**
@@ -51,12 +88,17 @@ function csvField(v: string): string {
  * recordSource idempotent.
  */
 export async function sourceAlreadyImported(filename: string): Promise<boolean> {
-  const res = await getClient().query({
-    query:        `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1`,
-    query_params: { f: filename },
-    format:       'JSONEachRow',
-  })
-  const rows = await res.json() as Array<{ c: string | number }>
+  const rows = await withClickHouseRetry(
+    async () => {
+      const res = await getClient().query({
+        query:        `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1`,
+        query_params: { f: filename },
+        format:       'JSONEachRow',
+      })
+      return await res.json() as Array<{ c: string | number }>
+    },
+    { onRetry: makeRetryLogger('source check', filename) }
+  )
   return Number(rows[0]?.c ?? 0) > 0
 }
 
@@ -67,6 +109,7 @@ export async function sourceAlreadyImported(filename: string): Promise<boolean> 
 export async function insertBatch(
   credentials: ULPCredential[],
   breach_name: string,
+  retryOptions: ClickHouseRetryOptions = {},
 ): Promise<void> {
   if (credentials.length === 0) return
   const chClient = getClient()
@@ -74,64 +117,67 @@ export async function insertBatch(
   // Deterministic content hash of this exact batch — see lib/upload-dedup.ts.
   const token = batchDedupToken(credentials, breach_name)
 
-  const readable = Readable.from(
-    (function* () {
-      for (const c of credentials) {
-        yield [
-          csvField(c.url),
-          csvField(c.email),
-          csvField(c.password),
-          csvField(c.domain),
-          csvField(c.source_file),
-          csvField(breach_name),
-        ].join(',') + '\n'
-      }
-    })(),
-    { objectMode: false },
-  )
+  await withClickHouseRetry(
+    async () => {
+      const readable = Readable.from(
+        (function* () {
+          for (const c of credentials) {
+            yield [
+              csvField(c.url),
+              csvField(c.email),
+              csvField(c.password),
+              csvField(c.domain),
+              csvField(c.source_file),
+              csvField(breach_name),
+            ].join(',') + '\n'
+          }
+        })(),
+        { objectMode: false },
+      )
 
-  await chClient.insert({
-    table: 'ulp.credentials',
-    columns: ['url', 'email', 'password', 'domain', 'source_file', 'breach_name'],
-    values: readable,
-    format: 'CSV',
-    clickhouse_settings: {
-      async_insert:          1 as any,
-      wait_for_async_insert: 1 as any,
-      max_execution_time:    0,
-      // Block-level insert dedup. ulp.credentials is ReplicatedMergeTree, so a
-      // re-inserted byte-identical batch (inbox reprocess, retry, or request race)
-      // is dropped by ClickHouse within its dedup window instead of appending
-      // duplicate rows. The token is a content hash of this exact batch, so any
-      // changed/new row still inserts. NOTE: ClickHouse requires async_insert
-      // dedup to be on too, or the token is ignored under async_insert=1.
-      insert_deduplicate:          1 as any,
-      async_insert_deduplicate:    1 as any,
-      insert_deduplication_token:  token as any,
-      // Allow ClickHouse to use multiple threads for column compression per insert.
-      // Default is 1; 4 uses spare CPU to speed up bulk loads.
-      max_insert_threads:    4 as any,
+      await chClient.insert({
+        table: 'ulp.credentials',
+        columns: ['url', 'email', 'password', 'domain', 'source_file', 'breach_name'],
+        values: readable,
+        format: 'CSV',
+        clickhouse_settings: {
+          max_execution_time:       0,
+          insert_deduplicate:       1 as any,
+          insert_deduplication_token: token as any,
+          max_insert_threads:       2 as any,
+        },
+      })
     },
-  })
+    {
+      ...retryOptions,
+      onRetry: makeRetryLogger('batch insert', breach_name, retryOptions.onRetry),
+    }
+  )
 }
 
 export async function recordSource(filename: string, lineCount: number): Promise<void> {
-  const chClient = getClient()
+  await withClickHouseRetry(
+    async () => {
+      const chClient = getClient()
 
-  // Idempotent: skip if this filename was already recorded in ulp.sources.
-  // Prevents duplicate source rows when a file is re-processed (e.g. after an
-  // OOM crash between processTextStream and renameSync, or a Force Scan race).
-  // Safe because inbox processing is serialised via uploadQueue (pLimit 1).
-  if (await sourceAlreadyImported(filename)) {
-    console.log(`[upload-processor] recordSource: ${filename} already in ulp.sources — skipping`)
-    return
-  }
+      // Idempotent: skip if this filename was already recorded in ulp.sources.
+      // Prevents duplicate source rows when a file is re-processed (e.g. after an
+      // OOM crash between processTextStream and renameSync, or a Force Scan race).
+      // Retried inserts re-check the guard so an ambiguous transient error does not
+      // create duplicate source rows on a later attempt.
+      if (await sourceAlreadyImported(filename)) {
+        console.log(`[upload-processor] recordSource: ${filename} already in ulp.sources — skipping`)
+        return
+      }
 
-  await chClient.insert({
-    table:  'ulp.sources',
-    values: [{ filename, line_count: lineCount }],
-    format: 'JSONEachRow',
-  })
+      await chClient.insert({
+        table:  'ulp.sources',
+        values: [{ filename, line_count: lineCount }],
+        format: 'JSONEachRow',
+      })
+    },
+    { onRetry: makeRetryLogger('source record', filename) }
+  )
 }
 
 // ─── Text stream processor ────────────────────────────────────────────────────
@@ -139,14 +185,14 @@ export async function recordSource(filename: string, lineCount: number): Promise
 /**
  * Stream-process a .txt or .csv file.
  *
- * Reads in 500K-row batches — peak RAM is ~200 MB regardless of file size.
+ * Reads in 100K-row batches — peak RAM stays bounded regardless of file size.
  * Pass jobId to push live progress via the in-memory SSE job store.
  */
 export async function processTextStream(
   stream: ReadableStream<Uint8Array>,
   filename: string,
   jobId?: string,
-  /** Called after each 500K-row batch with the cumulative imported count. */
+  /** Called after each 100K-row batch with the cumulative imported count. */
   onBatch?: (imported: number) => void,
 ): Promise<ProcessResult> {
   const breach_name        = matchBreach(filename)
@@ -174,7 +220,7 @@ export async function processTextStream(
   const dropPolicy = parseIngestPolicy()
   const filterOn   = policyActive(dropPolicy)
 
-  for await (const batch of parseULPStream(stream, filename, 500_000)) {
+  for await (const batch of parseULPStream(stream, filename, UPLOAD_BATCH_SIZE)) {
     let creds = batch.credentials
     if (filterOn) {
       const kept = creds.filter(c => !shouldDropAtIngest(c.email, c.url, c.domain, dropPolicy))
@@ -201,12 +247,8 @@ export async function processTextStream(
     checkMonitorsForULPUpload(filename).catch(err =>
       console.error('Domain monitor check error:', err)
     )
-    // Import-time prevention: clean up any exact (url,email,password) duplicates
-    // this import added (cross-file copies the per-stream Set can't catch).
-    // Fire-and-forget; report-only unless CONTENT_DEDUP_APPLY=true.
-    runContentDedupTick({ trigger: 'import' }).catch(err =>
-      console.error('Content-dedup post-import error:', err)
-    )
+    // Cross-file content dedup remains available through the scheduled/manual
+    // dedup flows; imports no longer trigger a full-table dedup hook here.
   }
 
   return { imported, skipped, errors: 0, filename, breach_name, rejection_breakdown, alreadyImported: false, tierDropped }
@@ -218,7 +260,7 @@ export async function processTextStream(
  * Drive a yauzl ZipFile through its .txt/.csv entries one at a time.
  *
  * yauzl with lazyEntries:true decompresses entries lazily — only one entry
- * lives in memory at once.  Peak RAM ≈ one entry's 500K-row batch (≈200 MB),
+ * lives in memory at once.  Peak RAM ≈ one entry's 100K-row batch,
  * not the full decompressed archive size.
  *
  * A single bad entry (encrypted, corrupted/CRC mismatch, etc.) only fails

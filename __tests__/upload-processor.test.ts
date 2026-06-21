@@ -1,20 +1,34 @@
-import { describe, it, expect, vi } from 'vitest'
+import { readFileSync } from 'fs'
 import { EventEmitter } from 'events'
 import { Readable } from 'stream'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 import type yauzl from 'yauzl'
 
 // ─── Mocks for everything processTextStream touches downstream ──────────────
 
+const h = vi.hoisted(() => ({
+  insert: vi.fn().mockResolvedValue(undefined),
+  query: vi.fn().mockResolvedValue({ json: async () => [{ c: 0 }] }),
+}))
+
 vi.mock('@/lib/clickhouse', () => ({
   getClient: () => ({
-    insert: vi.fn().mockResolvedValue(undefined),
-    query: vi.fn().mockResolvedValue({ json: async () => [{ c: 0 }] }),
+    insert: h.insert,
+    query: h.query,
   }),
 }))
 vi.mock('@/lib/domain-monitor', () => ({
   checkMonitorsForULPUpload: vi.fn().mockResolvedValue(undefined),
 }))
 vi.mock('@/lib/upload-jobs', () => ({ updateJob: vi.fn() }))
+vi.mock('@/lib/content-dedup', () => ({ runContentDedupTick: vi.fn().mockResolvedValue(undefined) }))
+
+beforeEach(() => {
+  h.insert.mockReset()
+  h.insert.mockResolvedValue(undefined)
+  h.query.mockReset()
+  h.query.mockResolvedValue({ json: async () => [{ c: 0 }] })
+})
 
 // ─── Fake yauzl ZipFile ───────────────────────────────────────────────────────
 
@@ -53,6 +67,65 @@ vi.mock('yauzl', () => ({
     open: vi.fn(),
   },
 }))
+
+describe('upload processor source contract', () => {
+  it('exports the 100,000-row upload batch size and removes the import-time dedup hook', async () => {
+    const { UPLOAD_BATCH_SIZE } = await import('@/lib/upload-processor')
+    const source = readFileSync(new URL('../lib/upload-processor.ts', import.meta.url), 'utf8')
+
+    expect(UPLOAD_BATCH_SIZE).toBe(100_000)
+    expect(source).not.toContain("runContentDedupTick({ trigger: 'import' })")
+  })
+
+  it('retries transient source existence checks', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    h.query
+      .mockRejectedValueOnce(Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }))
+      .mockResolvedValueOnce({ json: async () => [{ c: 1 }] })
+
+    try {
+      const { sourceAlreadyImported } = await import('@/lib/upload-processor')
+      const expectation = expect(sourceAlreadyImported('retry-check.txt')).resolves.toBe(true)
+
+      await vi.advanceTimersByTimeAsync(1000)
+
+      await expectation
+      expect(h.query).toHaveBeenCalledTimes(2)
+      expect(warnSpy.mock.calls.flat().join(' ')).toContain('retry-check.txt')
+    } finally {
+      warnSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('retries transient source recording inserts', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    h.query.mockResolvedValueOnce({ json: async () => [{ c: 0 }] })
+    h.insert
+      .mockRejectedValueOnce(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }))
+      .mockResolvedValueOnce(undefined)
+
+    try {
+      const { recordSource } = await import('@/lib/upload-processor')
+      const promise = recordSource('retry-record.txt', 42)
+      const expectation = expect(promise).resolves.toBeUndefined()
+
+      await vi.advanceTimersByTimeAsync(1000)
+      await expectation
+
+      expect(h.query).toHaveBeenCalledTimes(2)
+      expect(h.insert).toHaveBeenCalledTimes(2)
+      expect(warnSpy.mock.calls.flat().join(' ')).toContain('retry-record.txt')
+    } finally {
+      warnSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+})
 
 describe('processZipBuffer', () => {
   it('continues processing remaining entries after one entry fails to open (e.g. encrypted)', async () => {
