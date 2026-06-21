@@ -7,6 +7,9 @@ describe('hard T3 deployment policy', () => {
     expect(readme).toContain(
       'ACCEPT_PERMANENT_DATA_LOSS=1 APPLY=1 bash scripts/purge-existing-t3.sh',
     )
+    expect(readme).toContain('cancels only a failed exact T3 mutation')
+    expect(readme).toContain('bounded-memory lightweight delete')
+    expect(readme).toContain('background merges reclaim physical disk space gradually')
   })
 
   test('Compose defaults hard-drop tiers to T3', () => {
@@ -37,5 +40,13 @@ describe('hard T3 deployment policy', () => {
     expect(script).toContain('latest_fail_reason')
     expect(script).toContain('remaining_t3')
     expect(script).not.toMatch(/SELECT[^\n]*password/i)
+    expect(script).toContain('DELETE FROM ulp.credentials')
+    expect(script).not.toContain('ALTER TABLE ulp.credentials\nDELETE WHERE')
+    expect(script).toContain('lightweight_deletes_sync = 2')
+    expect(script).toContain('max_threads = 2')
+    expect(script).toContain('max_execution_time = 0')
+    expect(script).toContain('KILL MUTATION')
+    expect(script).toContain("command = '(DELETE WHERE country_tier = \\\\\'T3\\\\')'")
+    expect(script).not.toContain('OPTIMIZE TABLE')
   })
 })

@@ -274,6 +274,8 @@ BACKUP_VERIFIED=1 APPLY=1 bash scripts/purge-existing-t3.sh
 ACCEPT_PERMANENT_DATA_LOSS=1 APPLY=1 bash scripts/purge-existing-t3.sh
 ```
 
+After pulling an update, rerun the same destructive command if an earlier purge failed. The script cancels only a failed exact T3 mutation, refuses to run while any other credential-table mutation is active, and then uses a bounded-memory lightweight delete. The rows become invisible when the command completes; background merges reclaim physical disk space gradually, so the script does not run a memory-intensive `OPTIMIZE FINAL`.
+
 Tiers: **T1** = US/UK/CA/AU/NZ · **T2** = W.Europe/JP/KR/SG/IL/AE · **T3** = RU/CN/BR/LATAM/SEA.
 
 ---

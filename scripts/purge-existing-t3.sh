@@ -11,8 +11,6 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 APPLY="${APPLY:-0}"
 BACKUP_VERIFIED="${BACKUP_VERIFIED:-0}"
 ACCEPT_PERMANENT_DATA_LOSS="${ACCEPT_PERMANENT_DATA_LOSS:-0}"
-POLL_SECONDS="${POLL_SECONDS:-5}"
-TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-7200}"
 PREDICATE="country_tier = 'T3'"
 CONTAINER="${CLICKHOUSE_CONTAINER:-ulpsuite_clickhouse}"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
@@ -86,6 +84,37 @@ if [[ "$BACKUP_VERIFIED" != "1" ]]; then
   echo "WARNING: no verified backup; permanent T3 data loss explicitly accepted." >&2
 fi
 
+cancel_failed_t3_mutations() {
+  local ids mutation_id
+  ids="$(ch "
+SELECT mutation_id
+FROM system.mutations
+WHERE database = 'ulp'
+  AND table = 'credentials'
+  AND is_done = 0
+  AND latest_fail_reason != ''
+  AND command = '(DELETE WHERE country_tier = \\'T3\\')'
+FORMAT TSVRaw
+")"
+
+  while IFS= read -r mutation_id; do
+    [[ -z "$mutation_id" ]] && continue
+    echo "Cancelling failed exact T3 mutation: $mutation_id"
+    ch "
+KILL MUTATION
+WHERE database = 'ulp'
+  AND table = 'credentials'
+  AND mutation_id = '$mutation_id'
+  AND is_done = 0
+  AND latest_fail_reason != ''
+  AND command = '(DELETE WHERE country_tier = \\'T3\\')'
+SYNC
+"
+  done <<< "$ids"
+}
+
+cancel_failed_t3_mutations
+
 active="$(ch "
 SELECT count()
 FROM system.mutations
@@ -97,64 +126,22 @@ if [[ "$active" != "0" ]]; then
   exit 1
 fi
 
+bytes_before="$(ch "
+SELECT formatReadableSize(sum(bytes_on_disk))
+FROM system.parts
+WHERE database = 'ulp' AND table = 'credentials' AND active
+FORMAT TSVRaw
+")"
+
 echo
-echo "Submitting asynchronous T3 deletion mutation..."
+echo "Submitting bounded-memory lightweight T3 deletion..."
 ch "
-ALTER TABLE ulp.credentials
-DELETE WHERE $PREDICATE
-SETTINGS mutations_sync = 0
+DELETE FROM ulp.credentials
+WHERE $PREDICATE
+SETTINGS lightweight_deletes_sync = 2,
+         max_threads = 2,
+         max_execution_time = 0
 "
-
-mutation_id="$(ch "
-SELECT mutation_id
-FROM system.mutations
-WHERE database = 'ulp'
-  AND table = 'credentials'
-  AND command = '(DELETE WHERE country_tier = \\'T3\\')'
-ORDER BY create_time DESC
-LIMIT 1
-FORMAT TSVRaw
-")"
-
-if [[ -z "$mutation_id" ]]; then
-  echo "ERROR: deletion was submitted but its mutation id could not be found." >&2
-  exit 1
-fi
-
-echo "Mutation: $mutation_id"
-started_at="$(date +%s)"
-
-while true; do
-  row="$(ch "
-SELECT is_done, parts_to_do, latest_fail_reason
-FROM system.mutations
-WHERE database = 'ulp' AND table = 'credentials' AND mutation_id = '$mutation_id'
-FORMAT TSVRaw
-")"
-
-  if [[ -z "$row" ]]; then
-    echo "ERROR: mutation $mutation_id disappeared before completion." >&2
-    exit 1
-  fi
-
-  IFS=$'\t' read -r is_done parts_to_do latest_fail_reason <<< "$row"
-  if [[ -n "${latest_fail_reason:-}" ]]; then
-    echo "ERROR: mutation failed: $latest_fail_reason" >&2
-    exit 1
-  fi
-  if [[ "$is_done" == "1" ]]; then
-    break
-  fi
-
-  now="$(date +%s)"
-  if (( now - started_at >= TIMEOUT_SECONDS )); then
-    echo "ERROR: timed out after ${TIMEOUT_SECONDS}s; mutation still has $parts_to_do part(s)." >&2
-    exit 1
-  fi
-
-  echo "Waiting: $parts_to_do part(s) remaining..."
-  sleep "$POLL_SECONDS"
-done
 
 remaining_t3="$(ch "
 SELECT countIf($PREDICATE) AS remaining_t3
@@ -167,4 +154,13 @@ if [[ "$remaining_t3" != "0" ]]; then
   exit 1
 fi
 
+bytes_after="$(ch "
+SELECT formatReadableSize(sum(bytes_on_disk))
+FROM system.parts
+WHERE database = 'ulp' AND table = 'credentials' AND active
+FORMAT TSVRaw
+")"
+
 echo "T3 purge complete; remaining_t3=0."
+echo "Active-part storage: $bytes_before before, $bytes_after immediately after."
+echo "Physical disk is reclaimed gradually by normal background merges; no OPTIMIZE FINAL is run."
