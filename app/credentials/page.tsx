@@ -21,6 +21,10 @@ import { useToast } from "@/hooks/use-toast"
 import { useAuth } from "@/hooks/useAuth"
 import { TIER_LABELS } from "@/lib/country-tiers"
 import { LOGIN_TYPE_SHORT } from "@/lib/login-type"
+import {
+  DEFAULT_CREDENTIAL_LIMIT,
+  DEFAULT_CREDENTIAL_SORT,
+} from "@/lib/credential-browse-defaults"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -624,8 +628,8 @@ export default function CredentialsPage() {
   const [regexMode, setRegexMode]           = useState(false)
 
   // Sort / page size / export format
-  const [sortKey, setSortKey]         = useState('imported_desc')
-  const [limit, setLimit]             = useState(50)
+  const [sortKey, setSortKey]         = useState(DEFAULT_CREDENTIAL_SORT)
+  const [limit, setLimit]             = useState(DEFAULT_CREDENTIAL_LIMIT)
   const [exportFmt, setExportFmt]     = useState('csv')
 
   const { toast } = useToast()
@@ -704,13 +708,13 @@ export default function CredentialsPage() {
     setRegexMode(false)
     setExcludeNoise(true)
     setDedupe(true)
-    setSortKey('imported_desc'); setLimit(50)
+    setSortKey(DEFAULT_CREDENTIAL_SORT); setLimit(DEFAULT_CREDENTIAL_LIMIT)
     // Fetch directly with hardcoded defaults — all state setters above are async,
     // so calling load() here would still see the old values via its closure.
     // exclude_noise=1 + dedupe=1 keep the default-on declutter + dedupe after a clear.
     setLoading(true)
     setCursorStack([]); setCurrentCursor(null)
-    fetch('/api/credentials?limit=50&sort=imported_desc&exclude_noise=1&dedupe=1')
+    fetch(`/api/credentials?limit=${DEFAULT_CREDENTIAL_LIMIT}&sort=${DEFAULT_CREDENTIAL_SORT}&exclude_noise=1&dedupe=1`)
       .then(r => r.json())
       .then(json => { if (json.success) { setData(json); setCurrentCursor(null) } })
       .catch(() => { toast({ title: 'Failed to load', variant: 'destructive' }) })
@@ -740,7 +744,7 @@ export default function CredentialsPage() {
   /** Cycle sort: unsorted → asc → desc → reset; updates the dropdown in sync. */
   const cycleSortKey = (ascKey: string, descKey: string) => {
     const next = sortKey === ascKey ? descKey
-               : sortKey === descKey ? 'imported_desc'
+               : sortKey === descKey ? DEFAULT_CREDENTIAL_SORT
                : ascKey
     setSortKey(next)
     resetCursor(); load(null, { sort: next })
