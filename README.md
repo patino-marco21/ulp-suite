@@ -124,6 +124,8 @@ Open [http://localhost:3000](http://localhost:3000). Log in with `ADMIN_EMAIL` /
 
 Drop credential files directly into `./inbox/` from the host:
 
+Imports run in 100,000-row synchronous batches, and temporary ClickHouse outages pause and retry the active batch for up to 30 minutes; permanent or semantic failures still move the file to `./inbox/failed/`.
+
 ```bash
 cp /path/to/dumps/*.txt ~/ulp-suite/inbox/
 
@@ -133,15 +135,15 @@ docker compose logs -f app | grep inbox-watcher
 ```
 
 Files move to `./inbox/done/` on success, `./inbox/failed/` on failure.
-Retry failed files:
+Existing failed files must be retried from the Inbox Monitor after deployment:
 
 ```bash
 mv ~/ulp-suite/inbox/failed/* ~/ulp-suite/inbox/
 # Or click "Retry All" in the Inbox Monitor UI
 ```
 
-**Large files:** Files with >2M unique credentials disable in-file dedup once the cap is hit.
-Run the dedup endpoint after importing to clean up duplicates in ClickHouse:
+**Large files:** Files with >2M unique credentials disable in-file dedup once the cap is hit. The old post-file full-table dedup step is removed; scheduled or manual dedup remains available.
+Run the dedup endpoint when you want to manually dedup after importing:
 ```bash
 curl -s -b cookies.txt -X POST http://localhost:3000/api/admin/dedup | jq
 ```
@@ -226,9 +228,13 @@ In the Credentials Browser:
 
 Both are view-only — storage is untouched; toggle off to see everything.
 
+The browser defaults to 200 rows per page, globally ordered Domain A→Z. Page size and sort order remain selectable in the UI and API.
+
 ### Content deduplication (storage)
 
 Exact `(url,email,password)` duplicates accumulate when the same credential arrives across different combolist files. To remove them from storage:
+
+The old post-file full-table dedup pass is removed; scheduled or manual dedup remains available.
 
 ```bash
 # one-time (dry-run, then apply)
@@ -236,7 +242,7 @@ bash scripts/dedup-credentials-content.sh
 APPLY=1 bash scripts/dedup-credentials-content.sh
 ```
 
-To keep it lean automatically, the app runs a scheduled + post-import dedup — **report-only until you opt in**:
+The app supports scheduled or manual dedup — **report-only until you opt in**:
 
 ```bash
 CONTENT_DEDUP_APPLY=true   # allow the background ALTER … DELETE
