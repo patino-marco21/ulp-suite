@@ -14,9 +14,9 @@
  * the single row with the smallest full-row hash and deletes the rest.
  *
  * SAFETY: report-only by default. It logs how many rows it WOULD delete; nothing
- * is removed unless CONTENT_DEDUP_APPLY=true. Two triggers share this
- * routine: the scheduled cron (lib/dedup-cron.ts) and a post-import hook
- * (lib/upload-processor.ts) — the latter cleans up duplicates an import just added.
+ * is removed unless CONTENT_DEDUP_APPLY=true. The scheduled cron
+ * (lib/dedup-cron.ts) invokes this routine; operators can also run the verified
+ * content-key cleanup script at scripts/dedup-credentials-content.sh.
  *
  * SCALE: the stats (uniqExact) and the DELETE mutation scan the whole table — fine
  * at the current ~20 M rows; at billions, revisit (e.g. content-keyed dedup table /

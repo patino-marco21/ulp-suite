@@ -8,6 +8,11 @@ import { NORM_COLS } from "@/lib/ulp-normalize"
 import { NOISE_FILTER } from "@/lib/ulp-noise"
 import { dedupeLimitBy, dedupeCountExpr } from "@/lib/ulp-dedupe"
 import { SORT_MAP, type SortKey, encodeCursor, decodeCursor, buildCursorWhere } from "@/lib/cursor-pagination"
+import {
+  DEFAULT_CREDENTIAL_LIMIT,
+  DEFAULT_CREDENTIAL_SORT,
+  MAX_CREDENTIAL_LIMIT,
+} from "@/lib/credential-browse-defaults"
 
 export const dynamic = 'force-dynamic'
 
@@ -26,10 +31,10 @@ const SELECT = `${NORM_COLS},
  *
  * Query params:
  *   cursor        string    opaque pagination token (absent = first page)
- *   limit         number    (default 50, max 200)
+ *   limit         number    (default 200, max 200)
  *   q             string    text search (indexed — hasToken / bloom-filter, NOT LIKE)
  *   regex         '1'       treat q as RE2 regex
- *   sort          string    see SORT_MAP keys (default imported_desc)
+ *   sort          string    see SORT_MAP keys (default domain_asc)
  *   domain        string    exact domain match
  *   breach        string    exact breach_name match
  *   source_file   string    exact source_file match
@@ -56,11 +61,14 @@ export async function GET(request: NextRequest) {
 
   const sp = new URL(request.url).searchParams
   const cursorToken = sp.get('cursor') || ''
-  const limit = Math.min(200, Math.max(1, parseInt(sp.get('limit') || '50')))
+  const limit = Math.min(
+    MAX_CREDENTIAL_LIMIT,
+    Math.max(1, parseInt(sp.get('limit') || String(DEFAULT_CREDENTIAL_LIMIT), 10)),
+  )
 
   const q           = sp.get('q')            || ''
   const regex       = sp.get('regex')         === '1'
-  const sortKey     = sp.get('sort')          || 'imported_desc'
+  const sortKey     = sp.get('sort') || DEFAULT_CREDENTIAL_SORT
   const domain      = sp.get('domain')        || ''
   const breach      = sp.get('breach')        || ''
   const sourceFile  = sp.get('source_file')   || ''

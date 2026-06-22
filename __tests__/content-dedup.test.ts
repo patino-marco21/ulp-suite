@@ -1,3 +1,4 @@
+import { readFileSync } from 'fs'
 import { describe, test, expect } from 'vitest'
 import {
   CONTENT_KEY,
@@ -9,6 +10,10 @@ import {
 } from '@/lib/content-dedup'
 
 describe('content-dedup', () => {
+  test('does not claim that an import-time hook still triggers content dedup', () => {
+    const source = readFileSync(new URL('../lib/content-dedup.ts', import.meta.url), 'utf8')
+    expect(source).not.toContain('post-import hook')
+  })
   test('CONTENT_KEY is url, email, password', () => {
     expect(CONTENT_KEY).toBe('url, email, password')
   })

@@ -711,7 +711,7 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
   let   positionalLogin = ''
   // Per-call dedup set — caps at SEEN_CAP to prevent OOM on huge files.
   // Beyond the cap, duplicates are allowed through and can be cleaned up later
-  // via POST /api/admin/dedup (ClickHouse OPTIMIZE TABLE DEDUPLICATE).
+  // with: bash scripts/dedup-credentials-content.sh
   const SEEN_CAP = 2_000_000  // ~440 MB max heap for the Set
   const seen = new Set<string>()
   let seenCapWarned = false
@@ -721,7 +721,7 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
       if (!seenCapWarned) {
         seenCapWarned = true
         console.warn(`[ulp-parser] dedup cap (${SEEN_CAP.toLocaleString()}) reached for ${filename}. ` +
-          'Remaining rows skip in-file dedup — run POST /api/admin/dedup after import.')
+          'Remaining rows skip in-file dedup — run bash scripts/dedup-credentials-content.sh after import.')
       }
       return false  // not added; caller should push credential
     }
@@ -854,8 +854,8 @@ export async function* parseULPStream(
   let   positionalLogin = ''
   // Per-upload dedup set — capped at STREAM_SEEN_CAP to prevent OOM on huge files.
   // At 2M entries × ~220 bytes = ~440 MB max heap cost.  Beyond the cap, dedup is
-  // disabled for the remainder of the file.  Run POST /api/admin/dedup afterwards
-  // to remove any duplicates ClickHouse received past the cap.
+  // disabled for the remainder of the file. Run
+  // bash scripts/dedup-credentials-content.sh afterwards to remove duplicates.
   const STREAM_SEEN_CAP = 2_000_000
   const seen = new Set<string>()
   let streamSeenCapWarned = false
@@ -874,7 +874,7 @@ export async function* parseULPStream(
       if (!streamSeenCapWarned) {
         streamSeenCapWarned = true
         console.warn(`[ulp-parser] dedup cap (${STREAM_SEEN_CAP.toLocaleString()}) reached for ${filename}. ` +
-          'Remaining rows skip in-file dedup — run POST /api/admin/dedup after import.')
+          'Remaining rows skip in-file dedup — run bash scripts/dedup-credentials-content.sh after import.')
       }
       return false  // cap hit — allow through (not a known duplicate)
     }
