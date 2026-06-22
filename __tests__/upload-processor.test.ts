@@ -124,6 +124,7 @@ describe('upload processor source contract', () => {
 
       await expectation
       expect(h.query).toHaveBeenCalledTimes(2)
+      expect(h.query.mock.calls.every(call => call[0].abort_signal instanceof AbortSignal)).toBe(true)
       expect(warnSpy.mock.calls.flat().join(' ')).toContain('retry-check.txt')
     } finally {
       warnSpy.mockRestore()
@@ -150,6 +151,7 @@ describe('upload processor source contract', () => {
 
       expect(h.query).toHaveBeenCalledTimes(2)
       expect(h.insert).toHaveBeenCalledTimes(2)
+      expect(h.insert.mock.calls.every(call => call[0].abort_signal instanceof AbortSignal)).toBe(true)
       expect(warnSpy.mock.calls.flat().join(' ')).toContain('retry-record.txt')
     } finally {
       warnSpy.mockRestore()
@@ -258,5 +260,26 @@ describe('processZipBuffer', () => {
     expect(results[1]).toEqual({ filename: 'corrupt.txt', imported: 0, errors: 1 })
     expect(results[0].imported).toBe(1)
     expect(results[2].imported).toBe(1)
+  })
+
+  it('rejects the archive when text processing fails in ClickHouse', async () => {
+    const yauzl = (await import('yauzl')).default
+    const { processZipBuffer } = await import('@/lib/upload-processor')
+    const databaseError = Object.assign(new Error('DB::Exception: bad query'), { code: '62' })
+    h.query.mockRejectedValue(databaseError)
+
+    const fake = new FakeZipFile([
+      { fileName: 'db-failure.txt', contentOrError: 'https://example.com/login:user@example.com:mypassword\n' },
+      { fileName: 'must-not-run.txt', contentOrError: 'https://example.com/login:user2@example.com:mypassword\n' },
+    ])
+    ;(yauzl.fromBuffer as any).mockImplementation(
+      (_buf: Buffer, _opts: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => {
+        cb(null, fake as unknown as yauzl.ZipFile)
+      }
+    )
+
+    const results: unknown[] = []
+    await expect(processZipBuffer(Buffer.from('fake zip'), result => results.push(result))).rejects.toBe(databaseError)
+    expect(results).toEqual([])
   })
 })

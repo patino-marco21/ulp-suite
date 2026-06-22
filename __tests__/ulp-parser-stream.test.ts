@@ -11,10 +11,17 @@
  *    scale.)
  */
 
+import { readFileSync } from 'fs'
 import { describe, test, expect } from 'vitest'
 import { parseULPStream, parseULPContent } from '@/lib/ulp-parser'
 
 const FILE = 'stream-test.txt'
+
+test('dedup-cap guidance names the content-key script, not the removed admin endpoint', () => {
+  const source = readFileSync(new URL('../lib/ulp-parser.ts', import.meta.url), 'utf8')
+  expect(source).toContain('bash scripts/dedup-credentials-content.sh')
+  expect(source).not.toContain('POST /api/admin/dedup')
+})
 
 function streamFromChunks(chunks: string[]): ReadableStream<Uint8Array> {
   let i = 0

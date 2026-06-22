@@ -11,6 +11,10 @@ describe('isTransientClickHouseError', () => {
     expect(isTransientClickHouseError(Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }))).toBe(true)
     expect(isTransientClickHouseError({ statusCode: 503, message: 'unavailable' })).toBe(true)
     expect(isTransientClickHouseError(Object.assign(new Error('socket hang up'), { cause: { code: 'ECONNRESET' } }))).toBe(true)
+    expect(isTransientClickHouseError(new Error('Bad Gateway'))).toBe(true)
+    expect(isTransientClickHouseError(new Error('upstream returned 503 Service Unavailable'))).toBe(true)
+    expect(isTransientClickHouseError(new Error('504 Gateway Timeout from proxy'))).toBe(true)
+    expect(isTransientClickHouseError(new Error('Timeout error.'))).toBe(true)
   })
 
   it('does not classify semantic ClickHouse failures as transient', () => {
@@ -26,6 +30,7 @@ describe('isTransientClickHouseError', () => {
         cause: { code: 'ECONNRESET' },
       })
     ).toBe(false)
+    expect(isTransientClickHouseError(new Error('Bad Gateway: DB::Exception: Syntax error'))).toBe(false)
   })
 })
 
@@ -139,7 +144,43 @@ describe('withClickHouseRetry', () => {
     expect(exhausted).toBeInstanceOf(ClickHouseRetryExhaustedError)
     expect(exhausted.attempts).toBe(2)
     expect(exhausted.lastError).toBeInstanceOf(Error)
+    expect(exhausted.message).toContain('ECONNRESET')
 
     expect(sleeps).toEqual([1000])
+  })
+
+  it('aborts an in-flight attempt at the hard wall-clock deadline without starting another attempt', async () => {
+    let attempts = 0
+    let observedSignal: AbortSignal | undefined
+
+    const promise = withClickHouseRetry(
+      signal => {
+        attempts += 1
+        observedSignal = signal
+        return new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('operation aborted')), { once: true })
+        })
+      },
+      { maxElapsedMs: 20, initialDelayMs: 1, maxDelayMs: 1 }
+    )
+
+    await expect(promise).rejects.toBeInstanceOf(ClickHouseRetryExhaustedError)
+    expect(observedSignal?.aborted).toBe(true)
+    expect(attempts).toBe(1)
+  })
+
+  it('keeps exhaustion summaries useful without copying arbitrary sensitive error text', async () => {
+    const secret = new Error('fetch failed for https://user:password@example.test/private?token=secret')
+    Object.assign(secret, { code: 'ECONNREFUSED' })
+
+    const error = await withClickHouseRetry(
+      async () => { throw secret },
+      { maxElapsedMs: 0 }
+    ).catch(cause => cause as ClickHouseRetryExhaustedError)
+
+    expect(error.message).toContain('ECONNREFUSED')
+    expect(error.message).not.toContain('password')
+    expect(error.message).not.toContain('token=secret')
+    expect(error.lastError).toBe(secret)
   })
 })

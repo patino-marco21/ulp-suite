@@ -15,6 +15,9 @@ const TRANSIENT_MESSAGES = [
   'fetch failed',
   'connection closed',
   'econnrefused',
+  'bad gateway',
+  'service unavailable',
+  'gateway timeout',
 ]
 
 const SEMANTIC_CODES = new Set(['62'])
@@ -45,11 +48,32 @@ export class ClickHouseRetryExhaustedError extends Error {
   lastError: unknown
 
   constructor(attempts: number, lastError: unknown) {
-    super(`ClickHouse retry deadline exhausted after ${attempts} attempt${attempts === 1 ? '' : 's'}`)
+    super(
+      `ClickHouse retry deadline exhausted after ${attempts} attempt${attempts === 1 ? '' : 's'}; ` +
+      `last error: ${privacySafeErrorSummary(lastError)}`
+    )
     this.name = 'ClickHouseRetryExhaustedError'
     this.attempts = attempts
     this.lastError = lastError
   }
+}
+
+function privacySafeErrorSummary(error: unknown): string {
+  const code = getCode(error) ?? getCode(
+    error && typeof error === 'object' ? (error as { cause?: unknown }).cause : undefined
+  )
+  if (code !== undefined) return String(code)
+
+  const status = getStatus(error)
+  if (status !== undefined) return `HTTP ${String(status)}`
+
+  const message = getMessage(error).toLowerCase()
+  if (message === 'timeout error.') return 'Timeout error.'
+  for (const phrase of TRANSIENT_MESSAGES) {
+    if (message.includes(phrase)) return phrase
+  }
+
+  return error instanceof Error && error.name ? error.name : 'transient ClickHouse error'
 }
 
 function getCode(value: unknown): unknown {
@@ -83,6 +107,7 @@ function getMessage(value: unknown): string {
 
 function hasSemanticClickHouseSignal(error: unknown): boolean {
   const message = getMessage(error).toLowerCase()
+
   const code = getCode(error)
 
   if (SEMANTIC_CODES.has(String(code))) {
@@ -118,6 +143,10 @@ export function isTransientClickHouseError(error: unknown): boolean {
   const status = getStatus(error)
   const message = getMessage(error).toLowerCase()
 
+  if (message === 'timeout error.') {
+    return true
+  }
+
   if (TRANSIENT_CODES.has(String(code))) {
     return true
   }
@@ -144,7 +173,7 @@ function delayForAttempt(attempt: number, initialDelayMs: number, maxDelayMs: nu
 }
 
 export async function withClickHouseRetry<T>(
-  operation: () => Promise<T>,
+  operation: (signal: AbortSignal) => Promise<T>,
   options: ClickHouseRetryOptions = {}
 ): Promise<T> {
   const {
@@ -158,26 +187,51 @@ export async function withClickHouseRetry<T>(
 
   const startedAt = now()
   let attempts = 0
+  let lastError: unknown
+  let activeController: AbortController | undefined
+  let rejectDeadline!: (error: ClickHouseRetryExhaustedError) => void
+  const deadlinePromise = new Promise<never>((_resolve, reject) => {
+    rejectDeadline = reject
+  })
+  const deadlineTimer = setTimeout(() => {
+    const deadlineCause = lastError ?? new Error('Timeout error.')
+    rejectDeadline(new ClickHouseRetryExhaustedError(attempts, deadlineCause))
+    activeController?.abort(deadlineCause)
+  }, Math.max(0, maxElapsedMs))
 
-  while (true) {
-    attempts += 1
+  try {
+    while (true) {
+      attempts += 1
+      activeController = new AbortController()
 
-    try {
-      return await operation()
-    } catch (error) {
-      if (!isTransientClickHouseError(error)) {
-        throw error
+      try {
+        const result = await Promise.race([
+          operation(activeController.signal),
+          deadlinePromise,
+        ])
+        activeController = undefined
+        return result
+      } catch (error) {
+        activeController = undefined
+        if (error instanceof ClickHouseRetryExhaustedError) throw error
+        lastError = error
+
+        if (!isTransientClickHouseError(error)) {
+          throw error
+        }
+
+        const delayMs = delayForAttempt(attempts, initialDelayMs, maxDelayMs)
+        const deadline = startedAt + maxElapsedMs
+
+        if (now() + delayMs > deadline) {
+          throw new ClickHouseRetryExhaustedError(attempts, error)
+        }
+
+        onRetry?.({ attempt: attempts, delayMs, error })
+        await Promise.race([sleep(delayMs), deadlinePromise])
       }
-
-      const delayMs = delayForAttempt(attempts, initialDelayMs, maxDelayMs)
-      const deadline = startedAt + maxElapsedMs
-
-      if (now() + delayMs > deadline) {
-        throw new ClickHouseRetryExhaustedError(attempts, error)
-      }
-
-      onRetry?.({ attempt: attempts, delayMs, error })
-      await sleep(delayMs)
     }
+  } finally {
+    clearTimeout(deadlineTimer)
   }
 }

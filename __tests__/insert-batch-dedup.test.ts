@@ -40,6 +40,7 @@ describe('insertBatch deduplication settings', () => {
     expect(settings.wait_for_async_insert).toBeUndefined()
     expect(settings.async_insert_deduplicate).toBeUndefined()
     expect(settings.max_insert_threads).toBe(2)
+    expect(insertSpy.mock.calls[0][0].abort_signal).toBeInstanceOf(AbortSignal)
   })
 
   it('retries transient insert failures with the same token, fresh streams, and sanitized logs', async () => {
@@ -79,6 +80,9 @@ describe('insertBatch deduplication settings', () => {
     expect(firstCall.clickhouse_settings.insert_deduplication_token)
       .toBe(secondCall.clickhouse_settings.insert_deduplication_token)
     expect(firstCall.values).not.toBe(secondCall.values)
+    expect(firstCall.abort_signal).toBeInstanceOf(AbortSignal)
+    expect(secondCall.abort_signal).toBeInstanceOf(AbortSignal)
+    expect(firstCall.abort_signal).not.toBe(secondCall.abort_signal)
     expect(payloads).toHaveLength(2)
     expect(payloads[0]).toBe(payloads[1])
     expect(payloads[0]).toBe('"https://a.com","a@a.com","p1","a.com","f.txt","breachX"\n')

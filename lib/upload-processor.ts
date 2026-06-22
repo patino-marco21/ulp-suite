@@ -87,22 +87,26 @@ function makeRetryLogger(
  * in ulp.credentials. Used both to skip re-imports (processTextStream) and to keep
  * recordSource idempotent.
  */
+async function querySourceAlreadyImported(filename: string, signal: AbortSignal): Promise<boolean> {
+  const res = await getClient().query({
+    query:        `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1`,
+    query_params: { f: filename },
+    format:       'JSONEachRow',
+    abort_signal: signal,
+    clickhouse_settings: {
+      use_query_cache: 0,
+    },
+  })
+  const rows = await res.json() as Array<{ c: string | number }>
+  return Number(rows[0]?.c ?? 0) > 0
+}
+
 export async function sourceAlreadyImported(filename: string): Promise<boolean> {
   const rows = await withClickHouseRetry(
-    async () => {
-      const res = await getClient().query({
-        query:        `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1`,
-        query_params: { f: filename },
-        format:       'JSONEachRow',
-        clickhouse_settings: {
-          use_query_cache: 0,
-        },
-      })
-      return await res.json() as Array<{ c: string | number }>
-    },
+    async signal => querySourceAlreadyImported(filename, signal),
     { onRetry: makeRetryLogger('source check', filename) }
   )
-  return Number(rows[0]?.c ?? 0) > 0
+  return rows
 }
 
 /**
@@ -121,7 +125,7 @@ export async function insertBatch(
   const token = batchDedupToken(credentials, breach_name)
 
   await withClickHouseRetry(
-    async () => {
+    async signal => {
       const readable = Readable.from(
         (function* () {
           for (const c of credentials) {
@@ -143,6 +147,7 @@ export async function insertBatch(
         columns: ['url', 'email', 'password', 'domain', 'source_file', 'breach_name'],
         values: readable,
         format: 'CSV',
+        abort_signal: signal,
         clickhouse_settings: {
           max_execution_time:       0,
           insert_deduplicate:       1 as any,
@@ -160,7 +165,7 @@ export async function insertBatch(
 
 export async function recordSource(filename: string, lineCount: number): Promise<void> {
   await withClickHouseRetry(
-    async () => {
+    async signal => {
       const chClient = getClient()
 
       // Idempotent: skip if this filename was already recorded in ulp.sources.
@@ -168,7 +173,7 @@ export async function recordSource(filename: string, lineCount: number): Promise
       // OOM crash between processTextStream and renameSync, or a Force Scan race).
       // Retried inserts re-check the guard so an ambiguous transient error does not
       // create duplicate source rows on a later attempt.
-      if (await sourceAlreadyImported(filename)) {
+      if (await querySourceAlreadyImported(filename, signal)) {
         console.log(`[upload-processor] recordSource: ${filename} already in ulp.sources — skipping`)
         return
       }
@@ -177,6 +182,7 @@ export async function recordSource(filename: string, lineCount: number): Promise
         table:  'ulp.sources',
         values: [{ filename, line_count: lineCount }],
         format: 'JSONEachRow',
+        abort_signal: signal,
       })
     },
     { onRetry: makeRetryLogger('source record', filename) }
@@ -259,6 +265,13 @@ export async function processTextStream(
 
 // ─── ZIP processor (yauzl — lazy entry streaming) ────────────────────────────
 
+class ZipEntryStreamError extends Error {
+  constructor(public override cause: unknown) {
+    super('ZIP entry stream failed', { cause })
+    this.name = 'ZipEntryStreamError'
+  }
+}
+
 /**
  * Drive a yauzl ZipFile through its .txt/.csv entries one at a time.
  *
@@ -281,6 +294,14 @@ function processZipEntries(
   onEntry: (result: ProcessResult) => void,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
+    let settled = false
+    const rejectArchive = (error: unknown) => {
+      if (settled) return
+      settled = true
+      ;(zipfile as yauzl.ZipFile & { close?: () => void }).close?.()
+      reject(error)
+    }
+
     zipfile.readEntry()
 
     zipfile.on('entry', (entry: yauzl.Entry) => {
@@ -317,16 +338,38 @@ function processZipEntries(
         if (streamErr) { skipEntry(streamErr); return }
 
         // Convert Node.js Readable → Web ReadableStream for processTextStream
-        const webStream = Readable.toWeb(readStream) as ReadableStream<Uint8Array>
+        const nodeWebStream = Readable.toWeb(readStream) as ReadableStream<Uint8Array>
+        const reader = nodeWebStream.getReader()
+        const webStream = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            try {
+              const { done, value } = await reader.read()
+              if (done) controller.close()
+              else controller.enqueue(value)
+            } catch (error) {
+              controller.error(new ZipEntryStreamError(error))
+            }
+          },
+          cancel(reason) {
+            return reader.cancel(reason)
+          },
+        })
 
         processTextStream(webStream, entryName)
           .then(result => { onEntry(result); zipfile.readEntry() })
-          .catch(skipEntry)
+          .catch(error => {
+            if (error instanceof ZipEntryStreamError) skipEntry(error.cause)
+            else rejectArchive(error)
+          })
       })
     })
 
-    zipfile.on('end', resolve)
-    zipfile.on('error', reject)
+    zipfile.on('end', () => {
+      if (settled) return
+      settled = true
+      resolve()
+    })
+    zipfile.on('error', rejectArchive)
   })
 }
 
