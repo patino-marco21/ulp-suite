@@ -15,7 +15,11 @@ import {
   type RejectionReason,
 } from '@/lib/ulp-parser'
 import { getClient } from '@/lib/clickhouse'
-import { withClickHouseRetry, type ClickHouseRetryOptions } from '@/lib/clickhouse-retry'
+import {
+  privacySafeClickHouseErrorSummary,
+  withClickHouseRetry,
+  type ClickHouseRetryOptions,
+} from '@/lib/clickhouse-retry'
 import { batchDedupToken } from '@/lib/upload-dedup'
 import { parseIngestPolicy, policyActive, shouldDropAtIngest } from '@/lib/ingest-filter'
 import { checkMonitorsForULPUpload } from '@/lib/domain-monitor'
@@ -47,24 +51,7 @@ function csvField(v: string): string {
 }
 
 function retryErrorSummary(error: unknown): string {
-  if (error && typeof error === 'object') {
-    const code = (error as { code?: unknown }).code
-    if (code !== undefined) {
-      return `code=${String(code)}`
-    }
-
-    const status = (error as { status?: unknown; statusCode?: unknown }).status
-      ?? (error as { status?: unknown; statusCode?: unknown }).statusCode
-    if (status !== undefined) {
-      return `status=${String(status)}`
-    }
-
-    if (error instanceof Error && error.name) {
-      return error.name
-    }
-  }
-
-  return 'transient error'
+  return privacySafeClickHouseErrorSummary(error)
 }
 
 function makeRetryLogger(
@@ -97,8 +84,18 @@ async function querySourceAlreadyImported(filename: string, signal: AbortSignal)
       use_query_cache: 0,
     },
   })
-  const rows = await res.json() as Array<{ c: string | number }>
-  return Number(rows[0]?.c ?? 0) > 0
+  const closeOnAbort = () => res.close()
+  signal.addEventListener('abort', closeOnAbort, { once: true })
+  try {
+    if (signal.aborted) {
+      closeOnAbort()
+      throw signal.reason ?? new DOMException('The operation was aborted', 'AbortError')
+    }
+    const rows = await res.json() as Array<{ c: string | number }>
+    return Number(rows[0]?.c ?? 0) > 0
+  } finally {
+    signal.removeEventListener('abort', closeOnAbort)
+  }
 }
 
 export async function sourceAlreadyImported(filename: string): Promise<boolean> {

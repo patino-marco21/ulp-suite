@@ -20,7 +20,6 @@ const TRANSIENT_MESSAGES = [
   'gateway timeout',
 ]
 
-const SEMANTIC_CODES = new Set(['62'])
 const SEMANTIC_MESSAGES = [
   'bad query',
   'memory limit',
@@ -50,7 +49,7 @@ export class ClickHouseRetryExhaustedError extends Error {
   constructor(attempts: number, lastError: unknown) {
     super(
       `ClickHouse retry deadline exhausted after ${attempts} attempt${attempts === 1 ? '' : 's'}; ` +
-      `last error: ${privacySafeErrorSummary(lastError)}`
+      `last error: ${privacySafeClickHouseErrorSummary(lastError)}`
     )
     this.name = 'ClickHouseRetryExhaustedError'
     this.attempts = attempts
@@ -58,14 +57,14 @@ export class ClickHouseRetryExhaustedError extends Error {
   }
 }
 
-function privacySafeErrorSummary(error: unknown): string {
+export function privacySafeClickHouseErrorSummary(error: unknown): string {
   const code = getCode(error) ?? getCode(
     error && typeof error === 'object' ? (error as { cause?: unknown }).cause : undefined
   )
-  if (code !== undefined) return String(code)
+  if (TRANSIENT_CODES.has(String(code))) return String(code)
 
   const status = getStatus(error)
-  if (status !== undefined) return `HTTP ${String(status)}`
+  if (TRANSIENT_STATUS_CODES.has(Number(status))) return `HTTP ${Number(status)}`
 
   const message = getMessage(error).toLowerCase()
   if (message === 'timeout error.') return 'Timeout error.'
@@ -73,7 +72,7 @@ function privacySafeErrorSummary(error: unknown): string {
     if (message.includes(phrase)) return phrase
   }
 
-  return error instanceof Error && error.name ? error.name : 'transient ClickHouse error'
+  return 'transient ClickHouse error'
 }
 
 function getCode(value: unknown): unknown {
@@ -110,7 +109,8 @@ function hasSemanticClickHouseSignal(error: unknown): boolean {
 
   const code = getCode(error)
 
-  if (SEMANTIC_CODES.has(String(code))) {
+  if ((typeof code === 'number' && Number.isFinite(code)) ||
+      (typeof code === 'string' && /^\d+$/.test(code))) {
     return true
   }
 

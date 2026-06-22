@@ -54,7 +54,7 @@ describe('insertBatch deduplication settings', () => {
       payloads.push(await readAll(values))
 
       if (payloads.length === 1) {
-        throw Object.assign(new Error('refused'), { code: 'ECONNREFUSED' })
+        throw Object.assign(new Error('fetch failed'), { code: 'token=supersecret' })
       }
     })
 
@@ -91,6 +91,8 @@ describe('insertBatch deduplication settings', () => {
     expect(retryLog).not.toContain('https://a.com')
     expect(retryLog).not.toContain('a@a.com')
     expect(retryLog).not.toContain('p1')
+    expect(retryLog).not.toContain('token=supersecret')
+    expect(retryLog).toContain('fetch failed')
   })
 
   it('does not call insert for an empty batch', async () => {

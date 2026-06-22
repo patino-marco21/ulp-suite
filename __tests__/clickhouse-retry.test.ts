@@ -31,6 +31,17 @@ describe('isTransientClickHouseError', () => {
       })
     ).toBe(false)
     expect(isTransientClickHouseError(new Error('Bad Gateway: DB::Exception: Syntax error'))).toBe(false)
+    expect(isTransientClickHouseError({
+      code: '516',
+      type: 'AUTHENTICATION_FAILED',
+      message: '503 Service Unavailable: Authentication failed',
+    })).toBe(false)
+  })
+
+  it('keeps transport codes and transient numeric HTTP statuses retryable', () => {
+    expect(isTransientClickHouseError({ code: 'ETIMEDOUT', message: 'timed out' })).toBe(true)
+    expect(isTransientClickHouseError({ status: 502, message: 'proxy response' })).toBe(true)
+    expect(isTransientClickHouseError({ statusCode: 504, message: 'proxy response' })).toBe(true)
   })
 })
 
@@ -182,5 +193,30 @@ describe('withClickHouseRetry', () => {
     expect(error.message).not.toContain('password')
     expect(error.message).not.toContain('token=secret')
     expect(error.lastError).toBe(secret)
+  })
+
+  it('does not echo an arbitrary code when a safe transient phrase is available', async () => {
+    const secret = Object.assign(new Error('fetch failed'), { code: 'token=supersecret' })
+
+    const error = await withClickHouseRetry(
+      async () => { throw secret },
+      { maxElapsedMs: 0 }
+    ).catch(cause => cause as ClickHouseRetryExhaustedError)
+
+    expect(error.message).toContain('fetch failed')
+    expect(error.message).not.toContain('token=supersecret')
+    expect(error.lastError).toBe(secret)
+  })
+
+  it('uses a fixed fallback rather than arbitrary error name or status text', () => {
+    const secret = Object.assign(new Error('opaque failure'), {
+      name: 'token=supersecret',
+      status: 'session=alsosecret',
+    })
+    const error = new ClickHouseRetryExhaustedError(1, secret)
+
+    expect(error.message).toContain('transient ClickHouse error')
+    expect(error.message).not.toContain('token=supersecret')
+    expect(error.message).not.toContain('session=alsosecret')
   })
 })

@@ -132,6 +132,58 @@ describe('upload processor source contract', () => {
     }
   })
 
+  it('closes a source ResultSet whose json body hangs after headers when the deadline aborts', async () => {
+    vi.useFakeTimers()
+    let rejectJson!: (error: Error) => void
+    const close = vi.fn(() => rejectJson(new Error('response stream closed')))
+    h.query.mockResolvedValue({
+      json: () => new Promise<never>((_resolve, reject) => { rejectJson = reject }),
+      close,
+    })
+
+    try {
+      const { ClickHouseRetryExhaustedError } = await import('@/lib/clickhouse-retry')
+      const { sourceAlreadyImported } = await import('@/lib/upload-processor')
+      const promise = sourceAlreadyImported('hanging-body.txt')
+      const expectation = expect(promise).rejects.toBeInstanceOf(ClickHouseRetryExhaustedError)
+
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000)
+      await expectation
+
+      expect(close).toHaveBeenCalledTimes(1)
+      expect(h.query).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('closes without consuming a ResultSet returned after its signal is already aborted', async () => {
+    vi.useFakeTimers()
+    const close = vi.fn()
+    const json = vi.fn(() => new Promise<never>(() => {}))
+    h.query.mockImplementation(() => new Promise(resolve => {
+      setTimeout(() => resolve({ json, close }), 30 * 60 * 1000 + 1)
+    }))
+
+    try {
+      const { ClickHouseRetryExhaustedError } = await import('@/lib/clickhouse-retry')
+      const { sourceAlreadyImported } = await import('@/lib/upload-processor')
+      const promise = sourceAlreadyImported('late-headers.txt')
+      const expectation = expect(promise).rejects.toBeInstanceOf(ClickHouseRetryExhaustedError)
+
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000 + 1)
+      await expectation
+
+      expect(close).toHaveBeenCalledTimes(1)
+      expect(json).not.toHaveBeenCalled()
+      expect(h.query).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('retries transient source recording inserts', async () => {
     vi.useFakeTimers()
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -281,5 +333,43 @@ describe('processZipBuffer', () => {
     const results: unknown[] = []
     await expect(processZipBuffer(Buffer.from('fake zip'), result => results.push(result))).rejects.toBe(databaseError)
     expect(results).toEqual([])
+  })
+
+  it('rejects the archive when text processing exhausts ClickHouse retries', async () => {
+    const yauzl = (await import('yauzl')).default
+    const { ClickHouseRetryExhaustedError } = await import('@/lib/clickhouse-retry')
+    const { processZipBuffer } = await import('@/lib/upload-processor')
+    const retryError = new ClickHouseRetryExhaustedError(3, Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }))
+    h.query.mockRejectedValue(retryError)
+
+    const fake = new FakeZipFile([
+      { fileName: 'retry-exhausted.txt', contentOrError: 'https://example.com/login:user@example.com:mypassword\n' },
+    ])
+    ;(yauzl.fromBuffer as any).mockImplementation(
+      (_buf: Buffer, _opts: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => {
+        cb(null, fake as unknown as yauzl.ZipFile)
+      }
+    )
+
+    await expect(processZipBuffer(Buffer.from('fake zip'), () => {})).rejects.toBe(retryError)
+  })
+
+  it('rejects the archive when a credential insert exhausts ClickHouse retries', async () => {
+    const yauzl = (await import('yauzl')).default
+    const { ClickHouseRetryExhaustedError } = await import('@/lib/clickhouse-retry')
+    const { processZipBuffer } = await import('@/lib/upload-processor')
+    const retryError = new ClickHouseRetryExhaustedError(2, Object.assign(new Error('refused'), { code: 'ECONNRESET' }))
+    h.insert.mockRejectedValue(retryError)
+
+    const fake = new FakeZipFile([
+      { fileName: 'insert-exhausted.txt', contentOrError: 'https://example.com/login:user@example.com:mypassword\n' },
+    ])
+    ;(yauzl.fromBuffer as any).mockImplementation(
+      (_buf: Buffer, _opts: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => {
+        cb(null, fake as unknown as yauzl.ZipFile)
+      }
+    )
+
+    await expect(processZipBuffer(Buffer.from('fake zip'), () => {})).rejects.toBe(retryError)
   })
 })
