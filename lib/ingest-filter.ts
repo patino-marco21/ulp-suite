@@ -86,6 +86,22 @@ export function policyActive(p: IngestDropPolicy): boolean {
   return p.hardTiers.size > 0 || p.tiers.size > 0 || p.drop.suffixes.length > 0 || p.dropNoise
 }
 
+/**
+ * Build a pure predicate that returns true for rows whose tier is a configured
+ * HARD drop. Used by the parser to bail on (e.g.) T3 the instant the fields are
+ * split — before any downstream work. Returns undefined when no hard tiers are
+ * set, so callers can skip the work entirely.
+ */
+export function makeHardDropPredicate(
+  p: IngestDropPolicy,
+): ((email: string, url: string) => boolean) | undefined {
+  if (p.hardTiers.size === 0) return undefined
+  return (email, url) => {
+    const tier = classifyTier(email, url)
+    return tier !== '' && p.hardTiers.has(tier)
+  }
+}
+
 /** Does this credential's email-suffix or URL-TLD fall in the given set? */
 function matchesSuffixSet(email: string, url: string, set: SuffixSet): boolean {
   if (set.suffixes.length === 0) return false
