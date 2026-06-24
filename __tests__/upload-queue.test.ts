@@ -55,7 +55,7 @@ describe('uploadQueue', () => {
 
   test('concurrency is 1 — activeCount never exceeds 1', async () => {
     let maxActive = 0
-    const tasks = Array.from({ length: 5 }, (_, i) =>
+    const tasks = Array.from({ length: 5 }, (_) =>
       uploadQueue(async () => {
         maxActive = Math.max(maxActive, uploadQueue.activeCount)
         await new Promise(r => setTimeout(r, 5))
@@ -65,8 +65,6 @@ describe('uploadQueue', () => {
     expect(maxActive).toBe(1)
   })
 })
-
-import { afterEach as afterEachConc, beforeEach as beforeEachConc } from 'vitest'
 
 describe('parseConcurrency', () => {
   it('defaults to 1 for unset, empty, non-numeric, zero, or negative', async () => {
@@ -87,7 +85,7 @@ describe('parseConcurrency', () => {
 
 describe('uploadQueue concurrency from env', () => {
   const original = process.env.UPLOAD_CONCURRENCY
-  afterEachConc(() => {
+  afterEach(() => {
     if (original === undefined) delete process.env.UPLOAD_CONCURRENCY
     else process.env.UPLOAD_CONCURRENCY = original
     vi.resetModules()
