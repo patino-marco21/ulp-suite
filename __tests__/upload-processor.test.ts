@@ -373,3 +373,37 @@ describe('processZipBuffer', () => {
     await expect(processZipBuffer(Buffer.from('fake zip'), () => {})).rejects.toBe(retryError)
   })
 })
+
+describe('parser-time hard-tier drop wiring', () => {
+  it('passes a hard-drop predicate to parseULPStream and drops T3 in the parser', async () => {
+    vi.resetModules()
+    process.env.INGEST_FILTER_HARD_DROP_TIERS = 'T3'
+
+    let received: ((e: string, u: string) => boolean) | undefined
+    vi.doMock('@/lib/ulp-parser', async () => {
+      const actual = await vi.importActual<typeof import('@/lib/ulp-parser')>('@/lib/ulp-parser')
+      return {
+        ...actual,
+        parseULPStream: async function* (_s: any, _f: any, _b: any, pred?: any) {
+          received = pred
+          yield { credentials: [], rejected: 1, breakdown: { ...actual.makeRejectionMap(), tier_dropped: 1 } }
+        },
+      }
+    })
+
+    try {
+      const { processTextStream } = await import('@/lib/upload-processor')
+      const { Readable } = await import('node:stream')
+      const res = await processTextStream(
+        Readable.toWeb(Readable.from([])) as ReadableStream<Uint8Array>, 'tier.txt')
+      expect(typeof received).toBe('function')
+      expect(received!('x@mail.ru', '')).toBe(true)       // T3 dropped
+      expect(received!('x@gmail.com', '')).toBe(false)     // untiered kept
+      expect(res.rejection_breakdown.tier_dropped).toBe(1) // surfaced in the result
+    } finally {
+      delete process.env.INGEST_FILTER_HARD_DROP_TIERS
+      vi.doUnmock('@/lib/ulp-parser')
+      vi.resetModules()
+    }
+  })
+})

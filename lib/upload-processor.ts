@@ -22,7 +22,7 @@ import {
   type ClickHouseRetryOptions,
 } from '@/lib/clickhouse-retry'
 import { batchDedupToken } from '@/lib/upload-dedup'
-import { parseIngestPolicy, policyActive, shouldDropAtIngest } from '@/lib/ingest-filter'
+import { parseIngestPolicy, policyActive, shouldDropAtIngest, makeHardDropPredicate } from '@/lib/ingest-filter'
 import { checkMonitorsForULPUpload } from '@/lib/domain-monitor'
 import { matchBreach } from '@/lib/breach-matcher'
 import { updateJob } from '@/lib/upload-jobs'
@@ -213,6 +213,8 @@ export interface StreamToTableOptions {
   dropPolicy?: ReturnType<typeof parseIngestPolicy>
   /** Breach label for inserted rows. Default matchBreach(filename). */
   breachName?: string
+  /** Hard-tier early-drop predicate, applied inside the parser. */
+  shouldHardDrop?: (email: string, url: string) => boolean
   /** Called after each batch inserts, with cumulative counts. */
   onProgress?: (imported: number, skipped: number) => void
   /** Optional accumulator (benchmark): time awaiting parse vs awaiting insert. */
@@ -256,7 +258,7 @@ export async function streamCredentialsToTable(
   let tierDropped = 0
   const rejection_breakdown = makeRejectionMap()
 
-  const gen = parseULPStream(stream, filename, batchSize)
+  const gen = parseULPStream(stream, filename, batchSize, options.shouldHardDrop)
   let pending = gen.next()
   try {
     while (true) {
@@ -333,17 +335,22 @@ export async function processTextStream(
   let tierDropped          = 0
   const rejection_breakdown = makeRejectionMap()
 
-  // Ingest tier filter — off unless INGEST_FILTER_* is configured.
-  const dropPolicy = parseIngestPolicy()
-  const filterOn   = policyActive(dropPolicy)
+  // Ingest tier filter — hard tiers drop in the parser (earliest); the rest
+  // (noise/soft-tier/suffix) stays in the post-batch filter so kept rows are
+  // never re-classified.
+  const policy         = parseIngestPolicy()
+  const shouldHardDrop = makeHardDropPredicate(policy)
+  const softPolicy     = { ...policy, hardTiers: new Set<string>() }
+  const filterOn       = policyActive(softPolicy)
 
   const result = await streamCredentialsToTable(stream, filename, {
     table:      'ulp.credentials',
     batchSize:  UPLOAD_BATCH_SIZE,
     pipeline:   importPipelineEnabled(),
     filterOn,
-    dropPolicy,
+    dropPolicy: softPolicy,
     breachName: breach_name,
+    shouldHardDrop,
     onProgress: (imp, skp) => {
       if (jobId)   updateJob(jobId, { imported: imp, skipped: skp })
       if (onBatch) onBatch(imp)
