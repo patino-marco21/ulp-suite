@@ -11,6 +11,13 @@
  *   npx tsx scripts/benchmark-import.ts --file ./sample.txt --batch 250000
  */
 
+import { performance } from 'node:perf_hooks'
+import { Readable } from 'node:stream'
+import { pathToFileURL } from 'node:url'
+import fs from 'node:fs'
+import { getClient, executeQuery } from '@/lib/clickhouse'
+import { streamCredentialsToTable } from '@/lib/upload-processor'
+
 /** Seeded PRNG (deterministic synthetic data). */
 export function mulberry32(seed: number): () => number {
   let a = seed >>> 0
@@ -73,4 +80,161 @@ export function parseArgs(argv: string[]): BenchArgs {
     sweep: has('sweep'),
     json: val('json'),
   }
+}
+
+interface BenchConfig {
+  rows: number
+  batch: number
+  pipeline: boolean
+  concurrency: number
+  file?: string
+  seed: number
+}
+
+interface BenchResult extends BenchConfig {
+  imported: number
+  wallMs: number
+  rowsPerSec: number
+  peakRssMb: number
+  parseMs: number
+  insertMs: number
+  activeParts: number
+  activeMerges: number
+}
+
+/** A finite ReadableStream of `rows` synthetic lines. */
+function syntheticStream(rows: number, seed: number): ReadableStream<Uint8Array> {
+  const rnd = mulberry32(seed)
+  let produced = 0
+  const node = new Readable({
+    read() {
+      if (produced >= rows) { this.push(null); return }
+      let chunk = ''
+      for (let i = 0; i < 2000 && produced < rows; i++, produced++) {
+        chunk += makeSyntheticLine(rnd) + '\n'
+      }
+      this.push(Buffer.from(chunk, 'utf8'))
+    },
+  })
+  return Readable.toWeb(node) as unknown as ReadableStream<Uint8Array>
+}
+
+function makeStream(cfg: BenchConfig): ReadableStream<Uint8Array> {
+  if (cfg.file) {
+    return Readable.toWeb(fs.createReadStream(cfg.file)) as unknown as ReadableStream<Uint8Array>
+  }
+  return syntheticStream(cfg.rows, cfg.seed)
+}
+
+async function snapshot(tableNames: string[]): Promise<{ activeParts: number; activeMerges: number }> {
+  const bare = tableNames.map(t => t.split('.')[1])
+  const parts = await executeQuery(
+    `SELECT count() AS c FROM system.parts WHERE database = 'ulp' AND table IN {t:Array(String)} AND active`,
+    { t: bare },
+  ) as Array<{ c: number | string }>
+  const merges = await executeQuery(
+    `SELECT count() AS c FROM system.merges WHERE database = 'ulp' AND table IN {t:Array(String)}`,
+    { t: bare },
+  ) as Array<{ c: number | string }>
+  return { activeParts: Number(parts[0]?.c ?? 0), activeMerges: Number(merges[0]?.c ?? 0) }
+}
+
+export async function runBenchmark(cfg: BenchConfig): Promise<BenchResult> {
+  const stamp = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`
+  const tables = Array.from({ length: cfg.concurrency }, (_, i) => `ulp.bench_${stamp}_${i}`)
+  tables.forEach(assertBenchTable)
+
+  for (const t of tables) {
+    await executeQuery(
+      `CREATE TABLE ${t} AS ulp.credentials ` +
+      `ENGINE = MergeTree PARTITION BY toYYYYMM(imported_at) ORDER BY (domain, email, imported_at)`,
+    )
+  }
+
+  let peakRss = 0
+  const sampler = setInterval(() => { peakRss = Math.max(peakRss, process.memoryUsage().rss) }, 250)
+  const timings = { parseMs: 0, insertMs: 0 }
+  const t0 = performance.now()
+
+  try {
+    const runs = tables.map(t =>
+      streamCredentialsToTable(makeStream(cfg), cfg.file ?? `bench-${cfg.rows}.txt`, {
+        table: t,
+        batchSize: cfg.batch,
+        pipeline: cfg.pipeline,
+        timings,
+      }),
+    )
+    const results = await Promise.all(runs)
+    const imported = results.reduce((s, r) => s + r.imported, 0)
+    const wallMs = performance.now() - t0
+    const snap = await snapshot(tables)
+    return {
+      ...cfg,
+      imported,
+      wallMs: Math.round(wallMs),
+      rowsPerSec: Math.round(imported / (wallMs / 1000)),
+      peakRssMb: Math.round(peakRss / 2 ** 20),
+      parseMs: Math.round(timings.parseMs),
+      insertMs: Math.round(timings.insertMs),
+      ...snap,
+    }
+  } finally {
+    clearInterval(sampler)
+    for (const t of tables) {
+      await executeQuery(`DROP TABLE IF EXISTS ${t}`).catch(() => {})
+    }
+  }
+}
+
+function sweepConfigs(a: BenchArgs): BenchConfig[] {
+  const out: BenchConfig[] = []
+  for (const batch of [100000, 250000, 500000]) {
+    for (const pipeline of [true, false]) {
+      out.push({ rows: a.rows, batch, pipeline, concurrency: 1, file: a.file, seed: a.seed })
+    }
+  }
+  return out
+}
+
+function printReport(results: BenchResult[]): void {
+  console.table(results.map(r => ({
+    batch: r.batch,
+    pipeline: r.pipeline ? 'on' : 'off',
+    conc: r.concurrency,
+    imported: r.imported,
+    'rows/s': r.rowsPerSec,
+    'wall(ms)': r.wallMs,
+    'peakRSS(MB)': r.peakRssMb,
+    'parse(ms)': r.parseMs,
+    'insert(ms)': r.insertMs,
+    parts: r.activeParts,
+    merges: r.activeMerges,
+  })))
+}
+
+async function main(): Promise<void> {
+  const args = parseArgs(process.argv.slice(2))
+  const configs: BenchConfig[] = args.sweep
+    ? sweepConfigs(args)
+    : [{ rows: args.rows, batch: args.batch, pipeline: args.pipeline, concurrency: args.concurrency, file: args.file, seed: args.seed }]
+
+  const results: BenchResult[] = []
+  for (const cfg of configs) {
+    console.log(`▶ batch=${cfg.batch} pipeline=${cfg.pipeline ? 'on' : 'off'} concurrency=${cfg.concurrency} rows=${cfg.rows}${cfg.file ? ` file=${cfg.file}` : ''}`)
+    results.push(await runBenchmark(cfg))
+  }
+
+  printReport(results)
+  if (args.json) {
+    fs.writeFileSync(args.json, JSON.stringify(results, null, 2))
+    console.log(`Wrote ${args.json}`)
+  }
+  await getClient().close()
+}
+
+// Run main() only when executed directly (`npx tsx scripts/benchmark-import.ts`),
+// not when imported by the test suite.
+if (pathToFileURL(process.argv[1] ?? '').href === import.meta.url) {
+  main().catch(err => { console.error(err); process.exit(1) })
 }
