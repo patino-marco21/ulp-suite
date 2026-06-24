@@ -149,6 +149,33 @@ bash scripts/dedup-credentials-content.sh
 APPLY=1 bash scripts/dedup-credentials-content.sh
 ```
 
+### Import throughput tuning
+
+Imports overlap parsing with ClickHouse inserts (pipelining) to cut idle wait
+without raising peak memory beyond one extra batch. Two environment knobs:
+
+- `IMPORT_PIPELINE` — `off` disables pipelining and reverts to strictly
+  sequential parse→insert (kill-switch / A-B testing). Default: on.
+- `UPLOAD_CONCURRENCY` — number of files processed at once. Default `1`.
+  Raising it multiplies peak memory (each file holds its own in-flight batch and
+  its own dedup set), so only raise it on hardware with memory headroom.
+
+Batch size stays a fixed 100,000 rows; inserts remain synchronous, in-order, and
+retryable (unchanged from the resilience work).
+
+**Benchmark** (needs local ClickHouse — `npm run docker:infra`):
+
+    npx tsx scripts/benchmark-import.ts --rows 200000          # one run
+    npx tsx scripts/benchmark-import.ts --sweep --json b.json  # batch × pipeline matrix
+    npx tsx scripts/benchmark-import.ts --file ./sample.txt    # real local sample
+
+It imports into a throwaway `ulp.bench_*` table (dropped after each run) and
+never touches `ulp.credentials` or `ulp.sources`.
+
+> Running the benchmark from the host requires the `CLICKHOUSE_*` variables in
+> your shell (plain `tsx` does not auto-load `.env.local`) and a ClickHouse
+> instance reachable from the host (the Docker service must publish port 8123).
+
 ### Service URLs
 
 | Service | URL |
