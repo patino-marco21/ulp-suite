@@ -7,6 +7,7 @@
  */
 
 import { Readable } from 'stream'
+import { performance } from 'node:perf_hooks'
 import yauzl from 'yauzl'
 import {
   parseULPStream,
@@ -187,6 +188,116 @@ export async function recordSource(filename: string, lineCount: number): Promise
   )
 }
 
+// ─── Core stream→table loop (pipelined) ──────────────────────────────────────
+
+/**
+ * Pipelining is ON unless explicitly disabled. It overlaps parsing of the next
+ * batch with the insert of the current one, costing at most one extra resident
+ * batch (~30 MB at 100K rows). Set IMPORT_PIPELINE=off to fall back to strictly
+ * sequential parse→insert (kill-switch / benchmark comparison).
+ */
+export function importPipelineEnabled(): boolean {
+  return process.env.IMPORT_PIPELINE !== 'off'
+}
+
+export interface StreamToTableOptions {
+  /** Target table. Default 'ulp.credentials'. Benchmark passes a 'ulp.bench_*' table. */
+  table?: string
+  /** Rows per parser batch. Default UPLOAD_BATCH_SIZE. */
+  batchSize?: number
+  /** Overlap parse(N+1) with insert(N). Default importPipelineEnabled(). */
+  pipeline?: boolean
+  /** Apply the ingest tier filter. Default false. */
+  filterOn?: boolean
+  /** Drop policy used when filterOn. */
+  dropPolicy?: ReturnType<typeof parseIngestPolicy>
+  /** Breach label for inserted rows. Default matchBreach(filename). */
+  breachName?: string
+  /** Called after each batch inserts, with cumulative counts. */
+  onProgress?: (imported: number, skipped: number) => void
+  /** Optional accumulator (benchmark): time awaiting parse vs awaiting insert. */
+  timings?: { parseMs: number; insertMs: number }
+}
+
+export interface StreamToTableResult {
+  imported: number
+  skipped: number
+  tierDropped: number
+  rejection_breakdown: Record<RejectionReason, number>
+}
+
+/**
+ * Core parse→insert loop, free of source-recording and monitor side effects so
+ * the benchmark can drive the real path against a throwaway table.
+ *
+ * Prefetch-one pipelining: when `pipeline`, the next parser batch is requested
+ * BEFORE awaiting the current insert, so the parser's CPU work fills the insert's
+ * I/O wait. At most two batches are ever resident. Exactly one insert is awaited
+ * at a time, in order — preserving synchronous, retryable, dedup-token semantics.
+ * On any insert failure the finally stops the generator (releasing the stream
+ * reader lock) and absorbs the in-flight prefetch so it cannot become an
+ * unhandled rejection; the original error propagates and aborts the file.
+ */
+export async function streamCredentialsToTable(
+  stream: ReadableStream<Uint8Array>,
+  filename: string,
+  options: StreamToTableOptions = {},
+): Promise<StreamToTableResult> {
+  const table       = options.table ?? 'ulp.credentials'
+  const batchSize   = options.batchSize ?? UPLOAD_BATCH_SIZE
+  const pipeline    = options.pipeline ?? importPipelineEnabled()
+  const filterOn    = options.filterOn ?? false
+  const dropPolicy  = options.dropPolicy
+  const breach_name = options.breachName ?? matchBreach(filename)
+  const timings     = options.timings
+
+  let imported = 0
+  let skipped = 0
+  let tierDropped = 0
+  const rejection_breakdown = makeRejectionMap()
+
+  const gen = parseULPStream(stream, filename, batchSize)
+  let pending = gen.next()
+  try {
+    while (true) {
+      const tParse = timings ? performance.now() : 0
+      const { value: batch, done } = await pending
+      if (timings) timings.parseMs += performance.now() - tParse
+      if (done) break
+
+      // Kick off parsing of the NEXT batch before blocking on this insert.
+      if (pipeline) pending = gen.next()
+
+      let creds = batch.credentials
+      if (filterOn && dropPolicy) {
+        const kept = creds.filter(c => !shouldDropAtIngest(c.email, c.url, c.domain, dropPolicy))
+        tierDropped += creds.length - kept.length
+        creds = kept
+      }
+      skipped += batch.rejected
+      for (const [k, v] of Object.entries(batch.breakdown)) {
+        rejection_breakdown[k as RejectionReason] =
+          (rejection_breakdown[k as RejectionReason] ?? 0) + v
+      }
+
+      const tInsert = timings ? performance.now() : 0
+      await insertBatch(creds, breach_name, undefined, { table })
+      if (timings) timings.insertMs += performance.now() - tInsert
+
+      imported += creds.length
+      options.onProgress?.(imported, skipped)
+
+      // Sequential fallback: only fetch the next batch after the insert is done.
+      if (!pipeline) pending = gen.next()
+    }
+  } finally {
+    await gen.return(undefined).catch(() => {})
+    await Promise.resolve(pending).catch(() => {})
+  }
+
+  return { imported, skipped, tierDropped, rejection_breakdown }
+}
+
 // ─── Text stream processor ────────────────────────────────────────────────────
 
 /**
@@ -222,28 +333,26 @@ export async function processTextStream(
   let tierDropped          = 0
   const rejection_breakdown = makeRejectionMap()
 
-  // Ingest tier filter — drops low-value rows BEFORE insert. Off unless
-  // INGEST_FILTER_DROP_TIERS / INGEST_FILTER_DROP_SUFFIXES is configured.
+  // Ingest tier filter — off unless INGEST_FILTER_* is configured.
   const dropPolicy = parseIngestPolicy()
   const filterOn   = policyActive(dropPolicy)
 
-  for await (const batch of parseULPStream(stream, filename, UPLOAD_BATCH_SIZE)) {
-    let creds = batch.credentials
-    if (filterOn) {
-      const kept = creds.filter(c => !shouldDropAtIngest(c.email, c.url, c.domain, dropPolicy))
-      tierDropped += creds.length - kept.length
-      creds = kept
-    }
-    await insertBatch(creds, breach_name)
-    imported += creds.length
-    skipped  += batch.rejected
-    for (const [k, v] of Object.entries(batch.breakdown)) {
-      rejection_breakdown[k as RejectionReason] =
-        (rejection_breakdown[k as RejectionReason] ?? 0) + v
-    }
-    if (jobId)   updateJob(jobId, { imported, skipped })
-    if (onBatch) onBatch(imported)
-  }
+  const result = await streamCredentialsToTable(stream, filename, {
+    table:      'ulp.credentials',
+    batchSize:  UPLOAD_BATCH_SIZE,
+    pipeline:   importPipelineEnabled(),
+    filterOn,
+    dropPolicy,
+    breachName: breach_name,
+    onProgress: (imp, skp) => {
+      if (jobId)   updateJob(jobId, { imported: imp, skipped: skp })
+      if (onBatch) onBatch(imp)
+    },
+  })
+  imported    = result.imported
+  skipped     = result.skipped
+  tierDropped = result.tierDropped
+  Object.assign(rejection_breakdown, result.rejection_breakdown)
 
   if (filterOn && tierDropped > 0) {
     console.log(`[ingest-filter] ${filename}: dropped ${tierDropped} low-tier rows pre-insert`)
