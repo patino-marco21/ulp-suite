@@ -505,6 +505,7 @@ function colonSplit(line: string): [string, string, string] | null {
 export function parseLine(
   line: string,
   sourceFile: string,
+  shouldHardDrop?: (email: string, url: string) => boolean,
 ): { credential: ULPCredential | null; reason: RejectionReason | null } {
   const trimmed = line.trim()
 
@@ -645,6 +646,13 @@ export function parseLine(
   if (!login)                           return { credential: null, reason: 'no_fields' }
   if (!password || password.length < 3) return { credential: null, reason: 'no_password' }
   if (login === password)               return { credential: null, reason: 'no_password' }
+
+  // Rule 3.4: hard-tier early drop. The instant we have a plausible login/url we
+  // can classify; if it's a configured hard-drop tier, bail BEFORE the binary /
+  // garbage-URL / placeholder rules, domain extraction, and object construction.
+  if (shouldHardDrop?.(login, url)) {
+    return { credential: null, reason: 'tier_dropped' }
+  }
 
   // Rule 3.5: binary / encoding-failure rejection. A control byte or a U+FFFD
   // replacement char in any field means the source line was binary or
@@ -831,6 +839,7 @@ export async function* parseULPStream(
   stream: ReadableStream<Uint8Array>,
   filename: string,
   batchSize: number,
+  shouldHardDrop?: (email: string, url: string) => boolean,
 ): AsyncGenerator<StreamBatch> {
   const reader  = stream.getReader()
   // Use Buffer.from(chunk).toString('latin1') — NOT TextDecoder.
@@ -886,9 +895,13 @@ export async function* parseULPStream(
   function tryFlushBlock() {
     const cred = flushBlockState(blockState, filename)
     if (cred) {
-      const fp = `${cred.url}\0${cred.email}\0${cred.password}`
-      if (streamSeenCheck(fp)) { batchRejected++; batchBreakdown.dedup++ }
-      else                     { batch.push(cred) }
+      if (shouldHardDrop?.(cred.email, cred.url)) {
+        batchRejected++; batchBreakdown.tier_dropped++
+      } else {
+        const fp = `${cred.url}\0${cred.email}\0${cred.password}`
+        if (streamSeenCheck(fp)) { batchRejected++; batchBreakdown.dedup++ }
+        else                     { batch.push(cred) }
+      }
     } else if (blockState.url || blockState.login || blockState.password) {
       batchRejected++
       // no login at all → no_fields; login present but password issue → no_password
@@ -931,6 +944,11 @@ export async function* parseULPStream(
         positionalUrl = positionalLogin = ''
         return
       }
+      if (shouldHardDrop?.(positionalLogin, positionalUrl)) {
+        batchRejected++; batchBreakdown.tier_dropped++
+        positionalUrl = positionalLogin = ''
+        return
+      }
       const fp = `${positionalUrl}\0${positionalLogin}\0${trimmed}`
       if (streamSeenCheck(fp)) {
         batchRejected++; batchBreakdown.dedup++
@@ -948,7 +966,7 @@ export async function* parseULPStream(
       return
     }
 
-    const { credential, reason } = parseLine(line, filename)
+    const { credential, reason } = parseLine(line, filename, shouldHardDrop)
     if (credential) {
       const fp = `${credential.url}\0${credential.email}\0${credential.password}`
       if (streamSeenCheck(fp)) { batchRejected++; batchBreakdown.dedup++ }

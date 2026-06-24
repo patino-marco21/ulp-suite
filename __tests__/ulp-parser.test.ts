@@ -8,10 +8,11 @@
  *  - RFC 3986 edge cases  port disambiguation, colons-in-password
  */
 
-import { describe, test, expect } from 'vitest'
+import { describe, test, it, expect } from 'vitest'
 import {
   parseLine,
   parseULPContent,
+  parseULPStream,
 } from '@/lib/ulp-parser'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -642,5 +643,81 @@ describe('parseULPContent — rejection_breakdown', () => {
     const result = parseULPContent('valid@email.com:password123\n\n# comment\n', 'test.txt')
     expect(result.rejection_breakdown['blank']).toBeGreaterThanOrEqual(2)
     expect(result.credentials.length).toBe(1)
+  })
+})
+
+import { readFileSync as _rf } from 'node:fs'
+
+describe('parser-time hard-tier drop', () => {
+  const dropT3 = (email: string, _url: string) => email.toLowerCase().endsWith('@mail.ru')
+
+  it('bails on a hard-tier row before the binary/garbage rules (proves ordering)', () => {
+    // password carries a control char → without the predicate this is `garbage`
+    const line = 'user@mail.ru:pass\x01word'
+    expect(parseLine(line, 'f.txt').reason).toBe('garbage')              // no predicate → Rule 3.5
+    expect(parseLine(line, 'f.txt', dropT3).reason).toBe('tier_dropped') // predicate → bail first
+  })
+
+  it('keeps untiered / non-hard rows when the predicate is active', () => {
+    expect(parseLine('user@gmail.com:password123', 'f.txt', dropT3).credential).not.toBeNull()
+    expect(parseLine('user@comcast.net:password123', 'f.txt', dropT3).credential).not.toBeNull()
+  })
+
+  it('does NOT change behavior when no predicate is passed', () => {
+    const r = parseLine('user@mail.ru:password123', 'f.txt')
+    expect(r.credential).not.toBeNull()           // T3 kept without a predicate
+    expect(r.credential!.email).toBe('user@mail.ru')
+  })
+
+  it('the parser imports no tier/policy module (stays decoupled)', () => {
+    const src = _rf(new URL('../lib/ulp-parser.ts', import.meta.url), 'utf8')
+    expect(src).not.toContain('country-tiers')
+    expect(src).not.toContain('ingest-filter')
+  })
+})
+
+describe('parseULPStream hard-tier drop', () => {
+  const dropT3 = (email: string, _url: string) => email.toLowerCase().endsWith('@mail.ru')
+  const streamOf = (text: string) =>
+    new ReadableStream<Uint8Array>({
+      start(c) { c.enqueue(new TextEncoder().encode(text)); c.close() },
+    })
+  const collect = async (text: string, pred?: (e: string, u: string) => boolean) => {
+    const creds: string[] = []
+    const breakdown: Record<string, number> = {}
+    for await (const b of parseULPStream(streamOf(text), 'f.txt', 1000, pred)) {
+      for (const c of b.credentials) creds.push(c.email)
+      for (const [k, v] of Object.entries(b.breakdown)) breakdown[k] = (breakdown[k] ?? 0) + v
+    }
+    return { creds, breakdown }
+  }
+
+  it('excludes hard-tier inline rows from the batch and counts them', async () => {
+    const { creds, breakdown } = await collect(
+      'a@comcast.net:password1\nb@mail.ru:password2\n', dropT3)
+    expect(creds).toEqual(['a@comcast.net'])
+    expect(breakdown.tier_dropped).toBe(1)
+  })
+
+  it('drops duplicate hard-tier rows without consuming the dedup set', async () => {
+    const { creds, breakdown } = await collect(
+      'b@mail.ru:password2\nb@mail.ru:password2\n', dropT3)
+    expect(creds).toEqual([])
+    expect(breakdown.tier_dropped).toBe(2)   // both bailed before the dedup check
+    expect(breakdown.dedup ?? 0).toBe(0)
+  })
+
+  it('drops hard-tier positional (3-line) blocks', async () => {
+    const { creds, breakdown } = await collect(
+      'https://site.ru/login\nuser@mail.ru\npassword123\n', dropT3)
+    expect(creds).toEqual([])
+    expect(breakdown.tier_dropped).toBe(1)
+  })
+
+  it('drops hard-tier labeled blocks', async () => {
+    const { creds, breakdown } = await collect(
+      'URL: https://x.ru/\nLOGIN: user@mail.ru\nPASSWORD: password123\n=====\n', dropT3)
+    expect(creds).toEqual([])
+    expect(breakdown.tier_dropped).toBe(1)
   })
 })
