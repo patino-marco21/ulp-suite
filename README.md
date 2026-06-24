@@ -282,6 +282,10 @@ DEDUP_MIN_EXCESS=1000      # skip the (heavy) mutation below this many excess ro
 
 Drops T3 rows **before insert**, so they never cost storage / dedup / index / query compute (see `lib/ingest-filter.ts`). T1, T2, and untiered (`@gmail`/`.com`, no country signal) remain accepted.
 
+Hard-tier drops (`INGEST_FILTER_HARD_DROP_TIERS`, e.g. `T3`) are rejected at parse
+time — the row is dropped the instant it's classified, and shows up as
+`tier_dropped` in an import's "why lines were skipped" breakdown.
+
 ```bash
 INGEST_FILTER_HARD_DROP_TIERS=T3   # default; keep suffixes cannot override this
 INGEST_FILTER_DROP_TIERS=          # no soft tier drops
