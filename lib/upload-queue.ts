@@ -10,7 +10,21 @@
  */
 import pLimit from 'p-limit'
 
-export const uploadQueue = pLimit(1)
+/**
+ * Parse UPLOAD_CONCURRENCY into a safe limiter size.
+ * Invalid, empty, zero, or negative values fall back to 1.
+ *
+ * NB: raising this multiplies peak heap — each concurrent file holds its own
+ * in-flight batch(es) AND its own ~440 MB-capped dedup Set. Only raise on
+ * hardware with memory headroom. getCurrentJob() becomes best-effort ("one of
+ * N") when concurrency > 1.
+ */
+export function parseConcurrency(raw?: string): number {
+  const n = parseInt(raw ?? '1', 10)
+  return Number.isFinite(n) && n >= 1 ? n : 1
+}
+
+export const uploadQueue = pLimit(parseConcurrency(process.env.UPLOAD_CONCURRENCY))
 
 /** Total number of uploads currently running + waiting. */
 export function queueSize(): number {

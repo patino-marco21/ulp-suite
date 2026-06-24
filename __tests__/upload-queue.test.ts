@@ -1,4 +1,4 @@
-import { describe, test, expect, afterEach } from 'vitest'
+import { describe, test, it, expect, afterEach, vi } from 'vitest'
 import { uploadQueue, queueSize } from '@/lib/upload-queue'
 
 /** Flush the microtask queue so pLimit v7 (async executor) can start tasks. */
@@ -63,5 +63,47 @@ describe('uploadQueue', () => {
     )
     await Promise.all(tasks)
     expect(maxActive).toBe(1)
+  })
+})
+
+import { afterEach as afterEachConc, beforeEach as beforeEachConc } from 'vitest'
+
+describe('parseConcurrency', () => {
+  it('defaults to 1 for unset, empty, non-numeric, zero, or negative', async () => {
+    const { parseConcurrency } = await import('@/lib/upload-queue')
+    expect(parseConcurrency(undefined)).toBe(1)
+    expect(parseConcurrency('')).toBe(1)
+    expect(parseConcurrency('abc')).toBe(1)
+    expect(parseConcurrency('0')).toBe(1)
+    expect(parseConcurrency('-4')).toBe(1)
+  })
+
+  it('parses valid positive integers', async () => {
+    const { parseConcurrency } = await import('@/lib/upload-queue')
+    expect(parseConcurrency('2')).toBe(2)
+    expect(parseConcurrency('3')).toBe(3)
+  })
+})
+
+describe('uploadQueue concurrency from env', () => {
+  const original = process.env.UPLOAD_CONCURRENCY
+  afterEachConc(() => {
+    if (original === undefined) delete process.env.UPLOAD_CONCURRENCY
+    else process.env.UPLOAD_CONCURRENCY = original
+    vi.resetModules()
+  })
+
+  it('honours UPLOAD_CONCURRENCY when building the limiter', async () => {
+    process.env.UPLOAD_CONCURRENCY = '3'
+    vi.resetModules()
+    const { uploadQueue } = await import('@/lib/upload-queue')
+    expect(uploadQueue.concurrency).toBe(3)
+  })
+
+  it('defaults the limiter to concurrency 1', async () => {
+    delete process.env.UPLOAD_CONCURRENCY
+    vi.resetModules()
+    const { uploadQueue } = await import('@/lib/upload-queue')
+    expect(uploadQueue.concurrency).toBe(1)
   })
 })
