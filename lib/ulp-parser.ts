@@ -23,7 +23,7 @@ export interface ULPCredential {
   source_file: string
 }
 
-export type RejectionReason = 'blank' | 'no_fields' | 'no_password' | 'dedup' | 'garbage'
+export type RejectionReason = 'blank' | 'no_fields' | 'no_password' | 'dedup' | 'garbage' | 'tier_dropped'
 
 export interface ParseResult {
   credentials:         ULPCredential[]
@@ -332,13 +332,13 @@ export async function* parseBlockStream(
   let   buffer  = ''
   let   batch:  ULPCredential[] = []
   let   batchRejected = 0
-  let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0 }
+  let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0, tier_dropped: 0 }
   let   state   = makeBlockState()
 
   function flushBatch(): StreamBatch {
     const out: StreamBatch = { credentials: batch, rejected: batchRejected, breakdown: batchBreakdown }
     batch = []; batchRejected = 0
-    batchBreakdown = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0 }
+    batchBreakdown = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0, tier_dropped: 0 }
     return out
   }
 
@@ -694,7 +694,7 @@ export function parseLine(
 // ── Batch / stream parsers ────────────────────────────────────────────────────
 
 export function makeRejectionMap(): Record<string, number> {
-  return { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0 }
+  return { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0, tier_dropped: 0 }
 }
 
 export function parseULPContent(content: string, sourceFile: string): ParseResult {
@@ -847,7 +847,7 @@ export async function* parseULPStream(
   let   buffer  = ''
   let   batch:  ULPCredential[] = []
   let   batchRejected = 0
-  let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0 }
+  let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0, tier_dropped: 0 }
   let   blockState = makeBlockState()
   // Positional (label-free) state — mirrors the same logic in parseULPContent
   let   positionalUrl   = ''
@@ -863,7 +863,7 @@ export async function* parseULPStream(
   function flushBatch(): StreamBatch {
     const out: StreamBatch = { credentials: batch, rejected: batchRejected, breakdown: batchBreakdown }
     batch = []; batchRejected = 0
-    batchBreakdown = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0 }
+    batchBreakdown = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0, tier_dropped: 0 }
     return out
   }
 

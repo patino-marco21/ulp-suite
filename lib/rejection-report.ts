@@ -20,6 +20,7 @@ export const REASON_LABELS: Record<string, string> = {
   no_password: 'Login found but no valid password (too short or equals login)',
   dedup:       'Duplicate of an earlier line in this sample',
   garbage:     'Non-credential: placeholder login, "no password" sentinel, token/decryption blob, or binary/mojibake',
+  tier_dropped: 'Hard-dropped country tier (e.g. T3) — rejected at parse time before any further work',
 }
 
 export interface TopRejection {

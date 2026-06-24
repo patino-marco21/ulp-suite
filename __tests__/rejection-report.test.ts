@@ -1,5 +1,7 @@
 import { describe, test, expect } from 'vitest'
 import { REASON_LABELS, buildRecommendations, buildTopRejections } from '@/lib/rejection-report'
+import { REASON_LABELS as RL } from '@/lib/rejection-report'
+import { makeRejectionMap as mkMap } from '@/lib/ulp-parser'
 
 describe('parse-sample-report', () => {
   describe('REASON_LABELS', () => {
@@ -63,5 +65,13 @@ describe('parse-sample-report', () => {
       const recs = buildRecommendations({}, 100, 85)
       expect(recs.some(r => r.includes('healthy'))).toBe(true)
     })
+  })
+})
+
+describe('tier_dropped reason', () => {
+  it('is a labeled, zero-initialized rejection reason', () => {
+    expect(mkMap().tier_dropped).toBe(0)
+    expect(typeof RL.tier_dropped).toBe('string')
+    expect(RL.tier_dropped.length).toBeGreaterThan(0)
   })
 })
