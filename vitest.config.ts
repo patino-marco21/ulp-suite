@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config'
+import { configDefaults, defineConfig } from 'vitest/config'
 
 export default defineConfig({
   resolve: {
@@ -11,6 +11,9 @@ export default defineConfig({
     globals: true,
     // Print a summary line even for passing tests
     reporter: ['verbose'],
+    // Don't collect tests from nested git worktrees (e.g. .worktrees/hard-drop-t3/);
+    // their stale fixtures otherwise surface as false failures in the main suite.
+    exclude: [...configDefaults.exclude, '**/.worktrees/**'],
     // Coverage (run with --coverage)
     coverage: {
       provider: 'v8',
