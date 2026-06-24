@@ -100,4 +100,17 @@ describe('insertBatch deduplication settings', () => {
     await insertBatch([], 'breachX')
     expect(insertSpy).not.toHaveBeenCalled()
   })
+
+  it('defaults to ulp.credentials and honours an explicit target table', async () => {
+    const { insertBatch } = await import('@/lib/upload-processor')
+    const batch = [cred({ url: 'https://a.com', email: 'a@a.com', password: 'p1', domain: 'a.com' })]
+
+    await insertBatch(batch, 'breachX')
+    expect(insertSpy.mock.calls[0][0].table).toBe('ulp.credentials')
+
+    insertSpy.mockClear()
+
+    await insertBatch(batch, 'breachX', undefined, { table: 'ulp.bench_123' })
+    expect(insertSpy.mock.calls[0][0].table).toBe('ulp.bench_123')
+  })
 })

@@ -114,6 +114,7 @@ export async function insertBatch(
   credentials: ULPCredential[],
   breach_name: string,
   retryOptions: ClickHouseRetryOptions = {},
+  opts: { table?: string } = {},
 ): Promise<void> {
   if (credentials.length === 0) return
   const chClient = getClient()
@@ -140,7 +141,7 @@ export async function insertBatch(
       )
 
       await chClient.insert({
-        table: 'ulp.credentials',
+        table: opts.table ?? 'ulp.credentials',
         columns: ['url', 'email', 'password', 'domain', 'source_file', 'breach_name'],
         values: readable,
         format: 'CSV',
