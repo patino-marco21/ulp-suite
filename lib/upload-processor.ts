@@ -26,6 +26,7 @@ import { parseIngestPolicy, policyActive, shouldDropAtIngest, makeHardDropPredic
 import { checkMonitorsForULPUpload } from '@/lib/domain-monitor'
 import { matchBreach } from '@/lib/breach-matcher'
 import { updateJob } from '@/lib/upload-jobs'
+import { startIngest, recordBatch, finishIngest } from '@/lib/ingest-metrics'
 
 // ─── Public result type ───────────────────────────────────────────────────────
 
@@ -219,6 +220,8 @@ export interface StreamToTableOptions {
   onProgress?: (imported: number, skipped: number) => void
   /** Optional accumulator (benchmark): time awaiting parse vs awaiting insert. */
   timings?: { parseMs: number; insertMs: number }
+  /** Per-batch live metrics (ingest-health panel). Not passed by the benchmark. */
+  onBatchMetrics?: (m: { rows: number; parseMs: number; insertMs: number; tierDropped: number }) => void
 }
 
 export interface StreamToTableResult {
@@ -262,9 +265,10 @@ export async function streamCredentialsToTable(
   let pending = gen.next()
   try {
     while (true) {
-      const tParse = timings ? performance.now() : 0
+      const tParse = performance.now()
       const { value: batch, done } = await pending
-      if (timings) timings.parseMs += performance.now() - tParse
+      const batchParseMs = performance.now() - tParse
+      if (timings) timings.parseMs += batchParseMs
       if (done) break
 
       // Kick off parsing of the NEXT batch before blocking on this insert.
@@ -282,12 +286,19 @@ export async function streamCredentialsToTable(
           (rejection_breakdown[k as RejectionReason] ?? 0) + v
       }
 
-      const tInsert = timings ? performance.now() : 0
+      const tInsert = performance.now()
       await insertBatch(creds, breach_name, undefined, { table })
-      if (timings) timings.insertMs += performance.now() - tInsert
+      const batchInsertMs = performance.now() - tInsert
+      if (timings) timings.insertMs += batchInsertMs
 
       imported += creds.length
       options.onProgress?.(imported, skipped)
+      options.onBatchMetrics?.({
+        rows: creds.length,
+        parseMs: batchParseMs,
+        insertMs: batchInsertMs,
+        tierDropped: batch.breakdown.tier_dropped ?? 0,
+      })
 
       // Sequential fallback: only fetch the next batch after the insert is done.
       if (!pipeline) pending = gen.next()
@@ -343,19 +354,27 @@ export async function processTextStream(
   const softPolicy     = { ...policy, hardTiers: new Set<string>() }
   const filterOn       = policyActive(softPolicy)
 
-  const result = await streamCredentialsToTable(stream, filename, {
-    table:      'ulp.credentials',
-    batchSize:  UPLOAD_BATCH_SIZE,
-    pipeline:   importPipelineEnabled(),
-    filterOn,
-    dropPolicy: softPolicy,
-    breachName: breach_name,
-    shouldHardDrop,
-    onProgress: (imp, skp) => {
-      if (jobId)   updateJob(jobId, { imported: imp, skipped: skp })
-      if (onBatch) onBatch(imp)
-    },
-  })
+  startIngest(filename)
+  let result
+  try {
+    result = await streamCredentialsToTable(stream, filename, {
+      table:      'ulp.credentials',
+      batchSize:  UPLOAD_BATCH_SIZE,
+      pipeline:   importPipelineEnabled(),
+      filterOn,
+      dropPolicy: softPolicy,
+      breachName: breach_name,
+      shouldHardDrop,
+      onProgress: (imp, skp) => {
+        if (jobId)   updateJob(jobId, { imported: imp, skipped: skp })
+        if (onBatch) onBatch(imp)
+      },
+      onBatchMetrics: recordBatch,
+    })
+  } finally {
+    finishIngest()
+  }
+
   imported    = result.imported
   skipped     = result.skipped
   tierDropped = result.tierDropped

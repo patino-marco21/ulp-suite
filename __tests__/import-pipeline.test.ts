@@ -124,3 +124,26 @@ describe('streamCredentialsToTable pipelining', () => {
     expect(timings.parseMs + timings.insertMs).toBeGreaterThan(0)
   })
 })
+
+describe('onBatchMetrics', () => {
+  it('fires once per batch with rows/parseMs/insertMs/tierDropped', async () => {
+    parser.batches = [
+      { credentials: [{ url:'', email:'a@a', password:'p', domain:'a', source_file:'b' }],
+        rejected: 0, breakdown: { ...emptyBreakdown(), tier_dropped: 3 } },
+    ]
+    h.insert.mockResolvedValue(undefined)
+    const calls: any[] = []
+
+    const { streamCredentialsToTable } = await import('@/lib/upload-processor')
+    await streamCredentialsToTable(webStream(), 'b.txt', {
+      table: 'ulp.bench_x', pipeline: true,
+      onBatchMetrics: (m) => calls.push(m),
+    })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].rows).toBe(1)
+    expect(calls[0].tierDropped).toBe(3)
+    expect(typeof calls[0].parseMs).toBe('number')
+    expect(typeof calls[0].insertMs).toBe('number')
+  })
+})

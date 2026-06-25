@@ -407,3 +407,32 @@ describe('parser-time hard-tier drop wiring', () => {
     }
   })
 })
+
+describe('live ingest-metrics wiring', () => {
+  it('processTextStream brackets the import with startIngest/finishIngest', async () => {
+    vi.resetModules()
+    const ig = { startIngest: vi.fn(), recordBatch: vi.fn(), finishIngest: vi.fn(),
+                 getIngestMetrics: vi.fn() }
+    vi.doMock('@/lib/ingest-metrics', () => ig)
+    vi.doMock('@/lib/ulp-parser', async () => {
+      const actual = await vi.importActual<typeof import('@/lib/ulp-parser')>('@/lib/ulp-parser')
+      return {
+        ...actual,
+        parseULPStream: async function* () {
+          yield { credentials: [], rejected: 0, breakdown: actual.makeRejectionMap() }
+        },
+      }
+    })
+    try {
+      const { processTextStream } = await import('@/lib/upload-processor')
+      const { Readable } = await import('node:stream')
+      await processTextStream(Readable.toWeb(Readable.from([])) as ReadableStream<Uint8Array>, 'live.txt')
+      expect(ig.startIngest).toHaveBeenCalledWith('live.txt')
+      expect(ig.finishIngest).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.doUnmock('@/lib/ingest-metrics')
+      vi.doUnmock('@/lib/ulp-parser')
+      vi.resetModules()
+    }
+  })
+})
