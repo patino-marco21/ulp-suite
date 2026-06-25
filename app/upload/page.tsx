@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge"
 import { useAuth, isAdmin } from "@/hooks/useAuth"
 import { useToast } from "@/hooks/use-toast"
 import { buildTopRejections } from "@/lib/rejection-report"
+import { IngestHealthPanel } from "@/components/ingest-health-panel"
 import Link from "next/link"
 
 interface ZipFileEntry {
@@ -484,6 +485,7 @@ export default function UploadPage() {
 
       {/* Queue status — always visible for admins */}
       <QueueStatusPanel />
+      <IngestHealthPanel />
 
       {/* Format guide */}
       <Card className="mt-6">
