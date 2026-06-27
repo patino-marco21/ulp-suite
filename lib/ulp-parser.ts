@@ -15,6 +15,8 @@
  *     www. prefix stripped
  */
 
+import { hasGarbageIdentity, hasMojibakeSignature } from '@/lib/ulp-garbage'
+
 export interface ULPCredential {
   url:         string
   email:       string
@@ -184,6 +186,7 @@ function isJunkCredential(login: string, password: string): boolean {
   return isPlaceholderLogin(login)     || isSentinelPassword(password)
       || hasJunkMarker(login)          || hasJunkMarker(password)
       || hasBinaryOrReplacement(login) || hasBinaryOrReplacement(password)
+      || hasGarbageIdentity(login)     || hasMojibakeSignature(login)
 }
 
 // ── Block-format parser (Raccoon / Stealc / Meta / Vidar style) ──────────────
@@ -658,7 +661,11 @@ export function parseLine(
   // replacement char in any field means the source line was binary or
   // mis-encoded, not a credential — colonSplit will still have produced
   // url/login/password from the junk. Drop it. (International text is unharmed.)
-  if (hasBinaryOrReplacement(url) || hasBinaryOrReplacement(login) || hasBinaryOrReplacement(password)) {
+  // Also covers identity shape (internal whitespace, letter-less domain) and
+  // non-replacement mojibake on url/login — never password (the one field
+  // that legitimately carries non-ASCII content).
+  if (hasBinaryOrReplacement(url) || hasBinaryOrReplacement(login) || hasBinaryOrReplacement(password)
+      || hasGarbageIdentity(login) || hasMojibakeSignature(url) || hasMojibakeSignature(login)) {
     return { credential: null, reason: 'garbage' }
   }
 

@@ -15,6 +15,12 @@
 #       scheme-less hosts are NOT touched, mirroring the parser.
 #   (b) any of url/email/password contains a control byte (excl. tab/LF/CR) or
 #       the U+FFFD replacement char -- a sure sign of binary/mis-encoded input.
+#   (c) the email contains internal whitespace, or has an @-domain with no
+#       letter at all (e.g. "x@#", "x@123") -- no real email matches either.
+#   (d) email or url contains the latin1-mojibake signature of a multibyte
+#       UTF-8 character (real UTF-8 decoded as latin1 by the parser) -- NEVER
+#       checked on password, the one field that legitimately carries
+#       non-ASCII content. See lib/ulp-garbage.ts (shared with the parser).
 #
 # Rows with a junk url but a REAL email are PRESERVED (the parser salvages
 # those as email:password; deleting them would lose a real credential).
@@ -64,6 +70,10 @@ IS_GARBAGE=$(cat <<'EOF'
   OR position(url,      unhex('EFBFBD')) > 0
   OR position(email,    unhex('EFBFBD')) > 0
   OR position(password, unhex('EFBFBD')) > 0
+  OR match(trimBoth(email), '\\s')
+  OR (position(email,'@') > 0 AND NOT match(email_domain, '[a-z]'))
+  OR match(email, '[\\x{C2}-\\x{EF}][\\x{80}-\\x{BF}]')
+  OR match(url,   '[\\x{C2}-\\x{EF}][\\x{80}-\\x{BF}]')
 )
 EOF
 )
@@ -101,7 +111,10 @@ $CH "
 SELECT
   countIf(match(url, '^https?://') AND NOT match(domain(url), '^[\\\\p{L}\\\\p{N}]([\\\\p{L}\\\\p{N}-]*[\\\\p{L}\\\\p{N}])?(\\\\.[\\\\p{L}\\\\p{N}]([\\\\p{L}\\\\p{N}-]*[\\\\p{L}\\\\p{N}])?)+\$')) AS bad_host_any,
   countIf(match(url, '[\\\\x00-\\\\x08\\\\x0B\\\\x0C\\\\x0E-\\\\x1F]') OR match(email, '[\\\\x00-\\\\x08\\\\x0B\\\\x0C\\\\x0E-\\\\x1F]') OR match(password, '[\\\\x00-\\\\x08\\\\x0B\\\\x0C\\\\x0E-\\\\x1F]')) AS has_control_byte,
-  countIf(position(url, unhex('EFBFBD'))>0 OR position(email, unhex('EFBFBD'))>0 OR position(password, unhex('EFBFBD'))>0) AS has_replacement_char
+  countIf(position(url, unhex('EFBFBD'))>0 OR position(email, unhex('EFBFBD'))>0 OR position(password, unhex('EFBFBD'))>0) AS has_replacement_char,
+  countIf(match(trimBoth(email), '\\\\s')) AS has_whitespace_identity,
+  countIf(position(email,'@')>0 AND NOT match(email_domain, '[a-z]')) AS has_letterless_domain,
+  countIf(match(email, '[\\\\x{C2}-\\\\x{EF}][\\\\x{80}-\\\\x{BF}]') OR match(url, '[\\\\x{C2}-\\\\x{EF}][\\\\x{80}-\\\\x{BF}]')) AS has_mojibake_signature
 FROM ulp.credentials
 SETTINGS max_execution_time = 300
 " --format Vertical
