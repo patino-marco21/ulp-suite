@@ -43,6 +43,33 @@ describe('isTransientClickHouseError', () => {
     expect(isTransientClickHouseError({ status: 502, message: 'proxy response' })).toBe(true)
     expect(isTransientClickHouseError({ statusCode: 504, message: 'proxy response' })).toBe(true)
   })
+
+  it('treats server-wide "(total) memory limit exceeded" as transient despite carrying a numeric code', () => {
+    // code 241 (MEMORY_LIMIT_EXCEEDED) — but "(total)" means the GLOBAL tracker
+    // tripped from aggregate concurrent load, not this query's own inherent cost.
+    // Retrying after a brief wait is very plausibly successful once that load passes.
+    expect(isTransientClickHouseError({
+      code: '241',
+      message: '(total) memory limit exceeded: would use 14.05 GiB (attempt to allocate chunk of 4.20 MiB), ' +
+        'current RSS: 13.57 GiB, maximum: 14.05 GiB. OvercommitTracker decision: Query was selected to stop ' +
+        'by OvercommitTracker: While executing WaitForAsyncInsert.',
+    })).toBe(true)
+  })
+
+  it('still treats a bare/per-query memory limit (no "(total)") as semantic, not transient', () => {
+    // Contrast case: a per-query or per-user memory cap reflects this query's own
+    // cost, which retrying with the same data will not fix.
+    expect(isTransientClickHouseError({ code: '241', message: 'memory limit (for query) exceeded' })).toBe(false)
+  })
+
+  it('treats a stalled socket read/write as transient', () => {
+    expect(isTransientClickHouseError(
+      new Error('Timeout exceeded while reading from socket (peer: 172.18.0.3:47428, local: 172.18.0.2:8123, 30000 ms).')
+    )).toBe(true)
+    expect(isTransientClickHouseError(
+      new Error('Timeout exceeded while writing to socket (peer: 172.18.0.3:1234, local: 172.18.0.2:8123, 30000 ms).')
+    )).toBe(true)
+  })
 })
 
 describe('withClickHouseRetry', () => {

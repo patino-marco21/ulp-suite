@@ -29,6 +29,26 @@ const SEMANTIC_MESSAGES = [
   'too many parts',
 ]
 
+/**
+ * Messages that win over the semantic/numeric-code check below, even though they'd
+ * otherwise be classified as a deterministic ClickHouse error. Both reflect momentary
+ * aggregate server load rather than this query's own inherent cost, so retrying after
+ * a brief wait is very plausibly successful — unlike a per-query memory cap or a
+ * genuine syntax error, which retrying with the same data will not fix.
+ *
+ * "(total) memory limit exceeded" specifically means the GLOBAL memory tracker
+ * tripped from everything running concurrently, not this one query's own footprint
+ * (contrast with a bare/per-query "memory limit (for query) exceeded", which stays
+ * semantic via SEMANTIC_MESSAGES above). A stalled socket read/write means the server
+ * went quiet for the configured receive/send_timeout, which a server under the same
+ * transient load can do without the query itself being hung.
+ */
+const TRANSIENT_OVERLOAD_MESSAGES = [
+  '(total) memory limit exceeded',
+  'timeout exceeded while reading from socket',
+  'timeout exceeded while writing to socket',
+]
+
 const DEFAULT_INITIAL_DELAY_MS = 1_000
 const DEFAULT_MAX_DELAY_MS = 30_000
 const DEFAULT_MAX_ELAPSED_MS = 30 * 60 * 1_000
@@ -129,9 +149,21 @@ function hasSemanticClickHouseError(error: unknown): boolean {
   return hasSemanticClickHouseSignal((error as { cause?: unknown }).cause)
 }
 
+function hasTransientOverloadMessage(error: unknown): boolean {
+  const message = getMessage(error).toLowerCase()
+  return TRANSIENT_OVERLOAD_MESSAGES.some(phrase => message.includes(phrase))
+}
+
 export function isTransientClickHouseError(error: unknown): boolean {
   if (!error || (typeof error !== 'object' && typeof error !== 'string')) {
     return false
+  }
+
+  if (
+    hasTransientOverloadMessage(error) ||
+    hasTransientOverloadMessage((error as { cause?: unknown }).cause)
+  ) {
+    return true
   }
 
   if (hasSemanticClickHouseError(error)) {

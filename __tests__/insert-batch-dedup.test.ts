@@ -118,4 +118,31 @@ describe('insertBatch deduplication settings', () => {
     await insertBatch(batch, 'breachX', undefined, { table: 'ulp.bench_123' })
     expect(insertSpy.mock.calls[0][0].table).toBe('ulp.bench_123')
   })
+
+  it('keeps retrying transient overload failures well past the base 30-minute retry deadline', async () => {
+    const { insertBatch } = await import('@/lib/upload-processor')
+    const batch = [cred({ url: 'https://a.com', email: 'a@a.com', password: 'p1', domain: 'a.com' })]
+    let nowMs = 0
+    let attempts = 0
+
+    insertSpy.mockImplementation(async () => {
+      attempts += 1
+      if (attempts < 4) {
+        throw Object.assign(new Error('(total) memory limit exceeded: would use 14 GiB'), { code: '241' })
+      }
+    })
+
+    // Each retry "costs" 20 simulated minutes regardless of the requested backoff
+    // delay, so 3 retries blow past the base 30-minute deadline (60 min total) —
+    // proving insertBatch's own default deadline is longer than that base default,
+    // for long unattended AFK import runs where the server can stay near its
+    // memory ceiling for an extended stretch.
+    await insertBatch(batch, 'breachX', {
+      now: () => nowMs,
+      sleep: async () => { nowMs += 20 * 60 * 1000 },
+    })
+
+    expect(attempts).toBe(4)
+    expect(nowMs).toBeGreaterThan(30 * 60 * 1000)
+  })
 })

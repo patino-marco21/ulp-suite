@@ -45,6 +45,15 @@ export interface ProcessResult {
 
 export const UPLOAD_BATCH_SIZE = 100_000
 
+// Longer than withClickHouseRetry's base 30-minute default: this pipeline is meant
+// to be queued up and left running unattended for hours (many large files, one at a
+// time). A server can plausibly stay near its memory ceiling for longer than 30
+// minutes under that sustained load without any single batch's insert being stuck —
+// transient overload (see lib/clickhouse-retry.ts's TRANSIENT_OVERLOAD_MESSAGES)
+// deserves a longer runway here than it would for an interactive request. Still
+// bounded, not infinite, so a genuinely stuck batch doesn't retry forever.
+const IMPORT_RETRY_MAX_ELAPSED_MS = 2 * 60 * 60 * 1_000 // 2 hours
+
 // ─── ClickHouse helpers ───────────────────────────────────────────────────────
 
 /** Escape a value for ClickHouse CSV: wrap in double-quotes, double internal quotes. */
@@ -163,6 +172,7 @@ export async function insertBatch(
       })
     },
     {
+      maxElapsedMs: IMPORT_RETRY_MAX_ELAPSED_MS,
       ...retryOptions,
       onRetry: makeRetryLogger('batch insert', breach_name, retryOptions.onRetry),
     }
