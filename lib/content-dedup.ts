@@ -74,6 +74,19 @@ export function minExcessToApply(env: NodeJS.ProcessEnv = process.env): number {
   return Number.isFinite(n) && n >= 0 ? n : 1000
 }
 
+/**
+ * UTC hour (0-23) the daily cron tick is anchored to. Default 4 (04:00 UTC).
+ * Previously the first tick fired 60s after whatever moment the app container
+ * happened to start, so its daily recurrence landed at an arbitrary wall-clock
+ * time — including, on 2026-06-27, the middle of a heavy-query window. Anchor
+ * it to an explicit hour instead; tune DEDUP_CRON_HOUR_UTC to your actual
+ * low-traffic window.
+ */
+export function dedupCronHourUtc(env: NodeJS.ProcessEnv = process.env): number {
+  const h = parseInt(env.DEDUP_CRON_HOUR_UTC ?? '4', 10)
+  return Number.isFinite(h) && h >= 0 && h <= 23 ? h : 4
+}
+
 // ── tick (report, and optionally apply) ─────────────────────────────────────────
 
 let tickInFlight = false

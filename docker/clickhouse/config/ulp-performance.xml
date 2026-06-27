@@ -45,29 +45,43 @@
     </merge_tree>
 
     <!-- ── Memory ceiling ────────────────────────────────────────────────────────
-         CRITICAL: mark_cache and uncompressed_cache are allocated OUTSIDE of
-         max_server_memory_usage (they use a separate jemalloc arena).
-         Total ClickHouse RSS = max_server_memory_usage + mark_cache + uncompressed_cache.
-         Container: 20 GB.  Budget: 16 + 1 + 1 = 18 GB  →  2 GB safety margin.
+         UNRESOLVED: whether mark_cache/uncompressed_cache bytes are counted inside
+         max_server_memory_usage's own hard limit, or only show up in real container
+         RSS outside of it, is NOT settled — see the 2026-06-27 memory-pressure
+         investigation notes. The enforced ceiling has actually measured ~14.05 GiB
+         in production (twice: 2026-06-21 and 2026-06-27), 2 GiB below this 16 GiB
+         setting, which is consistent with caches counting inside it — but a prior
+         2026-06-07 fix (commit 6fced4c) was itself motivated by a real cgroup
+         OOM-kill that's only explainable if caches are real RSS OUTSIDE this limit.
+         Don't raise max_server_memory_usage based on either theory alone without
+         verifying directly against this host (compare system.metrics
+         'MemoryTracking' + system.asynchronous_metrics cache bytes against actual
+         process RSS) — under the OOM-motivated model, raising it without also
+         raising the container's mem_limit (docker-compose.yml, currently 20g)
+         would remove the safety margin that fix was protecting.
 
          max_server_memory_usage covers: query execution, query result cache,
          query condition cache, background merge buffers, connection overhead. -->
     <max_server_memory_usage>17179869184</max_server_memory_usage>      <!-- 16 GB -->
 
     <!-- ── Mark cache ─────────────────────────────────────────────────────────────
-         Stores granule-to-column-file offsets — allocated OUTSIDE max_server_memory.
+         Stores granule-to-column-file offsets.
          Actual size for this dataset: 22 278 granules × 40 columns × 16 B ≈ 14 MB.
-         1 GB is 70× larger than needed — covers fragmented parts during heavy imports.
+         256 MB is still ~18× that — generous slack for fragmented parts during
+         heavy imports, without the 1 GB this was previously set to (1 GB was 70×
+         the measured need; shrinking reclaims headroom either model above turns out
+         to be true — see the memory-ceiling note above this block).
          Monitor: SELECT value FROM system.asynchronous_metrics
                   WHERE metric IN ('MarkCacheFiles', 'MarkCacheBytes') -->
-    <mark_cache_size>1073741824</mark_cache_size>                       <!-- 1 GB -->
+    <mark_cache_size>268435456</mark_cache_size>                        <!-- 256 MB -->
 
     <!-- ── Uncompressed cache ─────────────────────────────────────────────────────
-         LRU cache of decompressed column blocks — allocated OUTSIDE max_server_memory.
-         1 GB ≈ 125 recent granules cached; effective for repeated domain/email searches.
+         LRU cache of decompressed column blocks.
+         512 MB ≈ 62 recent granules cached; still effective for repeated domain/email
+         searches, just a smaller working set than the previous 1 GB (~125 granules).
          Combined with OS page cache and the query result cache, this avoids redundant
          decompression on hot columns without consuming excessive RSS. -->
-    <uncompressed_cache_size>1073741824</uncompressed_cache_size>       <!-- 1 GB -->
+    <uncompressed_cache_size>536870912</uncompressed_cache_size>        <!-- 512 MB -->
     <!-- max_bytes_before_external_group_by / external_sort are user-level query settings
          in ClickHouse 26.3 — see users.d/ulp-profiles.xml. -->
 

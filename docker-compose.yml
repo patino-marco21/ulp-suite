@@ -24,9 +24,9 @@ services:
       CLICKHOUSE_PASSWORD: ""
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     # Memory: 32 GB total — 20 GB ClickHouse + 8 GB App + 4 GB OS/kernel headroom.
-    # CRITICAL: mark_cache (1 GB) + uncompressed_cache (1 GB) are allocated OUTSIDE
-    # max_server_memory_usage (16 GB). Total ClickHouse RSS ceiling = 18 GB → 2 GB
-    # safety margin inside the 20 GB container. See ulp-performance.xml for details.
+    # Whether mark_cache (256 MB) + uncompressed_cache (512 MB) count inside or
+    # outside max_server_memory_usage (16 GB) is unresolved — see the memory
+    # ceiling comment in ulp-performance.xml before changing any of these values.
     mem_limit: 20g
     mem_reservation: 12g
     ulimits:
@@ -125,6 +125,7 @@ services:
       # Exact-content dedup worker — report-only unless explicitly enabled.
       CONTENT_DEDUP_APPLY: ${CONTENT_DEDUP_APPLY:-false}
       DEDUP_CRON_HOURS: ${DEDUP_CRON_HOURS:-24}
+      DEDUP_CRON_HOUR_UTC: ${DEDUP_CRON_HOUR_UTC:-4}
       DEDUP_MIN_EXCESS: ${DEDUP_MIN_EXCESS:-1000}
     volumes:
       - ./uploads:/app/uploads
