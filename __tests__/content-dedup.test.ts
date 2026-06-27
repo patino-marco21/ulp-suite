@@ -5,6 +5,7 @@ import {
   buildStatsSql,
   buildDeleteSql,
   dedupCronHours,
+  dedupCronHourUtc,
   contentDedupApplyEnabled,
   minExcessToApply,
 } from '@/lib/content-dedup'
@@ -69,6 +70,20 @@ describe('content-dedup', () => {
     })
     test('honors a custom threshold', () => {
       expect(minExcessToApply({ DEDUP_MIN_EXCESS: '50' })).toBe(50)
+    })
+  })
+
+  describe('dedupCronHourUtc', () => {
+    test('defaults to 4 (04:00 UTC)', () => {
+      expect(dedupCronHourUtc({})).toBe(4)
+    })
+    test('honors a configured hour', () => {
+      expect(dedupCronHourUtc({ DEDUP_CRON_HOUR_UTC: '9' })).toBe(9)
+    })
+    test('out-of-range or invalid falls back to 4', () => {
+      expect(dedupCronHourUtc({ DEDUP_CRON_HOUR_UTC: '24' })).toBe(4)
+      expect(dedupCronHourUtc({ DEDUP_CRON_HOUR_UTC: '-1' })).toBe(4)
+      expect(dedupCronHourUtc({ DEDUP_CRON_HOUR_UTC: 'nope' })).toBe(4)
     })
   })
 })

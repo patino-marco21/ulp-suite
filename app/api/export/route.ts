@@ -7,6 +7,7 @@ import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS } from "@/lib/ulp-normalize"
 import { noiseWhere } from "@/lib/ulp-noise"
 import { dedupeLimitBy } from "@/lib/ulp-dedupe"
+import { exportGroupBySettings } from "@/lib/clickhouse-query-limits"
 
 export const dynamic = 'force-dynamic'
 
@@ -217,7 +218,8 @@ async function exportHcmask(
        WHERE ${clause}${allExtras} AND length(password) > 0
        GROUP BY password
        ORDER BY freq DESC
-       LIMIT 2000`,
+       LIMIT 2000
+       ${exportGroupBySettings(60)}`,
       mergedParams
     ) as Array<{ password: string; freq: string }>
 
@@ -315,7 +317,7 @@ function streamWordlist(incTiers: string[], excTiers: string[], loginTypes: stri
       try {
         const chClient = getClient()
         const resultSet = await chClient.query({
-          query: `SELECT password, count() AS freq FROM ulp.credentials ${where} GROUP BY password ORDER BY freq DESC LIMIT 5000000 SETTINGS max_execution_time = 120`,
+          query: `SELECT password, count() AS freq FROM ulp.credentials ${where} GROUP BY password ORDER BY freq DESC LIMIT 5000000 ${exportGroupBySettings(120)}`,
           format: 'JSONEachRow',
         })
         const stream = resultSet.stream<{ password: string; freq: string }>()
