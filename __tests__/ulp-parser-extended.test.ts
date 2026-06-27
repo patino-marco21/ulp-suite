@@ -18,6 +18,8 @@
  *  §12 CRLF and whitespace handling
  *  §13 parseULPContent batch counters
  *  §17 android:// credential parsing  — parsed since Rule 1 no longer blocks them
+ *  §25 Garbage identity + non-replacement mojibake — whitespace-in-login,
+ *      letter-less domains, and latin1-mojibake on email/url (never password)
  */
 
 import { describe, test, expect } from 'vitest'
@@ -1631,5 +1633,94 @@ describe('§24 URL-fragment logins + masked passwords', () => {
     const c = cred('https://site.com:realuser:P@ss*1word')
     expect(c).not.toBeNull()
     expect(c!.password).toBe('P@ss*1word')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §25  Garbage identity + non-replacement mojibake
+// Three classes neither isJunkCredential nor the purge script caught before:
+// whitespace-in-identity, letter-less domains, and latin1-mojibake on
+// email/url. Never on password — the one field that legitimately carries
+// non-ASCII content. See lib/ulp-garbage.ts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§25 Garbage identity + non-replacement mojibake', () => {
+  test('whitespace-in-login (tab-separated, no URL) → rejected garbage', () => {
+    expect(cred('user @example.com\tsecret123')).toBeNull()
+    expect(why('user @example.com\tsecret123')).toBe('garbage')
+  })
+
+  test('whitespace-in-login with URL → rejected garbage', () => {
+    expect(cred('https://example.com\tuser @example.com\tsecret123')).toBeNull()
+    expect(why('https://example.com\tuser @example.com\tsecret123')).toBe('garbage')
+  })
+
+  test('real screenshot example — heavily spaced login → rejected garbage', () => {
+    expect(cred('https://example.com\ty j s J @ i 3 2 Y E G\tsecret123')).toBeNull()
+  })
+
+  test('letter-less domain "x@#" → rejected garbage', () => {
+    expect(cred('https://example.com\tx@#\tsecret123')).toBeNull()
+    expect(why('https://example.com\tx@#\tsecret123')).toBe('garbage')
+  })
+
+  test('numeric-only domain "weird@123" → rejected garbage', () => {
+    expect(cred('https://example.com\tweird@123\tsecret123')).toBeNull()
+  })
+
+  test('mojibake login (Greek decoded as latin1) → rejected garbage', () => {
+    expect(cred('https://example.com\tÎ´ÎµÎ¹Î»Î¿Ï@gmail.com\tsecret123')).toBeNull()
+    expect(why('https://example.com\tÎ´ÎµÎ¹Î»Î¿Ï@gmail.com\tsecret123')).toBe('garbage')
+  })
+
+  test('mojibake URL (French decoded as latin1) → rejected garbage', () => {
+    expect(cred('https://caÃ©.com\tuser@site.com\tsecret123')).toBeNull()
+    expect(why('https://caÃ©.com\tuser@site.com\tsecret123')).toBe('garbage')
+  })
+
+  test('clean ASCII credential is KEPT (regression)', () => {
+    const c = cred('https://example.com\tuser@example.com\tsecret123')
+    expect(c).not.toBeNull()
+    expect(c!.email).toBe('user@example.com')
+  })
+
+  test('real accented PASSWORD is KEPT — password is exempt from every rule here', () => {
+    const c = cred('https://example.com\tuser@example.com\tcafé123')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('café123')
+  })
+
+  test('password containing the literal mojibake signature is KEPT (password is exempt)', () => {
+    const c = cred('https://example.com\tuser@example.com\tÎ´ÎµÎ¹Î»Î¿Ï123')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('Î´ÎµÎ¹Î»Î¿Ï123')
+  })
+
+  test('positional 3-line block with whitespace-in-login → dropped', () => {
+    const content = ['https://example.com/login', 'user @example.com', 'realpassword123'].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(0)
+    expect(r.rejection_breakdown.garbage).toBe(1)
+  })
+
+  test('positional 3-line block with real login → kept (regression)', () => {
+    const content = ['https://example.com/login', 'realuser@example.com', 'realpassword123'].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(1)
+    expect(r.credentials[0].email).toBe('realuser@example.com')
+  })
+
+  test('block-format credential with letter-less-domain login → dropped', () => {
+    const content = ['Host: https://site.com', 'Login: x@#', 'Password: GoodPass99', '===='].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(0)
+    expect(r.rejection_breakdown.garbage).toBe(1)
+  })
+
+  test('block-format normal credential → kept (regression)', () => {
+    const content = ['Host: https://site.com', 'Login: realuser@example.com', 'Password: GoodPass99', '===='].join('\n')
+    const r = parseULPContent(content, 'src.txt')
+    expect(r.credentials.length).toBe(1)
+    expect(r.credentials[0].email).toBe('realuser@example.com')
   })
 })
