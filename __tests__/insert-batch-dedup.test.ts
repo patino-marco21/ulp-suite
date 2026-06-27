@@ -36,7 +36,12 @@ describe('insertBatch deduplication settings', () => {
     const settings = insertSpy.mock.calls[0][0].clickhouse_settings
     expect(settings.insert_deduplicate).toBe(1)
     expect(settings.insert_deduplication_token).toBe(batchDedupToken(batch, 'breachX'))
-    expect(settings.async_insert).toBeUndefined()
+    // Explicitly disabled, not merely absent — the default profile sets async_insert=1
+    // for combining many small inserts. Leaving this unset means a 100K-row batch
+    // silently inherits that default and gets routed through the async-insert buffer,
+    // which is what produced the 2026-06-27 "(total) memory limit exceeded ... While
+    // executing WaitForAsyncInsert" production failures.
+    expect(settings.async_insert).toBe(0)
     expect(settings.wait_for_async_insert).toBeUndefined()
     expect(settings.async_insert_deduplicate).toBeUndefined()
     expect(settings.max_insert_threads).toBe(2)

@@ -46,6 +46,16 @@
                  60 s matches the client-side max_execution_time in lib/clickhouse.ts.
                  The MV backfill queries override this inline (max_execution_time = 3600). -->
             <max_execution_time>60</max_execution_time>
+
+            <!-- Socket-level read/write timeout — separate from max_execution_time, which
+                 bounds total query duration. This bounds how long the connection can go
+                 quiet (no bytes moved) before ClickHouse drops it. Default is 30 s, which
+                 produced "Timeout exceeded while reading from socket ... 30000 ms" failures
+                 on large bulk-import inserts during the 2026-06-27 memory-pressure incident
+                 — a server under load can stall mid-stream for longer than that without the
+                 query itself being hung. Raised to 5 min for headroom on multi-minute imports. -->
+            <receive_timeout>300</receive_timeout>
+            <send_timeout>300</send_timeout>
             <!-- MUST be 'throw', not 'break': ClickHouse 26.x enforces that the query
                  result cache (use_query_cache=1 below) is incompatible with any overflow
                  mode other than 'throw'. With 'break' every exec() throws error 731

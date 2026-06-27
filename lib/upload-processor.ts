@@ -153,6 +153,12 @@ export async function insertBatch(
           insert_deduplicate:       1 as any,
           insert_deduplication_token: token as any,
           max_insert_threads:       2 as any,
+          // The default profile sets async_insert=1 for combining many small inserts.
+          // A 100K-row batch is already large and has its own retry/dedup-token
+          // logic, so it gets no benefit from that buffer — only the extra memory
+          // cost of going through it. Must be explicit: leaving this key absent
+          // does not disable async_insert, it inherits the profile default.
+          async_insert:             0 as any,
         },
       })
     },
