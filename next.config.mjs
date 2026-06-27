@@ -6,6 +6,18 @@ const isDev = process.env.NODE_ENV === 'development'
 const nextConfig = {
   // Tell Next.js not to bundle better-sqlite3 (native addon — must be required at runtime)
   serverExternalPackages: ['better-sqlite3'],
+  // middleware.ts's matcher runs on /api/* (its own auth-redirect logic is
+  // separate from each route's own validateRequest()/API-key check — see
+  // app/api/upload/route.ts:89). Next.js 15.5+ caps how much of the request
+  // body it buffers for any matched route at 10MB by default, regardless of
+  // whether the middleware function itself reads the body; past that cap the
+  // body is silently truncated, which breaks request.formData() in the actual
+  // route handler (no closing multipart boundary -> parse throws -> "Invalid
+  // form data"). Raised to match this app's own existing 10 GB upload ceiling
+  // (MAX_FILE_SIZE in app/api/upload/route.ts).
+  experimental: {
+    middlewareClientMaxBodySize: '10gb',
+  },
   // Exclude large data folders from output file tracing (fixes slow builds)
   outputFileTracingExcludes: {
     '*': [
