@@ -436,10 +436,15 @@ function colonSplit(line: string): [string, string, string] | null {
       // No path — URL is up to end of host:port, then colon separates login
       // e.g. "https://site.com:8443:user:pass"
       const hostStart = afterScheme
-      // Consume optional port (digits after colon)
-      const portMatch = line.slice(hostStart).match(/^([^:]+):(\d+):/)
+      // Consume optional port (digits after colon). Bounded to 1-5 digits AND
+      // <= 65535 — same bound the scheme-less branch below already uses. An
+      // earlier unbounded \d+ here mistook long numeric logins (phone numbers,
+      // account IDs) for a port, absorbing them into the URL and leaving nothing
+      // parseable behind; that false no_fields then cascaded into the positional
+      // 3-line fallback merging unrelated rows together (2026-06-28 incident).
+      const portMatch = line.slice(hostStart).match(/^([^:]+):(\d{1,5}):/)
       let loginStart: number
-      if (portMatch) {
+      if (portMatch && Number(portMatch[2]) <= 65535) {
         loginStart = hostStart + portMatch[0].length
       } else {
         const c = line.indexOf(':', hostStart)

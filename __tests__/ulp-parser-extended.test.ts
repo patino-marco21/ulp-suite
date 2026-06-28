@@ -227,6 +227,50 @@ describe('§2 Port disambiguation', () => {
     expect(c!.password).toBe('password')
     expect(c!.domain).toBe('10.0.0.1')
   })
+
+  // 2026-06-28 production incident: a long numeric login (e.g. a phone number or
+  // account ID) after a scheme-with-no-path URL was being mistaken for a port —
+  // the port-detection regex was unbounded (any number of digits), unlike the
+  // scheme-less branch a few lines below, which already correctly bounds ports to
+  // 1-5 digits AND <= 65535. The login got absorbed into the URL, leaving only the
+  // bare password behind with no further colon to split on -> 'no_fields'. That
+  // false no_fields then triggered the positional 3-line fallback, which
+  // swallowed the next two (unrelated, independently well-formed) source lines as
+  // login/password — merging three real credential rows into one.
+  test('long numeric login after scheme+no-path host is NOT mistaken for a port', () => {
+    // This exact line's host starts with a hyphen, which independently and
+    // correctly fails isValidHost (Rule 3.6, same validity rule the garbage-purge
+    // predicate uses) -- so this specific sample is still rejected on its own
+    // merits, just no longer as 'no_fields'. That distinction is what matters
+    // here: 'no_fields' is the only reason that triggers the positional 3-line
+    // fallback, so confirming the reason changed confirms the merge-cascade no
+    // longer fires for this line, regardless of this one host's own validity.
+    expect(why('http://-mem.epfindia.gov.in:101076445715:Pass@125')).toBe('garbage')
+  })
+
+  test('a second real production example of the same long-numeric-login bug', () => {
+    const c = cred('http://neet.ntaonline.in:240411468873:Go@9733426051')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('http://neet.ntaonline.in')
+    expect(c!.email).toBe('240411468873')
+    expect(c!.password).toBe('Go@9733426051')
+  })
+
+  test('a numeric value that fits 5 digits but exceeds the port range (65535) is also not absorbed', () => {
+    const c = cred('http://site.com:99999:user:pass')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('http://site.com')
+    expect(c!.email).toBe('99999')
+    expect(c!.password).toBe('user:pass')
+  })
+
+  test('a genuine 5-digit port within range is still absorbed correctly (no regression)', () => {
+    const c = cred('https://site.com:65535:user:pass')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('https://site.com:65535')
+    expect(c!.email).toBe('user')
+    expect(c!.password).toBe('pass')
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
