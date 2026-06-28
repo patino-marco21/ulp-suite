@@ -32,9 +32,12 @@
 #   bash scripts/diagnose-and-purge-garbage.sh            # diagnose only (safe)
 #   PURGE=1 bash scripts/diagnose-and-purge-garbage.sh    # delete the garbage
 #
-# PURGE fires ALTER TABLE ... DELETE (a background mutation; url/email/password
-# are not key columns so the delete is allowed). It does NOT block -- monitor
-# with system.mutations, then re-run the default to watch the count fall.
+# PURGE cancels any failed prior attempt of this exact purge first (a heavyweight
+# ALTER TABLE ... DELETE version of this same predicate was found stuck retrying
+# and failing with MEMORY_LIMIT_EXCEEDED for ~20h on 2026-06-27/28 -- the same
+# wall scripts/purge-existing-t3.sh already hit and fixed for T3), then fires a
+# bounded-memory lightweight DELETE FROM (max_threads=2). It does NOT block --
+# re-run the default (no PURGE) afterward to watch the count fall.
 # Consider taking a backup first (the dedup pattern makes credentials_old), or
 # just trust the samples below before purging.
 #
@@ -156,20 +159,57 @@ if [ "$PURGE" != "1" ]; then
   echo "Read-only. Review §3 (these get deleted) and §1 counts. To delete:"
   echo "  PURGE=1 bash scripts/diagnose-and-purge-garbage.sh"
 else
-  echo "Firing ALTER TABLE ulp.credentials DELETE WHERE <garbage> (async)..."
-  if ! $CH "
-  ALTER TABLE ulp.credentials DELETE WHERE $IS_GARBAGE
-  SETTINGS mutations_sync = 0
-  "; then
-    echo "ERROR: DELETE mutation failed to submit."
+  # The garbage predicate is a large multi-line regex expression -- too fragile to
+  # match a failed mutation by full command-string equality (unlike T3's simple
+  # `country_tier = 'T3'`, see scripts/purge-existing-t3.sh). Match by a short,
+  # distinctive substring instead, mirroring lib/content-dedup.ts's
+  # MUTATION_MARKER + `command LIKE` pattern. unhex('EFBFBD') appears 3 times in
+  # IS_GARBAGE and is not a substring any unrelated mutation would contain.
+  MUTATION_MARKER="unhex('EFBFBD')"
+
+  echo "Cancelling any failed prior garbage-purge mutations..."
+  failed_ids="$($CH "
+  SELECT mutation_id FROM system.mutations
+  WHERE database = 'ulp' AND table = 'credentials'
+    AND is_done = 0 AND latest_fail_reason != ''
+    AND command LIKE '%${MUTATION_MARKER}%'
+  FORMAT TSVRaw
+  ")"
+  while IFS= read -r mutation_id; do
+    [ -z "$mutation_id" ] && continue
+    echo "  Cancelling failed garbage-purge mutation: $mutation_id"
+    $CH "
+    KILL MUTATION WHERE database = 'ulp' AND table = 'credentials'
+      AND mutation_id = '$mutation_id' AND is_done = 0
+      AND command LIKE '%${MUTATION_MARKER}%'
+    SYNC
+    "
+  done <<< "$failed_ids"
+
+  active="$($CH "
+  SELECT count() FROM system.mutations
+  WHERE database = 'ulp' AND table = 'credentials' AND is_done = 0
+  FORMAT TSVRaw
+  ")"
+  if [ "$active" != "0" ]; then
+    echo "ERROR: $active credential-table mutation(s) are already active; wait before purging." >&2
     exit 1
   fi
-  echo "Submitted. Monitor:"
-  echo "  docker exec ulpsuite_clickhouse clickhouse-client --query \\"
-  echo "    \"SELECT mutation_id, is_done, parts_to_do, latest_fail_reason"
-  echo "     FROM system.mutations WHERE database='ulp' AND table='credentials'"
-  echo "     AND NOT is_done\""
-  echo "Then re-run this script (no PURGE) to watch garbage_rows fall to ~0."
+
+  echo "Submitting bounded-memory lightweight garbage deletion..."
+  if ! $CH "
+  DELETE FROM ulp.credentials WHERE $IS_GARBAGE
+  SETTINGS lightweight_deletes_sync = 2,
+           max_threads = 2,
+           max_execution_time = 0
+  "; then
+    echo "ERROR: lightweight DELETE failed to submit."
+    exit 1
+  fi
+
+  remaining="$($CH "SELECT countIf($IS_GARBAGE) FROM ulp.credentials FORMAT TSVRaw")"
+  echo "Purge complete; remaining garbage rows: $remaining."
+  echo "Physical disk is reclaimed gradually by normal background merges."
 fi
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
