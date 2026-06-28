@@ -163,9 +163,17 @@ else
   # match a failed mutation by full command-string equality (unlike T3's simple
   # `country_tier = 'T3'`, see scripts/purge-existing-t3.sh). Match by a short,
   # distinctive substring instead, mirroring lib/content-dedup.ts's
-  # MUTATION_MARKER + `command LIKE` pattern. unhex('EFBFBD') appears 3 times in
-  # IS_GARBAGE and is not a substring any unrelated mutation would contain.
-  MUTATION_MARKER="unhex('EFBFBD')"
+  # MUTATION_MARKER + `command LIKE` pattern.
+  #
+  # MUST contain no quote characters: it gets embedded as '%${MUTATION_MARKER}%'
+  # below. A first version used "unhex('EFBFBD')" -- its own embedded single
+  # quotes closed that outer string literal early, producing a SQL syntax error
+  # in production (confirmed by reproducing the exact interpolation: the result
+  # `'%unhex('EFBFBD')%'` parses as the string `%unhex(`, then the bare token
+  # `EFBFBD`, then `)%'` -- not a valid LIKE pattern). Bare EFBFBD (the hex
+  # appearing inside all 3 of IS_GARBAGE's unhex('EFBFBD') calls) is just as
+  # distinctive and has no quoting hazard.
+  MUTATION_MARKER="EFBFBD"
 
   echo "Cancelling any failed prior garbage-purge mutations..."
   failed_ids="$($CH "

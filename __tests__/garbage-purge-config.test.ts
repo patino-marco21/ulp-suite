@@ -9,11 +9,25 @@ describe('garbage-purge bounded-memory delete', () => {
     // to match by full command-string equality (unlike T3's simple
     // `country_tier = 'T3'`). Match by a short, distinctive substring instead,
     // mirroring lib/content-dedup.ts's MUTATION_MARKER + `command LIKE` pattern.
-    expect(script).toContain("unhex('EFBFBD')")
     expect(script).toContain('system.mutations')
     expect(script).toContain('latest_fail_reason')
     expect(script).toContain('KILL MUTATION')
     expect(script).toContain('command LIKE')
+  })
+
+  test('the marker is safe to embed in a single-quoted LIKE pattern', () => {
+    // Regression guard: MUTATION_MARKER="unhex('EFBFBD')" was shipped once and
+    // broke production — its own embedded single quotes closed the outer
+    // '%...%' string literal early, producing a SQL syntax error (confirmed by
+    // reproducing the exact bash interpolation: `'%unhex('EFBFBD')%'` parses as
+    // the string `%unhex(`, then the bare token `EFBFBD`, then `)%'` -- not a
+    // valid LIKE pattern at all). A marker embedded in '%${MARKER}%' must
+    // contain no quote characters of its own.
+    const match = script.match(/MUTATION_MARKER="([^"]*)"/)
+    expect(match).not.toBeNull()
+    const marker = match![1]
+    expect(marker).not.toContain("'")
+    expect(marker.length).toBeGreaterThan(0)
   })
 
   test('refuses to purge while any other credentials mutation is active', () => {
