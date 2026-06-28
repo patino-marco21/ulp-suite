@@ -1,7 +1,7 @@
 "use client"
 export const dynamic = "force-dynamic"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import {
   ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Loader2,
   Copy, Filter, X, Globe, Download, ArrowUpDown,
@@ -62,6 +62,12 @@ interface ApiResult {
   query_ms?:   number
   timed_out?:  boolean   // true when query_ms > 200s — results may be incomplete
   sort?:       string
+  // Client-measured wall clock for this fetch (request → parsed response).
+  // Not sent by the server — set locally in load()/clearAll(). Distinct from
+  // query_ms (ClickHouse-only time): the gap between them is network +
+  // queueing + a possible concurrent superseded request, none of which
+  // query_ms can see.
+  total_ms?:   number
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -671,29 +677,46 @@ export default function CredentialsPage() {
     sortKey, limit,
   ])
 
+  // Tracks the in-flight request so a newer load() (e.g. user changes a filter
+  // while the initial mount load is still running) cancels the older one
+  // instead of letting both run concurrently against ClickHouse — without this,
+  // two full heavy queries contend for resources at once, AND whichever HTTP
+  // response lands last wins, even if it was the stale request.
+  const loadAbortRef = useRef<AbortController | null>(null)
+
   const load = useCallback(async (cursor: string | null, overrides?: { sort?: string; limit?: number; q?: string; domain?: string; excludeNoise?: boolean; dedupe?: boolean }) => {
+    loadAbortRef.current?.abort()
+    const controller = new AbortController()
+    loadAbortRef.current = controller
+
     setLoading(true)
+    const t0 = performance.now()
     try {
-      const res  = await fetch(`/api/credentials?${buildParams(cursor, overrides)}`)
+      const res  = await fetch(`/api/credentials?${buildParams(cursor, overrides)}`, { signal: controller.signal })
       const json = await res.json()
+      const total_ms = Math.round(performance.now() - t0)
       if (json.success) {
         // On deeper cursor pages the server skips the count() and returns
         // total:null — carry the page-1 total forward so the header/footer keep
         // showing the real count instead of flashing to 0.
-        setData(prev => (json.total == null ? { ...json, total: prev?.total ?? 0 } : json))
+        setData(prev => (json.total == null ? { ...json, total: prev?.total ?? 0, total_ms } : { ...json, total_ms }))
         setCurrentCursor(cursor)
       } else if (json.timed_out) {
         // 408 timeout: show the structured timeout response in the results panel
         // instead of a toast — the user can see why and what to do.
-        setData({ ...json, results: [] })
+        setData({ ...json, results: [], total_ms })
         setCurrentCursor(cursor)
       } else {
         toast({ title: 'Failed to load', variant: 'destructive' })
       }
-    } catch {
+    } catch (err) {
+      // AbortError means a newer load() superseded this one — not a real failure.
+      if (err instanceof DOMException && err.name === 'AbortError') return
       toast({ title: 'Failed to load', variant: 'destructive' })
     } finally {
-      setLoading(false)
+      // Only the still-current request may clear the spinner — an aborted
+      // request's finally must not stomp on a newer in-flight request's state.
+      if (loadAbortRef.current === controller) setLoading(false)
     }
   }, [buildParams, toast])
 
@@ -715,11 +738,18 @@ export default function CredentialsPage() {
     // exclude_noise=1 + dedupe=1 keep the default-on declutter + dedupe after a clear.
     setLoading(true)
     setCursorStack([]); setCurrentCursor(null)
-    fetch(`/api/credentials?limit=${DEFAULT_CREDENTIAL_LIMIT}&sort=${DEFAULT_CREDENTIAL_SORT}&exclude_noise=1&dedupe=1`)
+    loadAbortRef.current?.abort()
+    const controller = new AbortController()
+    loadAbortRef.current = controller
+    const t0 = performance.now()
+    fetch(`/api/credentials?limit=${DEFAULT_CREDENTIAL_LIMIT}&sort=${DEFAULT_CREDENTIAL_SORT}&exclude_noise=1&dedupe=1`, { signal: controller.signal })
       .then(r => r.json())
-      .then(json => { if (json.success) { setData(json); setCurrentCursor(null) } })
-      .catch(() => { toast({ title: 'Failed to load', variant: 'destructive' }) })
-      .finally(() => setLoading(false))
+      .then(json => { if (json.success) { setData({ ...json, total_ms: Math.round(performance.now() - t0) }); setCurrentCursor(null) } })
+      .catch((err) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return
+        toast({ title: 'Failed to load', variant: 'destructive' })
+      })
+      .finally(() => { if (loadAbortRef.current === controller) setLoading(false) })
   }
 
   const copy = (text: string) => {
@@ -833,13 +863,22 @@ export default function CredentialsPage() {
               <>
                 <p className="text-sm text-muted-foreground">
                   {data.total.toLocaleString()} records
-                  {data.query_ms !== undefined && (
-                    <span className={`ml-2 ${data.query_ms > 10_000 ? 'text-amber-500' : 'opacity-50'}`}>
-                      {data.query_ms >= 1_000
-                        ? `${(data.query_ms / 1_000).toFixed(1)}s`
-                        : `${data.query_ms}ms`}
-                    </span>
-                  )}
+                  {(() => {
+                    // total_ms is wall clock (request → parsed response) — what you
+                    // actually waited. query_ms is ClickHouse-only time and is shown
+                    // as a tooltip: a big gap between the two means time was lost to
+                    // network/queueing/a superseded request, not the database.
+                    const shown = data.total_ms ?? data.query_ms
+                    if (shown === undefined) return null
+                    const title = data.query_ms !== undefined
+                      ? `${data.query_ms.toLocaleString()}ms in ClickHouse`
+                      : undefined
+                    return (
+                      <span className={`ml-2 ${shown > 10_000 ? 'text-amber-500' : 'opacity-50'}`} title={title}>
+                        {shown >= 1_000 ? `${(shown / 1_000).toFixed(1)}s` : `${shown}ms`}
+                      </span>
+                    )
+                  })()}
                   <span className="ml-2 opacity-40 text-xs">· click any row to inspect</span>
                 </p>
                 {/* Slow/timed-out query warning */}
