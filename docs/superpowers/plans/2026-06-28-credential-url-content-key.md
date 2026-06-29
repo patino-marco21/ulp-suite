@@ -397,7 +397,7 @@ git commit -m "fix(dedup-cron): ignore url scheme/trailing-slash in storage cont
 - Consumes: the same expression as `URL_CONTENT_KEY`, hand-copied (bash cannot import TypeScript).
 - Produces: nothing — this is an operator script, not a module.
 
-- [ ] **Step 1: Update the `KEY=` line and header comment**
+- [x] **Step 1: Update the `KEY=` line and header comment**
 
 Change:
 
@@ -432,7 +432,7 @@ KEY="replaceRegexpOne(replaceRegexpOne(url, '^(?i:https?://)', ''), '/\$', ''), 
 
 `ORDER="url, email, password, imported_at"` stays exactly as-is — survivor selection (earliest `imported_at` per group) is unchanged; only which rows count as "the same group" changes.
 
-- [ ] **Step 2: Sanity-check the constructed query string**
+- [x] **Step 2: Sanity-check the constructed query string**
 
 ```bash
 KEY="replaceRegexpOne(replaceRegexpOne(url, '^(?i:https?://)', ''), '/\$', ''), email, password"
@@ -445,7 +445,7 @@ Expected output (confirms bash is not mangling the `$` or quotes):
 GROUP BY replaceRegexpOne(replaceRegexpOne(url, '^(?i:https?://)', ''), '/$', ''), email, password
 ```
 
-- [ ] **Step 3: Run the script's dry-run against real ClickHouse**
+- [ ] **Step 3: Run the script's dry-run against real ClickHouse** — NOT DONE: same Docker-unreachable limitation as Task 1 Step 5. The script ran and exited cleanly through the dry-run banner before failing on the `docker exec` calls, confirming the bash logic itself is sound, but no actual `excess_rows` comparison against real data happened. `APPLY=1` was never used. Run this for real wherever ClickHouse is reachable, after Task 1 Step 5 is confirmed.
 
 This requires Docker/ClickHouse access and depends on Task 1 Step 5 having confirmed the `(?i:...)` syntax. There is no automated test for this script — this dry-run output is the only verification.
 
@@ -457,7 +457,7 @@ Expected: the "Exact-duplicate scope" table reports a **larger** `excess_rows` t
 
 Do not pass `APPLY=1` as part of this plan. That is a separate, explicit operator decision made after reviewing this output, not an automated step.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit** — `d412700`, plus two follow-ups: `bcbf313` (a second hardcoded occurrence of the old key found in the "worst offenders" diagnostic, missed by this plan) and `6eafdca` (header comment clarification from code review)
 
 ```bash
 git add scripts/dedup-credentials-content.sh
