@@ -475,7 +475,7 @@ git commit -m "fix(dedup-script): ignore url scheme/trailing-slash in manual pur
 **Interfaces:**
 - Documents: the dedupe key is scheme/trailing-slash-insensitive on `url`, exact on `email`/`password`.
 
-- [ ] **Step 1: Write the failing docs contract**
+- [x] **Step 1: Write the failing docs contract**
 
 Create `__tests__/url-content-key-docs.test.ts`:
 
@@ -492,7 +492,7 @@ describe('url-content-key docs', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test and confirm RED**
+- [x] **Step 2: Run the test and confirm RED**
 
 Run:
 
@@ -502,7 +502,7 @@ npm test -- __tests__/url-content-key-docs.test.ts
 
 Expected: FAIL — README still describes the key as "exact" everywhere.
 
-- [ ] **Step 3: Update README**
+- [x] **Step 3: Update README**
 
 Change:
 
@@ -528,7 +528,7 @@ to:
 `(url,email,password)` duplicates accumulate when the same credential arrives across different combolist files — ignoring URL scheme and a trailing slash, same as the browser's Unique toggle above; email/password stay exact. To remove them from storage:
 ```
 
-- [ ] **Step 4: Run the test and confirm GREEN**
+- [x] **Step 4: Run the test and confirm GREEN**
 
 Run:
 
@@ -538,7 +538,7 @@ npm test -- __tests__/url-content-key-docs.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit** — `3528289`
 
 ```bash
 git add README.md __tests__/url-content-key-docs.test.ts
