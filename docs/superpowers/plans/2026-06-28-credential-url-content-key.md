@@ -230,7 +230,7 @@ git commit -m "fix(credentials): ignore url scheme/trailing-slash in browser ded
 - Consumes: `URL_CONTENT_KEY` from `lib/url-content-key.ts`.
 - Produces: unchanged exports `CONTENT_KEY: string`, `buildStatsSql()`, `buildDeleteSql()` — same names and signatures, new underlying value. `FULL_HASH`, `CONTENT_DUPLICATE_PREDICATE`, `MUTATION_MARKER`, and every cron-config function (`dedupCronHours`, `contentDedupApplyEnabled`, `minExcessToApply`, `dedupCronHourUtc`, `runContentDedupTick`) are untouched — they already derive from `CONTENT_KEY`.
 
-- [ ] **Step 1: Update the test to expect the new key (RED)**
+- [x] **Step 1: Update the test to expect the new key (RED)**
 
 Replace `__tests__/content-dedup.test.ts` entirely:
 
@@ -327,7 +327,7 @@ describe('content-dedup', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test and confirm RED**
+- [x] **Step 2: Run the test and confirm RED**
 
 Run:
 
@@ -337,7 +337,7 @@ npm test -- __tests__/content-dedup.test.ts
 
 Expected: FAIL on the `CONTENT_KEY`, `buildDeleteSql`, and `buildStatsSql` assertions — `CONTENT_KEY` still equals the old literal `'url, email, password'`.
 
-- [ ] **Step 3: Update the implementation**
+- [x] **Step 3: Update the implementation**
 
 In `lib/content-dedup.ts`, add the import alongside the existing one and replace the `CONTENT_KEY` export:
 
@@ -369,7 +369,7 @@ to:
 
 Everything else in the file (`FULL_HASH`, `CONTENT_DUPLICATE_PREDICATE`, `MUTATION_MARKER`, `buildStatsSql`, `buildDeleteSql`, all cron-config functions, `runContentDedupTick`) is unchanged — they already derive from `CONTENT_KEY`.
 
-- [ ] **Step 4: Run the test and confirm GREEN**
+- [x] **Step 4: Run the test and confirm GREEN**
 
 Run:
 
@@ -379,7 +379,7 @@ npm test -- __tests__/content-dedup.test.ts
 
 Expected: PASS (same test count as before this task).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit** — `bfd4107`
 
 ```bash
 git add lib/content-dedup.ts __tests__/content-dedup.test.ts
