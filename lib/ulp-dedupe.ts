@@ -16,7 +16,7 @@ import { URL_CONTENT_KEY } from '@/lib/url-content-key'
  * this keeps the VIEW unique going forward (a new overlapping import can't make
  * the browser show dupes before the next storage pass), without another rewrite.
  *
- * Implementation: `LIMIT 1 BY url, email, password` on the data query (one row
+ * Implementation: `LIMIT 1 BY <content key>` on the data query (one row
  * per unique credential, in the active sort order) + `uniq(...)` for the count
  * (HyperLogLog — cheap/low-memory at any scale; ~0.5% error is fine for a result
  * tally). The identifiers resolve to the SELECT's normalized url/email/password
@@ -29,7 +29,7 @@ import { URL_CONTENT_KEY } from '@/lib/url-content-key'
  */
 export const DEDUPE_BY = `${URL_CONTENT_KEY}, email, password`
 
-/** `LIMIT 1 BY url, email, password` (place between ORDER BY and LIMIT) or ''. */
+/** `LIMIT 1 BY <content key>` (place between ORDER BY and LIMIT) or ''. */
 export function dedupeLimitBy(dedupe: boolean): string {
   return dedupe ? `LIMIT 1 BY ${DEDUPE_BY}` : ''
 }
