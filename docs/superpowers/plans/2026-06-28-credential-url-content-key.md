@@ -95,7 +95,7 @@ npm test -- __tests__/url-content-key.test.ts
 
 Expected: PASS (1 test).
 
-- [ ] **Step 5: Verify the regex semantics against real ClickHouse** — NOT DONE: no Docker daemon reachable from the dev machine that implemented Tasks 1-5 (confirmed twice, by me and independently by the Task 1 implementer subagent). Still required before Task 4's `APPLY=1` is ever considered, and before fully trusting the `(?i:...)` syntax in production. Do this on a host with ClickHouse access before going further than the dry-run.
+- [x] **Step 5: Verify the regex semantics against real ClickHouse** — DONE differently than planned: no Docker daemon was ever reachable from the dev machine that implemented Tasks 1-5, so this ran against the public `play.clickhouse.com` HTTP endpoint instead (ClickHouse 26.7.1.110 — consistent with this project's version), using only literal test strings, zero real data. Five cases checked, all correct: `HTTPS://Example.com/Login/` and `Example.com/Login` both collapse to `Example.com/Login`; `http://affiliate.ledger.com/` (the exact example from the original bug report) collapses to `affiliate.ledger.com`; a bare host with no scheme/slash is a no-op; a double trailing slash strips exactly one (`affiliate.ledger.com//` → `affiliate.ledger.com/`); `weird-site.com/http-status` is correctly left untouched (the `^` anchor prevents a mid-string false positive); and a fully mixed-case scheme (`HtTpS://`) is handled. The `(?i:...)` syntax is confirmed real and correct — the fallback note below is no longer needed, kept for history. **What this does NOT cover:** the actual excess-row count against the real 1.41B-row table — that's Task 4 Step 3, still open, since the public playground has no access to this project's data.
 
 This requires Docker/ClickHouse access. If unavailable in your current environment, leave this checkbox open and do it before Task 4's dry-run (Task 4 depends on this syntax being confirmed).
 
@@ -445,7 +445,7 @@ Expected output (confirms bash is not mangling the `$` or quotes):
 GROUP BY replaceRegexpOne(replaceRegexpOne(url, '^(?i:https?://)', ''), '/$', ''), email, password
 ```
 
-- [ ] **Step 3: Run the script's dry-run against real ClickHouse** — NOT DONE: same Docker-unreachable limitation as Task 1 Step 5. The script ran and exited cleanly through the dry-run banner before failing on the `docker exec` calls, confirming the bash logic itself is sound, but no actual `excess_rows` comparison against real data happened. `APPLY=1` was never used. Run this for real wherever ClickHouse is reachable, after Task 1 Step 5 is confirmed.
+- [ ] **Step 3: Run the script's dry-run against real ClickHouse** — STILL NOT DONE, but the blocker it was waiting on is resolved: Task 1 Step 5 confirmed the `(?i:...)` regex syntax for real (via the public ClickHouse playground, see above), so the only thing left here is running the dry-run against this project's *actual* `ulp.credentials` table to see the real `excess_rows` delta — that genuinely requires this project's own ClickHouse, which the playground can't provide. The script ran and exited cleanly through the dry-run banner before failing on the `docker exec` calls when this was first attempted, confirming the bash logic itself is sound. `APPLY=1` was never used.
 
 This requires Docker/ClickHouse access and depends on Task 1 Step 5 having confirmed the `(?i:...)` syntax. There is no automated test for this script — this dry-run output is the only verification.
 
