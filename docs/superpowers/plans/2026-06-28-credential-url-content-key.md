@@ -30,7 +30,7 @@
 - Produces: `URL_CONTENT_KEY: string` — a ClickHouse SQL expression fragment.
 - Consumes: nothing (pure constant).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `__tests__/url-content-key.test.ts`:
 
@@ -47,7 +47,7 @@ describe('url-content-key', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test and confirm RED**
+- [x] **Step 2: Run the test and confirm RED**
 
 Run:
 
@@ -57,7 +57,7 @@ npm test -- __tests__/url-content-key.test.ts
 
 Expected: FAIL — `Cannot find module '@/lib/url-content-key'` (the file does not exist yet).
 
-- [ ] **Step 3: Write the minimal implementation**
+- [x] **Step 3: Write the minimal implementation**
 
 Create `lib/url-content-key.ts`:
 
@@ -85,7 +85,7 @@ export const URL_CONTENT_KEY =
   `replaceRegexpOne(replaceRegexpOne(url, '^(?i:https?://)', ''), '/$', '')`
 ```
 
-- [ ] **Step 4: Run the test and confirm GREEN**
+- [x] **Step 4: Run the test and confirm GREEN**
 
 Run:
 
@@ -95,7 +95,7 @@ npm test -- __tests__/url-content-key.test.ts
 
 Expected: PASS (1 test).
 
-- [ ] **Step 5: Verify the regex semantics against real ClickHouse**
+- [ ] **Step 5: Verify the regex semantics against real ClickHouse** — NOT DONE: no Docker daemon reachable from the dev machine that implemented Tasks 1-5 (confirmed twice, by me and independently by the Task 1 implementer subagent). Still required before Task 4's `APPLY=1` is ever considered, and before fully trusting the `(?i:...)` syntax in production. Do this on a host with ClickHouse access before going further than the dry-run.
 
 This requires Docker/ClickHouse access. If unavailable in your current environment, leave this checkbox open and do it before Task 4's dry-run (Task 4 depends on this syntax being confirmed).
 
@@ -107,7 +107,7 @@ Expected: both columns return `Example.com/Login` — proving a mixed-case schem
 
 If this errors instead (RE2 rejects the `(?i:...)` syntax): open `lib/url-content-key.ts`, replace `'^(?i:https?://)'` with `'^https?://'`, re-run the query above using `'https://Example.com/Login/'` (lowercase scheme) in place of the mixed-case literal, confirm it now returns `Example.com/Login`, then redo Steps 1–4 with the lowercase-only pattern (update the test's expected string to match) before continuing to Task 2.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit** — `4b3d821`
 
 ```bash
 git add lib/url-content-key.ts __tests__/url-content-key.test.ts
