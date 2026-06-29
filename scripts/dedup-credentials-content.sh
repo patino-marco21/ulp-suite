@@ -2,7 +2,9 @@
 # =============================================================================
 # dedup-credentials-content.sh
 #
-# Removes EXACT (url, email, password) duplicates from ulp.credentials —
+# Removes content duplicates from ulp.credentials -- identical email/password
+# and the same url once scheme and a trailing slash are ignored (see
+# lib/url-content-key.ts) —
 # the cross-source / cross-import copies that the earlier dedup (task #9) and
 # the import-time guards deliberately KEEP, because their keys all include
 # source_file + imported_at (to preserve provenance). The same credential
@@ -39,7 +41,12 @@ cd "$PROJECT_DIR"
 
 CH="docker exec ulpsuite_clickhouse clickhouse-client --query"
 APPLY="${APPLY:-0}"
-KEY="url, email, password"                       # content dedup key
+# Content dedup key. Must stay byte-identical to URL_CONTENT_KEY in
+# lib/url-content-key.ts (bash can't import TS) -- email/password are exact,
+# only the url comparison ignores scheme and one trailing slash. The `\$`
+# below is bash-escaping for a literal `$`; Step 2 proves the stored value
+# matches the TS expression exactly.
+KEY="replaceRegexpOne(replaceRegexpOne(url, '^(?i:https?://)', ''), '/\$', ''), email, password"
 ORDER="url, email, password, imported_at"        # ASC → LIMIT 1 BY keeps earliest
 
 echo ""
