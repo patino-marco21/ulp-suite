@@ -10,7 +10,8 @@
 # source_file + imported_at (to preserve provenance). The same credential
 # arriving in multiple combolist files therefore shows up 2–3× in the browser.
 #
-# This collapses each (url, email, password) to ONE row, keeping the EARLIEST
+# This collapses each (url, email, password) to ONE row — url meaning the
+# normalized form below ($KEY), not the literal column — keeping the EARLIEST
 # imported_at (its first sighting). Provenance of the other source_files for
 # that exact credential is lost — that is the point of a content-level dedup.
 #
@@ -20,9 +21,10 @@
 #      ⚠️ The table is now ReplicatedMergeTree, so we rewrite BOTH the table name
 #         AND the ZooKeeper path in the DDL (a clone with the same path would
 #         collide: REPLICA_ALREADY_EXISTS).
-#   2. INSERT … SELECT * … ORDER BY url,email,password,imported_at
-#      LIMIT 1 BY url,email,password  → one earliest row per credential.
-#   3. Verify count == uniqExact(cityHash64(url,email,password)) of the original
+#   2. INSERT … SELECT * … ORDER BY $ORDER, LIMIT 1 BY $KEY (see below — url
+#      here is the scheme/trailing-slash-normalized form, not the raw column)
+#      → one earliest row per credential.
+#   3. Verify count == uniqExact(cityHash64($KEY)) of the original (see below)
 #      AND that credentials_cdedup has 0 internal content-dupes.
 #   4. RENAME swap. ulp.credentials_predup is the untouched original (rollback).
 #
