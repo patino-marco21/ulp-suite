@@ -126,7 +126,7 @@ git commit -m "feat(dedupe): add shared scheme/slash-insensitive URL content key
 - Consumes: `URL_CONTENT_KEY` from `lib/url-content-key.ts`.
 - Produces: unchanged exports `DEDUPE_BY: string`, `dedupeLimitBy(dedupe: boolean): string`, `dedupeCountExpr(dedupe: boolean): string` — same names and signatures, new underlying value. No caller (e.g. `app/api/credentials/route.ts`) needs to change.
 
-- [ ] **Step 1: Update the test to expect the new key (RED)**
+- [x] **Step 1: Update the test to expect the new key (RED)**
 
 Replace `__tests__/ulp-dedupe.test.ts` entirely:
 
@@ -160,7 +160,7 @@ describe('ulp-dedupe', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test and confirm RED**
+- [x] **Step 2: Run the test and confirm RED**
 
 Run:
 
@@ -170,7 +170,7 @@ npm test -- __tests__/ulp-dedupe.test.ts
 
 Expected: FAIL — `DEDUPE_BY` still equals the old literal `'url, email, password'`, not the new expression.
 
-- [ ] **Step 3: Update the implementation**
+- [x] **Step 3: Update the implementation**
 
 In `lib/ulp-dedupe.ts`, add the import at the top and replace the `DEDUPE_BY` export:
 
@@ -201,7 +201,7 @@ to:
  * These survive in storage because every storage-level
 ```
 
-- [ ] **Step 4: Run the test and confirm GREEN**
+- [x] **Step 4: Run the test and confirm GREEN**
 
 Run:
 
@@ -211,7 +211,7 @@ npm test -- __tests__/ulp-dedupe.test.ts
 
 Expected: PASS (5 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit** — `e2f648f` (plus a tiny follow-up `e47909d` fixing two stale inline comments the code-quality reviewer caught)
 
 ```bash
 git add lib/ulp-dedupe.ts __tests__/ulp-dedupe.test.ts
