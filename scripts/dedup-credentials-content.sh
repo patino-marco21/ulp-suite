@@ -67,11 +67,11 @@ FROM ulp.credentials
 SETTINGS max_execution_time = 300
 " --format PrettyCompact
 echo ""
-echo "-- worst offenders: most-duplicated exact credentials --"
+echo "-- worst offenders: most-duplicated content-key credentials --"
 $CH "
 SELECT substring(url,1,40) AS url, substring(email,1,24) AS email, count() AS copies
 FROM ulp.credentials
-GROUP BY url, email, password
+GROUP BY $KEY
 ORDER BY copies DESC
 LIMIT 12
 SETTINGS max_execution_time = 300
