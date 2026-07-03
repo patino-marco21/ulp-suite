@@ -1,8 +1,13 @@
+import { URL_CONTENT_KEY } from '@/lib/url-content-key'
+
 /**
  * View-level exact-duplicate collapsing for the credential browser/search.
  *
  * "Exact duplicate" = same destination + same credential: identical
- * (url, email, password). These survive in storage because every storage-level
+ * (url, email, password), where url is compared scheme- and
+ * trailing-slash-insensitively (see lib/url-content-key.ts) — http://,
+ * https://, and no-scheme captures of the same host+path collapse to one row.
+ * These survive in storage because every storage-level
  * dedup keys on source_file + imported_at to preserve provenance (see
  * app/api/admin/dedup/route.ts and lib/upload-dedup.ts), so the same credential
  * arriving in multiple combolist files shows up 2–3× in results.
@@ -11,7 +16,7 @@
  * this keeps the VIEW unique going forward (a new overlapping import can't make
  * the browser show dupes before the next storage pass), without another rewrite.
  *
- * Implementation: `LIMIT 1 BY url, email, password` on the data query (one row
+ * Implementation: `LIMIT 1 BY <content key>` on the data query (one row
  * per unique credential, in the active sort order) + `uniq(...)` for the count
  * (HyperLogLog — cheap/low-memory at any scale; ~0.5% error is fine for a result
  * tally). The identifiers resolve to the SELECT's normalized url/email/password
@@ -22,9 +27,9 @@
  * brand-new dupe split across a page boundary is the only gap, and the next
  * storage pass closes it. Storage stays the source of truth — nothing is deleted.
  */
-export const DEDUPE_BY = 'url, email, password'
+export const DEDUPE_BY = `${URL_CONTENT_KEY}, email, password`
 
-/** `LIMIT 1 BY url, email, password` (place between ORDER BY and LIMIT) or ''. */
+/** `LIMIT 1 BY <content key>` (place between ORDER BY and LIMIT) or ''. */
 export function dedupeLimitBy(dedupe: boolean): string {
   return dedupe ? `LIMIT 1 BY ${DEDUPE_BY}` : ''
 }

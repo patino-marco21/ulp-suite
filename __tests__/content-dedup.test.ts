@@ -9,14 +9,15 @@ import {
   contentDedupApplyEnabled,
   minExcessToApply,
 } from '@/lib/content-dedup'
+import { URL_CONTENT_KEY } from '@/lib/url-content-key'
 
 describe('content-dedup', () => {
   test('does not claim that an import-time hook still triggers content dedup', () => {
     const source = readFileSync(new URL('../lib/content-dedup.ts', import.meta.url), 'utf8')
     expect(source).not.toContain('post-import hook')
   })
-  test('CONTENT_KEY is url, email, password', () => {
-    expect(CONTENT_KEY).toBe('url, email, password')
+  test('CONTENT_KEY ignores url scheme/trailing-slash (email, password stay exact)', () => {
+    expect(CONTENT_KEY).toBe(`${URL_CONTENT_KEY}, email, password`)
   })
 
   describe('buildDeleteSql', () => {
@@ -26,14 +27,14 @@ describe('content-dedup', () => {
     })
     test('keeps one survivor per content group (min full-hash, grouped by content)', () => {
       expect(sql).toContain('NOT IN (SELECT min(')
-      expect(sql).toContain('GROUP BY url, email, password')
+      expect(sql).toContain(`GROUP BY ${URL_CONTENT_KEY}, email, password`)
     })
   })
 
   describe('buildStatsSql', () => {
     const sql = buildStatsSql()
     test('reports total and excess in one pass without the duplicate subquery', () => {
-      expect(sql).toContain('uniqExact(cityHash64(url, email, password))')
+      expect(sql).toContain(`uniqExact(cityHash64(${URL_CONTENT_KEY}, email, password))`)
       expect(sql).toContain('AS excess')
       expect(sql).not.toContain('AS deletable')
       expect(sql).not.toContain('countIf(')

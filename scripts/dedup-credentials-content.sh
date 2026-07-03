@@ -2,13 +2,16 @@
 # =============================================================================
 # dedup-credentials-content.sh
 #
-# Removes EXACT (url, email, password) duplicates from ulp.credentials —
+# Removes content duplicates from ulp.credentials -- identical email/password
+# and the same url once scheme and a trailing slash are ignored (see
+# lib/url-content-key.ts) —
 # the cross-source / cross-import copies that the earlier dedup (task #9) and
 # the import-time guards deliberately KEEP, because their keys all include
 # source_file + imported_at (to preserve provenance). The same credential
 # arriving in multiple combolist files therefore shows up 2–3× in the browser.
 #
-# This collapses each (url, email, password) to ONE row, keeping the EARLIEST
+# This collapses each (url, email, password) to ONE row — url meaning the
+# normalized form below ($KEY), not the literal column — keeping the EARLIEST
 # imported_at (its first sighting). Provenance of the other source_files for
 # that exact credential is lost — that is the point of a content-level dedup.
 #
@@ -18,9 +21,10 @@
 #      ⚠️ The table is now ReplicatedMergeTree, so we rewrite BOTH the table name
 #         AND the ZooKeeper path in the DDL (a clone with the same path would
 #         collide: REPLICA_ALREADY_EXISTS).
-#   2. INSERT … SELECT * … ORDER BY url,email,password,imported_at
-#      LIMIT 1 BY url,email,password  → one earliest row per credential.
-#   3. Verify count == uniqExact(cityHash64(url,email,password)) of the original
+#   2. INSERT … SELECT * … ORDER BY $ORDER, LIMIT 1 BY $KEY (see below — url
+#      here is the scheme/trailing-slash-normalized form, not the raw column)
+#      → one earliest row per credential.
+#   3. Verify count == uniqExact(cityHash64($KEY)) of the original (see below)
 #      AND that credentials_cdedup has 0 internal content-dupes.
 #   4. RENAME swap. ulp.credentials_predup is the untouched original (rollback).
 #
@@ -39,7 +43,12 @@ cd "$PROJECT_DIR"
 
 CH="docker exec ulpsuite_clickhouse clickhouse-client --query"
 APPLY="${APPLY:-0}"
-KEY="url, email, password"                       # content dedup key
+# Content dedup key. Must stay byte-identical to URL_CONTENT_KEY in
+# lib/url-content-key.ts (bash can't import TS) -- email/password are exact,
+# only the url comparison ignores scheme and one trailing slash. The `\$`
+# below is bash-escaping for a literal `$`; Step 2 proves the stored value
+# matches the TS expression exactly.
+KEY="replaceRegexpOne(replaceRegexpOne(url, '^(?i:https?://)', ''), '/\$', ''), email, password"
 ORDER="url, email, password, imported_at"        # ASC → LIMIT 1 BY keeps earliest
 
 echo ""
@@ -60,11 +69,11 @@ FROM ulp.credentials
 SETTINGS max_execution_time = 300
 " --format PrettyCompact
 echo ""
-echo "-- worst offenders: most-duplicated exact credentials --"
+echo "-- worst offenders: most-duplicated content-key credentials --"
 $CH "
 SELECT substring(url,1,40) AS url, substring(email,1,24) AS email, count() AS copies
 FROM ulp.credentials
-GROUP BY url, email, password
+GROUP BY $KEY
 ORDER BY copies DESC
 LIMIT 12
 SETTINGS max_execution_time = 300

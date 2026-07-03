@@ -2,8 +2,10 @@
  * Content-level deduplication of ulp.credentials — the durable follow-up to the
  * one-time scripts/dedup-credentials-content.sh.
  *
- * WHY this exists (and why OPTIMIZE can't): exact (url,email,password) duplicates
- * arrive across DIFFERENT source files / import times. `OPTIMIZE … DEDUPLICATE BY`
+ * WHY this exists (and why OPTIMIZE can't): content duplicates — identical
+ * email/password and the same URL once scheme and a trailing slash are
+ * ignored (see lib/url-content-key.ts) — arrive across DIFFERENT source files /
+ * import times. `OPTIMIZE … DEDUPLICATE BY`
  * cannot collapse them — ClickHouse requires the DEDUPLICATE key to include the
  * ORDER BY + partition columns (domain, email, imported_at), and `imported_at`
  * being mandatory is exactly what keeps cross-import copies distinct. So content
@@ -23,9 +25,10 @@
  * partition-scoped passes). The min-excess threshold avoids needless mutations.
  */
 import { getClient } from '@/lib/clickhouse'
+import { URL_CONTENT_KEY } from '@/lib/url-content-key'
 
-/** Content identity: same destination + same credential. */
-export const CONTENT_KEY = 'url, email, password'
+/** Content identity: same destination + same credential (scheme/trailing-slash-insensitive on the URL). */
+export const CONTENT_KEY = `${URL_CONTENT_KEY}, email, password`
 
 /** Full-row hash — picks one deterministic survivor per content group. */
 export const FULL_HASH =
