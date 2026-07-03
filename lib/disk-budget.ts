@@ -15,7 +15,7 @@ export function diskBudgetBytes(env: NodeJS.ProcessEnv = process.env): number {
 
 export function buildLiveBytesSql(): string {
   return `SELECT
-    (SELECT sum(data_compressed_bytes) FROM system.parts WHERE database = 'ulp' AND active) +
+    (SELECT sum(data_compressed_bytes) FROM system.parts WHERE database = 'ulp' AND table = 'credentials' AND active) +
     (SELECT sum(data_compressed_bytes) FROM system.projection_parts WHERE database = 'ulp' AND active) AS bytes`
 }
 

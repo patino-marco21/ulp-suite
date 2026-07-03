@@ -21,6 +21,20 @@ describe('buildLiveBytesSql', () => {
     expect(sql).toContain('system.projection_parts')
     expect(sql).toContain('data_compressed_bytes')
   })
+
+  test('scopes the base-table (system.parts) subquery to ulp.credentials, not the whole database', () => {
+    const sql = buildLiveBytesSql()
+    // Isolate the system.parts subquery specifically (as opposed to
+    // system.projection_parts, which only credentials has a projection for
+    // and is therefore correctly scoped by construction). Without
+    // `AND table = 'credentials'` here, this sums bytes across every table
+    // in the ulp database (sources, domains, ...), not just the live
+    // credentials store this module claims to measure.
+    const partsClauseMatch = sql.match(/FROM system\.parts WHERE ([^)]*)\)/)
+    expect(partsClauseMatch).not.toBeNull()
+    const partsClause = partsClauseMatch![1]
+    expect(partsClause).toContain("table = 'credentials'")
+  })
 })
 
 describe('diskBudgetPct', () => {
