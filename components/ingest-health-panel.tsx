@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Activity, Database, GitMerge, Gauge } from "lucide-react"
+import { Activity, Database, GitMerge, Gauge, HardDrive } from "lucide-react"
 
 interface IngestHealth {
   app: {
@@ -22,6 +22,12 @@ interface IngestHealth {
     partsThreshold: number
     activeMerges: number
     memoryBytes: number
+    note?: string
+  }
+  diskBudget: {
+    usedBytes: number
+    budgetBytes: number
+    pct: number
     note?: string
   }
 }
@@ -53,7 +59,7 @@ export function IngestHealthPanel() {
   }, [])
 
   if (!data) return null
-  const { app, clickhouse } = data
+  const { app, clickhouse, diskBudget } = data
   const active = app.filename !== null && Date.now() - app.updatedAt < 5_000
   const partsPct = Math.min(100, Math.round((clickhouse.activeParts / clickhouse.partsThreshold) * 100))
 
@@ -113,6 +119,12 @@ export function IngestHealthPanel() {
           <div className="flex items-center gap-1.5">
             <Gauge className="h-3.5 w-3.5 text-muted-foreground" />
             <span>{fmtGB(clickhouse.memoryBytes)}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <HardDrive className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className={diskBudget.pct >= 70 ? "text-red-600 font-medium" : ""}>
+              {fmtGB(diskBudget.usedBytes)} / {fmtGB(diskBudget.budgetBytes)} ({diskBudget.pct}%)
+            </span>
           </div>
           {clickhouse.note && <span className="text-xs text-muted-foreground">({clickhouse.note})</span>}
         </div>

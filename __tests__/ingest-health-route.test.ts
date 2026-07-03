@@ -30,11 +30,12 @@ beforeEach(() => {
 })
 
 describe('GET /api/monitoring/ingest-health', () => {
-  it('returns the store snapshot + clickhouse parts/merges/memory', async () => {
+  it('returns the store snapshot + clickhouse parts/merges/memory + disk budget', async () => {
     mockEQ
-      .mockResolvedValueOnce([{ c: 42 }])    // parts
-      .mockResolvedValueOnce([{ c: 3 }])     // merges
-      .mockResolvedValueOnce([{ v: 8_000_000_000 }]) // memory
+      .mockResolvedValueOnce([{ c: 42 }])                          // parts
+      .mockResolvedValueOnce([{ c: 3 }])                           // merges
+      .mockResolvedValueOnce([{ v: 8_000_000_000 }])                // memory
+      .mockResolvedValueOnce([{ bytes: 275 * 1024 ** 3 }])          // disk budget
     const res = await GET({} as any)
     const json = await res.json()
     expect(json.app.bottleneck).toBe('insert')
@@ -42,6 +43,9 @@ describe('GET /api/monitoring/ingest-health', () => {
     expect(json.clickhouse.partsThreshold).toBe(1000)
     expect(json.clickhouse.activeMerges).toBe(3)
     expect(json.clickhouse.memoryBytes).toBe(8_000_000_000)
+    expect(json.diskBudget.usedBytes).toBe(275 * 1024 ** 3)
+    expect(json.diskBudget.budgetBytes).toBe(550 * 1024 ** 3)
+    expect(json.diskBudget.pct).toBe(50)
   })
 
   it('degrades to zeros + note when system tables are unavailable', async () => {
@@ -50,6 +54,8 @@ describe('GET /api/monitoring/ingest-health', () => {
     const json = await res.json()
     expect(json.clickhouse.activeParts).toBe(0)
     expect(json.clickhouse.note).toBeTruthy()
+    expect(json.diskBudget.usedBytes).toBe(0)
+    expect(json.diskBudget.note).toBeTruthy()
     expect(json.app.filename).toBe('x.txt')
   })
 })
