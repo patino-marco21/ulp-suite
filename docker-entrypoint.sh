@@ -34,7 +34,10 @@ chown -R nextjs:nodejs /app/data     2>/dev/null || true
 chown -R nextjs:nodejs /app/inbox    2>/dev/null || true
 chmod -R 775 /app/uploads 2>/dev/null || true
 chmod -R 775 /app/data    2>/dev/null || true
-chmod -R 775 /app/inbox   2>/dev/null || true
+# inbox is a host drop folder (README: `cp *.txt ~/ulp-suite/inbox/`) — needs to
+# stay writable by host users outside the nextjs:nodejs uid/gid, unlike
+# uploads/data which are only ever touched by the container itself.
+chmod -R 777 /app/inbox   2>/dev/null || true
 
 echo "[ulp-suite] launching Next.js as nextjs user..."
 # Use the absolute path to node so the exec survives any PATH stripping by su.

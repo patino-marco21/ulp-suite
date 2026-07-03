@@ -177,7 +177,32 @@ function enqueueFile(filePath: string): void {
   const filename = path.basename(filePath)
   const ext      = path.extname(filename).toLowerCase()
 
-  if (!SUPPORTED_EXTS.has(ext))     return   // unsupported extension
+  if (!SUPPORTED_EXTS.has(ext)) {
+    // Previously a silent `return` here — the file just sat in inbox/ forever
+    // with zero visibility, re-checked (and re-ignored) every 30s by reconcile().
+    // Move it to failed/ (same as a real processing failure) so it's surfaced
+    // in the job log / Inbox Monitor UI instead of vanishing from view.
+    // The rename is the race gate: if a concurrent call (chokidar 'add' +
+    // reconcile firing close together) already moved it, this throws and we
+    // bail without double-logging — same pattern as claimFileForProcessing.
+    try {
+      fs.mkdirSync(FAIL, { recursive: true })
+      fs.renameSync(filePath, path.join(FAIL, filename))
+    } catch {
+      return
+    }
+    console.warn(`[inbox-watcher] unsupported extension, moved to failed/: ${filename}`)
+    logJob({
+      source:        'inbox',
+      filename,
+      status:        'failed',
+      imported:      0,
+      skipped:       0,
+      duration_ms:   0,
+      error_message: `Unsupported file extension "${ext || '(none)'}" — supported: .txt, .csv, .zip`,
+    })
+    return
+  }
   if (inFlight.has(filename))       return   // already queued or processing
   // Use path separator guards so 'done_batch.txt' is NOT excluded:
   if (filePath.startsWith(DONE_PREFIX) || filePath.startsWith(FAIL_PREFIX) || filePath.startsWith(PROC_PREFIX)) return
