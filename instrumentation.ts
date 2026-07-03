@@ -57,6 +57,15 @@ export async function register() {
       } catch (err) {
         console.error('[instrumentation] Content-dedup cron failed to start:', err)
       }
+
+      // Scheduled proj_imported_desc scoping (clears the recency projection from
+      // partitions older than the recency window; harmless if it never runs).
+      try {
+        const { startProjectionScopeCron } = await import('./lib/projection-scope-cron')
+        startProjectionScopeCron()
+      } catch (err) {
+        console.error('[instrumentation] Projection-scope cron failed to start:', err)
+      }
     }
   }
 }
