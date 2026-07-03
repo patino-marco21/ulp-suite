@@ -29,7 +29,9 @@ Reserving ~30% of the 784GB disk as headroom for merges, safety margin, and the 
 
 A 414-million-row `ALTER TABLE ... DELETE` previously hit ClickHouse's 20GB memory ceiling (`MEMORY_LIMIT_EXCEEDED`, see `docs/superpowers/specs/2026-06-21-low-memory-t3-purge-design.md`) — any new heavyweight, full-table mutation-style operation at multi-billion-row scale risks repeating that incident and must use the same bounded-memory `DELETE FROM ... SETTINGS lightweight_deletes_sync=2, max_threads=2` pattern, or `DROP PARTITION` (metadata-only, no row-by-row rewrite) wherever partition boundaries allow it.
 
-No empirical ingest-rate benchmark exists yet for this exact pipeline on this hardware — `scripts/benchmark-import.ts` requires the app container's ClickHouse env vars (internal Docker network hostname), and a first attempt from the host and from the deployed `ulpsuite_app` image both failed (missing env vars; production image doesn't ship `scripts/` or `tsx`). Getting a real rows/sec number is called out as an early task in the implementation plan, not solved by this design.
+**Measured ingest throughput (2026-07-03):** 43,880 rows/sec, insert-bound (insert 9.77s vs. parse 0.46s for a 100K-row batch; 449,861 of 500,000 requested rows survived filtering), via `scripts/benchmark-import.ts --rows 500000` run from a throwaway `node:24-bookworm-slim` container on `ulpsuite_network` (peak RSS 461MB, 5 parts, 0 merges). `scripts/benchmark-import.ts` needs the app container's ClickHouse env vars (internal Docker network hostname); the deployed `ulpsuite_app` image doesn't ship `scripts/` or `tsx`, so a throwaway container bind-mounting the repo onto the same network is the working approach — see the implementation plan's Task 1 for the exact command.
+
+At this measured rate, 100 billion raw lines would take roughly 26 days of continuous processing; 500 billion would take roughly 4.3 months. This is a real, sustained-duration undertaking, not a short batch job — worth factoring into any operational planning around "consolidating hundreds of billions of lines."
 
 ## Design
 
