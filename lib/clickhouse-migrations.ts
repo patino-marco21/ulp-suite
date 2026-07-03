@@ -72,7 +72,25 @@ let migrationsDone = false
 //     (chrome://, chrome-extension://, file://, ftp://, data:, javascript:, …) on
 //     top of v12's IP/:port/.php/localhost set. MODIFY COLUMN swaps the MATERIALIZED
 //     expression; MATERIALIZE COLUMN recomputes existing parts in the background.
-const DDL_VERSION = 13
+// v14: proj_imported_desc projection. Table is ORDER BY (domain, email, imported_at) —
+//     imported_at is LAST, not first — so the Credentials Browser's default view
+//     (SORT_MAP['imported_desc'] in lib/cursor-pagination.ts: imported_at DESC, domain
+//     ASC, email ASC, url ASC, password ASC) isn't a prefix of the table's physical
+//     order and forces a full read + sort at WHERE 1=1 (confirmed 29.2s at ~34M rows).
+//     A projection's ORDER BY can't use DESC (Code: 62 syntax error), so
+//     negate(toUnixTimestamp(imported_at)) stands in for "imported_at DESC" — ascending
+//     on the negated timestamp is exactly descending on imported_at. Confirmed live
+//     (2026-07-03, scripts/verify-imported-desc-projection.sh with
+//     force_optimize_projection=1 — a real yes/no, not a cache-warming timing artifact)
+//     that ClickHouse's optimizer does match the app's literal "imported_at DESC" query
+//     against this key via monotonic-function inference: 0.592s → 0.099s (6x) at 16.85M
+//     rows. Costs real disk — the projection re-stores these 16 columns in the new sort
+//     order (1.04 GiB alongside a 533.50 MiB base table at 16.85M rows, so budget for
+//     roughly 2x the base table size, not a small fraction of it). ADD PROJECTION is
+//     metadata-only/instant; MATERIALIZE PROJECTION backfills existing parts in the
+//     background — until it finishes, old parts fall back to the pre-projection full
+//     scan for this query (no error, just no speedup yet for that data).
+const DDL_VERSION = 14
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -630,6 +648,22 @@ export async function runClickHouseMigrations(): Promise<void> {
       `ALTER TABLE ulp.credentials MATERIALIZE COLUMN is_noise`
     )
     console.warn('[ClickHouse migration] DDL v13 applied (broadened is_noise — MATERIALIZE running in background)')
+  }
+
+  // v14 — proj_imported_desc projection (see DDL_VERSION comment above).
+  // ADD PROJECTION is metadata-only/instant; new inserts get it for free.
+  // MATERIALIZE PROJECTION backfills existing parts as a background mutation.
+  if (lastDdl < 14) {
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD PROJECTION IF NOT EXISTS proj_imported_desc (
+        SELECT url, email, password, source_file, breach_name, country_tier, login_type,
+               password_length, password_mask, url_scheme, is_corporate_email, email_domain,
+               url_host, password_entropy_band, imported_at, domain
+        ORDER BY negate(toUnixTimestamp(imported_at)), domain, email, url, password
+      )`,
+      `ALTER TABLE ulp.credentials MATERIALIZE PROJECTION proj_imported_desc`
+    )
+    console.warn('[ClickHouse migration] DDL v14 applied (added proj_imported_desc projection — MATERIALIZE running in background)')
   }
 
   if (lastDdl < DDL_VERSION) {
