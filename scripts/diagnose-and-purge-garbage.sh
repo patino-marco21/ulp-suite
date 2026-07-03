@@ -21,6 +21,29 @@
 #       UTF-8 character (real UTF-8 decoded as latin1 by the parser) -- NEVER
 #       checked on password, the one field that legitimately carries
 #       non-ASCII content. See lib/ulp-garbage.ts (shared with the parser).
+#   (e) email or password differs from its own trimBoth() -- a leftover
+#       leading/trailing separator character (tab/LF/CR/space), not content.
+#       Checked on password too (unlike (c)/(d)) because this is structural,
+#       not content -- see lib/ulp-garbage.ts's hasEdgeWhitespace.
+#   (f) password is an exact-match export/serialization placeholder (null,
+#       undefined, unknown/[unknown], n/a) -- mirrors SENTINEL_PASSWORDS in
+#       lib/ulp-parser.ts; keep the two lists in sync. Deliberately excludes
+#       "password" and "test" -- common real (if weak) user-chosen passwords,
+#       not extraction-failure artifacts (2026-07-03 finding).
+#   (g) email contains 2+ "@" signs -- a real address has exactly one; two or
+#       more means two records got concatenated with no separator (e.g.
+#       "user@gmail.comother@yahoo.de"). See lib/ulp-garbage.ts's
+#       hasGarbageIdentity, checked BEFORE the letter-less-domain rule in (c)
+#       since that rule only inspects text after the LAST "@" and would
+#       otherwise see a normal trailing domain and miss the merge.
+#   (h) email or url contains "ic3l0gs" or "karmacloud" -- a seller
+#       watermark/branding string found repeated 3-4x inside single rows in
+#       the 2026-07-03 ingest (a known combo-list practice: sellers inject a
+#       marker to brand/poison copies of their list). Dataset-specific, so
+#       intentionally NOT in lib/ulp-garbage.ts / the parser -- this is a
+#       one-off backlog cleanup, not a permanent structural rule. ~89% of
+#       these rows are already caught by (g); this adds the remainder where
+#       the watermark landed somewhere that didn't produce a 2nd "@".
 #
 # Rows with a junk url but a REAL email are PRESERVED (the parser salvages
 # those as email:password; deleting them would lose a real credential).
@@ -74,9 +97,15 @@ IS_GARBAGE=$(cat <<'EOF'
   OR position(email,    unhex('EFBFBD')) > 0
   OR position(password, unhex('EFBFBD')) > 0
   OR match(trimBoth(email), '\\s')
+  OR (length(email) - length(replaceAll(email, '@', ''))) >= 2
   OR (position(email,'@') > 0 AND NOT match(email_domain, '[a-z]'))
   OR match(email, '[\\x{C2}-\\x{EF}][\\x{80}-\\x{BF}]')
   OR match(url,   '[\\x{C2}-\\x{EF}][\\x{80}-\\x{BF}]')
+  OR email    != trimBoth(email)
+  OR password != trimBoth(password)
+  OR lower(password) IN ('null','undefined','unknown','[unknown]','n/a')
+  OR email ILIKE '%ic3l0gs%' OR email ILIKE '%karmacloud%'
+  OR url   ILIKE '%ic3l0gs%' OR url   ILIKE '%karmacloud%'
 )
 EOF
 )

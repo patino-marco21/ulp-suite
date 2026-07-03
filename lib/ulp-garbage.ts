@@ -2,20 +2,30 @@
  * Garbage-identity / mojibake classification — the malformed-credential
  * classes neither the parser's existing isJunkCredential gate nor
  * scripts/diagnose-and-purge-garbage.sh's IS_GARBAGE predicate catch today:
- * whitespace inside an email/login, an @-domain with no letter at all, and
- * non-replacement mojibake (real UTF-8 decoded as latin1).
+ * whitespace inside an email/login, 2+ "@" signs (concatenated records), an
+ * @-domain with no letter at all, and non-replacement mojibake (real UTF-8
+ * decoded as latin1).
  *
  * Mirrors the lib/ulp-noise.ts split: {@link GARBAGE_EXPR} is the canonical
  * SQL clause (embedded into scripts/diagnose-and-purge-garbage.sh's
- * IS_GARBAGE predicate); {@link hasGarbageIdentity} and
- * {@link hasMojibakeSignature} are the JS mirror, wired into the parser's
+ * IS_GARBAGE predicate); {@link hasGarbageIdentity}, {@link hasMojibakeSignature}
+ * and {@link hasEdgeWhitespace} are the JS mirror, wired into the parser's
  * isJunkCredential gate (lib/ulp-parser.ts) and unit-tested directly here.
  *
- * Scope: identity (email/login) and url only — NEVER password. Real emails
- * and URLs are pure ASCII, so whitespace / a letter-less domain / mojibake
- * there is always junk. Passwords are the one field that legitimately
- * carries non-ASCII content (e.g. a real "café123"), so every rule here
- * deliberately exempts password.
+ * Scope: identity (email/login) and url only — NEVER password content. Real
+ * emails and URLs are pure ASCII, so whitespace / a letter-less domain /
+ * mojibake there is always junk. Passwords are the one field that
+ * legitimately carries non-ASCII content (e.g. a real "café123") or internal
+ * whitespace (a real passphrase like "correct horse battery"), so every
+ * content rule here deliberately exempts password.
+ *
+ * {@link hasEdgeWhitespace} is the one exception, and it checks structure,
+ * not content: no login form accepts, and no person types, a password that
+ * starts or ends with a literal tab/newline/CR/space, so a value that
+ * differs from its own trim() is a leftover field-separator character the
+ * parser failed to fully consume, not real secret content. Applied to
+ * password too for that reason (2026-07-03 finding — real ingested data had
+ * passwords like "\tcamaro1976" and "\r7q1xnFLmhyfbX^fthH").
  */
 
 /**
@@ -44,17 +54,34 @@ export function hasMojibakeSignature(s: string): boolean {
 /**
  * True if `identity` (an email/login field) is structurally not a real
  * identity: internal whitespace (no real email contains a space — RFC
- * 5321/5322), or an @-domain with no letter at all (every real domain's TLD
- * has letters; catches "x@#", "x@123", and an empty domain after a bare "x@").
- * Logins with no "@" at all (bare usernames) are only checked for whitespace.
+ * 5321/5322), 2+ "@" signs (a real address has exactly one; two or more is
+ * two records concatenated with no separator — 2026-07-03 finding, e.g.
+ * "user@gmail.comother@yahoo.de" or "user@gmail.com@gmail.com" — note this
+ * must be checked BEFORE the domain-letter check below, which only looks at
+ * the text after the LAST "@" and would otherwise see a perfectly normal
+ * trailing domain and miss the merge entirely), or an @-domain with no letter
+ * at all (every real domain's TLD has letters; catches "x@#", "x@123", and an
+ * empty domain after a bare "x@"). Logins with no "@" at all (bare usernames)
+ * are only checked for whitespace.
  */
 export function hasGarbageIdentity(identity: string): boolean {
   const trimmed = identity.trim()
   if (/\s/.test(trimmed)) return true
-  const at = trimmed.lastIndexOf('@')
-  if (at === -1) return false
-  const domainPart = trimmed.slice(at + 1)
+  const firstAt = trimmed.indexOf('@')
+  if (firstAt === -1) return false
+  if (trimmed.indexOf('@', firstAt + 1) !== -1) return true
+  const domainPart = trimmed.slice(firstAt + 1)
   return !/[a-z]/i.test(domainPart)
+}
+
+/**
+ * True if `s` has leading/trailing whitespace or control characters (space,
+ * tab, newline, CR) still attached. See the file-level doc comment for why
+ * this is applied to password unlike every other rule here: it is a
+ * structural check on the field's edges, not on its content.
+ */
+export function hasEdgeWhitespace(s: string): boolean {
+  return s !== s.trim()
 }
 
 /**
@@ -67,7 +94,10 @@ export function hasGarbageIdentity(identity: string): boolean {
  */
 export const GARBAGE_EXPR = `(
   match(trimBoth(email), '\\s')
+  OR (length(email) - length(replaceAll(email, '@', ''))) >= 2
   OR (position(email,'@') > 0 AND NOT match(email_domain, '[a-z]'))
   OR match(email, '[\\x{C2}-\\x{EF}][\\x{80}-\\x{BF}]')
   OR match(url,   '[\\x{C2}-\\x{EF}][\\x{80}-\\x{BF}]')
+  OR email    != trimBoth(email)
+  OR password != trimBoth(password)
 )`

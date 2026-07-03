@@ -15,7 +15,7 @@
  *     www. prefix stripped
  */
 
-import { hasGarbageIdentity, hasMojibakeSignature } from '@/lib/ulp-garbage'
+import { hasGarbageIdentity, hasMojibakeSignature, hasEdgeWhitespace } from '@/lib/ulp-garbage'
 
 export interface ULPCredential {
   url:         string
@@ -147,16 +147,29 @@ function isPlaceholderLogin(login: string): boolean {
 /**
  * Passwords that are "no password could be extracted" sentinels, not real
  * secrets — browser "password not saved" markers ([NOT_SAVED], *none*, none),
- * extraction failures ([fail], [empty], [fetch_error]) and decryption failures
- * (Decryptionfailed., "Old or unknown version."). Exact match (trimmed,
- * case-insensitive) so a real password merely CONTAINING one of these as a
- * substring (e.g. "none123") is unaffected. An all-asterisk value ("********")
- * is a masked/redacted password, never a real secret.
+ * extraction failures ([fail], [empty], [fetch_error]), decryption failures
+ * (Decryptionfailed., "Old or unknown version."), and serialization
+ * placeholders (null, undefined, unknown/[unknown], n/a — mirroring
+ * PLACEHOLDER_LOGINS above, since these are the same export-tool artifacts
+ * landing in the password slot instead of the login slot: 2026-07-03 finding,
+ * ~17.7k rows). Exact match (trimmed, case-insensitive) so a real password
+ * merely CONTAINING one of these as a substring (e.g. "none123") is
+ * unaffected. An all-asterisk value ("********") is a masked/redacted
+ * password, never a real secret.
+ *
+ * Deliberately NOT listed: "password" and "test". Unlike the login-side
+ * placeholders, these are common real (if weak) user-chosen passwords — top-10
+ * material in every leaked-password frequency list — so treating them as
+ * sentinels would delete genuine, useful signal for a credential-intelligence
+ * tool. Same false-positive-vs-recall tradeoff already made for "pass" in
+ * PLACEHOLDER_LOGINS above, resolved the other way here because the real-
+ * password risk is far higher for an actual password value than for a login.
  */
 const SENTINEL_PASSWORDS = new Set([
   '[not_saved]', 'not_saved', '*none*', 'none', '[fail]',
   'decryptionfailed.', 'old or unknown version.',
   '[empty]', '*empty*', '[fetch_error]',
+  'null', 'undefined', 'unknown', '[unknown]', 'n/a',
 ])
 function isSentinelPassword(password: string): boolean {
   const p = password.trim()
@@ -187,6 +200,7 @@ function isJunkCredential(login: string, password: string): boolean {
       || hasJunkMarker(login)          || hasJunkMarker(password)
       || hasBinaryOrReplacement(login) || hasBinaryOrReplacement(password)
       || hasGarbageIdentity(login)     || hasMojibakeSignature(login)
+      || hasEdgeWhitespace(login)      || hasEdgeWhitespace(password)
 }
 
 // ── Block-format parser (Raccoon / Stealc / Meta / Vidar style) ──────────────
@@ -668,9 +682,12 @@ export function parseLine(
   // url/login/password from the junk. Drop it. (International text is unharmed.)
   // Also covers identity shape (internal whitespace, letter-less domain) and
   // non-replacement mojibake on url/login — never password (the one field
-  // that legitimately carries non-ASCII content).
+  // that legitimately carries non-ASCII content) — plus edge whitespace/control
+  // chars on login OR password (a leftover separator character, not content,
+  // so it's checked on both — see lib/ulp-garbage.ts).
   if (hasBinaryOrReplacement(url) || hasBinaryOrReplacement(login) || hasBinaryOrReplacement(password)
-      || hasGarbageIdentity(login) || hasMojibakeSignature(url) || hasMojibakeSignature(login)) {
+      || hasGarbageIdentity(login) || hasMojibakeSignature(url) || hasMojibakeSignature(login)
+      || hasEdgeWhitespace(login)  || hasEdgeWhitespace(password)) {
     return { credential: null, reason: 'garbage' }
   }
 

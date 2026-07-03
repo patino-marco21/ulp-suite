@@ -516,19 +516,19 @@ describe('§7 Label-line false-positive audit (documented behaviour)', () => {
     expect(why('PASSWORD: myPassword123')).toBe('garbage')
   })
 
-  test('Host: example.com → parsed as email=Host, password=example.com (false positive)', () => {
-    const c = cred('Host: example.com')
-    expect(c).not.toBeNull()
-    expect(c!.email).toBe('Host')
-    expect(c!.password).toContain('example.com')
+  test('Host: example.com → now rejected garbage (§26: password " example.com" has a leading space)', () => {
+    // Behaviour change (§26, 2026-07-03): previously a documented false positive
+    // (login=Host, password=" example.com" kept despite the leading space being
+    // a label-colon artifact, not content). hasEdgeWhitespace now catches this
+    // as a side effect — a genuine improvement, not a regression.
+    expect(cred('Host: example.com')).toBeNull()
+    expect(why('Host: example.com')).toBe('garbage')
   })
 
-  test('Username: admin → 2-field colon → email=Username, password=admin', () => {
-    const c = cred('Username: admin')
-    // password is ' admin' (3 chars with leading space, or 6 chars)
-    // ' admin'.length = 6 ≥ 3 → accepted
-    expect(c).not.toBeNull()
-    expect(c!.email).toBe('Username')
+  test('Username: admin → now rejected garbage (§26: password " admin" has a leading space)', () => {
+    // Behaviour change (§26, 2026-07-03): see above — same label-colon artifact.
+    expect(cred('Username: admin')).toBeNull()
+    expect(why('Username: admin')).toBe('garbage')
   })
 
   test('URL: https://example.com → parsed as url=, email=URL, password=https (false positive)', () => {
@@ -1766,5 +1766,66 @@ describe('§25 Garbage identity + non-replacement mojibake', () => {
     const r = parseULPContent(content, 'src.txt')
     expect(r.credentials.length).toBe(1)
     expect(r.credentials[0].email).toBe('realuser@example.com')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §26  Edge whitespace + password-slot serialization placeholders
+// 2026-07-03 finding from real ingested data: passwords with a leftover
+// leading/trailing tab/CR/LF/space still attached, and export placeholders
+// (null, undefined, unknown) landing in the password slot instead of login.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§26 Edge whitespace + password-slot placeholders', () => {
+  test('password with leading tab → rejected (not stored)', () => {
+    // colon-separated (not tab-separated): the tab/pipe/semicolon split paths
+    // all .trim() each field during parsing, so they can't reproduce this —
+    // colonSplit does not, matching how the real 2026-07-03 rows were built.
+    // (Rejected via 'no_fields' for this exact shape, not 'garbage' — colonSplit's
+    // own port/host detection bails first. Either way it's never stored.)
+    expect(cred('https://example.com:realuser:\tcamaro1976')).toBeNull()
+  })
+
+  test('password with leading space → rejected garbage', () => {
+    expect(cred('https://example.com:realuser: 0414L')).toBeNull()
+  })
+
+  test('login with trailing tab → rejected garbage', () => {
+    expect(cred('https://example.com:realuser\t:realpassword123')).toBeNull()
+  })
+
+  test('internal whitespace in password is KEPT — not an edge case (regression)', () => {
+    const c = cred('https://example.com\trealuser\tcorrect horse battery')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('correct horse battery')
+  })
+
+  test('password "null" → rejected garbage', () => {
+    expect(cred('https://example.com\trealuser\tnull')).toBeNull()
+    expect(why('https://example.com\trealuser\tnull')).toBe('garbage')
+  })
+
+  test('password "undefined" → rejected garbage', () => {
+    expect(cred('https://example.com\trealuser\tundefined')).toBeNull()
+  })
+
+  test('password "[UNKNOWN]" → rejected garbage', () => {
+    expect(cred('https://example.com\trealuser\t[UNKNOWN]')).toBeNull()
+  })
+
+  test('password "n/a" → rejected garbage', () => {
+    expect(cred('https://example.com\trealuser\tn/a')).toBeNull()
+  })
+
+  test('password "password" is KEPT — common real weak password, not a sentinel (regression)', () => {
+    const c = cred('https://example.com\trealuser\tpassword')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('password')
+  })
+
+  test('password "test" is KEPT — common real weak password, not a sentinel (regression)', () => {
+    const c = cred('https://example.com\trealuser\ttest')
+    expect(c).not.toBeNull()
+    expect(c!.password).toBe('test')
   })
 })
