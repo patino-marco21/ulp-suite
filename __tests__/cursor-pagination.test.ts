@@ -18,8 +18,8 @@ describe('SORT_MAP', () => {
     for (const k of keys) expect(SORT_MAP[k]).toBeDefined()
   })
 
-  test('domain_asc puts empty domains last', () => {
-    expect(SORT_MAP['domain_asc']).toContain("(domain='') ASC")
+  test('domain_asc sorts plainly by domain (matches table ORDER BY prefix)', () => {
+    expect(SORT_MAP['domain_asc']).toBe('domain ASC,  email ASC, imported_at ASC, url ASC, password ASC')
   })
 })
 
@@ -74,32 +74,18 @@ describe('buildCursorWhere', () => {
     expect(params).toHaveProperty('c_ia')
   })
 
-  test('domain_asc with non-empty domain: includes OR domain = empty', () => {
-    const payload = { sort: 'domain_asc' as SortKey, v: { ...baseRow, domain: 'test.com' } }
-    const { clause } = buildCursorWhere('domain_asc', payload)
-    expect(clause).toContain("domain = ''")
-    expect(clause).toContain("domain != ''")
+  test('domain_asc: tuple greater-than clause', () => {
+    const payload = { sort: 'domain_asc' as SortKey, v: { ...baseRow } }
+    const { clause, params } = buildCursorWhere('domain_asc', payload)
+    expect(clause).toBe('(domain, email, imported_at, url, password) > ({c_d:String}, {c_e:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String})')
+    expect(Object.keys(params)).toEqual(expect.arrayContaining(['c_d', 'c_e', 'c_ia', 'c_u', 'c_pw']))
   })
 
-  test('domain_asc with empty domain: only empty domain branch', () => {
-    const payload = { sort: 'domain_asc' as SortKey, v: { ...baseRow, domain: '' } }
-    const { clause } = buildCursorWhere('domain_asc', payload)
-    expect(clause).toContain("domain = ''")
-    expect(clause).not.toContain("domain != ''")
-  })
-
-  test('domain_desc with non-empty domain: includes domain < or OR empty', () => {
-    const payload = { sort: 'domain_desc' as SortKey, v: { ...baseRow, domain: 'test.com' } }
+  test('domain_desc: descending OR expansion', () => {
+    const payload = { sort: 'domain_desc' as SortKey, v: { ...baseRow } }
     const { clause } = buildCursorWhere('domain_desc', payload)
     expect(clause).toContain('domain < {c_d:String}')
-    expect(clause).toContain("domain = ''")
-  })
-
-  test('domain_desc with empty domain: only empty domain tiebreaker', () => {
-    const payload = { sort: 'domain_desc' as SortKey, v: { ...baseRow, domain: '' } }
-    const { clause } = buildCursorWhere('domain_desc', payload)
-    expect(clause).toContain("domain = ''")
-    expect(clause).not.toContain('domain < {c_d:String}')
+    expect(clause).toContain('domain = {c_d:String}')
   })
 
   test('email_asc: tuple greater-than', () => {

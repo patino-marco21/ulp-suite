@@ -7,8 +7,8 @@ export type SortKey =
 export const SORT_MAP: Record<SortKey, string> = {
   imported_desc: 'imported_at DESC, domain ASC, email ASC, url ASC, password ASC',
   imported_asc:  'imported_at ASC,  domain ASC, email ASC, url ASC, password ASC',
-  domain_asc:    "(domain='') ASC, domain ASC, email ASC, imported_at ASC, url ASC, password ASC",
-  domain_desc:   "(domain='') ASC, domain DESC, email ASC, imported_at ASC, url ASC, password ASC",
+  domain_asc:    'domain ASC,  email ASC, imported_at ASC, url ASC, password ASC',
+  domain_desc:   'domain DESC, email ASC, imported_at ASC, url ASC, password ASC',
   email_asc:     'email ASC, domain ASC, imported_at ASC, url ASC, password ASC',
   email_desc:    'email DESC, domain ASC, imported_at ASC, url ASC, password ASC',
   pw_len_desc:   'password_length DESC, domain ASC, email ASC, imported_at ASC, url ASC',
@@ -60,34 +60,16 @@ export function buildCursorWhere(
         clause: `(imported_at < {c_ia:DateTime} OR (imported_at = {c_ia:DateTime} AND (domain, email, url, password) > ({c_d:String}, {c_e:String}, {c_u:String}, {c_pw:String})))`,
         params: { c_ia: v.imported_at, c_d: v.domain, c_e: v.email, c_u: v.url, c_pw: v.password },
       }
-    case 'domain_asc': {
-      const isEmpty = (v.domain as string) === ''
-      const p = { c_d: v.domain, c_e: v.email, c_ia: v.imported_at, c_u: v.url, c_pw: v.password }
-      if (isEmpty) {
-        return {
-          clause: `(domain = '' AND (email, imported_at, url, password) > ({c_e:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String}))`,
-          params: p,
-        }
-      }
+    case 'domain_asc':
       return {
-        clause: `((domain != '' AND (domain, email, imported_at, url, password) > ({c_d:String}, {c_e:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String})) OR domain = '')`,
-        params: p,
+        clause: `(domain, email, imported_at, url, password) > ({c_d:String}, {c_e:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String})`,
+        params: { c_d: v.domain, c_e: v.email, c_ia: v.imported_at, c_u: v.url, c_pw: v.password },
       }
-    }
-    case 'domain_desc': {
-      const isEmpty = (v.domain as string) === ''
-      const p = { c_d: v.domain, c_e: v.email, c_ia: v.imported_at, c_u: v.url, c_pw: v.password }
-      if (isEmpty) {
-        return {
-          clause: `(domain = '' AND (email, imported_at, url, password) > ({c_e:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String}))`,
-          params: p,
-        }
-      }
+    case 'domain_desc':
       return {
-        clause: `((domain != '' AND (domain < {c_d:String} OR (domain = {c_d:String} AND (email, imported_at, url, password) > ({c_e:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String})))) OR domain = '')`,
-        params: p,
+        clause: `(domain < {c_d:String} OR (domain = {c_d:String} AND (email, imported_at, url, password) > ({c_e:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String})))`,
+        params: { c_d: v.domain, c_e: v.email, c_ia: v.imported_at, c_u: v.url, c_pw: v.password },
       }
-    }
     case 'email_asc':
       return {
         clause: `(email, domain, imported_at, url, password) > ({c_e:String}, {c_d:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String})`,
