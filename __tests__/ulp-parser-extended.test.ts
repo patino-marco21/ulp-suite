@@ -376,14 +376,22 @@ describe('§4 Domain extraction', () => {
     expect(c!.domain).toBe('')
   })
 
-  test('HTTP basic auth URL: user@host in URL — domain includes @ prefix (documented behaviour)', () => {
-    // extractDomain slices from after :// to first /; that includes "user@"
-    // This is existing (documented) behaviour — user@host is treated as the host segment.
+  test('HTTP basic auth URL: user@host in URL — domain strips userinfo prefix', () => {
     const c = cred('https://user@example.com/path:login:pass123')
     expect(c).not.toBeNull()
-    // Domain will be 'user@example.com' — the @ is part of the authority in RFC 3986
-    // but the parser does not strip the userinfo prefix. Document as-is.
-    expect(c!.domain).toContain('example.com')
+    expect(c!.domain).toBe('example.com')
+  })
+
+  test('android:// URL: domain is the package name, not the cert-fingerprint hash', () => {
+    const c = cred('android://k9aZtW7fY1Y2bGyRWiDEDqy7OL4SpPHl8HhBkB6a8G84UUjbTm6cxumzzePrsYmGj6Iqns_Zuh97uOYlVdhrwg==@com.example.app/:user123:pass456')
+    expect(c).not.toBeNull()
+    expect(c!.domain).toBe('com.example.app')
+  })
+
+  test('android:// URL with no cert-fingerprint hash: domain is the package name as-is', () => {
+    const c = cred('android://com.example.app:user123:pass456')
+    expect(c).not.toBeNull()
+    expect(c!.domain).toBe('com.example.app')
   })
 
   test('fqdn with many subdomains: only full host preserved (no www strip for non-www)', () => {

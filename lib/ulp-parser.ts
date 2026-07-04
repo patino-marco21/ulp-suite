@@ -72,7 +72,13 @@ export function extractDomain(url: string): string {
   if (schemeEnd !== -1) {
     const afterScheme = url.slice(schemeEnd + 3)
     const slashPos    = afterScheme.indexOf('/')
-    const host        = slashPos === -1 ? afterScheme : afterScheme.slice(0, slashPos)
+    let host          = slashPos === -1 ? afterScheme : afterScheme.slice(0, slashPos)
+    // Strip RFC 3986 userinfo ("user@" or, for android://, a cert-fingerprint
+    // hash@) so the extracted domain is the actual host/package, not the
+    // fingerprint — fingerprints sort essentially at random and clustered
+    // punctuation-first entries at the front of an alphabetical domain sort.
+    const atPos = host.lastIndexOf('@')
+    if (atPos !== -1) host = host.slice(atPos + 1)
     return stripPort(host).toLowerCase().replace(/^www\./, '')
   }
   // No scheme — bare domain like site.com/path
