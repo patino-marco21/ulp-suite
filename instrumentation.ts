@@ -36,34 +36,24 @@ export async function register() {
 
     // Start scheduled monitor re-scanner (production only — prevents dev hot-reload duplicates)
     if (process.env.NODE_ENV === 'production') {
-      console.warn('[instrumentation] DIAGNOSTIC: entered production cron-registration block')
       try {
-        console.warn('[instrumentation] DIAGNOSTIC: about to import monitor-rescan-cron')
         const { startMonitorRescanCron } = await import('./lib/monitor-rescan-cron')
-        console.warn('[instrumentation] DIAGNOSTIC: imported monitor-rescan-cron, calling it')
         startMonitorRescanCron()
-        console.warn('[instrumentation] DIAGNOSTIC: called startMonitorRescanCron')
       } catch (err) {
         console.error('[instrumentation] Monitor rescan cron failed to start:', err)
       }
 
       try {
-        console.warn('[instrumentation] DIAGNOSTIC: about to import inbox-watcher')
         const { startInboxWatcher } = await import('./lib/inbox-watcher')
-        console.warn('[instrumentation] DIAGNOSTIC: imported inbox-watcher, calling it')
         startInboxWatcher()
-        console.warn('[instrumentation] DIAGNOSTIC: called startInboxWatcher')
       } catch (err) {
         console.error('[instrumentation] Inbox watcher failed to start:', err)
       }
 
       // Scheduled content-dedup (report-only unless CONTENT_DEDUP_APPLY=true).
       try {
-        console.warn('[instrumentation] DIAGNOSTIC: about to import dedup-cron')
         const { startDedupCron } = await import('./lib/dedup-cron')
-        console.warn('[instrumentation] DIAGNOSTIC: imported dedup-cron, calling it')
         startDedupCron()
-        console.warn('[instrumentation] DIAGNOSTIC: called startDedupCron')
       } catch (err) {
         console.error('[instrumentation] Content-dedup cron failed to start:', err)
       }
@@ -71,15 +61,11 @@ export async function register() {
       // Scheduled proj_imported_desc scoping (clears the recency projection from
       // partitions older than the recency window; harmless if it never runs).
       try {
-        console.warn('[instrumentation] DIAGNOSTIC: about to import projection-scope-cron')
         const { startProjectionScopeCron } = await import('./lib/projection-scope-cron')
-        console.warn('[instrumentation] DIAGNOSTIC: imported projection-scope-cron, calling it')
         startProjectionScopeCron()
-        console.warn('[instrumentation] DIAGNOSTIC: called startProjectionScopeCron')
       } catch (err) {
         console.error('[instrumentation] Projection-scope cron failed to start:', err)
       }
-      console.warn('[instrumentation] DIAGNOSTIC: reached end of cron-registration block')
     }
   }
 }
