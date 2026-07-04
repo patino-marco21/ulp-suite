@@ -106,7 +106,16 @@ let migrationsDone = false
 //     unresolved parser bug in the #98 file) — from the default declutter view without
 //     deleting them. MODIFY COLUMN swaps the MATERIALIZED expression; MATERIALIZE
 //     COLUMN recomputes existing parts in the background.
-const DDL_VERSION = 15
+// v16: v15's blank-domain check only fired when url was also non-blank, to protect
+//     genuinely bare "username:password, no site" credentials — but ~97% of rows
+//     with BOTH blank domain and blank url turned out to be #98-style corruption
+//     too (a whole "url:login:pass" line landing in the email or password column
+//     instead), which is why the originally-reported garbage kept appearing on the
+//     default page even after v15 shipped. Broadens the blank-domain check to also
+//     fire when email or password still carries an embedded ':' (only ~3% of the
+//     blank+blank population has neither — genuinely bare credentials are still
+//     exempt). Same MODIFY COLUMN + MATERIALIZE COLUMN pattern as v12/v13/v15.
+const DDL_VERSION = 16
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -691,6 +700,16 @@ export async function runClickHouseMigrations(): Promise<void> {
       `ALTER TABLE ulp.credentials MATERIALIZE COLUMN is_noise`
     )
     console.warn('[ClickHouse migration] DDL v15 applied (broadened is_noise for junk domains — MATERIALIZE running in background)')
+  }
+
+  // v16 — broaden is_noise's blank-domain check again (see DDL_VERSION comment).
+  // Same MODIFY + MATERIALIZE pattern as v12/v13/v15.
+  if (lastDdl < 16) {
+    await runMigration(
+      `ALTER TABLE ulp.credentials MODIFY COLUMN is_noise UInt8 MATERIALIZED toUInt8(${NOISE_EXPR})`,
+      `ALTER TABLE ulp.credentials MATERIALIZE COLUMN is_noise`
+    )
+    console.warn('[ClickHouse migration] DDL v16 applied (broadened is_noise blank-domain check — MATERIALIZE running in background)')
   }
 
   if (lastDdl < DDL_VERSION) {
