@@ -14,13 +14,19 @@
  *     moz-extension://, file://, ftp://, data:, javascript:, mailto:, …) — these
  *     are never real site credentials. NOTE: android:// is deliberately NOT noise
  *     (the parser keeps app credentials; they can be high value).
- *   - domain is blank, or doesn't start with a letter/digit, or contains a space
- *     or '@' — these are parser-corruption artifacts (e.g. multi-field-joined
- *     lines) that sort essentially at random to the front of an alphabetical
- *     domain browse. Legitimate hostnames never start with punctuation or
- *     contain whitespace/'@'; android:// domains are the app package name
- *     (extractDomain strips the cert-fingerprint prefix), so real android
- *     credentials are unaffected.
+ *   - domain is blank AND (the url is non-blank, or email/password still carries
+ *     an embedded ':' — leftover unparsed field structure), or domain doesn't
+ *     start with a letter/digit, or domain contains a space or '@'. These are
+ *     parser-corruption artifacts (mostly multi-field-joined lines, e.g. a whole
+ *     "url:login:pass" line landing in the email or password column) that sort
+ *     essentially at random to the front of an alphabetical domain browse.
+ *     A genuinely bare "username:password, no site" credential (blank domain,
+ *     blank url, no embedded ':' in either field) is deliberately NOT noise —
+ *     only ~3% of blank-domain-and-url rows look like this; the rest carry a
+ *     colon signaling the real url/login/password got mis-split. Legitimate
+ *     hostnames never start with punctuation or contain whitespace/'@';
+ *     android:// domains are the app package name (extractDomain strips the
+ *     cert-fingerprint prefix), so real android credentials are unaffected.
  *
  * ── PERFORMANCE ───────────────────────────────────────────────────────────────
  * This logic is baked into a MATERIALIZED `is_noise UInt8` column (DDL v12,
@@ -44,7 +50,7 @@ export const NOISE_EXPR = `isIPv4String(url_host)
   OR port(url) != 0
   OR match(lower(url), '\\\\.php($|[?#])')
   OR match(lower(url), '^(chrome|chrome-extension|moz-extension|edge|opera|brave|vivaldi|about|file|ftp|view-source|data|javascript|mailto):')
-  OR (domain = '' AND url != '')
+  OR (domain = '' AND (url != '' OR position(email, ':') > 0 OR position(password, ':') > 0))
   OR match(domain, '^[^\\\\p{L}\\\\p{N}]')
   OR match(domain, '[ @]')`
 
@@ -90,19 +96,27 @@ function hasExplicitPort(url: string): boolean {
 
 /**
  * JS mirror of {@link NOISE_EXPR}. `host` is the port-stripped host (the stored
- * `url_host`/`domain` column); `url` is the full raw URL. Pure + side-effect free.
+ * `url_host`/`domain` column); `url` is the full raw URL. `email`/`password`
+ * default to '' for callers that don't have them handy — that only widens the
+ * "genuinely bare credential" exemption (never flags a row this function's
+ * SQL counterpart would keep), so omitting them is safe, just slightly less
+ * precise. Pure + side-effect free.
  */
-export function isNoiseUrl(url: string, host: string): boolean {
+export function isNoiseUrl(url: string, host: string, email = '', password = ''): boolean {
   const h = (host || '').toLowerCase()
   const u = (url || '').toLowerCase()
-  if (!h && !u) return false
+  // NOTE: no "both blank → not noise" early return — a genuinely bare
+  // "username:password, no site" credential (blank domain, blank url, no
+  // embedded ':' in either field) still falls through every check below to
+  // the final `return false`. This lets the blank-domain check further down
+  // distinguish that case from a mis-split multi-field line.
   if (NONWEB_SCHEME_RE.test(u)) return true
   if (IPV4_PREFIX_RE.test(h)) return true
   if (h === 'localhost' || h.endsWith('.local')) return true
   if (u !== '' && h !== '' && !h.includes('.')) return true  // single-label / no-TLD host
   if (hasExplicitPort(u)) return true
   if (PHP_ENDPOINT_RE.test(u)) return true
-  if (h === '' && u !== '') return true
+  if (h === '' && (u !== '' || email.includes(':') || password.includes(':'))) return true
   if (DOMAIN_JUNK_PREFIX_RE.test(h)) return true
   if (DOMAIN_JUNK_CONTENT_RE.test(h)) return true
   return false

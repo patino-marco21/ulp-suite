@@ -29,6 +29,14 @@ describe('ulp-noise', () => {
     ])('noise: %s (%s)', (url, domain) => {
       expect(isNoiseUrl(url, domain)).toBe(true)
     })
+
+    test('blank domain + blank url, but password carries an embedded ":" (real fields mis-split)', () => {
+      expect(isNoiseUrl('', '', '!', '/g#gt"`4d+cs:users.nexusmods.com/auth/sign_up:lastslimedo')).toBe(true)
+    })
+
+    test('blank domain + blank url, but email carries an embedded ":" (real fields mis-split)', () => {
+      expect(isNoiseUrl('', '', 'http://10.10.10.2:8091/Login:p.pourshayan:', '=SLI_<<x')).toBe(true)
+    })
   })
 
   describe('isNoiseUrl — keeps real credentials (false-positive guards)', () => {
@@ -48,6 +56,14 @@ describe('ulp-noise', () => {
       ['https://5paisa.com/x', '5paisa.com', 'domain starting with a digit is not punctuation'],
     ])('keep: %s (%s)', (url, domain) => {
       expect(isNoiseUrl(url, domain)).toBe(false)
+    })
+
+    test('genuinely bare "username:password, no site" credential — neither field has a colon', () => {
+      expect(isNoiseUrl('', '', 'abdallahamr', '20205050')).toBe(false)
+    })
+
+    test('email/password default to "" for callers that omit them (never over-flags)', () => {
+      expect(isNoiseUrl('', '')).toBe(false)
     })
   })
 
@@ -88,6 +104,8 @@ describe('ulp-noise', () => {
       expect(NOISE_EXPR).toContain('\\\\p{L}')
       expect(NOISE_EXPR).toContain('\\\\p{N}')
       expect(NOISE_EXPR).toContain("match(domain, '[ @]')")
+      expect(NOISE_EXPR).toContain("position(email, ':') > 0")
+      expect(NOISE_EXPR).toContain("position(password, ':') > 0")
     })
   })
 })
