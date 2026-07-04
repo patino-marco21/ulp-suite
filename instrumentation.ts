@@ -36,6 +36,7 @@ export async function register() {
 
     // Start scheduled monitor re-scanner (production only — prevents dev hot-reload duplicates)
     if (process.env.NODE_ENV === 'production') {
+      console.warn('[instrumentation] DIAGNOSTIC: entered production cron-registration block')
       try {
         const { startMonitorRescanCron } = await import('./lib/monitor-rescan-cron')
         startMonitorRescanCron()
