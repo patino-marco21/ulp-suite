@@ -90,7 +90,23 @@ let migrationsDone = false
 //     metadata-only/instant; MATERIALIZE PROJECTION backfills existing parts in the
 //     background — until it finishes, old parts fall back to the pre-projection full
 //     scan for this query (no error, just no speedup yet for that data).
-const DDL_VERSION = 14
+// v15: broaden is_noise to also flag blank/punctuation-prefixed/space-or-@-containing
+//     domains (see lib/ulp-noise.ts NOISE_EXPR doc comment). Discovered 2026-07-04:
+//     domain_asc (the Credentials Browser's actual default sort) is a genuine prefix
+//     of the table's own ORDER BY (domain, email, imported_at), so it doesn't need a
+//     projection — but its first "page" was dominated by parser-corruption artifacts
+//     (multi-field-joined lines, mostly from the #98 source file) and android://
+//     cert-fingerprint-as-domain rows, both of which sort essentially at random ahead
+//     of real domains. The cert-fingerprint issue is fixed at the source (extractDomain
+//     now strips RFC 3986 userinfo — see lib/ulp-parser.ts — plus a one-time
+//     INSERT-corrected-copy + ALTER TABLE ... DELETE repair of the ~994k existing
+//     android rows, since `domain` is the table's leading ORDER BY column and
+//     ClickHouse rejects direct UPDATEs on it). This is_noise broadening hides what's
+//     left — corrupted rows that were never given a fix design (still a real,
+//     unresolved parser bug in the #98 file) — from the default declutter view without
+//     deleting them. MODIFY COLUMN swaps the MATERIALIZED expression; MATERIALIZE
+//     COLUMN recomputes existing parts in the background.
+const DDL_VERSION = 15
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -664,6 +680,17 @@ export async function runClickHouseMigrations(): Promise<void> {
       `ALTER TABLE ulp.credentials MATERIALIZE PROJECTION proj_imported_desc`
     )
     console.warn('[ClickHouse migration] DDL v14 applied (added proj_imported_desc projection — MATERIALIZE running in background)')
+  }
+
+  // v15 — broaden is_noise again (see DDL_VERSION comment). MODIFY swaps the
+  // MATERIALIZED expression to the expanded NOISE_EXPR; MATERIALIZE COLUMN
+  // recomputes existing parts in the background.
+  if (lastDdl < 15) {
+    await runMigration(
+      `ALTER TABLE ulp.credentials MODIFY COLUMN is_noise UInt8 MATERIALIZED toUInt8(${NOISE_EXPR})`,
+      `ALTER TABLE ulp.credentials MATERIALIZE COLUMN is_noise`
+    )
+    console.warn('[ClickHouse migration] DDL v15 applied (broadened is_noise for junk domains — MATERIALIZE running in background)')
   }
 
   if (lastDdl < DDL_VERSION) {

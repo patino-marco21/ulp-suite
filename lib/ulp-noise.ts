@@ -14,6 +14,13 @@
  *     moz-extension://, file://, ftp://, data:, javascript:, mailto:, …) — these
  *     are never real site credentials. NOTE: android:// is deliberately NOT noise
  *     (the parser keeps app credentials; they can be high value).
+ *   - domain is blank, or doesn't start with a letter/digit, or contains a space
+ *     or '@' — these are parser-corruption artifacts (e.g. multi-field-joined
+ *     lines) that sort essentially at random to the front of an alphabetical
+ *     domain browse. Legitimate hostnames never start with punctuation or
+ *     contain whitespace/'@'; android:// domains are the app package name
+ *     (extractDomain strips the cert-fingerprint prefix), so real android
+ *     credentials are unaffected.
  *
  * ── PERFORMANCE ───────────────────────────────────────────────────────────────
  * This logic is baked into a MATERIALIZED `is_noise UInt8` column (DDL v12,
@@ -36,7 +43,10 @@ export const NOISE_EXPR = `isIPv4String(url_host)
   OR (url != '' AND url_host != '' AND position(url_host, '.') = 0)
   OR port(url) != 0
   OR match(lower(url), '\\\\.php($|[?#])')
-  OR match(lower(url), '^(chrome|chrome-extension|moz-extension|edge|opera|brave|vivaldi|about|file|ftp|view-source|data|javascript|mailto):')`
+  OR match(lower(url), '^(chrome|chrome-extension|moz-extension|edge|opera|brave|vivaldi|about|file|ftp|view-source|data|javascript|mailto):')
+  OR (domain = '' AND url != '')
+  OR match(domain, '^[^\\\\p{L}\\\\p{N}]')
+  OR match(domain, '[ @]')`
 
 /**
  * WHERE term that selects non-noise rows. Reads the precomputed `is_noise` column
@@ -64,6 +74,11 @@ const PHP_ENDPOINT_RE = /\.php($|[?#])/i
 /** Browser-internal / non-web URL schemes — never a real site credential.
  *  android:// is intentionally excluded (app credentials are kept). */
 const NONWEB_SCHEME_RE = /^(chrome|chrome-extension|moz-extension|edge|opera|brave|vivaldi|about|file|ftp|view-source|data|javascript|mailto):/i
+/** Domain doesn't start with a letter/digit — real hostnames never do; this
+ *  catches parser-corruption artifacts (garbled fields, stray leading quotes). */
+const DOMAIN_JUNK_PREFIX_RE = /^[^\p{L}\p{N}]/u
+/** Domain contains a space or '@' — multi-field-joined corruption residue. */
+const DOMAIN_JUNK_CONTENT_RE = /[ @]/
 
 /** Host carries an explicit ":port" (mirrors ClickHouse port(url) != 0). */
 function hasExplicitPort(url: string): boolean {
@@ -87,5 +102,8 @@ export function isNoiseUrl(url: string, host: string): boolean {
   if (u !== '' && h !== '' && !h.includes('.')) return true  // single-label / no-TLD host
   if (hasExplicitPort(u)) return true
   if (PHP_ENDPOINT_RE.test(u)) return true
+  if (h === '' && u !== '') return true
+  if (DOMAIN_JUNK_PREFIX_RE.test(h)) return true
+  if (DOMAIN_JUNK_CONTENT_RE.test(h)) return true
   return false
 }

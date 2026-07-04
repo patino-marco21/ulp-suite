@@ -232,7 +232,12 @@ CREATE TABLE IF NOT EXISTS ulp.credentials
     -- per-row WHERE predicate, so /credentials filters on a cheap `is_noise = 0`
     -- PREWHERE compare rather than running match()/port()/isIPv4String() over the
     -- wide url column for every scanned row. References url_host (materialized
-    -- above), the same way country_tier references tld.
+    -- above), the same way country_tier references tld. Also flags blank/
+    -- punctuation-prefixed/space-or-@-containing domains — parser-corruption
+    -- artifacts that sort essentially at random ahead of real domains in an
+    -- alphabetical domain browse (real hostnames never start with punctuation or
+    -- contain whitespace/'@'; android:// domains are the app package name, since
+    -- extractDomain strips the cert-fingerprint prefix).
     is_noise UInt8 MATERIALIZED toUInt8(
         isIPv4String(url_host)
         OR isIPv6String(url_host)
@@ -243,6 +248,9 @@ CREATE TABLE IF NOT EXISTS ulp.credentials
         OR port(url) != 0
         OR match(lower(url), '\\.php($|[?#])')
         OR match(lower(url), '^(chrome|chrome-extension|moz-extension|edge|opera|brave|vivaldi|about|file|ftp|view-source|data|javascript|mailto):')
+        OR (domain = '' AND url != '')
+        OR match(domain, '^[^\\p{L}\\p{N}]')
+        OR match(domain, '[ @]')
     ),
 
     -- ── Skip indexes ──────────────────────────────────────────────────────────

@@ -21,6 +21,11 @@ describe('ulp-noise', () => {
       ['mailto:someone@example.com', 'example.com', 'mailto link'],
       ['http://dev/login', 'dev', 'single-label host (no TLD)'],
       ['https', 'https', 'scheme-split corruption (url is just the scheme)'],
+      ['https://example.com/register', '', 'domain extraction failed despite non-blank url'],
+      ['https://discord.com/login:+233-263934775:y"*1@!GbA', '!gba', 'domain starts with punctuation (multi-field-joined corruption)'],
+      ["!6hr3*gu&ci1.", "!6hr3*gu&ci1.", 'domain starts with punctuation'],
+      ['android://HASH==@com.discord garamgodaam@gmail.com', 'com.discord garamgodaam@gmail.com', 'domain contains concatenated junk (space + @)'],
+      ['https://go-tix.id satrioviankam@gmail.com:513manaman', 'go-tix.id satrioviankam@gmail.com', 'domain contains a space (url/email concatenation corruption)'],
     ])('noise: %s (%s)', (url, domain) => {
       expect(isNoiseUrl(url, domain)).toBe(true)
     })
@@ -39,6 +44,8 @@ describe('ulp-noise', () => {
       ['https://x.com/checkout?next=http://y:8080', 'x.com', 'port only inside query, not the host'],
       ['android://Mo94hjn8SQ==@zw.co.ledger.ecocash/', 'zw.co.ledger.ecocash', 'android app credential — kept (can be high value)'],
       ['', '', 'salvaged email:pass row with no URL'],
+      ['https://münchen.de/login', 'münchen.de', 'IDN domain — leading Unicode letter is not punctuation'],
+      ['https://5paisa.com/x', '5paisa.com', 'domain starting with a digit is not punctuation'],
     ])('keep: %s (%s)', (url, domain) => {
       expect(isNoiseUrl(url, domain)).toBe(false)
     })
@@ -74,6 +81,13 @@ describe('ulp-noise', () => {
       expect(NOISE_EXPR).toContain('chrome-extension')
       expect(NOISE_EXPR).toContain('mailto')
       expect(NOISE_EXPR).toContain("position(url_host, '.') = 0")
+    })
+
+    test('covers the v15 additions: blank/punctuation-prefixed/junk domains', () => {
+      expect(NOISE_EXPR).toContain("domain = ''")
+      expect(NOISE_EXPR).toContain('\\\\p{L}')
+      expect(NOISE_EXPR).toContain('\\\\p{N}')
+      expect(NOISE_EXPR).toContain("match(domain, '[ @]')")
     })
   })
 })
