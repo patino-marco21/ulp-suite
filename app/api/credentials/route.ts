@@ -20,6 +20,23 @@ export const dynamic = 'force-dynamic'
 const VALID_MASKS = new Set(['alpha', 'numeric', 'alphanumeric', 'mixed', 'empty'])
 
 
+// Read by the inner query (see query site below) — deliberately raw url/email/
+// password/domain, no NORM_COLS. NORM_COLS's nested-if correction (for ~38K
+// legacy corrupted rows) is expensive enough per-row that including it here
+// defeats proj_imported_desc: confirmed via force_optimize_projection=1 that
+// the identical query WITH NORM_COLS inline gets PROJECTION_NOT_USED, while
+// this raw-column form uses the projection successfully. Below the fold at
+// 67M+ rows that difference is a full unindexed table scan vs. a bounded
+// read — the former is what took production down with MEMORY_LIMIT_EXCEEDED
+// (2026-07-04).
+const RAW_COLS = `url, email, password, domain,
+  source_file, breach_name,
+  country_tier, login_type, password_length, password_mask,
+  url_scheme, is_corporate_email, email_domain,
+  url_host, password_entropy_band, imported_at`
+
+// Outer SELECT — NORM_COLS applied to the inner query's already-bounded
+// (LIMIT-sized) result, not to every scanned row. See RAW_COLS above.
 const SELECT = `${NORM_COLS},
   source_file, breach_name,
   country_tier, login_type, password_length, password_mask,
@@ -188,12 +205,20 @@ export async function GET(request: NextRequest) {
         // Data query uses throw so a timeout produces a clear error (caught below)
         // rather than silently returning 0 rows (timeout_overflow_mode=break with
         // ORDER BY does not flush the sort buffer — ClickHouse issue #52234).
+        //
+        // Split into an inner (raw columns, ORDER BY, LIMIT) and outer (NORM_COLS)
+        // query — see RAW_COLS above for why. The inner query alone is what needs
+        // to read in order via proj_imported_desc; wrapping NORM_COLS around it
+        // instead of inlining it keeps that projection usable.
         `SELECT ${SELECT}
-         FROM ulp.credentials
-         WHERE ${where}${cursorClause}
-         ORDER BY ${orderBy}
-         ${dedupeLimitBy(dedupe)}
-         LIMIT {limit:UInt32}
+         FROM (
+           SELECT ${RAW_COLS}
+           FROM ulp.credentials
+           WHERE ${where}${cursorClause}
+           ORDER BY ${orderBy}
+           ${dedupeLimitBy(dedupe)}
+           LIMIT {limit:UInt32}
+         ) AS t
          SETTINGS max_execution_time = 300,
                   timeout_overflow_mode = 'throw'`,
         allParams
