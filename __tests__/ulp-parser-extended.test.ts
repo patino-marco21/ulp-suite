@@ -1829,3 +1829,48 @@ describe('§26 Edge whitespace + password-slot placeholders', () => {
     expect(c!.password).toBe('test')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §27  " : " (space-colon-space) as a deliberate field delimiter
+// 2026-07-04 finding from real ingested data: entire source files (e.g.
+// @ARCEUSULP #88/#89) use " : " consistently as the url/login/password
+// delimiter instead of a bare ":". colonSplit's scheme branch didn't trim its
+// output, so every field carried the surrounding whitespace into
+// hasEdgeWhitespace (§26) and got rejected as garbage — ~99.7% data loss on
+// those files. Fix trims only when BOTH separators show the same symmetric
+// "space before the colon" pattern, so §26's asymmetric artifact case
+// ("realuser: 0414L", space on one side only) still correctly rejects.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§27 space-colon-space delimiter (symmetric — real format, not an artifact)', () => {
+  test('real ARCEUSULP #89 line parses correctly with " : " delimiters', () => {
+    const c = cred('https://discord.com/login : darius.sharon@yahoo.com : n-8g_cc9pjjfcww')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('https://discord.com/login')
+    expect(c!.email).toBe('darius.sharon@yahoo.com')
+    expect(c!.password).toBe('n-8g_cc9pjjfcww')
+  })
+
+  test('non-email login with " : " delimiters also parses correctly', () => {
+    const c = cred('https://75cc555.com/main/inicio : 11942542366 : 31082016')
+    expect(c).not.toBeNull()
+    expect(c!.url).toBe('https://75cc555.com/main/inicio')
+    expect(c!.email).toBe('11942542366')
+    expect(c!.password).toBe('31082016')
+  })
+
+  test('no-path scheme form with " : " delimiters parses correctly', () => {
+    const c = cred('https://example.com : realuser : realpassword123')
+    expect(c).not.toBeNull()
+    expect(c!.email).toBe('realuser')
+    expect(c!.password).toBe('realpassword123')
+  })
+
+  test('asymmetric single-sided space (§26 artifact) is still rejected — not a regression', () => {
+    expect(cred('https://example.com:realuser: 0414L')).toBeNull()
+  })
+
+  test('asymmetric space before only (no space after) is still rejected', () => {
+    expect(cred('https://example.com:realuser :0414L')).toBeNull()
+  })
+})

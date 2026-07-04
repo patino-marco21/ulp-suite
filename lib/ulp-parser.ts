@@ -445,6 +445,15 @@ function colonSplit(line: string): [string, string, string] | null {
       const loginRest = rest.slice(colon1 + 1)             // "login:pass" or "login"
       const colon2    = loginRest.indexOf(':')
       if (colon2 === -1) return null                        // no password
+      // Some sources use " : " (space-padded) as the field delimiter instead of
+      // a bare ":". Only trim when BOTH separators show that same symmetric
+      // "space before the colon" pattern — a deliberate delimiter convention,
+      // not a one-sided artifact. "realuser: 0414L" (space after only, one
+      // separator) must stay untrimmed so hasEdgeWhitespace still catches it;
+      // "login : password" (space before on both separators) is a real format.
+      if (rest[colon1 - 1] === ' ' && loginRest[colon2 - 1] === ' ') {
+        return [fullUrl.trim(), loginRest.slice(0, colon2).trim(), loginRest.slice(colon2 + 1).trim()]
+      }
       return [fullUrl, loginRest.slice(0, colon2), loginRest.slice(colon2 + 1)]
     } else {
       // No path — URL is up to end of host:port, then colon separates login
@@ -458,8 +467,10 @@ function colonSplit(line: string): [string, string, string] | null {
       // 3-line fallback merging unrelated rows together (2026-06-28 incident).
       const portMatch = line.slice(hostStart).match(/^([^:]+):(\d{1,5}):/)
       let loginStart: number
+      let sawPortMatch = false
       if (portMatch && Number(portMatch[2]) <= 65535) {
         loginStart = hostStart + portMatch[0].length
+        sawPortMatch = true
       } else {
         const c = line.indexOf(':', hostStart)
         if (c === -1) return null
@@ -469,6 +480,14 @@ function colonSplit(line: string): [string, string, string] | null {
       const loginRest = line.slice(loginStart)
       const colon     = loginRest.indexOf(':')
       if (colon === -1) return null
+      // Same symmetric-delimiter check as the with-path branch above — only
+      // trim when the url/login separator AND the login/password separator
+      // both show a space before the colon. Never trim the port-match
+      // sub-case: "host:port:" isn't a user-facing delimiter to begin with,
+      // so there's no "space before the colon" convention to check there.
+      if (!sawPortMatch && line[loginStart - 2] === ' ' && loginRest[colon - 1] === ' ') {
+        return [urlPart.trim(), loginRest.slice(0, colon).trim(), loginRest.slice(colon + 1).trim()]
+      }
       return [urlPart, loginRest.slice(0, colon), loginRest.slice(colon + 1)]
     }
   }
