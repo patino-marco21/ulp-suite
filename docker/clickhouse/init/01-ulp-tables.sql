@@ -265,7 +265,20 @@ CREATE TABLE IF NOT EXISTS ulp.credentials
     INDEX idx_set_password_entropy password_entropy_band TYPE set(0) GRANULARITY 1,
 
     -- minmax: date range on imported_at
-    INDEX idx_mm_imported_at imported_at TYPE minmax GRANULARITY 1
+    INDEX idx_mm_imported_at imported_at TYPE minmax GRANULARITY 1,
+
+    -- proj_imported_desc: lets the Credentials Browser's default view (ORDER BY
+    -- imported_at DESC, domain ASC, email ASC, url ASC, password ASC) read in order
+    -- instead of a full read + sort (this table's own ORDER BY has imported_at LAST).
+    -- Mirrors DDL v14 in lib/clickhouse-migrations.ts — that file is the source of
+    -- truth; keep both in sync. negate(toUnixTimestamp(imported_at)) stands in for
+    -- "imported_at DESC" since a projection's ORDER BY can't use DESC directly.
+    PROJECTION proj_imported_desc (
+        SELECT url, email, password, source_file, breach_name, country_tier, login_type,
+               password_length, password_mask, url_scheme, is_corporate_email, email_domain,
+               url_host, password_entropy_band, imported_at, domain
+        ORDER BY negate(toUnixTimestamp(imported_at)), domain, email, url, password
+    )
 )
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/ulp/credentials', '{replica}')
 ORDER BY (domain, email, imported_at)

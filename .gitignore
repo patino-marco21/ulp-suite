@@ -27,6 +27,7 @@ server.log
 uploads/
 data/
 /inbox/
+archive/
 clickhouse-data/
 mysql-data/
 minio-data/
