@@ -21,21 +21,23 @@
  * content-key cleanup script at scripts/dedup-credentials-content.sh.
  *
  * SCALE: the stats query (uniqExact) is fine through the current ~91M rows
- * (confirmed live 2026-07-04, 5s). The DELETE mutation is NOT verified at this
- * scale and should not be enabled (CONTENT_DEDUP_APPLY=true) until redesigned —
- * confirmed live: the exact CONTENT_DUPLICATE_PREDICATE subquery (`SELECT
- * min(FULL_HASH) ... GROUP BY CONTENT_KEY`, ~67M distinct groups) exceeds 4 GiB
- * in ~1.6s for a single evaluation. ClickHouse re-evaluates big-table mutation
- * subqueries per merge per part, not once (each merge keeps its own HashSet in
- * memory), so under this instance's ~20-thread background pool the real cost
- * when the mutation actually runs could be a low multiple of that — plausibly
- * past the server's effective memory ceiling. system.mutations confirms this
- * DELETE has never actually run against this table. Fix direction: a
- * precomputed content-key dedup table maintained incrementally, same pattern as
- * mv_domain_counts / mv_password_counts in lib/clickhouse-migrations.ts, so the
- * mutation reads a small lookup instead of re-deriving ~67M group memberships
- * inline. The min-excess threshold avoids needless mutations but does not
- * address this risk once excess exceeds it.
+ * (confirmed live 2026-07-04, 5s). The DELETE mutation used to be a heavyweight
+ * `ALTER TABLE ... DELETE`, whose CONTENT_DUPLICATE_PREDICATE subquery (~67M
+ * distinct groups) exceeded 4 GiB in ~1.6s for a single evaluation — and
+ * ClickHouse re-evaluates big-table mutation subqueries per merge per part, not
+ * once, so under this instance's ~20-thread background pool the real cost could
+ * multiply well past the server's memory ceiling. Fixed 2026-07-05: switched to
+ * a lightweight `DELETE FROM` (matching scripts/purge-existing-t3.sh's proven
+ * fix for the same class of problem on this table) with max_threads=2 (bounds
+ * concurrent subquery re-evaluation) and max_bytes_before_external_group_by
+ * (CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES below) deliberately NOT paired with
+ * an explicit max_memory_usage override — unlike lib/clickhouse-query-limits.ts's
+ * exportGroupBySettings(), where setting max_memory_usage below the profile's
+ * 20 GiB spill threshold made spilling unreachable. Full investigation:
+ * docs/superpowers/specs/2026-07-04-content-dedup-scale-fix-design.md.
+ * Do not set CONTENT_DEDUP_APPLY=true until that spec's "Verification plan"
+ * has actually been completed against disposable data — this fix is confirmed
+ * against an equivalent read-only SELECT, not yet against a real mutation.
  */
 import { getClient } from '@/lib/clickhouse'
 import { URL_CONTENT_KEY } from '@/lib/url-content-key'
@@ -68,7 +70,21 @@ export function buildStatsSql(): string {
 }
 
 export function buildDeleteSql(): string {
-  return `ALTER TABLE ulp.credentials DELETE WHERE ${CONTENT_DUPLICATE_PREDICATE}`
+  return `DELETE FROM ulp.credentials WHERE ${CONTENT_DUPLICATE_PREDICATE}`
+}
+
+/**
+ * Memory ceiling for the DELETE mutation's inline CONTENT_DUPLICATE_PREDICATE
+ * subquery. Confirmed live 2026-07-04: without this, the subquery exceeds
+ * 4 GiB in ~1.6s; with it, it succeeds in ~17.8s (disk spill). No
+ * max_memory_usage override is set alongside this anywhere this is used — see
+ * the SCALE comment above for why that pairing matters.
+ */
+export const CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES = 4_294_967_296 // 4 GiB
+
+/** Full statement runContentDedupTick() submits — exported so its exact shape is testable. */
+export function buildDeleteExecSql(): string {
+  return `${buildDeleteSql()} SETTINGS mutations_sync = 0, max_threads = 2, max_bytes_before_external_group_by = ${CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES}`
 }
 
 // ── env knobs (pure, testable) ──────────────────────────────────────────────────
@@ -150,8 +166,8 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
       return { total, excess, applied: false }
     }
 
-    await client.exec({ query: `${buildDeleteSql()} SETTINGS mutations_sync = 0` })
-    console.log(`[content-dedup] submitted ALTER DELETE (~${excess} duplicate rows, async mutation)`)
+    await client.exec({ query: buildDeleteExecSql() })
+    console.log(`[content-dedup] submitted DELETE FROM (~${excess} duplicate rows, async mutation)`)
     return { total, excess, applied: true }
   } catch (err) {
     console.error('[content-dedup] tick error:', err instanceof Error ? err.message : String(err))

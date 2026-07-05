@@ -4,6 +4,8 @@ import {
   CONTENT_KEY,
   buildStatsSql,
   buildDeleteSql,
+  buildDeleteExecSql,
+  CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES,
   dedupCronHours,
   dedupCronHourUtc,
   contentDedupApplyEnabled,
@@ -22,12 +24,36 @@ describe('content-dedup', () => {
 
   describe('buildDeleteSql', () => {
     const sql = buildDeleteSql()
-    test('is an ALTER TABLE … DELETE on ulp.credentials', () => {
-      expect(sql.startsWith('ALTER TABLE ulp.credentials DELETE WHERE')).toBe(true)
+    test('is a lightweight DELETE FROM on ulp.credentials, not a heavyweight ALTER TABLE', () => {
+      expect(sql.startsWith('DELETE FROM ulp.credentials WHERE')).toBe(true)
+      expect(sql).not.toContain('ALTER TABLE')
     })
     test('keeps one survivor per content group (min full-hash, grouped by content)', () => {
       expect(sql).toContain('NOT IN (SELECT min(')
       expect(sql).toContain(`GROUP BY ${URL_CONTENT_KEY}, email, password`)
+    })
+    test('never includes its own SETTINGS clause', () => {
+      // runContentDedupTick() appends the real SETTINGS clause via
+      // buildDeleteExecSql() — a second one here would make the combined
+      // statement invalid SQL (two SETTINGS keywords).
+      expect(sql).not.toContain('SETTINGS')
+    })
+  })
+
+  describe('CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES', () => {
+    test('is 4 GiB', () => {
+      expect(CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES).toBe(4_294_967_296)
+    })
+  })
+
+  describe('buildDeleteExecSql', () => {
+    test('combines the delete statement with mutations_sync, bounded threads, and external group-by spill in exactly one SETTINGS clause', () => {
+      const sql = buildDeleteExecSql()
+      expect(sql).toContain('DELETE FROM ulp.credentials WHERE')
+      expect(sql).toContain(
+        'SETTINGS mutations_sync = 0, max_threads = 2, max_bytes_before_external_group_by = 4294967296',
+      )
+      expect(sql.match(/SETTINGS/g)?.length).toBe(1)
     })
   })
 
