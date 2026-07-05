@@ -7,7 +7,7 @@ import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS } from "@/lib/ulp-normalize"
 import { noiseWhere } from "@/lib/ulp-noise"
 import { dedupeLimitBy } from "@/lib/ulp-dedupe"
-import { exportGroupBySettings } from "@/lib/clickhouse-query-limits"
+import { exportGroupBySettings, exportSortSettings } from "@/lib/clickhouse-query-limits"
 
 export const dynamic = 'force-dynamic'
 
@@ -15,15 +15,55 @@ export const dynamic = 'force-dynamic'
 // All data-repair mutations done (0 pending) — raw columns are correct.
 // Raw columns enable optimize_read_in_order and avoid per-row NORM_*_EXPR
 // computation that defeated primary-key pruning.
+// No synthetic blank-domain sort prefix — blank domains are 0.23% of rows,
+// negligible to reorder, and such a prefix isn't a valid ORDER BY match against
+// the table's actual primary key (same fix as lib/cursor-pagination.ts's SORT_MAP).
+//
+// Every entry has 2+ columns for stable tie-breaking when the leading column
+// repeats (e.g. many rows share an imported_at second, or a password_length).
+//
+// With dedupe=1, ANY sort whose leading column isn't `domain` used to hit live
+// MEMORY_LIMIT_EXCEEDED (code 241) at 91M rows — confirmed for imported_desc/
+// imported_asc/email_asc/pw_len_desc/pw_len_asc. Adding tiebreaker columns here
+// does NOT avoid it (tested) — root cause is that ClickHouse's `ORDER BY ...
+// LIMIT 1 BY <key> ... LIMIT n` can't bound the sort to the base table's
+// (domain, email, imported_at) physical order or to proj_imported_desc once
+// LIMIT BY is present, so it materializes and sorts the full filtered row set
+// (domain-leading sorts stay safe because `domain` is the table's actual
+// leading primary-key column). exportSortSettings() below papers over this by
+// forcing an external sort instead of fixing the underlying planner behavior
+// — see the query site's comment.
 const SORT_MAP: Record<string, string> = {
-  'imported_desc': 'imported_at DESC',
-  'imported_asc':  'imported_at ASC',
-  'domain_asc':    `(domain='') ASC, domain ASC, imported_at DESC`,
-  'domain_desc':   `(domain='') ASC, domain DESC, imported_at DESC`,
-  'email_asc':     `email ASC`,
-  'pw_len_desc':   'password_length DESC',
-  'pw_len_asc':    'password_length ASC',
+  'imported_desc': 'imported_at DESC, domain ASC',
+  'imported_asc':  'imported_at ASC, domain ASC',
+  'domain_asc':    `domain ASC, imported_at DESC`,
+  'domain_desc':   `domain DESC, imported_at DESC`,
+  'email_asc':     `email ASC, imported_at DESC`,
+  'pw_len_desc':   'password_length DESC, imported_at DESC',
+  'pw_len_asc':    'password_length ASC, imported_at DESC',
 }
+
+// Read by the inner query (see query site below) — deliberately raw url/email/
+// password/domain, no NORM_COLS. Confirmed against live ClickHouse (85M rows):
+// inlining NORM_COLS's nested-if/regex expression in the same SELECT as
+// ORDER BY + LIMIT makes the planner abandon the read-in-order + early-stop
+// optimization, forcing a full sort/materialization over the filtered table —
+// MEMORY_LIMIT_EXCEEDED (code 241) once the table is large enough. Raw-column
+// version of the same query: 0.1s. Mirrors the fix in app/api/credentials/
+// route.ts (72271da).
+const RAW_COLS = `url, email, password, domain,
+  source_file, breach_name,
+  country_tier, login_type, password_length, password_mask,
+  url_scheme, is_corporate_email, email_domain,
+  url_host, password_entropy_band, imported_at`
+
+// Outer SELECT — NORM_COLS applied to the inner query's already-bounded
+// (LIMIT 10000) result, not to every scanned row. See RAW_COLS above.
+const SELECT = `${NORM_COLS},
+  source_file, breach_name,
+  country_tier, login_type, password_length, password_mask,
+  url_scheme, is_corporate_email, email_domain,
+  url_host, password_entropy_band, imported_at`
 
 // GET /api/export?format=wordlist&tier_include=T1
 export async function GET(request: NextRequest) {
@@ -134,16 +174,19 @@ export async function POST(request: NextRequest) {
   try {
     const orderBy = SORT_MAP[sort] ?? SORT_MAP['imported_desc']
     const rows = await executeQuery(
-      `SELECT ${NORM_COLS},
-              source_file, breach_name,
-              country_tier, login_type, password_length, password_mask,
-              url_scheme, is_corporate_email, email_domain,
-              url_host, password_entropy_band, imported_at
-       FROM ulp.credentials
-       WHERE ${clause}${allExtras}
-       ORDER BY ${orderBy}
-       ${dedupeLimitBy(dedupeOn)}
-       LIMIT 10000`,
+      // Split into an inner (raw columns, ORDER BY, LIMIT) and outer (NORM_COLS)
+      // query — see RAW_COLS above for why. exportSortSettings() covers the
+      // dedupe + non-domain-sort case — see the comment above SORT_MAP.
+      `SELECT ${SELECT}
+       FROM (
+         SELECT ${RAW_COLS}
+         FROM ulp.credentials
+         WHERE ${clause}${allExtras}
+         ORDER BY ${orderBy}
+         ${dedupeLimitBy(dedupeOn)}
+         LIMIT 10000
+       ) AS t
+       ${exportSortSettings()}`,
       mergedParams
     ) as Array<Record<string, string>>
 
