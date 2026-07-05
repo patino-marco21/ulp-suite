@@ -359,16 +359,22 @@ find /home/cole/ulp-suite/inbox -iname "*stability-fix-verify*"
 
 Expected: the file appears in `inbox/done/zzz-stability-fix-verify.txt` (not claimed and completed within the first second or two this time — the stability check should make it wait until the write is actually finished before claiming).
 
+Verify via the app's own authoritative import count, not a ClickHouse domain filter — the test data's URL embeds a per-line index into the domain (`stability-fix-verify-1.invalid`, `-2.invalid`, ... `-20.invalid`), so no single fixed-string domain filter matches all 20 rows. `processing_jobs.imported` is set directly from the parser's own count and isn't subject to that mismatch (there is no standalone `sqlite3` CLI in the container — query via the app's own `better-sqlite3` dependency instead):
+
 ```bash
-echo "SELECT count() FROM ulp.credentials WHERE domain = 'stability-fix-verify.invalid'" | docker exec -i ulpsuite_clickhouse clickhouse-client
+docker exec ulpsuite_app node -e "
+const Database = require('better-sqlite3');
+const db = new Database('/app/data/ulp.db', { readonly: true });
+console.log(JSON.stringify(db.prepare(\"SELECT filename, imported, skipped FROM processing_jobs WHERE filename = 'zzz-stability-fix-verify.txt' ORDER BY id DESC LIMIT 1\").all()));
+"
 ```
 
-Expected: `20` — all 20 lines imported, not 0. This is the direct confirmation the fix works: before the fix, an identical test (`zzz-race-condition-test.txt`, same shape, same timing) produced `0`.
+Expected: `imported: 20, skipped: 0` — all 20 lines imported. This is the direct confirmation the fix works: before the fix, an identical test (`zzz-race-condition-test.txt`, same shape, same timing) produced `imported: 1` via this same query — a partial, premature read, not the full 20.
 
 - [ ] **Step 5: Clean up the verification test row and file**
 
 ```bash
-echo "ALTER TABLE ulp.credentials DELETE WHERE domain = 'stability-fix-verify.invalid' SETTINGS mutations_sync = 1" | docker exec -i ulpsuite_clickhouse clickhouse-client
+echo "ALTER TABLE ulp.credentials DELETE WHERE domain LIKE 'stability-fix-verify%.invalid' SETTINGS mutations_sync = 1" | docker exec -i ulpsuite_clickhouse clickhouse-client
 rm -f /home/cole/ulp-suite/inbox/done/zzz-stability-fix-verify.txt
 ```
 
