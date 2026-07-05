@@ -11,7 +11,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { claimFileForProcessing, sweepProcessingToFailed } from '@/lib/inbox-claim'
+import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable } from '@/lib/inbox-claim'
 
 let tmp: string
 beforeEach(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'inbox-claim-')) })
@@ -79,5 +79,31 @@ describe('sweepProcessingToFailed', () => {
     fs.writeFileSync(path.join(proc, 'f.txt'), '1')
 
     expect(sweepProcessingToFailed(proc, path.join(tmp, 'failed'))).toEqual(['f.txt'])
+  })
+})
+
+describe('isFileSizeStable', () => {
+  test('returns true when the file size is unchanged across the wait', async () => {
+    const file = path.join(tmp, 'stable.txt')
+    fs.writeFileSync(file, 'complete content')
+    expect(await isFileSizeStable(file, 10)).toBe(true)
+  })
+
+  test('returns false when the file grows during the wait', async () => {
+    const file = path.join(tmp, 'growing.txt')
+    fs.writeFileSync(file, 'partial')
+    setTimeout(() => fs.appendFileSync(file, ' more data'), 5)
+    expect(await isFileSizeStable(file, 20)).toBe(false)
+  })
+
+  test('returns false when the file is removed during the wait', async () => {
+    const file = path.join(tmp, 'vanishing.txt')
+    fs.writeFileSync(file, 'data')
+    setTimeout(() => fs.unlinkSync(file), 5)
+    expect(await isFileSizeStable(file, 20)).toBe(false)
+  })
+
+  test('returns false when the file does not exist at all', async () => {
+    expect(await isFileSizeStable(path.join(tmp, 'missing.txt'), 10)).toBe(false)
   })
 })

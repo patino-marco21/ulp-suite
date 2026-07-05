@@ -71,3 +71,27 @@ export function sweepProcessingToFailed(procDir: string, failDir: string): strin
   }
   return swept
 }
+
+/**
+ * Checks whether a file's size has stopped changing over `waitMs`, as a proxy
+ * for "an external writer (e.g. cp of a large file) has finished." A file
+ * still being written has a size that changes between the two checks; a
+ * fully-written file's size stays the same. Returns false (not stable) if the
+ * file vanishes between checks — treated the same as "still changing," not as
+ * an error: the caller should skip this attempt, not throw.
+ */
+export async function isFileSizeStable(filePath: string, waitMs: number): Promise<boolean> {
+  let before: number
+  try {
+    before = fs.statSync(filePath).size
+  } catch {
+    return false
+  }
+  await new Promise(resolve => setTimeout(resolve, waitMs))
+  try {
+    const after = fs.statSync(filePath).size
+    return after === before
+  } catch {
+    return false
+  }
+}
