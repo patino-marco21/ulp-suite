@@ -60,6 +60,34 @@ const DONE_MAX_AGE_MS         = 7 * 24 * 60 * 60 * 1_000   // 7 days
 const RECONCILE_INTERVAL_MS   = 30_000                       // scan for missed files every 30 s
 const STABILITY_CHECK_WAIT_MS = 1_000                        // gap between size checks before claiming a file
 
+/** Live progress for the file currently being processed. */
+export interface InboxJobProgress {
+  filename:        string
+  started_at:      number   // Date.now() when processing began
+  rows_imported:   number   // rows successfully inserted so far
+  file_size_bytes: number   // from fs.statSync before processing
+}
+
+// globalThis-backed singletons -----------------------------------------------
+//
+// instrumentation.ts (which calls startInboxWatcher()) and the API routes
+// that read this state (app/api/inbox/status, app/api/inbox/scan) are
+// compiled into SEPARATE webpack chunks in this app's production
+// (output: 'standalone') build. A plain module-scope `const`/`let` here
+// would silently become multiple independent instances: one the real
+// watcher updates, and others -- always empty -- that routes read.
+// globalThis is one true object per OS process regardless of which chunk
+// loaded this file. See
+// docs/superpowers/specs/2026-07-05-inbox-status-globalthis-singleton-design.md
+declare global {
+  // eslint-disable-next-line no-var
+  var __ulpInFlight: Set<string> | undefined
+  // eslint-disable-next-line no-var
+  var __ulpPendingTasks: Set<string> | undefined
+  // eslint-disable-next-line no-var
+  var __ulpCurrentProgress: InboxJobProgress | null | undefined
+}
+
 /**
  * Filenames that have been submitted to uploadQueue (both pending and active).
  * Entries are added in enqueueFile() and removed in the task's finally block.
@@ -75,22 +103,20 @@ const STABILITY_CHECK_WAIT_MS = 1_000                        // gap between size
  * (enqueueFile was called but the task's finally never ran — should never
  * happen in normal operation but guards against future bugs).
  */
-const inFlight    = new Set<string>()
-const pendingTasks = new Set<string>()  // subset of inFlight — has live pLimit task
+const inFlight     = globalThis.__ulpInFlight     ?? (globalThis.__ulpInFlight     = new Set<string>())
+const pendingTasks = globalThis.__ulpPendingTasks ?? (globalThis.__ulpPendingTasks = new Set<string>())  // subset of inFlight — has live pLimit task
 
-/** Live progress for the file currently being processed. */
-export interface InboxJobProgress {
-  filename:        string
-  started_at:      number   // Date.now() when processing began
-  rows_imported:   number   // rows successfully inserted so far
-  file_size_bytes: number   // from fs.statSync before processing
+function getCurrentProgress(): InboxJobProgress | null {
+  return globalThis.__ulpCurrentProgress ?? null
 }
 
-let _currentProgress: InboxJobProgress | null = null
+function setCurrentProgress(progress: InboxJobProgress | null): void {
+  globalThis.__ulpCurrentProgress = progress
+}
 
 /** Returns live progress for the inbox file currently being processed, or null if idle. */
 export function getInboxJobProgress(): InboxJobProgress | null {
-  return _currentProgress
+  return getCurrentProgress()
 }
 
 /** Number of filenames currently marked as queued or in-progress. */
@@ -115,7 +141,7 @@ export function getInFlightCount(): number {
  *      Not in inbox/ (task already ran and cleaned up, but entry leaked)
  */
 export function clearStaleInFlight(): number {
-  const current = _currentProgress?.filename ?? null
+  const current = getCurrentProgress()?.filename ?? null
   let cleared = 0
   for (const name of Array.from(inFlight)) {
     if (name === current)          continue  // actively processing — leave it
@@ -253,13 +279,14 @@ async function enqueueFile(filePath: string): Promise<void> {
       console.log(`[inbox-watcher] processing: ${filename}`)
       // Capture file size (from the claimed path) for ETA in the status API.
       const fileSizeBytes = (() => { try { return fs.statSync(procPath!).size } catch { return 0 } })()
-      _currentProgress = { filename, started_at: startAt, rows_imported: 0, file_size_bytes: fileSizeBytes }
+      setCurrentProgress({ filename, started_at: startAt, rows_imported: 0, file_size_bytes: fileSizeBytes })
 
       if (ext === '.zip') {
         await processZipFile(procPath, result => {
           imported += result.imported
           skipped  += result.skipped
-          if (_currentProgress) _currentProgress.rows_imported = imported
+          const cp = getCurrentProgress()
+          if (cp) cp.rows_imported = imported
           if (result.imported > 0) {
             console.log(
               `[inbox-watcher]   ${result.filename}: ` +
@@ -274,7 +301,8 @@ async function enqueueFile(filePath: string): Promise<void> {
         const webStream  = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>
         const result     = await processTextStream(webStream, filename, undefined, n => {
           // onBatch: update live progress after each 500 K-row batch
-          if (_currentProgress) _currentProgress.rows_imported = n
+          const cp = getCurrentProgress()
+          if (cp) cp.rows_imported = n
         })
         imported = result.imported
         skipped  = result.skipped
@@ -314,7 +342,7 @@ async function enqueueFile(filePath: string): Promise<void> {
         } catch {}
       }
     } finally {
-      _currentProgress = null
+      setCurrentProgress(null)
       pendingTasks.delete(filename)   // task is done (success or fail)
       inFlight.delete(filename)
       setCurrentJob(null)
