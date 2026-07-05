@@ -37,7 +37,7 @@ import { Readable } from 'stream'
 import { uploadQueue, queueSize, setCurrentJob } from '@/lib/upload-queue'
 import { logJob } from '@/lib/processing-log'
 import { processTextStream, processZipFile } from '@/lib/upload-processor'
-import { claimFileForProcessing, sweepProcessingToFailed } from '@/lib/inbox-claim'
+import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable } from '@/lib/inbox-claim'
 
 const INBOX = path.resolve('./inbox')
 const DONE  = path.resolve('./inbox/done')
@@ -56,8 +56,9 @@ const PROC_PREFIX = PROC + path.sep
 
 let started = false
 
-const DONE_MAX_AGE_MS       = 7 * 24 * 60 * 60 * 1_000   // 7 days
-const RECONCILE_INTERVAL_MS = 30_000                       // scan for missed files every 30 s
+const DONE_MAX_AGE_MS         = 7 * 24 * 60 * 60 * 1_000   // 7 days
+const RECONCILE_INTERVAL_MS   = 30_000                       // scan for missed files every 30 s
+const STABILITY_CHECK_WAIT_MS = 1_000                        // gap between size checks before claiming a file
 
 /**
  * Filenames that have been submitted to uploadQueue (both pending and active).
@@ -139,7 +140,7 @@ export function forceReconcile(): number {
       if (!entry.isFile()) continue
       const filePath = path.join(INBOX, entry.name)
       if (!inFlight.has(entry.name)) {
-        enqueueFile(filePath)
+        void enqueueFile(filePath)
         queued++
       }
     }
@@ -173,7 +174,7 @@ function cleanupOldFiles(dir: string, maxAgeMs: number): void {
  * Queue a single file for processing.
  * Safe to call multiple times for the same file — inFlight deduplates.
  */
-function enqueueFile(filePath: string): void {
+async function enqueueFile(filePath: string): Promise<void> {
   const filename = path.basename(filePath)
   const ext      = path.extname(filename).toLowerCase()
 
@@ -206,6 +207,17 @@ function enqueueFile(filePath: string): void {
   if (inFlight.has(filename))       return   // already queued or processing
   // Use path separator guards so 'done_batch.txt' is NOT excluded:
   if (filePath.startsWith(DONE_PREFIX) || filePath.startsWith(FAIL_PREFIX) || filePath.startsWith(PROC_PREFIX)) return
+
+  // Guard against claiming a file an external process (e.g. `cp` of a large
+  // file) is still writing. fs.createReadStream hits EOF at the file's
+  // CURRENT size, not its eventual size, so reading a partially-written file
+  // silently "succeeds" with 0 or a handful of rows and no error. If the size
+  // is still changing, skip this attempt without marking inFlight — the file
+  // stays untouched in inbox/, so the next chokidar poll (~2s) or reconcile
+  // pass (~30s) checks again with fresh stat calls. An arbitrarily slow
+  // writer resolves correctly over time; no new timeout/retry-count logic
+  // needed, since this reuses the existing polling cadence.
+  if (!(await isFileSizeStable(filePath, STABILITY_CHECK_WAIT_MS))) return
 
   inFlight.add(filename)
   pendingTasks.add(filename)   // mark as having a live pLimit task
@@ -317,7 +329,7 @@ function reconcile(): void {
       if (!entry.isFile()) continue
       const filePath = path.join(INBOX, entry.name)
       if (!inFlight.has(entry.name)) {
-        enqueueFile(filePath)
+        void enqueueFile(filePath)
         queued++
       }
     }
