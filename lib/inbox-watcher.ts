@@ -217,6 +217,15 @@ async function enqueueFile(filePath: string): Promise<void> {
   // pass (~30s) checks again with fresh stat calls. An arbitrarily slow
   // writer resolves correctly over time; no new timeout/retry-count logic
   // needed, since this reuses the existing polling cadence.
+  //
+  // NOTE: the await below opens a has()-then-add() gap where two concurrent
+  // calls for the same filename (e.g. a chokidar 'add' event and a reconcile()
+  // pass) can both pass the inFlight.has() check above before either calls
+  // inFlight.add(). That's safe: uploadQueue is pLimit(1), so the two tasks
+  // still run one at a time, and claimFileForProcessing's atomic rename lets
+  // only one of them actually claim the file -- the other gets procPath ===
+  // null and returns without importing. Worst case is a harmless extra
+  // "claim skipped (already gone)" log line, never a double import.
   if (!(await isFileSizeStable(filePath, STABILITY_CHECK_WAIT_MS))) return
 
   inFlight.add(filename)
