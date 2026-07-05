@@ -71,7 +71,7 @@ The full statement actually submitted (assembled in `runContentDedupTick()`):
 
 ```sql
 DELETE FROM ulp.credentials WHERE <CONTENT_DUPLICATE_PREDICATE>
-SETTINGS mutations_sync = 0,
+SETTINGS lightweight_deletes_sync = 0,
          max_threads = 2,
          max_bytes_before_external_group_by = 4294967296
 ```

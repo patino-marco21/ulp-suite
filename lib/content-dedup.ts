@@ -11,7 +11,7 @@
  * being mandatory is exactly what keeps cross-import copies distinct. So content
  * dedup must compare only (url,email,password).
  *
- * MECHANISM: a race-safe `ALTER TABLE … DELETE` (a background mutation — concurrent
+ * MECHANISM: a race-safe lightweight `DELETE FROM` (a background mutation — concurrent
  * inserts are never lost, unlike a rewrite+swap). For each content group it keeps
  * the single row with the smallest full-row hash and deletes the rest.
  *
