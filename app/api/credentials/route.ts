@@ -43,6 +43,19 @@ const SELECT = `${NORM_COLS},
   url_scheme, is_corporate_email, email_domain,
   url_host, password_entropy_band, imported_at`
 
+// Confirmed live against ulp.credentials (91M rows): with dedupe=1, any sort
+// whose leading column isn't `domain` (the table's actual primary-key leading
+// column — see ORDER BY (domain, email, imported_at)) hits MEMORY_LIMIT_EXCEEDED
+// (code 241). ClickHouse's `ORDER BY ... LIMIT 1 BY <key> ... LIMIT n` can't
+// bound the sort to the primary key or to proj_imported_desc once LIMIT BY is
+// present, so it fully materializes and sorts the filtered set first,
+// regardless of the final LIMIT or how many ORDER BY tiebreaker columns exist
+// (tested — extra columns do not help). domain-leading sorts (domain_asc/desc)
+// stay safe and don't need this. Forcing an external (disk-spill) sort past
+// this threshold converts the crash into a slower (~16-30s) but successful
+// query instead.
+const SORT_MAX_MEMORY_BYTES = 4_294_967_296 // 4 GiB
+
 /**
  * GET /api/credentials — browse all credentials with pagination, filtering, and sorting.
  *
@@ -220,7 +233,8 @@ export async function GET(request: NextRequest) {
            LIMIT {limit:UInt32}
          ) AS t
          SETTINGS max_execution_time = 300,
-                  timeout_overflow_mode = 'throw'`,
+                  timeout_overflow_mode = 'throw',
+                  max_bytes_before_external_sort = ${SORT_MAX_MEMORY_BYTES}`,
         allParams
       ),
     ])
