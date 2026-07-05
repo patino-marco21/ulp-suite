@@ -20,9 +20,22 @@
  * (lib/dedup-cron.ts) invokes this routine; operators can also run the verified
  * content-key cleanup script at scripts/dedup-credentials-content.sh.
  *
- * SCALE: the stats (uniqExact) and the DELETE mutation scan the whole table — fine
- * at the current ~20 M rows; at billions, revisit (e.g. content-keyed dedup table /
- * partition-scoped passes). The min-excess threshold avoids needless mutations.
+ * SCALE: the stats query (uniqExact) is fine through the current ~91M rows
+ * (confirmed live 2026-07-04, 5s). The DELETE mutation is NOT verified at this
+ * scale and should not be enabled (CONTENT_DEDUP_APPLY=true) until redesigned —
+ * confirmed live: the exact CONTENT_DUPLICATE_PREDICATE subquery (`SELECT
+ * min(FULL_HASH) ... GROUP BY CONTENT_KEY`, ~67M distinct groups) exceeds 4 GiB
+ * in ~1.6s for a single evaluation. ClickHouse re-evaluates big-table mutation
+ * subqueries per merge per part, not once (each merge keeps its own HashSet in
+ * memory), so under this instance's ~20-thread background pool the real cost
+ * when the mutation actually runs could be a low multiple of that — plausibly
+ * past the server's effective memory ceiling. system.mutations confirms this
+ * DELETE has never actually run against this table. Fix direction: a
+ * precomputed content-key dedup table maintained incrementally, same pattern as
+ * mv_domain_counts / mv_password_counts in lib/clickhouse-migrations.ts, so the
+ * mutation reads a small lookup instead of re-deriving ~67M group memberships
+ * inline. The min-excess threshold avoids needless mutations but does not
+ * address this risk once excess exceeds it.
  */
 import { getClient } from '@/lib/clickhouse'
 import { URL_CONTENT_KEY } from '@/lib/url-content-key'
