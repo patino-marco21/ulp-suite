@@ -6,6 +6,7 @@ import {
   buildDeleteSql,
   buildDeleteExecSql,
   CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES,
+  CONTENT_DEDUP_MAX_THREADS,
   dedupCronHours,
   dedupCronHourUtc,
   contentDedupApplyEnabled,
@@ -46,12 +47,18 @@ describe('content-dedup', () => {
     })
   })
 
+  describe('CONTENT_DEDUP_MAX_THREADS', () => {
+    test('is 2', () => {
+      expect(CONTENT_DEDUP_MAX_THREADS).toBe(2)
+    })
+  })
+
   describe('buildDeleteExecSql', () => {
-    test('combines the delete statement with mutations_sync, bounded threads, and external group-by spill in exactly one SETTINGS clause', () => {
+    test('combines the delete statement with lightweight_deletes_sync, bounded threads, and external group-by spill in exactly one SETTINGS clause', () => {
       const sql = buildDeleteExecSql()
       expect(sql).toContain('DELETE FROM ulp.credentials WHERE')
       expect(sql).toContain(
-        'SETTINGS mutations_sync = 0, max_threads = 2, max_bytes_before_external_group_by = 4294967296',
+        'SETTINGS lightweight_deletes_sync = 0, max_threads = 2, max_bytes_before_external_group_by = 4294967296',
       )
       expect(sql.match(/SETTINGS/g)?.length).toBe(1)
     })

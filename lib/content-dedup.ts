@@ -35,9 +35,19 @@
  * exportGroupBySettings(), where setting max_memory_usage below the profile's
  * 20 GiB spill threshold made spilling unreachable. Full investigation:
  * docs/superpowers/specs/2026-07-04-content-dedup-scale-fix-design.md.
- * Do not set CONTENT_DEDUP_APPLY=true until that spec's "Verification plan"
- * has actually been completed against disposable data — this fix is confirmed
- * against an equivalent read-only SELECT, not yet against a real mutation.
+ * Uses `lightweight_deletes_sync = 0` (not `mutations_sync`, which governs
+ * heavyweight `ALTER TABLE` mutations and is not documented to affect
+ * lightweight `DELETE FROM`) — matching scripts/purge-existing-t3.sh and
+ * scripts/diagnose-and-purge-garbage.sh's shared precedent of using
+ * `lightweight_deletes_sync` for this exact statement type on this table
+ * (they use `=2`, "wait all replicas"; the daily cron needs the opposite —
+ * fire-and-forget — so this uses `=0`). ClickHouse's own docs confirm `=0`
+ * makes the statement "return immediately" without waiting for the background
+ * mutation, the same non-blocking semantics `mutations_sync=0` gives heavyweight
+ * mutations. Do not set CONTENT_DEDUP_APPLY=true until that spec's
+ * "Verification plan" has actually been completed against disposable data —
+ * this fix is confirmed against an equivalent read-only SELECT, not yet
+ * against a real mutation.
  */
 import { getClient } from '@/lib/clickhouse'
 import { URL_CONTENT_KEY } from '@/lib/url-content-key'
@@ -82,9 +92,15 @@ export function buildDeleteSql(): string {
  */
 export const CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES = 4_294_967_296 // 4 GiB
 
+/**
+ * Bounds concurrent subquery re-evaluation across the background merge pool
+ * (mirrors scripts/purge-existing-t3.sh's max_threads=2).
+ */
+export const CONTENT_DEDUP_MAX_THREADS = 2
+
 /** Full statement runContentDedupTick() submits — exported so its exact shape is testable. */
 export function buildDeleteExecSql(): string {
-  return `${buildDeleteSql()} SETTINGS mutations_sync = 0, max_threads = 2, max_bytes_before_external_group_by = ${CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES}`
+  return `${buildDeleteSql()} SETTINGS lightweight_deletes_sync = 0, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_bytes_before_external_group_by = ${CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES}`
 }
 
 // ── env knobs (pure, testable) ──────────────────────────────────────────────────
