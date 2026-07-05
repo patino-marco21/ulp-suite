@@ -92,10 +92,53 @@ Deliberately **not** setting `max_memory_usage` on this statement — leaving it
 
 ### Verification plan (before touching production data)
 
-Two things are untested and must be confirmed against a disposable dataset, not production, before ever setting `CONTENT_DEDUP_APPLY=true`:
+**Both items below are confirmed**, tested live (2026-07-05) against a disposable
+`ulp.content_dedup_verify_test` table — a read-only `CREATE TABLE ... AS SELECT ... FROM
+ulp.credentials LIMIT 2000000` copy, dropped after testing. `ulp.credentials` itself was never
+written to, only read from (the `CREATE TABLE AS SELECT` and one row-count check, both plain
+`SELECT`s).
 
-1. **Does lightweight `DELETE FROM` combined with this subquery-based `WHERE` clause actually stay memory-bounded?** I verified the subquery alone (as a `SELECT`) spills correctly, and verified lightweight delete works for T3's simple equality predicate — but not this combination. Test against a copy of one partition or synthetic data shaped the same way at smaller scale, sized to still exercise high content-key cardinality.
-2. **Does the in-flight-mutation guard still work?** Confirm a submitted lightweight `DELETE FROM` shows up in `system.mutations` with `is_done=0` and a `command` value the existing `LIKE '%GROUP BY ...%'` check matches, the same way the heavyweight version did.
+1. **Does lightweight `DELETE FROM` combined with this subquery-based `WHERE` clause actually stay memory-bounded? Confirmed yes.** Red case: the exact `CONTENT_DUPLICATE_PREDICATE`-shaped `GROUP BY` against the 2M-row test table, capped at `max_memory_usage = 67108864` (64 MiB) with no spill setting, failed as expected — `Code: 241. DB::Exception: ... MEMORY_LIMIT_EXCEEDED` ("would use 70.25 MiB ... maximum: 64.00 MiB"), confirming the test data is large enough to genuinely stress the query at that threshold. Green case: the same predicate, same 64 MiB `max_memory_usage`, run as an actual `DELETE FROM ... SETTINGS lightweight_deletes_sync = 2, max_threads = 2, max_bytes_before_external_group_by = 67108864` (only the spill setting added), completed with no error. Isolating the spill setting as the only variable changed between the failing and succeeding run directly confirms `max_bytes_before_external_group_by` is what makes this combination memory-safe.
+2. **Does the in-flight-mutation guard still work? Confirmed yes.** After the green-case DELETE, `system.mutations` showed one row for the test table with `is_done = 1` and `command` containing the exact substring `GROUP BY replaceRegexpOne(replaceRegexpOne(url, '^(?i:https?://)', ''), '/$', ''), email, password` — `MUTATION_MARKER`'s literal value — confirming the existing `LIKE '%GROUP BY ...%'` in-flight check matches a lightweight-delete-produced mutation the same way it matched the heavyweight version. Worth noting for future readers: ClickHouse represents a lightweight `DELETE FROM` internally as `UPDATE _row_exists = 0 WHERE <predicate>` in `system.mutations.command` — the leading verb changes from the heavyweight version's `DELETE WHERE`, but `MUTATION_MARKER` only matches the `GROUP BY ...` tail of the command, so the check is unaffected by that internal representation change.
+
+### Known limitation: exact full-tuple duplicates are not deduplicated (tie-breaking gap)
+
+Found during the verification above, **not fixed by this plan, not introduced by this plan**:
+`CONTENT_DUPLICATE_PREDICATE`'s `WHERE FULL_HASH NOT IN (SELECT min(FULL_HASH) ... GROUP BY
+CONTENT_KEY)` shape does not break ties. When two or more rows within the same content-key group
+are exact full-tuple duplicates (identical across `url`, `email`, `password`, `domain`,
+`source_file`, `breach_name`, **and** `imported_at`), they all hash identically via `FULL_HASH`
+and all equal that group's `min(FULL_HASH)` — so `NOT IN` is false for every one of them, and
+**none get deleted**, not just all-but-one.
+
+Evidence: in the 2,000,000-row disposable test table, Step 2's stats query reported `excess =
+518939` (rows expected removable). After running the fixed lightweight DELETE, the table held
+1,495,144 rows, not the expected `2000000 - 518939 = 1481061` — 14,083 more than expected. Re-running
+the same `uniqExact`-based stats query against the post-delete table confirmed `distinct_creds`
+was unchanged at `1481061` but `excess` was `14083`, not `0`. Grouping by the full 7-column tuple
+and summing `(n - 1)` across groups with `count() > 1` yielded exactly `14083` — a complete,
+exact match, with no unexplained remainder. Inspecting one such group directly showed 47 rows,
+all sharing one `FULL_HASH` value, all from the same `source_file`/`imported_at` batch, with blank
+`url`/`domain` and an apparent unsplit `url:username:password` triplet stuffed into `email` —
+consistent with the mis-split-field import corruption this codebase's noise-handling work (see
+recent `fix(noise)`/`fix(parser)`/`fix(credentials)` commits) has been separately hardening
+against on the read/declutter side. That corruption is what makes exact full-tuple duplicates
+reachable in practice; diagnosing or fixing the corruption itself is out of scope here.
+
+Confirmed via `git diff` between the pre-this-plan commit and this plan's shipped `lib/content-dedup.ts`
+that `CONTENT_DUPLICATE_PREDICATE`, `FULL_HASH`, and `CONTENT_KEY` are byte-for-byte unchanged by
+this plan's `ALTER TABLE ... DELETE` → `DELETE FROM` change — this tie-breaking behavior is a
+pre-existing property of the predicate itself. It was never previously observed because, per the
+Problem section above, `system.mutations` shows this DELETE had never actually run against real
+data before this verification.
+
+**This does not block enabling `CONTENT_DEDUP_APPLY`** — it is not a memory-safety or crash risk,
+which is what this plan exists to address, and both verification items above are unaffected by it.
+It does mean dedup will not reach 100% for this specific edge case: rows that are exact full-tuple
+duplicates of each other will persist indefinitely, and the stats-reported `excess` will never
+reach zero while such rows exist, regardless of how many times the DELETE runs. A follow-up (e.g.
+a stable tiebreaker such as `argMin` over a deterministic column, or a `LIMIT 1 BY`-based approach)
+is tracked separately and is not part of this plan.
 
 ### Rollout plan
 

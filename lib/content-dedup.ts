@@ -63,6 +63,15 @@ export const FULL_HASH =
  * Rows to delete: those whose full-row hash is NOT the minimum within their
  * content group — i.e. every copy except one per unique (url,email,password).
  * (A singleton's hash is trivially its group min, so singletons are never deleted.)
+ *
+ * Known limitation (does not break on memory-safety, does affect completeness):
+ * `min()` does not break ties. If two or more rows in a content group are exact
+ * full-tuple duplicates (identical across every column FULL_HASH covers,
+ * including imported_at), they all share one FULL_HASH equal to the group min,
+ * so NOT IN is false for all of them and none get deleted — not just all-but-one.
+ * Confirmed live against disposable data (2026-07-05); see the "Known limitation"
+ * subsection in docs/superpowers/specs/2026-07-04-content-dedup-scale-fix-design.md
+ * for the mechanism, evidence, and why it's tracked as a separate follow-up.
  */
 export const CONTENT_DUPLICATE_PREDICATE =
   `${FULL_HASH} NOT IN (SELECT min(${FULL_HASH}) FROM ulp.credentials GROUP BY ${CONTENT_KEY})`
