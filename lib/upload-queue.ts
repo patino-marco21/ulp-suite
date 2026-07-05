@@ -24,7 +24,28 @@ export function parseConcurrency(raw?: string): number {
   return Number.isFinite(n) && n >= 1 ? n : 1
 }
 
-export const uploadQueue = pLimit(parseConcurrency(process.env.UPLOAD_CONCURRENCY))
+// globalThis-backed singletons -----------------------------------------------
+//
+// instrumentation.ts (which starts the inbox watcher) and the API routes that
+// read/use this queue are compiled into SEPARATE webpack chunks in this app's
+// production (output: 'standalone') build -- confirmed by inspecting the
+// compiled .next/server/ output, where this file's code appeared duplicated
+// across multiple chunk files. A plain module-scope `const`/`let` here would
+// silently become multiple independent instances: one that the real watcher
+// updates, and others -- always empty -- that routes read. globalThis is one
+// true object per OS process regardless of which chunk loaded this file, so
+// anchoring state to it is what makes it actually shared. See
+// docs/superpowers/specs/2026-07-05-inbox-status-globalthis-singleton-design.md
+declare global {
+  // eslint-disable-next-line no-var
+  var __ulpUploadQueue: ReturnType<typeof pLimit> | undefined
+  // eslint-disable-next-line no-var
+  var __ulpCurrentJob: string | null | undefined
+}
+
+export const uploadQueue =
+  globalThis.__ulpUploadQueue ??
+  (globalThis.__ulpUploadQueue = pLimit(parseConcurrency(process.env.UPLOAD_CONCURRENCY)))
 
 /** Total number of uploads currently running + waiting. */
 export function queueSize(): number {
@@ -33,14 +54,12 @@ export function queueSize(): number {
 
 // ── Current job tracking ──────────────────────────────────────────────────────
 
-let _currentJob: string | null = null
-
 /** Set the filename of the job currently being processed. Pass null when done. */
 export function setCurrentJob(name: string | null): void {
-  _currentJob = name
+  globalThis.__ulpCurrentJob = name
 }
 
 /** Returns the filename currently being processed, or null if the queue is idle. */
 export function getCurrentJob(): string | null {
-  return _currentJob
+  return globalThis.__ulpCurrentJob ?? null
 }

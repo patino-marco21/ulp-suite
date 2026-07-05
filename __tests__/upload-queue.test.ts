@@ -88,11 +88,18 @@ describe('uploadQueue concurrency from env', () => {
   afterEach(() => {
     if (original === undefined) delete process.env.UPLOAD_CONCURRENCY
     else process.env.UPLOAD_CONCURRENCY = original
+    // The queue is now a globalThis-backed singleton (lib/upload-queue.ts) so
+    // it survives vi.resetModules() by design -- that IS the fix under test
+    // elsewhere in this file. These two tests specifically simulate a fresh
+    // process picking up a new env value, so they must also clear the cached
+    // global, not just reset the module registry.
+    delete globalThis.__ulpUploadQueue
     vi.resetModules()
   })
 
   it('honours UPLOAD_CONCURRENCY when building the limiter', async () => {
     process.env.UPLOAD_CONCURRENCY = '3'
+    delete globalThis.__ulpUploadQueue
     vi.resetModules()
     const { uploadQueue } = await import('@/lib/upload-queue')
     expect(uploadQueue.concurrency).toBe(3)
@@ -100,8 +107,26 @@ describe('uploadQueue concurrency from env', () => {
 
   it('defaults the limiter to concurrency 1', async () => {
     delete process.env.UPLOAD_CONCURRENCY
+    delete globalThis.__ulpUploadQueue
     vi.resetModules()
     const { uploadQueue } = await import('@/lib/upload-queue')
     expect(uploadQueue.concurrency).toBe(1)
+  })
+})
+
+describe('globalThis-backed singleton (survives cross-chunk duplication)', () => {
+  test('the exported uploadQueue is the same object stored on globalThis', async () => {
+    const { uploadQueue: reImportedQueue } = await import('@/lib/upload-queue')
+    expect(globalThis.__ulpUploadQueue).toBe(reImportedQueue)
+  })
+
+  test('setCurrentJob/getCurrentJob read and write through globalThis', async () => {
+    const { setCurrentJob, getCurrentJob } = await import('@/lib/upload-queue')
+    setCurrentJob('probe-globalthis-job.txt')
+    expect(globalThis.__ulpCurrentJob).toBe('probe-globalthis-job.txt')
+    expect(getCurrentJob()).toBe('probe-globalthis-job.txt')
+    setCurrentJob(null)
+    expect(globalThis.__ulpCurrentJob).toBeNull()
+    expect(getCurrentJob()).toBeNull()
   })
 })
