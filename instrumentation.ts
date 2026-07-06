@@ -35,6 +35,16 @@ export async function register() {
     }
 
     // Start scheduled monitor re-scanner (production only — prevents dev hot-reload duplicates)
+    //
+    // NOTE for anyone adding a new job here: this file is compiled into a
+    // separate webpack chunk from API route handlers in production
+    // (output: 'standalone'), so any module-scope state a job below shares
+    // with a route (a getter a route calls, a queue a route also submits
+    // to) must be anchored to globalThis, not a plain module-scope
+    // let/const — see lib/upload-queue.ts / lib/inbox-watcher.ts for the
+    // pattern, and docs/superpowers/specs/2026-07-05-inbox-status-globalthis-singleton-design.md
+    // for the full root-cause writeup. Jobs with no route ever reading their
+    // state (the crons below) don't need this.
     if (process.env.NODE_ENV === 'production') {
       try {
         const { startMonitorRescanCron } = await import('./lib/monitor-rescan-cron')
