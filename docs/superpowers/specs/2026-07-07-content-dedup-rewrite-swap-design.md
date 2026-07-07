@@ -58,10 +58,17 @@ cycle as a rollback safety net).
 **Per-tick sequence** (replaces the current bucket loop in
 `runContentDedupTick`'s apply path):
 
-1. Capture `cutoff` — `SELECT now()` **against ClickHouse's own clock**, not
-   the Node process's, since `imported_at` is a ClickHouse-side `DEFAULT
-   now()` value computed at insert time; comparing it against a
-   Node-clock timestamp risks skew-related bugs.
+1. Capture `cutoff` and `expectedRows` together, in one query, **against
+   ClickHouse's own clock**, not the Node process's: `SELECT now() AS cutoff,
+   uniqExact(cityHash64(CONTENT_KEY)) AS expected_rows FROM ulp.credentials`.
+   `cutoff` matters because `imported_at` is a ClickHouse-side `DEFAULT
+   now()` value computed at insert time; comparing it against a Node-clock
+   timestamp risks skew-related bugs. `expectedRows` must be captured **here**,
+   not re-queried at verify time (step 6) — `ulp.credentials` keeps receiving
+   live inserts throughout the build, so a fresh count at verify time compares
+   against a moving target and would spuriously fail verification on
+   perfectly correct runs, simply because more rows landed while the build
+   was running.
 2. If `ulp.credentials_predup_auto` exists (the previous successful run's
    retained safety net), drop it. This is the ONE place the safety net gets
    cleared — an operator gets the entire interval between two ticks (e.g. a
@@ -85,12 +92,19 @@ cycle as a rollback safety net).
    including among byte-identical duplicates. This makes the `_part`/
    `_part_offset` tie-break hash extension from the bucketed design
    unnecessary.
-6. Verify: `count()` on `ulp.credentials_cdedup_auto` must equal
-   `uniqExact(cityHash64(CONTENT_KEY))` computed on the original
-   `ulp.credentials`, AND `ulp.credentials_cdedup_auto` must itself have zero
-   internal excess (`count() - uniqExact(cityHash64(CONTENT_KEY)) = 0`). If
-   either check fails: log the failure, drop `ulp.credentials_cdedup_auto`,
-   return `{ applied: false }`. The original table is never touched.
+6. Verify: `count()` on `ulp.credentials_cdedup_auto` must be **greater than
+   or equal to** `expectedRows` from step 1 (not strictly equal — the build
+   may have picked up a few rows imported just after `cutoff` in addition to
+   everything that existed at that moment, since `INSERT ... SELECT` has no
+   strict snapshot isolation; that's a good outcome, not a mismatch. A count
+   *below* `expectedRows` means the build genuinely lost pre-existing content
+   keys, which is the real failure this check exists to catch), AND
+   `ulp.credentials_cdedup_auto` must itself have zero internal excess
+   (`count() - uniqExact(cityHash64(CONTENT_KEY)) = 0` — this one stays a
+   strict equality; a `LIMIT 1 BY`-built table must never have internal
+   duplicates regardless of timing). If either check fails: log the failure,
+   drop `ulp.credentials_cdedup_auto`, return `{ applied: false }`. The
+   original table is never touched.
 7. Swap: `RENAME TABLE ulp.credentials TO ulp.credentials_predup_auto,
    ulp.credentials_cdedup_auto TO ulp.credentials` (metadata-only, instant).
 8. Catch-up: rows imported between step 1's cutoff and step 7's swap exist
@@ -153,11 +167,16 @@ script — nothing left to roll out by bucket range).
   — pure function; rewrites the table name and ZooKeeper path in a `SHOW
   CREATE TABLE` result. Pure and unit-testable, unlike the DB call that
   fetches `showCreateSql` in the first place.
+- `buildCutoffSql(): string` — the step-1 query that captures `cutoff` and
+  `expectedRows` together in one read against `ulp.credentials`.
 - `buildPopulateDedupedTableSql(): string` — the `INSERT INTO
   {AUTO_DEDUP_TABLE} SELECT * FROM ulp.credentials ORDER BY
   {CONTENT_DEDUP_SURVIVOR_ORDER} LIMIT 1 BY {CONTENT_KEY}` statement.
-- `buildVerifyDedupedTableSql(): string` — the row-count and excess
-  verification query (against `AUTO_DEDUP_TABLE` and the original).
+- `buildVerifyDedupedTableSql(): string` — `AUTO_DEDUP_TABLE`'s own row count
+  and internal excess only (does not query the original table — the
+  `>= expectedRows` comparison from step 6 is done in `runContentDedupTick`
+  against the value `buildCutoffSql()` already captured in step 1, not
+  re-queried here).
 - `buildRenameSwapSql(): string` — the `RENAME TABLE ulp.credentials TO
   {AUTO_PREDUP_TABLE}, {AUTO_DEDUP_TABLE} TO ulp.credentials` statement.
 - `buildCatchupInsertSql(cutoff: string): string` — the post-swap catch-up
