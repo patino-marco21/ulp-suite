@@ -1,5 +1,32 @@
 # Content-Dedup: Bucketed Delete + Tie-Break Fix — Design
 
+> **2026-07-07 rollout finding — do not enable `CONTENT_DEDUP_APPLY` on this
+> design without reading this first.** The Rollout Plan below was executed
+> against real data for buckets 0-1 of the planned 0-31 checkpoint (stopped
+> there by explicit decision — see `.superpowers/sdd/progress.md`). Both
+> buckets succeeded correctly (zero memory errors, exactly the expected row
+> count removed, projection intact), confirming this design's memory fix and
+> tie-break fix both hold at real scale. However, both took ~34 minutes each,
+> and `system.parts` shows why: `ulp.credentials` currently has only **13
+> active parts**, one of which holds **315.6M rows (26 GiB) — 68% of the
+> whole table**. Since every bucket's hash predicate matches at least one row
+> in essentially every part, **every one of the 1024 buckets rewrites all 13
+> parts, including that 26 GiB part, independently of bucket count.**
+> Bucketing bounds the tie-break GROUP BY's memory correctly (that problem is
+> solved), but it does nothing to reduce full-part-rewrite cost, which this
+> design didn't anticipate — a full 1024-bucket sweep is not time-viable as
+> designed (order of weeks, not the "hours" estimated below). Also
+> incidentally discovered and fixed during this same rollout, unrelated to
+> the above: `mutations_sync`-based synchronous waiting hits ClickHouse
+> connection-level timeouts on long mutations regardless of bucket count
+> (see `lib/content-dedup.ts`'s MUTATION WAIT comment for the fire-and-forget
+> + poll fix this drove). **Before ever setting `CONTENT_DEDUP_APPLY=true`,
+> this needs a follow-up design for the actual chunking strategy** — likely
+> something aligned with physical part boundaries rather than a pure content
+> hash, though a naive part-based chunk needs its own correctness care (a
+> content-duplicate group can span multiple parts, unlike hash buckets,
+> which guarantee a group never splits across two).
+
 ## Problem
 
 `lib/content-dedup.ts`'s scheduled duplicate cleanup (`CONTENT_DEDUP_APPLY`) has
