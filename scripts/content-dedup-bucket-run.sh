@@ -122,6 +122,7 @@ for BUCKET in $(seq "$BUCKET_START" "$BUCKET_END"); do
       )
     SETTINGS mutations_sync = 1,
              allow_nondeterministic_mutations = 1,
+             max_execution_time = 0,
              max_threads = 2,
              max_bytes_before_external_group_by = 4294967296
   "

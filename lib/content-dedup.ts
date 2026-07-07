@@ -49,10 +49,34 @@
  * (supersedes docs/superpowers/specs/2026-07-04-content-dedup-scale-fix-design.md).
  *
  * Uses `mutations_sync = 1` per bucket (block until that one bucket's mutation
- * completes — simpler sequential control flow than polling system.mutations,
- * and each bucket is small enough this won't hit a client timeout) and
- * `allow_nondeterministic_mutations = 1` (required because the WHERE clause's
- * subquery references the same table being mutated).
+ * completes — simpler sequential control flow than polling system.mutations)
+ * and `allow_nondeterministic_mutations = 1` (required because the WHERE
+ * clause's subquery references the same table being mutated).
+ *
+ * TWO-PART execution-time fix (confirmed live 2026-07-07 — bucket 0 of a real
+ * 1024-bucket run against the real table failed twice with Code 159
+ * TIMEOUT_EXCEEDED, both cleanly killed with zero rows affected, before this
+ * was understood and fixed):
+ *   1. This query's own `max_execution_time = 0` bounds the FOREGROUND
+ *      `mutations_sync = 1` wait — without it, the client-side wait for a
+ *      slow bucket could itself time out even if the mutation eventually
+ *      succeeds.
+ *   2. That alone is NOT sufficient: a mutation's BACKGROUND per-part rewrite
+ *      work does not inherit `max_execution_time` from this SETTINGS clause
+ *      at all — confirmed via live testing (polled a stuck mutation for 5+
+ *      minutes; parts_to_do never moved, because some real parts here take
+ *      longer than 60s to rewrite their 9 MATERIALIZED columns, and every
+ *      retry hit the same 60s wall before finishing) and via the matching,
+ *      still-open upstream issue ClickHouse/ClickHouse#61759. The actual fix
+ *      for the background half is raising `max_execution_time` in
+ *      docker/clickhouse/users/ulp-profiles.xml's default profile (60 -> 3600)
+ *      — see that file's comment. The app's own queries are unaffected (its
+ *      client already sets max_execution_time=60 explicitly; see
+ *      lib/clickhouse.ts).
+ * The bucket predicate's `cityHash64(CONTENT_KEY) % bucketCount` filter can't
+ * be indexed, so every bucket's mutation still evaluates it across the whole
+ * table — bucketing bounds memory (few rows per bucket to GROUP), not
+ * scan-plus-part-rewrite time, which is what this two-part fix addresses.
  *
  * Do not set CONTENT_DEDUP_APPLY=true for the full automatic sweep until the
  * design doc's Rollout Plan checkpoint (buckets 0-31 of 1024, run manually via
@@ -141,7 +165,7 @@ export const CONTENT_DEDUP_MAX_THREADS = 2
 
 /** Full statement runContentDedupTick() submits per bucket — exported so its exact shape is testable. */
 export function buildDeleteExecSqlForBucket(bucketIndex: number, bucketCount: number): string {
-  return `${buildDeleteSqlForBucket(bucketIndex, bucketCount)} SETTINGS mutations_sync = 1, allow_nondeterministic_mutations = 1, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_bytes_before_external_group_by = ${CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES}`
+  return `${buildDeleteSqlForBucket(bucketIndex, bucketCount)} SETTINGS mutations_sync = 1, allow_nondeterministic_mutations = 1, max_execution_time = 0, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_bytes_before_external_group_by = ${CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES}`
 }
 
 // ── env knobs (pure, testable) ──────────────────────────────────────────────────

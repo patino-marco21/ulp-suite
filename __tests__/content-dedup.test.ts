@@ -83,11 +83,11 @@ describe('content-dedup', () => {
   })
 
   describe('buildDeleteExecSqlForBucket', () => {
-    test('combines the bucketed delete with mutations_sync, nondeterministic-mutations allowance, bounded threads, and external group-by spill in exactly one SETTINGS clause', () => {
+    test('combines the bucketed delete with mutations_sync, nondeterministic-mutations allowance, unlimited execution time, bounded threads, and external group-by spill in exactly one SETTINGS clause', () => {
       const sql = buildDeleteExecSqlForBucket(2, 16)
       expect(sql).toContain('ALTER TABLE ulp.credentials DELETE WHERE')
       expect(sql).toContain(
-        'SETTINGS mutations_sync = 1, allow_nondeterministic_mutations = 1, max_threads = 2, max_bytes_before_external_group_by = 4294967296',
+        'SETTINGS mutations_sync = 1, allow_nondeterministic_mutations = 1, max_execution_time = 0, max_threads = 2, max_bytes_before_external_group_by = 4294967296',
       )
       expect(sql.match(/SETTINGS/g)?.length).toBe(1)
     })
