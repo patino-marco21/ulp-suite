@@ -2,11 +2,14 @@ import { readFileSync } from 'fs'
 import { describe, test, expect } from 'vitest'
 import {
   CONTENT_KEY,
+  FULL_HASH,
   buildStatsSql,
-  buildDeleteSql,
-  buildDeleteExecSql,
+  contentDuplicatePredicateForBucket,
+  buildDeleteSqlForBucket,
+  buildDeleteExecSqlForBucket,
   CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES,
   CONTENT_DEDUP_MAX_THREADS,
+  contentDedupBucketCount,
   dedupCronHours,
   dedupCronHourUtc,
   contentDedupApplyEnabled,
@@ -23,20 +26,46 @@ describe('content-dedup', () => {
     expect(CONTENT_KEY).toBe(`${URL_CONTENT_KEY}, email, password`)
   })
 
-  describe('buildDeleteSql', () => {
-    const sql = buildDeleteSql()
-    test('is a lightweight DELETE FROM on ulp.credentials, not a heavyweight ALTER TABLE', () => {
-      expect(sql.startsWith('DELETE FROM ulp.credentials WHERE')).toBe(true)
-      expect(sql).not.toContain('ALTER TABLE')
+  describe('FULL_HASH', () => {
+    test('includes _part and _part_offset so exact full-tuple duplicates never tie', () => {
+      expect(FULL_HASH).toBe(
+        'cityHash64(url, email, password, domain, source_file, breach_name, imported_at, _part, _part_offset)',
+      )
     })
-    test('keeps one survivor per content group (min full-hash, grouped by content)', () => {
-      expect(sql).toContain('NOT IN (SELECT min(')
-      expect(sql).toContain(`GROUP BY ${URL_CONTENT_KEY}, email, password`)
+  })
+
+  describe('contentDuplicatePredicateForBucket', () => {
+    const sql = contentDuplicatePredicateForBucket(5, 1024)
+    test('scopes the outer filter to the given bucket', () => {
+      expect(sql).toContain(`cityHash64(${CONTENT_KEY}) % 1024 = 5`)
+    })
+    test('scopes the tie-break subquery to the same bucket', () => {
+      expect(sql).toContain(
+        `NOT IN (SELECT min(${FULL_HASH}) FROM ulp.credentials WHERE cityHash64(${CONTENT_KEY}) % 1024 = 5 GROUP BY ${CONTENT_KEY})`,
+      )
+    })
+    test('preserves the literal "GROUP BY <CONTENT_KEY>" substring the in-flight mutation check matches on', () => {
+      expect(sql).toContain(`GROUP BY ${CONTENT_KEY}`)
+    })
+    test('a different bucket index/count changes both the filter and the subquery scope', () => {
+      const other = contentDuplicatePredicateForBucket(0, 8)
+      expect(other).toContain(`cityHash64(${CONTENT_KEY}) % 8 = 0`)
+      expect(other).not.toContain('% 1024 = 5')
+    })
+  })
+
+  describe('buildDeleteSqlForBucket', () => {
+    const sql = buildDeleteSqlForBucket(2, 16)
+    test('is a heavyweight ALTER TABLE DELETE on ulp.credentials, not a lightweight DELETE FROM', () => {
+      expect(sql.startsWith('ALTER TABLE ulp.credentials DELETE WHERE')).toBe(true)
+      expect(sql).not.toContain('DELETE FROM')
+    })
+    test('embeds this bucket\'s predicate', () => {
+      expect(sql).toContain(`cityHash64(${CONTENT_KEY}) % 16 = 2`)
     })
     test('never includes its own SETTINGS clause', () => {
-      // runContentDedupTick() appends the real SETTINGS clause via
-      // buildDeleteExecSql() — a second one here would make the combined
-      // statement invalid SQL (two SETTINGS keywords).
+      // buildDeleteExecSqlForBucket() appends the real SETTINGS clause -- a
+      // second one here would make the combined statement invalid SQL.
       expect(sql).not.toContain('SETTINGS')
     })
   })
@@ -53,12 +82,12 @@ describe('content-dedup', () => {
     })
   })
 
-  describe('buildDeleteExecSql', () => {
-    test('combines the delete statement with lightweight_deletes_sync, bounded threads, and external group-by spill in exactly one SETTINGS clause', () => {
-      const sql = buildDeleteExecSql()
-      expect(sql).toContain('DELETE FROM ulp.credentials WHERE')
+  describe('buildDeleteExecSqlForBucket', () => {
+    test('combines the bucketed delete with mutations_sync, nondeterministic-mutations allowance, bounded threads, and external group-by spill in exactly one SETTINGS clause', () => {
+      const sql = buildDeleteExecSqlForBucket(2, 16)
+      expect(sql).toContain('ALTER TABLE ulp.credentials DELETE WHERE')
       expect(sql).toContain(
-        'SETTINGS lightweight_deletes_sync = 0, max_threads = 2, max_bytes_before_external_group_by = 4294967296',
+        'SETTINGS mutations_sync = 1, allow_nondeterministic_mutations = 1, max_threads = 2, max_bytes_before_external_group_by = 4294967296',
       )
       expect(sql.match(/SETTINGS/g)?.length).toBe(1)
     })
@@ -71,6 +100,19 @@ describe('content-dedup', () => {
       expect(sql).toContain('AS excess')
       expect(sql).not.toContain('AS deletable')
       expect(sql).not.toContain('countIf(')
+    })
+  })
+
+  describe('contentDedupBucketCount', () => {
+    test('defaults to 1024', () => {
+      expect(contentDedupBucketCount({})).toBe(1024)
+    })
+    test('honors a configured count', () => {
+      expect(contentDedupBucketCount({ CONTENT_DEDUP_BUCKET_COUNT: '256' })).toBe(256)
+    })
+    test('invalid or non-positive falls back to 1024', () => {
+      expect(contentDedupBucketCount({ CONTENT_DEDUP_BUCKET_COUNT: '0' })).toBe(1024)
+      expect(contentDedupBucketCount({ CONTENT_DEDUP_BUCKET_COUNT: 'nope' })).toBe(1024)
     })
   })
 

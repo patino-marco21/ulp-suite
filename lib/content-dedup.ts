@@ -11,43 +11,53 @@
  * being mandatory is exactly what keeps cross-import copies distinct. So content
  * dedup must compare only (url,email,password).
  *
- * MECHANISM: a race-safe lightweight `DELETE FROM` (a background mutation — concurrent
- * inserts are never lost, unlike a rewrite+swap). For each content group it keeps
- * the single row with the smallest full-row hash and deletes the rest.
+ * MECHANISM: a heavyweight `ALTER TABLE ... DELETE`, chunked into
+ * CONTENT_DEDUP_BUCKET_COUNT (default 1024) hash buckets and run one bucket at
+ * a time. For each content group it keeps the single row with the smallest
+ * full-row hash (FULL_HASH, which includes _part/_part_offset — see its own
+ * comment below) and deletes the rest.
  *
  * SAFETY: report-only by default. It logs how many rows it WOULD delete; nothing
  * is removed unless CONTENT_DEDUP_APPLY=true. The scheduled cron
  * (lib/dedup-cron.ts) invokes this routine; operators can also run the verified
- * content-key cleanup script at scripts/dedup-credentials-content.sh.
+ * content-key cleanup script at scripts/dedup-credentials-content.sh, or the
+ * bucket-range rollout script at scripts/content-dedup-bucket-run.sh.
  *
- * SCALE: the stats query (uniqExact) is fine through the current ~91M rows
- * (confirmed live 2026-07-04, 5s). The DELETE mutation used to be a heavyweight
- * `ALTER TABLE ... DELETE`, whose CONTENT_DUPLICATE_PREDICATE subquery (~67M
- * distinct groups) exceeded 4 GiB in ~1.6s for a single evaluation — and
- * ClickHouse re-evaluates big-table mutation subqueries per merge per part, not
- * once, so under this instance's ~20-thread background pool the real cost could
- * multiply well past the server's memory ceiling. Fixed 2026-07-05: switched to
- * a lightweight `DELETE FROM` (matching scripts/purge-existing-t3.sh's proven
- * fix for the same class of problem on this table) with max_threads=2 (bounds
- * concurrent subquery re-evaluation) and max_bytes_before_external_group_by
- * (CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES below) deliberately NOT paired with
- * an explicit max_memory_usage override — unlike lib/clickhouse-query-limits.ts's
- * exportGroupBySettings(), where setting max_memory_usage below the profile's
- * 20 GiB spill threshold made spilling unreachable. Full investigation:
- * docs/superpowers/specs/2026-07-04-content-dedup-scale-fix-design.md.
- * Uses `lightweight_deletes_sync = 0` (not `mutations_sync`, which governs
- * heavyweight `ALTER TABLE` mutations and is not documented to affect
- * lightweight `DELETE FROM`) — matching scripts/purge-existing-t3.sh and
- * scripts/diagnose-and-purge-garbage.sh's shared precedent of using
- * `lightweight_deletes_sync` for this exact statement type on this table
- * (they use `=2`, "wait all replicas"; the daily cron needs the opposite —
- * fire-and-forget — so this uses `=0`). ClickHouse's own docs confirm `=0`
- * makes the statement "return immediately" without waiting for the background
- * mutation, the same non-blocking semantics `mutations_sync=0` gives heavyweight
- * mutations. Do not set CONTENT_DEDUP_APPLY=true until that spec's
- * "Verification plan" has actually been completed against disposable data —
- * this fix is confirmed against an equivalent read-only SELECT, not yet
- * against a real mutation.
+ * SCALE: this mechanism went through two prior designs before this one, both
+ * confirmed broken live against the real table (neither caught earlier because
+ * verification used a `CREATE TABLE ... AS SELECT` disposable clone, which does
+ * not carry over projections):
+ *   1. Lightweight `DELETE FROM` — rejected outright by the table's
+ *      `proj_imported_desc` projection (Code 344 SUPPORT_IS_DISABLED; lightweight
+ *      deletes need lightweight_mutation_projection_mode='rebuild'/'drop', and
+ *      this table leaves it at the default 'throw'). Confirmed live 2026-07-06.
+ *   2. Unchunked heavyweight `ALTER TABLE ... DELETE` — handles projections
+ *      natively, and is fast at small scale (3M rows: ~3s), but confirmed live
+ *      (twice, from a clean/idle memory baseline) to fail with
+ *      MEMORY_LIMIT_EXCEEDED roughly 25 times in a row at 13.2M rows (2.8% of
+ *      the real table) before eventually succeeding via ClickHouse's automatic
+ *      mutation retry — not an acceptable production behavior at the real
+ *      table's 467M-row scale. max_bytes_before_external_group_by (below) only
+ *      bounds the GROUP BY aggregation; it does nothing for the separate memory
+ *      cost of rewriting parts containing this table's ~9 complex MATERIALIZED
+ *      columns, which is what was actually spiking.
+ * This version buckets the heavyweight DELETE by
+ * `cityHash64(CONTENT_KEY) % bucketCount` (see contentDuplicatePredicateForBucket
+ * below), confirmed live to complete a 13.2M-row sample (that failed ~25 times
+ * unchunked) across 16 buckets with zero memory errors. Full investigation:
+ * docs/superpowers/specs/2026-07-06-content-dedup-bucketed-delete-design.md
+ * (supersedes docs/superpowers/specs/2026-07-04-content-dedup-scale-fix-design.md).
+ *
+ * Uses `mutations_sync = 1` per bucket (block until that one bucket's mutation
+ * completes — simpler sequential control flow than polling system.mutations,
+ * and each bucket is small enough this won't hit a client timeout) and
+ * `allow_nondeterministic_mutations = 1` (required because the WHERE clause's
+ * subquery references the same table being mutated).
+ *
+ * Do not set CONTENT_DEDUP_APPLY=true for the full automatic sweep until the
+ * design doc's Rollout Plan checkpoint (buckets 0-31 of 1024, run manually via
+ * scripts/content-dedup-bucket-run.sh against real data) has completed and
+ * been reviewed.
  */
 import { getClient } from '@/lib/clickhouse'
 import { URL_CONTENT_KEY } from '@/lib/url-content-key'
@@ -55,26 +65,41 @@ import { URL_CONTENT_KEY } from '@/lib/url-content-key'
 /** Content identity: same destination + same credential (scheme/trailing-slash-insensitive on the URL). */
 export const CONTENT_KEY = `${URL_CONTENT_KEY}, email, password`
 
-/** Full-row hash — picks one deterministic survivor per content group. */
+/**
+ * Full-row hash — picks one deterministic survivor per content group.
+ * Includes ClickHouse's virtual `_part`/`_part_offset` columns so that two
+ * rows can never hash equal even when every real column is byte-for-byte
+ * identical (every physical row has a unique (_part, _part_offset) pair).
+ * Earlier versions of this hash omitted these two columns: exact full-tuple
+ * duplicates all shared one hash equal to their own group min, so `NOT IN`
+ * was false for all of them and none were deletable — confirmed live
+ * 2026-07-06 with 3 deliberately-inserted identical rows (all 3 shared one
+ * cityHash64, so none were deletable), quantified at ~3.2% of duplicate rows
+ * surviving a "successful" run this way against a 13.2M-row real-data sample.
+ * See docs/superpowers/specs/2026-07-06-content-dedup-bucketed-delete-design.md.
+ */
 export const FULL_HASH =
-  'cityHash64(url, email, password, domain, source_file, breach_name, imported_at)'
+  'cityHash64(url, email, password, domain, source_file, breach_name, imported_at, _part, _part_offset)'
 
 /**
- * Rows to delete: those whose full-row hash is NOT the minimum within their
- * content group — i.e. every copy except one per unique (url,email,password).
- * (A singleton's hash is trivially its group min, so singletons are never deleted.)
+ * Content-duplicate predicate scoped to one bucket of `bucketCount`.
+ * Chunking by `cityHash64(CONTENT_KEY) % bucketCount` bounds each mutation's
+ * memory footprint: a content-duplicate group's rows always share the same
+ * CONTENT_KEY, so they always hash to the same bucket and can never be split
+ * across two — chunking cannot affect correctness. Both the outer WHERE and
+ * the inner subquery's GROUP BY are scoped to the same bucket, so the
+ * subquery's cardinality (and its memory cost) is bounded to ~1/bucketCount
+ * of the table instead of the whole table.
  *
- * Known limitation (does not break on memory-safety, does affect completeness):
- * `min()` does not break ties. If two or more rows in a content group are exact
- * full-tuple duplicates (identical across every column FULL_HASH covers,
- * including imported_at), they all share one FULL_HASH equal to the group min,
- * so NOT IN is false for all of them and none get deleted — not just all-but-one.
- * Confirmed live against disposable data (2026-07-05); see the "Known limitation"
- * subsection in docs/superpowers/specs/2026-07-04-content-dedup-scale-fix-design.md
- * for the mechanism, evidence, and why it's tracked as a separate follow-up.
+ * IMPORTANT: this must keep the literal substring `GROUP BY ${CONTENT_KEY}`
+ * in the emitted SQL — MUTATION_MARKER below matches on it to detect an
+ * in-flight bucket mutation across process restarts. Do not restructure the
+ * GROUP BY clause without preserving this exact substring.
  */
-export const CONTENT_DUPLICATE_PREDICATE =
-  `${FULL_HASH} NOT IN (SELECT min(${FULL_HASH}) FROM ulp.credentials GROUP BY ${CONTENT_KEY})`
+export function contentDuplicatePredicateForBucket(bucketIndex: number, bucketCount: number): string {
+  const bucketFilter = `cityHash64(${CONTENT_KEY}) % ${bucketCount} = ${bucketIndex}`
+  return `${bucketFilter} AND ${FULL_HASH} NOT IN (SELECT min(${FULL_HASH}) FROM ulp.credentials WHERE ${bucketFilter} GROUP BY ${CONTENT_KEY})`
+}
 
 /** Distinctive substring of the DELETE command, for the in-flight mutation check. */
 const MUTATION_MARKER = `GROUP BY ${CONTENT_KEY}`
@@ -88,16 +113,23 @@ export function buildStatsSql(): string {
   SETTINGS max_execution_time = 300`
 }
 
-export function buildDeleteSql(): string {
-  return `DELETE FROM ulp.credentials WHERE ${CONTENT_DUPLICATE_PREDICATE}`
+/**
+ * Heavyweight ALTER TABLE DELETE for one bucket — handles the table's
+ * projection natively (unlike lightweight DELETE FROM, which this table
+ * rejects outright; see the file's SCALE comment).
+ */
+export function buildDeleteSqlForBucket(bucketIndex: number, bucketCount: number): string {
+  return `ALTER TABLE ulp.credentials DELETE WHERE ${contentDuplicatePredicateForBucket(bucketIndex, bucketCount)}`
 }
 
 /**
- * Memory ceiling for the DELETE mutation's inline CONTENT_DUPLICATE_PREDICATE
- * subquery. Confirmed live 2026-07-04: without this, the subquery exceeds
- * 4 GiB in ~1.6s; with it, it succeeds in ~17.8s (disk spill). No
- * max_memory_usage override is set alongside this anywhere this is used — see
- * the SCALE comment above for why that pairing matters.
+ * Memory ceiling for each bucket's DELETE mutation inline subquery (see
+ * contentDuplicatePredicateForBucket). Confirmed live 2026-07-04: without an
+ * equivalent bound, the unchunked version of this subquery exceeded 4 GiB in
+ * ~1.6s; with it, it succeeds via disk spill. No max_memory_usage override is
+ * set alongside this anywhere it's used — that pairing made spilling
+ * unreachable in an unrelated query profile (lib/clickhouse-query-limits.ts's
+ * exportGroupBySettings()), so it's deliberately avoided here too.
  */
 export const CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES = 4_294_967_296 // 4 GiB
 
@@ -107,9 +139,9 @@ export const CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES = 4_294_967_296 // 4 GiB
  */
 export const CONTENT_DEDUP_MAX_THREADS = 2
 
-/** Full statement runContentDedupTick() submits — exported so its exact shape is testable. */
-export function buildDeleteExecSql(): string {
-  return `${buildDeleteSql()} SETTINGS lightweight_deletes_sync = 0, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_bytes_before_external_group_by = ${CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES}`
+/** Full statement runContentDedupTick() submits per bucket — exported so its exact shape is testable. */
+export function buildDeleteExecSqlForBucket(bucketIndex: number, bucketCount: number): string {
+  return `${buildDeleteSqlForBucket(bucketIndex, bucketCount)} SETTINGS mutations_sync = 1, allow_nondeterministic_mutations = 1, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_bytes_before_external_group_by = ${CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES}`
 }
 
 // ── env knobs (pure, testable) ──────────────────────────────────────────────────
@@ -129,6 +161,15 @@ export function contentDedupApplyEnabled(env: NodeJS.ProcessEnv = process.env): 
 export function minExcessToApply(env: NodeJS.ProcessEnv = process.env): number {
   const n = parseInt(env.DEDUP_MIN_EXCESS ?? '1000', 10)
   return Number.isFinite(n) && n >= 0 ? n : 1000
+}
+
+/**
+ * Number of hash buckets the DELETE mutation is chunked into (bounds each
+ * mutation's memory footprint — see the file's SCALE comment). Default 1024.
+ */
+export function contentDedupBucketCount(env: NodeJS.ProcessEnv = process.env): number {
+  const n = parseInt(env.CONTENT_DEDUP_BUCKET_COUNT ?? '1024', 10)
+  return Number.isFinite(n) && n >= 1 ? n : 1024
 }
 
 /**
@@ -156,7 +197,7 @@ export interface DedupTickResult {
 
 /**
  * Read duplicate stats, log them, and — only when CONTENT_DEDUP_APPLY is on and
- * excess clears the threshold — submit the async DELETE. Never throws.
+ * excess clears the threshold — submit the bucketed DELETE sweep. Never throws.
  */
 export async function runContentDedupTick(opts: { trigger?: string } = {}): Promise<DedupTickResult> {
   const trigger = opts.trigger ?? 'tick'
@@ -191,8 +232,12 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
       return { total, excess, applied: false }
     }
 
-    await client.exec({ query: buildDeleteExecSql() })
-    console.log(`[content-dedup] submitted DELETE FROM (~${excess} duplicate rows, async mutation)`)
+    const bucketCount = contentDedupBucketCount()
+    console.log(`[content-dedup] submitting bucketed DELETE across ${bucketCount} buckets (~${excess} duplicate rows total)`)
+    for (let bucket = 0; bucket < bucketCount; bucket++) {
+      await client.exec({ query: buildDeleteExecSqlForBucket(bucket, bucketCount) })
+    }
+    console.log(`[content-dedup] completed bucketed DELETE (${bucketCount} buckets, ~${excess} duplicate rows)`)
     return { total, excess, applied: true }
   } catch (err) {
     console.error('[content-dedup] tick error:', err instanceof Error ? err.message : String(err))
