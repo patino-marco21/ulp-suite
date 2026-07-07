@@ -42,18 +42,18 @@
             <max_bytes_before_external_group_by>21474836480</max_bytes_before_external_group_by>
             <max_bytes_before_external_sort>21474836480</max_bytes_before_external_sort>
 
-            <!-- Raised 60 -> 3600 (2026-07-07): the app's own ClickHouse client
+            <!-- Raised 60 to 3600 (2026-07-07): the app's own ClickHouse client
                  (lib/clickhouse.ts) explicitly passes max_execution_time=60 on every
-                 query, so this profile default no longer bounds normal app queries --
+                 query, so this profile default no longer bounds normal app queries —
                  it only bounds ad-hoc clickhouse-client CLI usage (scripts/, manual
                  debugging) and, critically, heavyweight ALTER TABLE ... DELETE/UPDATE
                  mutations' background per-part rewrite work. Confirmed live (and via
                  the still-open upstream ClickHouse/ClickHouse#61759) that a mutation's
                  per-part execution does NOT inherit max_execution_time from the
-                 submitting query's own SETTINGS clause -- it's hard-capped by this
+                 submitting query's own SETTINGS clause — it's hard-capped by this
                  profile value regardless. At 60s, real parts in ulp.credentials
                  (recomputing 9 MATERIALIZED columns per row) failed with Code 159
-                 TIMEOUT_EXCEEDED on every retry, never making progress -- see
+                 TIMEOUT_EXCEEDED on every retry, never making progress — see
                  lib/content-dedup.ts's bucketed-DELETE mechanism, which needs this
                  profile to allow a single part's rewrite more than 60s. -->
             <max_execution_time>3600</max_execution_time>
