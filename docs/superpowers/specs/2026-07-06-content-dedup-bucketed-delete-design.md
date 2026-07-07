@@ -101,10 +101,18 @@ checkpoint before committing to the full sweep:
 2. Deploy.
 3. Manually run only buckets **0–31 of 1024** (~1.8% of the real backlog,
    ~14M of ~467M rows) directly against `ulp.credentials`, sequentially,
-   with the exact settings the full run will use. Verify: no memory errors,
-   reasonable per-bucket timing, projection intact, and that the resulting
-   duplicate count decreased by the expected amount for those specific
-   buckets.
+   with the exact settings the full run will use. Trigger this via a new
+   one-off script, `scripts/content-dedup-bucket-run.sh` — following this
+   codebase's existing dry-run/`APPLY=1` convention for direct production
+   DB operations (matching `scripts/dedup-credentials-content.sh` and
+   `scripts/purge-existing-t3.sh`), accepting a bucket range so it can
+   re-run this same checkpoint style for any future manual bucket-range
+   need. This keeps `runContentDedupTick()` itself simple: it always
+   targets the full configured bucket count once
+   `CONTENT_DEDUP_APPLY=true`, with no partial-sweep mode of its own (see
+   Error Handling). Verify: no memory errors, reasonable per-bucket
+   timing, projection intact, and that the resulting duplicate count
+   decreased by the expected amount for those specific buckets.
 4. **Stop and report back.** Do not proceed to the remaining 992 buckets
    automatically. Enabling `CONTENT_DEDUP_APPLY=true` (which drives the full,
    all-1024-bucket sweep on every cron tick from then on) is a separate,
@@ -121,12 +129,14 @@ functions:
 - `buildDeleteSqlForBucket(bucketIndex: number, bucketCount: number): string` — heavyweight `ALTER TABLE ... DELETE`, not lightweight `DELETE FROM`.
 - `buildDeleteExecSqlForBucket(bucketIndex: number, bucketCount: number): string` — adds `mutations_sync = 1` (block until this one bucket's mutation completes — simpler sequential control flow than polling `system.mutations`, and each bucket is small enough that this won't hit a client timeout) plus `allow_nondeterministic_mutations = 1` (required for heavyweight mutations whose WHERE references the same table) alongside the existing `max_threads`/`max_bytes_before_external_group_by` settings.
 - `FULL_HASH` gains `_part, _part_offset` as trailing hash inputs.
-- `runContentDedupTick()`'s apply path changes from "submit one DELETE" to "loop buckets 0..CONTENT_DEDUP_BUCKET_COUNT-1, awaiting each in turn."
+- `contentDedupBucketCount(env: NodeJS.ProcessEnv = process.env): number` — new env knob, matching the file's existing `dedupCronHours`/`minExcessToApply`/`dedupCronHourUtc` convention exactly (optional `env` param for test injection, `parseInt` with a validated fallback). Reads `CONTENT_DEDUP_BUCKET_COUNT`, defaults to `1024`.
+- `runContentDedupTick()`'s apply path changes from "submit one DELETE" to "loop buckets `0..contentDedupBucketCount()-1`, awaiting each in turn."
 - `buildStatsSql()` (the report-only stats query) is unaffected — it doesn't delete anything, so it isn't subject to the projection restriction and needs no bucketing.
 
 No changes to `dedup-cron.ts`'s scheduling logic, `app/api` routes, or any
-other file — this is fully contained to `lib/content-dedup.ts` plus its test
-file.
+other file — this is contained to `lib/content-dedup.ts`, its test file, and
+the new one-off rollout script (`scripts/content-dedup-bucket-run.sh`, see
+Rollout Plan step 3).
 
 ## Testing
 
@@ -160,3 +170,13 @@ already-deduplicated bucket's DELETE simply matches zero rows) though not
 free (it still evaluates the bucket's GROUP BY). This mirrors the existing
 `tickInFlight` guard's already-accepted idempotent-retry model; no new
 resume/checkpoint state is introduced.
+
+The existing cross-process overlap guard (the `system.mutations` check
+against `MUTATION_MARKER = GROUP BY ${CONTENT_KEY}`) must keep working
+unchanged for bucketed mutations: the bucket predicate is additional `WHERE`
+filtering layered around the existing `CONTENT_KEY` grouping, not a rewrite
+of it, so every bucket's mutation command text still contains the literal
+`GROUP BY ${CONTENT_KEY}` substring and remains detectable by the existing
+`LIKE` check. The implementation must preserve this substring verbatim in
+each bucket's SQL — if it doesn't, the overlap guard silently stops
+detecting in-flight bucket mutations.
