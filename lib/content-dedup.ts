@@ -48,35 +48,42 @@
  * docs/superpowers/specs/2026-07-06-content-dedup-bucketed-delete-design.md
  * (supersedes docs/superpowers/specs/2026-07-04-content-dedup-scale-fix-design.md).
  *
- * Uses `mutations_sync = 1` per bucket (block until that one bucket's mutation
- * completes — simpler sequential control flow than polling system.mutations)
- * and `allow_nondeterministic_mutations = 1` (required because the WHERE
- * clause's subquery references the same table being mutated).
+ * MUTATION WAIT: submits each bucket with `mutations_sync = 0` (fire-and-forget
+ * — the submitting query returns almost immediately) and polls system.mutations
+ * for completion via separate, short-lived queries (see waitForBucketMutation
+ * below), rather than blocking one connection open for the mutation's full
+ * duration. Also uses `allow_nondeterministic_mutations = 1` (required because
+ * the WHERE clause's subquery references the same table being mutated).
  *
- * TWO-PART execution-time fix (confirmed live 2026-07-07 — bucket 0 of a real
- * 1024-bucket run against the real table failed twice with Code 159
- * TIMEOUT_EXCEEDED, both cleanly killed with zero rows affected, before this
- * was understood and fixed):
- *   1. This query's own `max_execution_time = 0` bounds the FOREGROUND
- *      `mutations_sync = 1` wait — without it, the client-side wait for a
- *      slow bucket could itself time out even if the mutation eventually
- *      succeeds.
- *   2. That alone is NOT sufficient: a mutation's BACKGROUND per-part rewrite
- *      work does not inherit `max_execution_time` from this SETTINGS clause
- *      at all — confirmed via live testing (polled a stuck mutation for 5+
- *      minutes; parts_to_do never moved, because some real parts here take
- *      longer than 60s to rewrite their 9 MATERIALIZED columns, and every
- *      retry hit the same 60s wall before finishing) and via the matching,
- *      still-open upstream issue ClickHouse/ClickHouse#61759. The actual fix
- *      for the background half is raising `max_execution_time` in
- *      docker/clickhouse/users/ulp-profiles.xml's default profile (60 -> 3600)
- *      — see that file's comment. The app's own queries are unaffected (its
- *      client already sets max_execution_time=60 explicitly; see
- *      lib/clickhouse.ts).
+ * This poll design is the THIRD wait-mechanism attempt — the first two both
+ * used `mutations_sync = 1` (block until done) and each hit a different
+ * timeout class, confirmed live against real ulp.credentials on 2026-07-07:
+ *   1. ClickHouse's `max_execution_time` (default 60s, this deployment's
+ *      `docker/clickhouse/users/ulp-profiles.xml` default profile) caps a
+ *      mutation's BACKGROUND per-part rewrite work and does NOT inherit any
+ *      override from the submitting query's own SETTINGS clause — confirmed
+ *      via live testing (a stuck mutation's parts_to_do never moved across 5+
+ *      minutes of polling, because some real parts here take longer than 60s
+ *      to rewrite their 9 MATERIALIZED columns, and every retry hit the same
+ *      wall before finishing) and via the matching, still-open upstream issue
+ *      ClickHouse/ClickHouse#61759. Fixed by raising that profile's
+ *      max_execution_time to 3600 (see that file's comment) — the app's own
+ *      queries are unaffected (lib/clickhouse.ts's client already sets
+ *      max_execution_time=60 explicitly per query).
+ *   2. Even with (1) fixed, `mutations_sync = 1` still failed: it holds one
+ *      connection open and blocking for the mutation's entire duration (30+
+ *      minutes for a single slow bucket), and the same profile's
+ *      `receive_timeout`/`send_timeout` (300s) kills a connection that goes
+ *      quiet that long — confirmed live: a bucket mutation that had ACTUALLY
+ *      SUCCEEDED server-side (is_done=1, correct row count removed) was
+ *      reported as a client-side failure anyway, a false negative. Since this
+ *      is the third distinct timeout class the same "block one connection
+ *      open" approach hit, the wait mechanism itself was redesigned
+ *      (fire-and-forget + poll) rather than patched a fourth time.
  * The bucket predicate's `cityHash64(CONTENT_KEY) % bucketCount` filter can't
  * be indexed, so every bucket's mutation still evaluates it across the whole
- * table — bucketing bounds memory (few rows per bucket to GROUP), not
- * scan-plus-part-rewrite time, which is what this two-part fix addresses.
+ * table — bucketing bounds memory (few rows per bucket to GROUP), not scan or
+ * part-rewrite time, which is why a single bucket can still take many minutes.
  *
  * Do not set CONTENT_DEDUP_APPLY=true for the full automatic sweep until the
  * design doc's Rollout Plan checkpoint (buckets 0-31 of 1024, run manually via
@@ -163,9 +170,16 @@ export const CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES = 4_294_967_296 // 4 GiB
  */
 export const CONTENT_DEDUP_MAX_THREADS = 2
 
-/** Full statement runContentDedupTick() submits per bucket — exported so its exact shape is testable. */
+/**
+ * Full statement runContentDedupTick() submits per bucket — exported so its
+ * exact shape is testable. `mutations_sync = 0` (fire-and-forget): the
+ * submitting query returns as soon as the mutation is registered, rather than
+ * blocking one connection open for the mutation's full duration — see the
+ * MUTATION WAIT comment at the top of this file for why. Completion is
+ * detected separately by waitForBucketMutation().
+ */
 export function buildDeleteExecSqlForBucket(bucketIndex: number, bucketCount: number): string {
-  return `${buildDeleteSqlForBucket(bucketIndex, bucketCount)} SETTINGS mutations_sync = 1, allow_nondeterministic_mutations = 1, max_execution_time = 0, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_bytes_before_external_group_by = ${CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES}`
+  return `${buildDeleteSqlForBucket(bucketIndex, bucketCount)} SETTINGS mutations_sync = 0, allow_nondeterministic_mutations = 1, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_bytes_before_external_group_by = ${CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES}`
 }
 
 // ── env knobs (pure, testable) ──────────────────────────────────────────────────
@@ -211,6 +225,43 @@ export function dedupCronHourUtc(env: NodeJS.ProcessEnv = process.env): number {
 
 // ── tick (report, and optionally apply) ─────────────────────────────────────────
 
+/** How often to re-check whether a bucket's fire-and-forget mutation has finished. */
+export const CONTENT_DEDUP_POLL_INTERVAL_MS = 5_000
+
+/** Give up waiting for a single bucket's mutation after this long (see the file's MUTATION WAIT comment). */
+export const CONTENT_DEDUP_BUCKET_MAX_WAIT_MS = 60 * 60 * 1000 // 1 hour
+
+/** True while any content-dedup DELETE mutation (any bucket) is still in flight. */
+async function dedupMutationInFlight(client: ReturnType<typeof getClient>): Promise<boolean> {
+  const res = await client.query({
+    query: `SELECT count() AS c FROM system.mutations
+            WHERE database='ulp' AND table='credentials' AND is_done=0
+              AND command LIKE {marker:String}`,
+    query_params: { marker: `%${MUTATION_MARKER}%` },
+    format: 'JSONEachRow',
+  })
+  const [row] = (await res.json()) as Array<{ c: string }>
+  return Number(row?.c ?? 0) > 0
+}
+
+/**
+ * Poll system.mutations — fresh short-lived queries, not one held-open
+ * connection — until the bucket mutation just submitted with
+ * mutations_sync=0 completes. Buckets run strictly sequentially, so at most
+ * one dedup mutation is ever in flight; "no longer in flight" means this
+ * bucket's mutation reached is_done=1. See the file's MUTATION WAIT comment
+ * for why this replaced a mutations_sync=1 blocking wait.
+ */
+async function waitForBucketMutation(client: ReturnType<typeof getClient>): Promise<void> {
+  const deadline = Date.now() + CONTENT_DEDUP_BUCKET_MAX_WAIT_MS
+  while (await dedupMutationInFlight(client)) {
+    if (Date.now() > deadline) {
+      throw new Error(`Bucket mutation did not complete within ${CONTENT_DEDUP_BUCKET_MAX_WAIT_MS}ms`)
+    }
+    await new Promise(resolve => setTimeout(resolve, CONTENT_DEDUP_POLL_INTERVAL_MS))
+  }
+}
+
 let tickInFlight = false
 
 export interface DedupTickResult {
@@ -243,15 +294,7 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
     if (!willApply) return { total, excess, applied: false }
 
     // Don't stack mutations: skip if a content-dedup DELETE is already running.
-    const mutRes = await client.query({
-      query: `SELECT count() AS c FROM system.mutations
-              WHERE database='ulp' AND table='credentials' AND is_done=0
-                AND command LIKE {marker:String}`,
-      query_params: { marker: `%${MUTATION_MARKER}%` },
-      format: 'JSONEachRow',
-    })
-    const [mut] = (await mutRes.json()) as Array<{ c: string }>
-    if (Number(mut?.c ?? 0) > 0) {
+    if (await dedupMutationInFlight(client)) {
       console.log('[content-dedup] a dedup mutation is already running — skipping')
       return { total, excess, applied: false }
     }
@@ -260,6 +303,7 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
     console.log(`[content-dedup] submitting bucketed DELETE across ${bucketCount} buckets (~${excess} duplicate rows total)`)
     for (let bucket = 0; bucket < bucketCount; bucket++) {
       await client.exec({ query: buildDeleteExecSqlForBucket(bucket, bucketCount) })
+      await waitForBucketMutation(client)
     }
     console.log(`[content-dedup] completed bucketed DELETE (${bucketCount} buckets, ~${excess} duplicate rows)`)
     return { total, excess, applied: true }

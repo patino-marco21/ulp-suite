@@ -9,6 +9,8 @@ import {
   buildDeleteExecSqlForBucket,
   CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES,
   CONTENT_DEDUP_MAX_THREADS,
+  CONTENT_DEDUP_POLL_INTERVAL_MS,
+  CONTENT_DEDUP_BUCKET_MAX_WAIT_MS,
   contentDedupBucketCount,
   dedupCronHours,
   dedupCronHourUtc,
@@ -82,12 +84,24 @@ describe('content-dedup', () => {
     })
   })
 
+  describe('CONTENT_DEDUP_POLL_INTERVAL_MS', () => {
+    test('is 5 seconds', () => {
+      expect(CONTENT_DEDUP_POLL_INTERVAL_MS).toBe(5_000)
+    })
+  })
+
+  describe('CONTENT_DEDUP_BUCKET_MAX_WAIT_MS', () => {
+    test('is 1 hour', () => {
+      expect(CONTENT_DEDUP_BUCKET_MAX_WAIT_MS).toBe(60 * 60 * 1000)
+    })
+  })
+
   describe('buildDeleteExecSqlForBucket', () => {
-    test('combines the bucketed delete with mutations_sync, nondeterministic-mutations allowance, unlimited execution time, bounded threads, and external group-by spill in exactly one SETTINGS clause', () => {
+    test('combines the bucketed delete as a fire-and-forget mutation (mutations_sync = 0) with nondeterministic-mutations allowance, bounded threads, and external group-by spill in exactly one SETTINGS clause', () => {
       const sql = buildDeleteExecSqlForBucket(2, 16)
       expect(sql).toContain('ALTER TABLE ulp.credentials DELETE WHERE')
       expect(sql).toContain(
-        'SETTINGS mutations_sync = 1, allow_nondeterministic_mutations = 1, max_execution_time = 0, max_threads = 2, max_bytes_before_external_group_by = 4294967296',
+        'SETTINGS mutations_sync = 0, allow_nondeterministic_mutations = 1, max_threads = 2, max_bytes_before_external_group_by = 4294967296',
       )
       expect(sql.match(/SETTINGS/g)?.length).toBe(1)
     })
