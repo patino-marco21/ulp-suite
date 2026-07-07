@@ -71,7 +71,11 @@ echo "APPLY=$APPLY (0 = dry-run)"
 echo "Buckets: $BUCKET_START..$BUCKET_END of $BUCKET_COUNT"
 echo
 
-# Escape single quotes in MUTATION_MARKER for SQL (double them)
+# MUTATION_MARKER contains single quotes (from CONTENT_KEY's regex literals),
+# and gets embedded here inside another single-quoted SQL string ('%...%') --
+# without escaping, ClickHouse's parser sees those quotes as closing the outer
+# string early and throws a syntax error. Double them (SQL's standard escape)
+# to keep the whole thing one valid string literal.
 escaped_marker="${MUTATION_MARKER//\'/\'\'}"
 active="$(ch "
 SELECT count()
