@@ -20,12 +20,12 @@
 > the above: `mutations_sync`-based synchronous waiting hits ClickHouse
 > connection-level timeouts on long mutations regardless of bucket count
 > (see `lib/content-dedup.ts`'s MUTATION WAIT comment for the fire-and-forget
-> + poll fix this drove). **Before ever setting `CONTENT_DEDUP_APPLY=true`,
-> this needs a follow-up design for the actual chunking strategy** — likely
-> something aligned with physical part boundaries rather than a pure content
-> hash, though a naive part-based chunk needs its own correctness care (a
-> content-duplicate group can span multiple parts, unlike hash buckets,
-> which guarantee a group never splits across two).
+> + poll fix this drove). **The follow-up design is written:**
+> `docs/superpowers/specs/2026-07-07-content-dedup-rewrite-swap-design.md`
+> replaces this entire bucketed-mutation mechanism with the insert-select-rename
+> pattern (matching ClickHouse's own guidance and this codebase's existing
+> `scripts/dedup-credentials-content.sh`) — do not implement a part-aligned
+> chunking scheme against this design; read that doc instead.
 
 ## Problem
 
