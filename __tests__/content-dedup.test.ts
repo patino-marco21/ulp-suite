@@ -2,16 +2,16 @@ import { readFileSync } from 'fs'
 import { describe, test, expect } from 'vitest'
 import {
   CONTENT_KEY,
-  FULL_HASH,
   buildStatsSql,
-  contentDuplicatePredicateForBucket,
-  buildDeleteSqlForBucket,
-  buildDeleteExecSqlForBucket,
-  CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES,
-  CONTENT_DEDUP_MAX_THREADS,
-  CONTENT_DEDUP_POLL_INTERVAL_MS,
-  CONTENT_DEDUP_BUCKET_MAX_WAIT_MS,
-  contentDedupBucketCount,
+  AUTO_DEDUP_TABLE,
+  AUTO_PREDUP_TABLE,
+  CONTENT_DEDUP_SURVIVOR_ORDER,
+  rewriteCreateTableDdl,
+  buildCutoffSql,
+  buildPopulateDedupedTableSql,
+  buildVerifyDedupedTableSql,
+  buildRenameSwapSql,
+  buildCatchupInsertSql,
   dedupCronHours,
   dedupCronHourUtc,
   contentDedupApplyEnabled,
@@ -28,88 +28,9 @@ describe('content-dedup', () => {
     expect(CONTENT_KEY).toBe(`${URL_CONTENT_KEY}, email, password`)
   })
 
-  describe('FULL_HASH', () => {
-    test('includes _part and _part_offset so exact full-tuple duplicates never tie', () => {
-      expect(FULL_HASH).toBe(
-        'cityHash64(url, email, password, domain, source_file, breach_name, imported_at, _part, _part_offset)',
-      )
-    })
-  })
-
-  describe('contentDuplicatePredicateForBucket', () => {
-    const sql = contentDuplicatePredicateForBucket(5, 1024)
-    test('scopes the outer filter to the given bucket', () => {
-      expect(sql).toContain(`cityHash64(${CONTENT_KEY}) % 1024 = 5`)
-    })
-    test('scopes the tie-break subquery to the same bucket', () => {
-      expect(sql).toContain(
-        `NOT IN (SELECT min(${FULL_HASH}) FROM ulp.credentials WHERE cityHash64(${CONTENT_KEY}) % 1024 = 5 GROUP BY ${CONTENT_KEY})`,
-      )
-    })
-    test('preserves the literal "GROUP BY <CONTENT_KEY>" substring the in-flight mutation check matches on', () => {
-      expect(sql).toContain(`GROUP BY ${CONTENT_KEY}`)
-    })
-    test('a different bucket index/count changes both the filter and the subquery scope', () => {
-      const other = contentDuplicatePredicateForBucket(0, 8)
-      expect(other).toContain(`cityHash64(${CONTENT_KEY}) % 8 = 0`)
-      expect(other).not.toContain('% 1024 = 5')
-    })
-  })
-
-  describe('buildDeleteSqlForBucket', () => {
-    const sql = buildDeleteSqlForBucket(2, 16)
-    test('is a heavyweight ALTER TABLE DELETE on ulp.credentials, not a lightweight DELETE FROM', () => {
-      expect(sql.startsWith('ALTER TABLE ulp.credentials DELETE WHERE')).toBe(true)
-      expect(sql).not.toContain('DELETE FROM')
-    })
-    test('embeds this bucket\'s predicate', () => {
-      expect(sql).toContain(`cityHash64(${CONTENT_KEY}) % 16 = 2`)
-    })
-    test('never includes its own SETTINGS clause', () => {
-      // buildDeleteExecSqlForBucket() appends the real SETTINGS clause -- a
-      // second one here would make the combined statement invalid SQL.
-      expect(sql).not.toContain('SETTINGS')
-    })
-  })
-
-  describe('CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES', () => {
-    test('is 4 GiB', () => {
-      expect(CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES).toBe(4_294_967_296)
-    })
-  })
-
-  describe('CONTENT_DEDUP_MAX_THREADS', () => {
-    test('is 2', () => {
-      expect(CONTENT_DEDUP_MAX_THREADS).toBe(2)
-    })
-  })
-
-  describe('CONTENT_DEDUP_POLL_INTERVAL_MS', () => {
-    test('is 5 seconds', () => {
-      expect(CONTENT_DEDUP_POLL_INTERVAL_MS).toBe(5_000)
-    })
-  })
-
-  describe('CONTENT_DEDUP_BUCKET_MAX_WAIT_MS', () => {
-    test('is 1 hour', () => {
-      expect(CONTENT_DEDUP_BUCKET_MAX_WAIT_MS).toBe(60 * 60 * 1000)
-    })
-  })
-
-  describe('buildDeleteExecSqlForBucket', () => {
-    test('combines the bucketed delete as a fire-and-forget mutation (mutations_sync = 0) with nondeterministic-mutations allowance, bounded threads, and external group-by spill in exactly one SETTINGS clause', () => {
-      const sql = buildDeleteExecSqlForBucket(2, 16)
-      expect(sql).toContain('ALTER TABLE ulp.credentials DELETE WHERE')
-      expect(sql).toContain(
-        'SETTINGS mutations_sync = 0, allow_nondeterministic_mutations = 1, max_threads = 2, max_bytes_before_external_group_by = 4294967296',
-      )
-      expect(sql.match(/SETTINGS/g)?.length).toBe(1)
-    })
-  })
-
   describe('buildStatsSql', () => {
     const sql = buildStatsSql()
-    test('reports total and excess in one pass without the duplicate subquery', () => {
+    test('reports total and excess in one pass without a duplicate subquery', () => {
       expect(sql).toContain(`uniqExact(cityHash64(${URL_CONTENT_KEY}, email, password))`)
       expect(sql).toContain('AS excess')
       expect(sql).not.toContain('AS deletable')
@@ -117,16 +38,103 @@ describe('content-dedup', () => {
     })
   })
 
-  describe('contentDedupBucketCount', () => {
-    test('defaults to 1024', () => {
-      expect(contentDedupBucketCount({})).toBe(1024)
+  describe('AUTO_DEDUP_TABLE / AUTO_PREDUP_TABLE', () => {
+    test('are distinct from the manual script\'s _cdedup/_predup table names', () => {
+      expect(AUTO_DEDUP_TABLE).toBe('ulp.credentials_cdedup_auto')
+      expect(AUTO_PREDUP_TABLE).toBe('ulp.credentials_predup_auto')
     })
-    test('honors a configured count', () => {
-      expect(contentDedupBucketCount({ CONTENT_DEDUP_BUCKET_COUNT: '256' })).toBe(256)
+  })
+
+  describe('CONTENT_DEDUP_SURVIVOR_ORDER', () => {
+    test('mirrors scripts/dedup-credentials-content.sh\'s ORDER exactly', () => {
+      expect(CONTENT_DEDUP_SURVIVOR_ORDER).toBe('url, email, password, imported_at')
     })
-    test('invalid or non-positive falls back to 1024', () => {
-      expect(contentDedupBucketCount({ CONTENT_DEDUP_BUCKET_COUNT: '0' })).toBe(1024)
-      expect(contentDedupBucketCount({ CONTENT_DEDUP_BUCKET_COUNT: 'nope' })).toBe(1024)
+  })
+
+  describe('rewriteCreateTableDdl', () => {
+    const fixture = `CREATE TABLE ulp.credentials
+(
+    \`url\` String CODEC(ZSTD(3)),
+    \`email\` String CODEC(ZSTD(3)),
+    \`imported_at\` DateTime DEFAULT now() CODEC(Delta(4), ZSTD(1))
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/ulp/credentials', '{replica}')
+PARTITION BY toYYYYMM(imported_at)
+ORDER BY (domain, email, imported_at)`
+
+    test('rewrites the CREATE TABLE line to the target table name', () => {
+      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE)
+      expect(result.split('\n')[0]).toBe(`CREATE TABLE ${AUTO_DEDUP_TABLE}`)
+    })
+
+    test('rewrites the ReplicatedMergeTree ZooKeeper path to match', () => {
+      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE)
+      expect(result).toContain(`/ulp/credentials_cdedup_auto'`)
+      expect(result).not.toContain(`/ulp/credentials'`)
+    })
+
+    test('leaves the rest of the DDL unchanged', () => {
+      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE)
+      expect(result).toContain('`url` String CODEC(ZSTD(3))')
+      expect(result).toContain('PARTITION BY toYYYYMM(imported_at)')
+    })
+
+    test('only rewrites the first occurrence of the table name (the CREATE TABLE line), not incidental matches elsewhere', () => {
+      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE)
+      expect(result.match(/ulp\.credentials_cdedup_auto/g)?.length).toBe(1)
+    })
+  })
+
+  describe('buildPopulateDedupedTableSql', () => {
+    test('inserts a deduped copy keeping the earliest imported_at per content key', () => {
+      const sql = buildPopulateDedupedTableSql()
+      expect(sql).toContain(`INSERT INTO ${AUTO_DEDUP_TABLE}`)
+      expect(sql).toContain('SELECT * FROM ulp.credentials')
+      expect(sql).toContain(`ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}`)
+      expect(sql).toContain(`LIMIT 1 BY ${CONTENT_KEY}`)
+    })
+  })
+
+  describe('buildCutoffSql', () => {
+    test('captures the clock time and the distinct content-key count together, in one query', () => {
+      const sql = buildCutoffSql()
+      expect(sql).toContain('now() AS cutoff')
+      expect(sql).toContain(`uniqExact(cityHash64(${CONTENT_KEY})) AS expected_rows`)
+      expect(sql).toContain('FROM ulp.credentials')
+    })
+  })
+
+  describe('buildVerifyDedupedTableSql', () => {
+    test('reports the deduped table\'s own row count and internal excess only -- does not separately query the original table', () => {
+      const sql = buildVerifyDedupedTableSql()
+      expect(sql).toContain(`FROM ${AUTO_DEDUP_TABLE}`)
+      expect(sql).toContain(`uniqExact(cityHash64(${CONTENT_KEY}))`)
+      expect(sql).toContain('AS cdedup_rows')
+      expect(sql).toContain('AS excess_after')
+      // Exactly one data source (AUTO_DEDUP_TABLE) -- the old design queried
+      // the original ulp.credentials too, which is what caused the
+      // moving-target verification bug this shape fixes.
+      expect(sql.match(/FROM/g)?.length).toBe(1)
+      expect(sql).not.toContain('expected_rows')
+    })
+  })
+
+  describe('buildRenameSwapSql', () => {
+    test('atomically renames the original to the predup name and the deduped copy into place', () => {
+      const sql = buildRenameSwapSql()
+      expect(sql).toBe(`RENAME TABLE ulp.credentials TO ${AUTO_PREDUP_TABLE}, ${AUTO_DEDUP_TABLE} TO ulp.credentials`)
+    })
+  })
+
+  describe('buildCatchupInsertSql', () => {
+    test('copies rows imported after cutoff, excluding content keys already present, deduplicated against itself', () => {
+      const sql = buildCatchupInsertSql('2026-07-07 15:07:51')
+      expect(sql).toContain('INSERT INTO ulp.credentials')
+      expect(sql).toContain(`FROM ${AUTO_PREDUP_TABLE}`)
+      expect(sql).toContain("WHERE imported_at > '2026-07-07 15:07:51'")
+      expect(sql).toContain(`cityHash64(${CONTENT_KEY}) NOT IN (SELECT cityHash64(${CONTENT_KEY}) FROM ulp.credentials)`)
+      expect(sql).toContain(`ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}`)
+      expect(sql).toContain(`LIMIT 1 BY ${CONTENT_KEY}`)
     })
   })
 

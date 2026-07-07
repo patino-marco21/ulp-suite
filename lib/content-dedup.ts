@@ -11,129 +11,57 @@
  * being mandatory is exactly what keeps cross-import copies distinct. So content
  * dedup must compare only (url,email,password).
  *
- * MECHANISM: a heavyweight `ALTER TABLE ... DELETE`, chunked into
- * CONTENT_DEDUP_BUCKET_COUNT (default 1024) hash buckets and run one bucket at
- * a time. For each content group it keeps the single row with the smallest
- * full-row hash (FULL_HASH, which includes _part/_part_offset — see its own
- * comment below) and deletes the rest.
+ * MECHANISM: insert-select-rename (matching ClickHouse's own guidance to
+ * avoid mutations for large transformations, and this codebase's own proven
+ * scripts/dedup-credentials-content.sh). Builds a deduplicated copy of
+ * ulp.credentials into AUTO_DEDUP_TABLE via `INSERT ... SELECT ... ORDER BY
+ * CONTENT_DEDUP_SURVIVOR_ORDER LIMIT 1 BY CONTENT_KEY` (keeps the earliest
+ * imported_at per content key — LIMIT 1 BY has no "exact ties" failure mode,
+ * unlike a min(hash) predicate), verifies it, atomically RENAMEs it into
+ * place, then copies over anything imported during the build window (see
+ * "CATCH-UP" below). Full design:
+ * docs/superpowers/specs/2026-07-07-content-dedup-rewrite-swap-design.md
  *
- * SAFETY: report-only by default. It logs how many rows it WOULD delete; nothing
- * is removed unless CONTENT_DEDUP_APPLY=true. The scheduled cron
- * (lib/dedup-cron.ts) invokes this routine; operators can also run the verified
- * content-key cleanup script at scripts/dedup-credentials-content.sh, or the
- * bucket-range rollout script at scripts/content-dedup-bucket-run.sh.
+ * SAFETY: report-only by default. It logs how many rows it WOULD remove;
+ * nothing is touched unless CONTENT_DEDUP_APPLY=true. The scheduled cron
+ * (lib/dedup-cron.ts) invokes this routine; operators can also run the
+ * separate, manual scripts/dedup-credentials-content.sh (unchanged by this
+ * design — it uses its own _cdedup/_predup table names, so the two never
+ * collide if both are run around the same time).
  *
- * SCALE: this mechanism went through two prior designs before this one, both
- * confirmed broken live against the real table (neither caught earlier because
- * verification used a `CREATE TABLE ... AS SELECT` disposable clone, which does
- * not carry over projections):
- *   1. Lightweight `DELETE FROM` — rejected outright by the table's
- *      `proj_imported_desc` projection (Code 344 SUPPORT_IS_DISABLED; lightweight
- *      deletes need lightweight_mutation_projection_mode='rebuild'/'drop', and
- *      this table leaves it at the default 'throw'). Confirmed live 2026-07-06.
- *   2. Unchunked heavyweight `ALTER TABLE ... DELETE` — handles projections
- *      natively, and is fast at small scale (3M rows: ~3s), but confirmed live
- *      (twice, from a clean/idle memory baseline) to fail with
- *      MEMORY_LIMIT_EXCEEDED roughly 25 times in a row at 13.2M rows (2.8% of
- *      the real table) before eventually succeeding via ClickHouse's automatic
- *      mutation retry — not an acceptable production behavior at the real
- *      table's 467M-row scale. max_bytes_before_external_group_by (below) only
- *      bounds the GROUP BY aggregation; it does nothing for the separate memory
- *      cost of rewriting parts containing this table's ~9 complex MATERIALIZED
- *      columns, which is what was actually spiking.
- * This version buckets the heavyweight DELETE by
- * `cityHash64(CONTENT_KEY) % bucketCount` (see contentDuplicatePredicateForBucket
- * below), confirmed live to complete a 13.2M-row sample (that failed ~25 times
- * unchunked) across 16 buckets with zero memory errors. Full investigation:
- * docs/superpowers/specs/2026-07-06-content-dedup-bucketed-delete-design.md
- * (supersedes docs/superpowers/specs/2026-07-04-content-dedup-scale-fix-design.md).
+ * PRIOR DESIGNS (all superseded — see the design doc above for the full
+ * investigation): (1) lightweight `DELETE FROM` — rejected outright by the
+ * table's `proj_imported_desc` projection. (2) unchunked heavyweight `ALTER
+ * TABLE ... DELETE` — hit MEMORY_LIMIT_EXCEEDED at 2.8% of the real table's
+ * scale. (3) the same DELETE chunked into hash buckets — fixed the memory
+ * problem, but every bucket still rewrites every physical part regardless of
+ * bucket count (content-hash values don't correlate with part boundaries),
+ * confirmed live to make a full sweep take on the order of weeks against a
+ * real table that had settled into 13 parts (one 315M-row/26GiB). This
+ * version (insert-select-rename) replaces (3) entirely rather than patching
+ * it further — the part-touching problem is structural, not scale-specific,
+ * and recurs for any future incremental use of a mutation-based approach.
  *
- * MUTATION WAIT: submits each bucket with `mutations_sync = 0` (fire-and-forget
- * — the submitting query returns almost immediately) and polls system.mutations
- * for completion via separate, short-lived queries (see waitForBucketMutation
- * below), rather than blocking one connection open for the mutation's full
- * duration. Also uses `allow_nondeterministic_mutations = 1` (required because
- * the WHERE clause's subquery references the same table being mutated).
+ * CATCH-UP: ulp.credentials keeps receiving live inserts from the ingest
+ * pipeline throughout the (potentially tens-of-minutes) rebuild. A cutoff
+ * timestamp captured against ClickHouse's own clock (not Node's — imported_at
+ * is a ClickHouse-side DEFAULT now() value; comparing against a Node-clock
+ * timestamp risks skew) before the build starts lets a post-swap INSERT pull
+ * anything imported after it from the archived original — excluding content
+ * keys already present in the new table (INSERT ... SELECT has no strict
+ * snapshot isolation, so the main build may have already picked up rows right
+ * at the cutoff boundary) and deduplicating the catch-up set against itself.
  *
- * This poll design is the THIRD wait-mechanism attempt — the first two both
- * used `mutations_sync = 1` (block until done) and each hit a different
- * timeout class, confirmed live against real ulp.credentials on 2026-07-07:
- *   1. ClickHouse's `max_execution_time` (default 60s, this deployment's
- *      `docker/clickhouse/users/ulp-profiles.xml` default profile) caps a
- *      mutation's BACKGROUND per-part rewrite work and does NOT inherit any
- *      override from the submitting query's own SETTINGS clause — confirmed
- *      via live testing (a stuck mutation's parts_to_do never moved across 5+
- *      minutes of polling, because some real parts here take longer than 60s
- *      to rewrite their 9 MATERIALIZED columns, and every retry hit the same
- *      wall before finishing) and via the matching, still-open upstream issue
- *      ClickHouse/ClickHouse#61759. Fixed by raising that profile's
- *      max_execution_time to 3600 (see that file's comment) — the app's own
- *      queries are unaffected (lib/clickhouse.ts's client already sets
- *      max_execution_time=60 explicitly per query).
- *   2. Even with (1) fixed, `mutations_sync = 1` still failed: it holds one
- *      connection open and blocking for the mutation's entire duration (30+
- *      minutes for a single slow bucket), and the same profile's
- *      `receive_timeout`/`send_timeout` (300s) kills a connection that goes
- *      quiet that long — confirmed live: a bucket mutation that had ACTUALLY
- *      SUCCEEDED server-side (is_done=1, correct row count removed) was
- *      reported as a client-side failure anyway, a false negative. Since this
- *      is the third distinct timeout class the same "block one connection
- *      open" approach hit, the wait mechanism itself was redesigned
- *      (fire-and-forget + poll) rather than patched a fourth time.
- * The bucket predicate's `cityHash64(CONTENT_KEY) % bucketCount` filter can't
- * be indexed, so every bucket's mutation still evaluates it across the whole
- * table — bucketing bounds memory (few rows per bucket to GROUP), not scan or
- * part-rewrite time, which is why a single bucket can still take many minutes.
- *
- * Do not set CONTENT_DEDUP_APPLY=true for the full automatic sweep until the
- * design doc's Rollout Plan checkpoint (buckets 0-31 of 1024, run manually via
- * scripts/content-dedup-bucket-run.sh against real data) has completed and
- * been reviewed.
+ * ROLLBACK: the archived original (AUTO_PREDUP_TABLE) is deliberately kept
+ * for one full cron interval after each successful run, only dropped at the
+ * START of the *next* run — giving an operator the entire interval to notice
+ * a problem and manually roll back before it's cleared for the next cycle.
  */
 import { getClient } from '@/lib/clickhouse'
 import { URL_CONTENT_KEY } from '@/lib/url-content-key'
 
 /** Content identity: same destination + same credential (scheme/trailing-slash-insensitive on the URL). */
 export const CONTENT_KEY = `${URL_CONTENT_KEY}, email, password`
-
-/**
- * Full-row hash — picks one deterministic survivor per content group.
- * Includes ClickHouse's virtual `_part`/`_part_offset` columns so that two
- * rows can never hash equal even when every real column is byte-for-byte
- * identical (every physical row has a unique (_part, _part_offset) pair).
- * Earlier versions of this hash omitted these two columns: exact full-tuple
- * duplicates all shared one hash equal to their own group min, so `NOT IN`
- * was false for all of them and none were deletable — confirmed live
- * 2026-07-06 with 3 deliberately-inserted identical rows (all 3 shared one
- * cityHash64, so none were deletable), quantified at ~3.2% of duplicate rows
- * surviving a "successful" run this way against a 13.2M-row real-data sample.
- * See docs/superpowers/specs/2026-07-06-content-dedup-bucketed-delete-design.md.
- */
-export const FULL_HASH =
-  'cityHash64(url, email, password, domain, source_file, breach_name, imported_at, _part, _part_offset)'
-
-/**
- * Content-duplicate predicate scoped to one bucket of `bucketCount`.
- * Chunking by `cityHash64(CONTENT_KEY) % bucketCount` bounds each mutation's
- * memory footprint: a content-duplicate group's rows always share the same
- * CONTENT_KEY, so they always hash to the same bucket and can never be split
- * across two — chunking cannot affect correctness. Both the outer WHERE and
- * the inner subquery's GROUP BY are scoped to the same bucket, so the
- * subquery's cardinality (and its memory cost) is bounded to ~1/bucketCount
- * of the table instead of the whole table.
- *
- * IMPORTANT: this must keep the literal substring `GROUP BY ${CONTENT_KEY}`
- * in the emitted SQL — MUTATION_MARKER below matches on it to detect an
- * in-flight bucket mutation across process restarts. Do not restructure the
- * GROUP BY clause without preserving this exact substring.
- */
-export function contentDuplicatePredicateForBucket(bucketIndex: number, bucketCount: number): string {
-  const bucketFilter = `cityHash64(${CONTENT_KEY}) % ${bucketCount} = ${bucketIndex}`
-  return `${bucketFilter} AND ${FULL_HASH} NOT IN (SELECT min(${FULL_HASH}) FROM ulp.credentials WHERE ${bucketFilter} GROUP BY ${CONTENT_KEY})`
-}
-
-/** Distinctive substring of the DELETE command, for the in-flight mutation check. */
-const MUTATION_MARKER = `GROUP BY ${CONTENT_KEY}`
 
 export function buildStatsSql(): string {
   return `SELECT
@@ -144,42 +72,100 @@ export function buildStatsSql(): string {
   SETTINGS max_execution_time = 300`
 }
 
+/** Build target for the rewrite+swap cycle. Distinct from scripts/dedup-credentials-content.sh's ulp.credentials_cdedup so the two never collide. */
+export const AUTO_DEDUP_TABLE = 'ulp.credentials_cdedup_auto'
+
+/** Archived original after a successful swap -- kept one full cron interval as a rollback safety net (see ROLLBACK above). */
+export const AUTO_PREDUP_TABLE = 'ulp.credentials_predup_auto'
+
 /**
- * Heavyweight ALTER TABLE DELETE for one bucket — handles the table's
- * projection natively (unlike lightweight DELETE FROM, which this table
- * rejects outright; see the file's SCALE comment).
+ * Deterministic tie-break for LIMIT 1 BY: keeps the earliest imported_at per
+ * content key. Mirrors scripts/dedup-credentials-content.sh's ORDER exactly
+ * -- the raw url column (not the normalized URL_CONTENT_KEY expression);
+ * imported_at ASC is what actually decides the survivor among same-content-key
+ * rows once LIMIT 1 BY groups them.
  */
-export function buildDeleteSqlForBucket(bucketIndex: number, bucketCount: number): string {
-  return `ALTER TABLE ulp.credentials DELETE WHERE ${contentDuplicatePredicateForBucket(bucketIndex, bucketCount)}`
+export const CONTENT_DEDUP_SURVIVOR_ORDER = 'url, email, password, imported_at'
+
+/**
+ * Rewrites a `SHOW CREATE TABLE` result to target a different table name and
+ * ReplicatedMergeTree ZooKeeper path -- a clone with the same ZK path
+ * collides with Code REPLICA_ALREADY_EXISTS. Pure function so the rewrite
+ * logic is unit-testable without a live database; runContentDedupTick() is
+ * responsible for fetching showCreateSql via a live SHOW CREATE TABLE first.
+ * Mirrors scripts/dedup-credentials-content.sh's sed rewrite exactly: only
+ * the CREATE TABLE line's table name is rewritten (not any other line), and
+ * the ZK path is matched by its `/ulp/credentials'` suffix rather than a
+ * fixed prefix, so it works regardless of the exact path prefix ClickHouse
+ * uses (confirmed live: the real path is `/clickhouse/tables/{shard}/ulp/credentials`,
+ * which still ends in exactly that suffix).
+ */
+export function rewriteCreateTableDdl(showCreateSql: string, targetTable: string): string {
+  const targetShortName = targetTable.split('.')[1]
+  const lines = showCreateSql.split('\n')
+  lines[0] = lines[0].replace('ulp.credentials', targetTable)
+  return lines.join('\n').replace("/ulp/credentials'", `/ulp/${targetShortName}'`)
 }
 
 /**
- * Memory ceiling for each bucket's DELETE mutation inline subquery (see
- * contentDuplicatePredicateForBucket). Confirmed live 2026-07-04: without an
- * equivalent bound, the unchunked version of this subquery exceeded 4 GiB in
- * ~1.6s; with it, it succeeds via disk spill. No max_memory_usage override is
- * set alongside this anywhere it's used — that pairing made spilling
- * unreachable in an unrelated query profile (lib/clickhouse-query-limits.ts's
- * exportGroupBySettings()), so it's deliberately avoided here too.
+ * Captures the cutoff timestamp and the distinct content-key count together,
+ * in one query, against ClickHouse's own clock, before the build starts.
+ * Both values MUST come from here, not be re-queried later: ulp.credentials
+ * keeps receiving live inserts throughout the build, so a fresh count taken
+ * at verify time would compare against a moving target and spuriously fail
+ * verification on a perfectly correct run.
  */
-export const CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES = 4_294_967_296 // 4 GiB
+export function buildCutoffSql(): string {
+  return `SELECT
+    now() AS cutoff,
+    uniqExact(cityHash64(${CONTENT_KEY})) AS expected_rows
+  FROM ulp.credentials
+  SETTINGS max_execution_time = 300`
+}
+
+/** Builds AUTO_DEDUP_TABLE: one row per content key, keeping the earliest imported_at. */
+export function buildPopulateDedupedTableSql(): string {
+  return `INSERT INTO ${AUTO_DEDUP_TABLE}
+  SELECT * FROM ulp.credentials
+  ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}
+  LIMIT 1 BY ${CONTENT_KEY}`
+}
 
 /**
- * Bounds concurrent subquery re-evaluation across the background merge pool
- * (mirrors scripts/purge-existing-t3.sh's max_threads=2).
+ * AUTO_DEDUP_TABLE's own row count and internal excess -- does not query the
+ * original table (that comparison uses buildCutoffSql()'s expectedRows,
+ * captured before the build started, via runContentDedupTick's `>=` check --
+ * see buildCutoffSql's comment for why a fresh query here would be wrong).
  */
-export const CONTENT_DEDUP_MAX_THREADS = 2
+export function buildVerifyDedupedTableSql(): string {
+  return `SELECT
+    count() AS cdedup_rows,
+    count() - uniqExact(cityHash64(${CONTENT_KEY})) AS excess_after
+  FROM ${AUTO_DEDUP_TABLE}
+  SETTINGS max_execution_time = 300`
+}
+
+/** Atomic, metadata-only swap: the deduped copy becomes ulp.credentials; the original is archived under AUTO_PREDUP_TABLE. */
+export function buildRenameSwapSql(): string {
+  return `RENAME TABLE ulp.credentials TO ${AUTO_PREDUP_TABLE}, ${AUTO_DEDUP_TABLE} TO ulp.credentials`
+}
 
 /**
- * Full statement runContentDedupTick() submits per bucket — exported so its
- * exact shape is testable. `mutations_sync = 0` (fire-and-forget): the
- * submitting query returns as soon as the mutation is registered, rather than
- * blocking one connection open for the mutation's full duration — see the
- * MUTATION WAIT comment at the top of this file for why. Completion is
- * detected separately by waitForBucketMutation().
+ * Copies rows imported after `cutoff` from the archived original into the
+ * now-live ulp.credentials -- anything imported during the build window
+ * would otherwise be silently lost (see CATCH-UP above). Excludes content
+ * keys already present (the main build may have already picked up rows right
+ * at the cutoff boundary) and deduplicates the catch-up set against itself.
+ * `cutoff` must be a ClickHouse-clock timestamp string (e.g. from `SELECT
+ * now()`), not a Node-clock value -- see the file's CATCH-UP comment.
  */
-export function buildDeleteExecSqlForBucket(bucketIndex: number, bucketCount: number): string {
-  return `${buildDeleteSqlForBucket(bucketIndex, bucketCount)} SETTINGS mutations_sync = 0, allow_nondeterministic_mutations = 1, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_bytes_before_external_group_by = ${CONTENT_DEDUP_GROUP_BY_MAX_MEMORY_BYTES}`
+export function buildCatchupInsertSql(cutoff: string): string {
+  return `INSERT INTO ulp.credentials
+  SELECT * FROM ${AUTO_PREDUP_TABLE}
+  WHERE imported_at > '${cutoff}'
+    AND cityHash64(${CONTENT_KEY}) NOT IN (SELECT cityHash64(${CONTENT_KEY}) FROM ulp.credentials)
+  ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}
+  LIMIT 1 BY ${CONTENT_KEY}`
 }
 
 // ── env knobs (pure, testable) ──────────────────────────────────────────────────
@@ -190,30 +176,21 @@ export function dedupCronHours(env: NodeJS.ProcessEnv = process.env): number {
   return Number.isFinite(h) && h > 0 ? h : 0
 }
 
-/** Whether the destructive DELETE is allowed to run. Default false (report-only). */
+/** Whether the destructive rebuild is allowed to run. Default false (report-only). */
 export function contentDedupApplyEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.CONTENT_DEDUP_APPLY === 'true' || env.CONTENT_DEDUP_APPLY === '1'
 }
 
-/** Don't fire a (heavy) mutation unless at least this many excess rows exist. Default 1000. */
+/** Don't rebuild the table unless at least this many excess rows exist. Default 1000. */
 export function minExcessToApply(env: NodeJS.ProcessEnv = process.env): number {
   const n = parseInt(env.DEDUP_MIN_EXCESS ?? '1000', 10)
   return Number.isFinite(n) && n >= 0 ? n : 1000
 }
 
 /**
- * Number of hash buckets the DELETE mutation is chunked into (bounds each
- * mutation's memory footprint — see the file's SCALE comment). Default 1024.
- */
-export function contentDedupBucketCount(env: NodeJS.ProcessEnv = process.env): number {
-  const n = parseInt(env.CONTENT_DEDUP_BUCKET_COUNT ?? '1024', 10)
-  return Number.isFinite(n) && n >= 1 ? n : 1024
-}
-
-/**
- * UTC hour (0-23) the daily cron tick is anchored to. Default 4 (04:00 UTC).
+ * UTC hour (0-23) the cron tick is anchored to. Default 4 (04:00 UTC).
  * Previously the first tick fired 60s after whatever moment the app container
- * happened to start, so its daily recurrence landed at an arbitrary wall-clock
+ * happened to start, so its recurrence landed at an arbitrary wall-clock
  * time — including, on 2026-06-27, the middle of a heavy-query window. Anchor
  * it to an explicit hour instead; tune DEDUP_CRON_HOUR_UTC to your actual
  * low-traffic window.
@@ -225,43 +202,6 @@ export function dedupCronHourUtc(env: NodeJS.ProcessEnv = process.env): number {
 
 // ── tick (report, and optionally apply) ─────────────────────────────────────────
 
-/** How often to re-check whether a bucket's fire-and-forget mutation has finished. */
-export const CONTENT_DEDUP_POLL_INTERVAL_MS = 5_000
-
-/** Give up waiting for a single bucket's mutation after this long (see the file's MUTATION WAIT comment). */
-export const CONTENT_DEDUP_BUCKET_MAX_WAIT_MS = 60 * 60 * 1000 // 1 hour
-
-/** True while any content-dedup DELETE mutation (any bucket) is still in flight. */
-async function dedupMutationInFlight(client: ReturnType<typeof getClient>): Promise<boolean> {
-  const res = await client.query({
-    query: `SELECT count() AS c FROM system.mutations
-            WHERE database='ulp' AND table='credentials' AND is_done=0
-              AND command LIKE {marker:String}`,
-    query_params: { marker: `%${MUTATION_MARKER}%` },
-    format: 'JSONEachRow',
-  })
-  const [row] = (await res.json()) as Array<{ c: string }>
-  return Number(row?.c ?? 0) > 0
-}
-
-/**
- * Poll system.mutations — fresh short-lived queries, not one held-open
- * connection — until the bucket mutation just submitted with
- * mutations_sync=0 completes. Buckets run strictly sequentially, so at most
- * one dedup mutation is ever in flight; "no longer in flight" means this
- * bucket's mutation reached is_done=1. See the file's MUTATION WAIT comment
- * for why this replaced a mutations_sync=1 blocking wait.
- */
-async function waitForBucketMutation(client: ReturnType<typeof getClient>): Promise<void> {
-  const deadline = Date.now() + CONTENT_DEDUP_BUCKET_MAX_WAIT_MS
-  while (await dedupMutationInFlight(client)) {
-    if (Date.now() > deadline) {
-      throw new Error(`Bucket mutation did not complete within ${CONTENT_DEDUP_BUCKET_MAX_WAIT_MS}ms`)
-    }
-    await new Promise(resolve => setTimeout(resolve, CONTENT_DEDUP_POLL_INTERVAL_MS))
-  }
-}
-
 let tickInFlight = false
 
 export interface DedupTickResult {
@@ -272,7 +212,7 @@ export interface DedupTickResult {
 
 /**
  * Read duplicate stats, log them, and — only when CONTENT_DEDUP_APPLY is on and
- * excess clears the threshold — submit the bucketed DELETE sweep. Never throws.
+ * excess clears the threshold — run the rewrite+swap cycle. Never throws.
  */
 export async function runContentDedupTick(opts: { trigger?: string } = {}): Promise<DedupTickResult> {
   const trigger = opts.trigger ?? 'tick'
@@ -293,19 +233,61 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
     )
     if (!willApply) return { total, excess, applied: false }
 
-    // Don't stack mutations: skip if a content-dedup DELETE is already running.
-    if (await dedupMutationInFlight(client)) {
-      console.log('[content-dedup] a dedup mutation is already running — skipping')
+    // 1. Capture cutoff AND expectedRows together, against ClickHouse's own
+    // clock, before anything else runs (see the file's CATCH-UP comment and
+    // buildCutoffSql's comment for why both must come from here, not be
+    // re-queried at verify time).
+    const cutoffRes = await client.query({ query: buildCutoffSql(), format: 'JSONEachRow' })
+    const [cutoffRow] = (await cutoffRes.json()) as Array<{ cutoff: string; expected_rows: string }>
+    const cutoff = cutoffRow?.cutoff
+    const expectedRows = Number(cutoffRow?.expected_rows ?? -1)
+    if (!cutoff) throw new Error('[content-dedup] failed to capture cutoff timestamp')
+
+    // 2. Drop the previous run's retained rollback safety net.
+    await client.exec({ query: `DROP TABLE IF EXISTS ${AUTO_PREDUP_TABLE}` })
+
+    // 3. Drop any partial build left over from a crashed run -- an unattended
+    // tick always starts fresh rather than trying to resume.
+    await client.exec({ query: `DROP TABLE IF EXISTS ${AUTO_DEDUP_TABLE}` })
+
+    // 4. Create the deduped-table clone (schema + rewritten ZK path).
+    const showCreateRes = await client.query({ query: 'SHOW CREATE TABLE ulp.credentials', format: 'JSONEachRow' })
+    const [showCreateRow] = (await showCreateRes.json()) as Array<{ statement: string }>
+    const showCreateSql = showCreateRow?.statement
+    if (!showCreateSql) throw new Error('[content-dedup] SHOW CREATE TABLE returned nothing')
+    await client.exec({ query: rewriteCreateTableDdl(showCreateSql, AUTO_DEDUP_TABLE) })
+
+    // 5. Populate.
+    console.log(`[content-dedup] ${trigger}: building deduped table (~${excess} duplicate rows to remove)`)
+    await client.exec({ query: buildPopulateDedupedTableSql() })
+
+    // 6. Verify before swapping. cdedupRows >= expectedRows (not ==): the
+    // build may have picked up a few rows imported just after cutoff in
+    // addition to everything that existed at that moment -- a good outcome,
+    // not a mismatch (see buildCutoffSql's comment). A count BELOW
+    // expectedRows means the build genuinely lost pre-existing content keys,
+    // which is the real failure this check exists to catch. excessAfter
+    // stays a strict == 0 check regardless of timing -- a LIMIT 1 BY-built
+    // table must never have internal duplicates.
+    const verifyRes = await client.query({ query: buildVerifyDedupedTableSql(), format: 'JSONEachRow' })
+    const [verify] = (await verifyRes.json()) as Array<{ cdedup_rows: string; excess_after: string }>
+    const cdedupRows = Number(verify?.cdedup_rows ?? -1)
+    const excessAfter = Number(verify?.excess_after ?? -1)
+    if (cdedupRows < expectedRows || excessAfter !== 0) {
+      console.error(
+        `[content-dedup] verification failed (cdedup_rows=${cdedupRows} expected_rows=${expectedRows} excess_after=${excessAfter}) -- aborting, original table untouched`,
+      )
+      await client.exec({ query: `DROP TABLE IF EXISTS ${AUTO_DEDUP_TABLE}` })
       return { total, excess, applied: false }
     }
 
-    const bucketCount = contentDedupBucketCount()
-    console.log(`[content-dedup] submitting bucketed DELETE across ${bucketCount} buckets (~${excess} duplicate rows total)`)
-    for (let bucket = 0; bucket < bucketCount; bucket++) {
-      await client.exec({ query: buildDeleteExecSqlForBucket(bucket, bucketCount) })
-      await waitForBucketMutation(client)
-    }
-    console.log(`[content-dedup] completed bucketed DELETE (${bucketCount} buckets, ~${excess} duplicate rows)`)
+    // 7. Swap.
+    await client.exec({ query: buildRenameSwapSql() })
+
+    // 8. Catch up anything imported during the build window.
+    await client.exec({ query: buildCatchupInsertSql(cutoff) })
+
+    console.log(`[content-dedup] ${trigger}: completed rewrite+swap (~${excess} duplicate rows removed)`)
     return { total, excess, applied: true }
   } catch (err) {
     console.error('[content-dedup] tick error:', err instanceof Error ? err.message : String(err))
