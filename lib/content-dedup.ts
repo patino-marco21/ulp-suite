@@ -152,6 +152,22 @@ export const CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES = 4_294_967_296 // 4 GiB
 export const CONTENT_DEDUP_MAX_THREADS = 2
 
 /**
+ * Caps the row count of each block ClickHouse forms while executing the
+ * populate/catch-up SELECT (default 65,536). For `INSERT ... SELECT`
+ * specifically, the insert reuses the exact blocks the SELECT produces --
+ * `max_insert_block_size` has no effect here (it only governs standalone
+ * INSERT VALUES-style statements), so this is the lever that actually bounds
+ * how many rows' worth of this table's ~9 MATERIALIZED columns get computed
+ * together in one block. Confirmed live 2026-07-08: even with disk-spill
+ * sort and max_threads=2, the populate query still hit a THIRD
+ * MEMORY_LIMIT_EXCEEDED (a large single allocation) after writing 64M of the
+ * expected ~356M rows -- each fix so far has roughly doubled progress before
+ * failure (10.6M -> 32M -> 64M), consistent with a genuine per-block memory
+ * ceiling rather than a fluke.
+ */
+export const CONTENT_DEDUP_MAX_BLOCK_SIZE = 16_384
+
+/**
  * Builds AUTO_DEDUP_TABLE: one row per content key, keeping the earliest
  * imported_at. `max_execution_time = 1800, timeout_overflow_mode = 'throw'`
  * mirrors scripts/dedup-credentials-content.sh's own equivalent INSERT step
@@ -163,7 +179,7 @@ export function buildPopulateDedupedTableSql(): string {
   SELECT * FROM ulp.credentials
   ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}
   LIMIT 1 BY ${CONTENT_KEY}
-  SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
+  SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_block_size = ${CONTENT_DEDUP_MAX_BLOCK_SIZE}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
 }
 
 /**
@@ -201,7 +217,7 @@ export function buildCatchupInsertSql(cutoff: string): string {
     AND cityHash64(${CONTENT_KEY}) NOT IN (SELECT cityHash64(${CONTENT_KEY}) FROM ulp.credentials)
   ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}
   LIMIT 1 BY ${CONTENT_KEY}
-  SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
+  SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_block_size = ${CONTENT_DEDUP_MAX_BLOCK_SIZE}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
 }
 
 // ── env knobs (pure, testable) ──────────────────────────────────────────────────
