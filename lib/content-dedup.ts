@@ -123,12 +123,33 @@ export function buildCutoffSql(): string {
   SETTINGS max_execution_time = 300`
 }
 
-/** Builds AUTO_DEDUP_TABLE: one row per content key, keeping the earliest imported_at. */
+/**
+ * Memory ceiling for the populate/catch-up `INSERT ... SELECT ... ORDER BY
+ * ... LIMIT 1 BY` queries. ClickHouse can't push a bounded LIMIT through this
+ * shape -- it must fully sort the input before applying LIMIT 1 BY, no matter
+ * how small the final result is (same underlying behavior documented in
+ * lib/clickhouse-query-limits.ts's EXPORT_SORT_MAX_MEMORY_BYTES, for the
+ * export feature's own ORDER BY + LIMIT 1 BY queries). Confirmed live
+ * 2026-07-08: without this, the real ~467M-row populate query hit
+ * MEMORY_LIMIT_EXCEEDED (16 GiB ceiling) reading a single mid-sized part --
+ * never caught earlier because disposable-clone testing only used 3M rows,
+ * well under the threshold where this triggers.
+ */
+export const CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES = 4_294_967_296 // 4 GiB
+
+/**
+ * Builds AUTO_DEDUP_TABLE: one row per content key, keeping the earliest
+ * imported_at. `max_execution_time = 1800, timeout_overflow_mode = 'throw'`
+ * mirrors scripts/dedup-credentials-content.sh's own equivalent INSERT step
+ * exactly -- the client's default max_execution_time (60s, lib/clickhouse.ts)
+ * is far too short for a full-table sort at this scale.
+ */
 export function buildPopulateDedupedTableSql(): string {
   return `INSERT INTO ${AUTO_DEDUP_TABLE}
   SELECT * FROM ulp.credentials
   ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}
-  LIMIT 1 BY ${CONTENT_KEY}`
+  LIMIT 1 BY ${CONTENT_KEY}
+  SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
 }
 
 /**
@@ -165,7 +186,8 @@ export function buildCatchupInsertSql(cutoff: string): string {
   WHERE imported_at > '${cutoff}'
     AND cityHash64(${CONTENT_KEY}) NOT IN (SELECT cityHash64(${CONTENT_KEY}) FROM ulp.credentials)
   ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}
-  LIMIT 1 BY ${CONTENT_KEY}`
+  LIMIT 1 BY ${CONTENT_KEY}
+  SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
 }
 
 // ── env knobs (pure, testable) ──────────────────────────────────────────────────

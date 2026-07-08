@@ -8,6 +8,7 @@ import {
   CONTENT_DEDUP_SURVIVOR_ORDER,
   rewriteCreateTableDdl,
   buildCutoffSql,
+  CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES,
   buildPopulateDedupedTableSql,
   buildVerifyDedupedTableSql,
   buildRenameSwapSql,
@@ -85,13 +86,22 @@ ORDER BY (domain, email, imported_at)`
     })
   })
 
+  describe('CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES', () => {
+    test('is 4 GiB', () => {
+      expect(CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES).toBe(4_294_967_296)
+    })
+  })
+
   describe('buildPopulateDedupedTableSql', () => {
-    test('inserts a deduped copy keeping the earliest imported_at per content key', () => {
+    test('inserts a deduped copy keeping the earliest imported_at per content key, with disk-spill and a raised timeout', () => {
       const sql = buildPopulateDedupedTableSql()
       expect(sql).toContain(`INSERT INTO ${AUTO_DEDUP_TABLE}`)
       expect(sql).toContain('SELECT * FROM ulp.credentials')
       expect(sql).toContain(`ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}`)
       expect(sql).toContain(`LIMIT 1 BY ${CONTENT_KEY}`)
+      expect(sql).toContain(`max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}`)
+      expect(sql).toContain('max_execution_time = 1800')
+      expect(sql).toContain("timeout_overflow_mode = 'throw'")
     })
   })
 
@@ -127,7 +137,7 @@ ORDER BY (domain, email, imported_at)`
   })
 
   describe('buildCatchupInsertSql', () => {
-    test('copies rows imported after cutoff, excluding content keys already present, deduplicated against itself', () => {
+    test('copies rows imported after cutoff, excluding content keys already present, deduplicated against itself, with disk-spill and a raised timeout', () => {
       const sql = buildCatchupInsertSql('2026-07-07 15:07:51')
       expect(sql).toContain('INSERT INTO ulp.credentials')
       expect(sql).toContain(`FROM ${AUTO_PREDUP_TABLE}`)
@@ -135,6 +145,9 @@ ORDER BY (domain, email, imported_at)`
       expect(sql).toContain(`cityHash64(${CONTENT_KEY}) NOT IN (SELECT cityHash64(${CONTENT_KEY}) FROM ulp.credentials)`)
       expect(sql).toContain(`ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}`)
       expect(sql).toContain(`LIMIT 1 BY ${CONTENT_KEY}`)
+      expect(sql).toContain(`max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}`)
+      expect(sql).toContain('max_execution_time = 1800')
+      expect(sql).toContain("timeout_overflow_mode = 'throw'")
     })
   })
 
