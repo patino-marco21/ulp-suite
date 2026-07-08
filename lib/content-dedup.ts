@@ -42,6 +42,21 @@
  * it further — the part-touching problem is structural, not scale-specific,
  * and recurs for any future incremental use of a mutation-based approach.
  *
+ * POPULATE SCALE: six live attempts against the real table each hit
+ * MEMORY_LIMIT_EXCEEDED at roughly the same point regardless of per-block
+ * settings tuned (disk-spill sort, thread limiting, and a capped block size
+ * each confirmed live -- the first two roughly doubled progress before
+ * failure, the third had no measurable effect). Root cause: a single
+ * continuously-growing INSERT accumulates background-merge memory pressure
+ * over its whole duration, which per-block settings don't address. The
+ * populate step is chunked by content-key hash bucket for the same reason
+ * the old bucketed-DELETE design chunked its DELETE -- a content-duplicate
+ * group always hashes to the same bucket, so chunking cannot affect
+ * correctness -- but for a different purpose: giving background merges a
+ * real gap to settle between sequential buckets, rather than bounding
+ * per-mutation part-rewrite cost. Full design:
+ * docs/superpowers/specs/2026-07-08-content-dedup-bucketed-populate-design.md
+ *
  * CATCH-UP: ulp.credentials keeps receiving live inserts from the ingest
  * pipeline throughout the (potentially tens-of-minutes) rebuild. A cutoff
  * timestamp captured against ClickHouse's own clock (not Node's — imported_at
@@ -152,34 +167,39 @@ export const CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES = 4_294_967_296 // 4 GiB
 export const CONTENT_DEDUP_MAX_THREADS = 2
 
 /**
- * Caps the row count of each block ClickHouse forms while executing the
- * populate/catch-up SELECT (default 65,536). For `INSERT ... SELECT`
- * specifically, the insert reuses the exact blocks the SELECT produces --
- * `max_insert_block_size` has no effect here (it only governs standalone
- * INSERT VALUES-style statements), so this is the lever that actually bounds
- * how many rows' worth of this table's ~9 MATERIALIZED columns get computed
- * together in one block. Confirmed live 2026-07-08: even with disk-spill
- * sort and max_threads=2, the populate query still hit a THIRD
- * MEMORY_LIMIT_EXCEEDED (a large single allocation) after writing 64M of the
- * expected ~356M rows -- each fix so far has roughly doubled progress before
- * failure (10.6M -> 32M -> 64M), consistent with a genuine per-block memory
- * ceiling rather than a fluke.
+ * Number of hash buckets the populate step is chunked into. Default 32:
+ * comfortable safety margin under the ~64M-row point where an unchunked
+ * populate reliably hit MEMORY_LIMIT_EXCEEDED (~11M rows/bucket at this
+ * table's real scale, ~5.8x margin), while keeping the number of full
+ * source-table re-scans modest -- every bucket's hash filter is unprunable,
+ * so each bucket costs one full table scan regardless of bucket count.
  */
-export const CONTENT_DEDUP_MAX_BLOCK_SIZE = 16_384
+export function contentDedupBucketCount(env: NodeJS.ProcessEnv = process.env): number {
+  const n = parseInt(env.CONTENT_DEDUP_BUCKET_COUNT ?? '32', 10)
+  return Number.isFinite(n) && n >= 1 ? n : 32
+}
 
 /**
- * Builds AUTO_DEDUP_TABLE: one row per content key, keeping the earliest
- * imported_at. `max_execution_time = 1800, timeout_overflow_mode = 'throw'`
- * mirrors scripts/dedup-credentials-content.sh's own equivalent INSERT step
- * exactly -- the client's default max_execution_time (60s, lib/clickhouse.ts)
- * is far too short for a full-table sort at this scale.
+ * Builds AUTO_DEDUP_TABLE's share for one bucket: one row per content key
+ * whose hash falls in this bucket, keeping the earliest imported_at. A
+ * content-duplicate group's rows always share the same CONTENT_KEY, so they
+ * always hash to the same bucket and can never split across two --
+ * chunking cannot affect correctness. `max_execution_time = 1800,
+ * timeout_overflow_mode = 'throw'` mirrors scripts/dedup-credentials-content.sh's
+ * own equivalent INSERT step exactly -- the client's default
+ * max_execution_time (60s, lib/clickhouse.ts) is far too short at this
+ * scale. No max_block_size override (see POPULATE SCALE above): bucketing
+ * itself now bounds the operation's scale, and a small block size risks a
+ * "too many parts" problem at bucket scale that it didn't at full-table
+ * scale.
  */
-export function buildPopulateDedupedTableSql(): string {
+export function buildPopulateDedupedTableSqlForBucket(bucketIndex: number, bucketCount: number): string {
   return `INSERT INTO ${AUTO_DEDUP_TABLE}
   SELECT * FROM ulp.credentials
+  WHERE cityHash64(${CONTENT_KEY}) % ${bucketCount} = ${bucketIndex}
   ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}
   LIMIT 1 BY ${CONTENT_KEY}
-  SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_block_size = ${CONTENT_DEDUP_MAX_BLOCK_SIZE}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
+  SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
 }
 
 /**
@@ -217,7 +237,7 @@ export function buildCatchupInsertSql(cutoff: string): string {
     AND cityHash64(${CONTENT_KEY}) NOT IN (SELECT cityHash64(${CONTENT_KEY}) FROM ulp.credentials)
   ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}
   LIMIT 1 BY ${CONTENT_KEY}
-  SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_block_size = ${CONTENT_DEDUP_MAX_BLOCK_SIZE}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
+  SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
 }
 
 // ── env knobs (pure, testable) ──────────────────────────────────────────────────
@@ -318,9 +338,13 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
     if (!showCreateSql) throw new Error('[content-dedup] SHOW CREATE TABLE returned nothing')
     await client.exec({ query: rewriteCreateTableDdl(showCreateSql, AUTO_DEDUP_TABLE) })
 
-    // 5. Populate.
-    console.log(`[content-dedup] ${trigger}: building deduped table (~${excess} duplicate rows to remove)`)
-    await client.exec({ query: buildPopulateDedupedTableSql() })
+    // 5. Populate, one bucket at a time -- see the file's POPULATE SCALE
+    // comment for why this runs as a sequential loop instead of one INSERT.
+    const bucketCount = contentDedupBucketCount()
+    console.log(`[content-dedup] ${trigger}: building deduped table across ${bucketCount} buckets (~${excess} duplicate rows to remove)`)
+    for (let bucket = 0; bucket < bucketCount; bucket++) {
+      await client.exec({ query: buildPopulateDedupedTableSqlForBucket(bucket, bucketCount) })
+    }
 
     // 6. Verify before swapping. cdedupRows >= expectedRows (not ==): the
     // build may have picked up a few rows imported just after cutoff in

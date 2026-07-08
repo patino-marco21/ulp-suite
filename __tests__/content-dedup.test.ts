@@ -10,8 +10,8 @@ import {
   buildCutoffSql,
   CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES,
   CONTENT_DEDUP_MAX_THREADS,
-  CONTENT_DEDUP_MAX_BLOCK_SIZE,
-  buildPopulateDedupedTableSql,
+  contentDedupBucketCount,
+  buildPopulateDedupedTableSqlForBucket,
   buildVerifyDedupedTableSql,
   buildRenameSwapSql,
   buildCatchupInsertSql,
@@ -100,25 +100,38 @@ ORDER BY (domain, email, imported_at)`
     })
   })
 
-  describe('CONTENT_DEDUP_MAX_BLOCK_SIZE', () => {
-    test('is 16,384', () => {
-      expect(CONTENT_DEDUP_MAX_BLOCK_SIZE).toBe(16_384)
+  describe('contentDedupBucketCount', () => {
+    test('defaults to 32', () => {
+      expect(contentDedupBucketCount({})).toBe(32)
+    })
+    test('honors a positive override', () => {
+      expect(contentDedupBucketCount({ CONTENT_DEDUP_BUCKET_COUNT: '16' })).toBe(16)
+    })
+    test('invalid or non-positive falls back to 32', () => {
+      expect(contentDedupBucketCount({ CONTENT_DEDUP_BUCKET_COUNT: '0' })).toBe(32)
+      expect(contentDedupBucketCount({ CONTENT_DEDUP_BUCKET_COUNT: 'nope' })).toBe(32)
     })
   })
 
-  describe('buildPopulateDedupedTableSql', () => {
-    test('inserts a deduped copy keeping the earliest imported_at per content key, with disk-spill, bounded threads, a capped block size, and a raised timeout', () => {
-      const sql = buildPopulateDedupedTableSql()
+  describe('buildPopulateDedupedTableSqlForBucket', () => {
+    test('inserts a deduped copy of one bucket, keeping the earliest imported_at per content key, with disk-spill, bounded threads, and a raised timeout', () => {
+      const sql = buildPopulateDedupedTableSqlForBucket(5, 32)
       expect(sql).toContain(`INSERT INTO ${AUTO_DEDUP_TABLE}`)
       expect(sql).toContain('SELECT * FROM ulp.credentials')
+      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 5`)
       expect(sql).toContain(`ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}`)
       expect(sql).toContain(`LIMIT 1 BY ${CONTENT_KEY}`)
       expect(sql).toContain(`max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}`)
       expect(sql).toContain(`max_threads = ${CONTENT_DEDUP_MAX_THREADS}`)
       expect(sql).toContain(`max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}`)
-      expect(sql).toContain(`max_block_size = ${CONTENT_DEDUP_MAX_BLOCK_SIZE}`)
       expect(sql).toContain('max_execution_time = 1800')
       expect(sql).toContain("timeout_overflow_mode = 'throw'")
+      expect(sql).not.toContain('max_block_size')
+    })
+
+    test('a different bucket index changes only the bucket filter', () => {
+      const sql = buildPopulateDedupedTableSqlForBucket(0, 32)
+      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 0`)
     })
   })
 
@@ -154,7 +167,7 @@ ORDER BY (domain, email, imported_at)`
   })
 
   describe('buildCatchupInsertSql', () => {
-    test('copies rows imported after cutoff, excluding content keys already present, deduplicated against itself, with disk-spill, bounded threads, a capped block size, and a raised timeout', () => {
+    test('copies rows imported after cutoff, excluding content keys already present, deduplicated against itself, with disk-spill, bounded threads, and a raised timeout', () => {
       const sql = buildCatchupInsertSql('2026-07-07 15:07:51')
       expect(sql).toContain('INSERT INTO ulp.credentials')
       expect(sql).toContain(`FROM ${AUTO_PREDUP_TABLE}`)
@@ -165,9 +178,9 @@ ORDER BY (domain, email, imported_at)`
       expect(sql).toContain(`max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}`)
       expect(sql).toContain(`max_threads = ${CONTENT_DEDUP_MAX_THREADS}`)
       expect(sql).toContain(`max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}`)
-      expect(sql).toContain(`max_block_size = ${CONTENT_DEDUP_MAX_BLOCK_SIZE}`)
       expect(sql).toContain('max_execution_time = 1800')
       expect(sql).toContain("timeout_overflow_mode = 'throw'")
+      expect(sql).not.toContain('max_block_size')
     })
   })
 
