@@ -138,6 +138,20 @@ export function buildCutoffSql(): string {
 export const CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES = 4_294_967_296 // 4 GiB
 
 /**
+ * Bounds concurrent sort/insert parallelism against this table (mirrors
+ * scripts/purge-existing-t3.sh's and the prior bucketed design's
+ * max_threads=2 for the same table). Confirmed live 2026-07-08: even with
+ * disk-spill sort enabled, the populate query hit a SECOND, later
+ * MEMORY_LIMIT_EXCEEDED (a large single allocation, well past the sort
+ * phase) -- consistent with this table's ~9 complex MATERIALIZED columns
+ * being recomputed per row on the INSERT side across multiple concurrent
+ * threads; fewer threads means fewer of those computations happening at
+ * once, bounding peak memory at the cost of wall-clock time (acceptable
+ * given this runs at most weekly, not on a latency budget).
+ */
+export const CONTENT_DEDUP_MAX_THREADS = 2
+
+/**
  * Builds AUTO_DEDUP_TABLE: one row per content key, keeping the earliest
  * imported_at. `max_execution_time = 1800, timeout_overflow_mode = 'throw'`
  * mirrors scripts/dedup-credentials-content.sh's own equivalent INSERT step
@@ -149,7 +163,7 @@ export function buildPopulateDedupedTableSql(): string {
   SELECT * FROM ulp.credentials
   ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}
   LIMIT 1 BY ${CONTENT_KEY}
-  SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
+  SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
 }
 
 /**
@@ -187,7 +201,7 @@ export function buildCatchupInsertSql(cutoff: string): string {
     AND cityHash64(${CONTENT_KEY}) NOT IN (SELECT cityHash64(${CONTENT_KEY}) FROM ulp.credentials)
   ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}
   LIMIT 1 BY ${CONTENT_KEY}
-  SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
+  SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
 }
 
 // ── env knobs (pure, testable) ──────────────────────────────────────────────────

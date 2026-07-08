@@ -9,6 +9,7 @@ import {
   rewriteCreateTableDdl,
   buildCutoffSql,
   CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES,
+  CONTENT_DEDUP_MAX_THREADS,
   buildPopulateDedupedTableSql,
   buildVerifyDedupedTableSql,
   buildRenameSwapSql,
@@ -92,14 +93,22 @@ ORDER BY (domain, email, imported_at)`
     })
   })
 
+  describe('CONTENT_DEDUP_MAX_THREADS', () => {
+    test('is 2', () => {
+      expect(CONTENT_DEDUP_MAX_THREADS).toBe(2)
+    })
+  })
+
   describe('buildPopulateDedupedTableSql', () => {
-    test('inserts a deduped copy keeping the earliest imported_at per content key, with disk-spill and a raised timeout', () => {
+    test('inserts a deduped copy keeping the earliest imported_at per content key, with disk-spill, bounded threads, and a raised timeout', () => {
       const sql = buildPopulateDedupedTableSql()
       expect(sql).toContain(`INSERT INTO ${AUTO_DEDUP_TABLE}`)
       expect(sql).toContain('SELECT * FROM ulp.credentials')
       expect(sql).toContain(`ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}`)
       expect(sql).toContain(`LIMIT 1 BY ${CONTENT_KEY}`)
       expect(sql).toContain(`max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}`)
+      expect(sql).toContain(`max_threads = ${CONTENT_DEDUP_MAX_THREADS}`)
+      expect(sql).toContain(`max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}`)
       expect(sql).toContain('max_execution_time = 1800')
       expect(sql).toContain("timeout_overflow_mode = 'throw'")
     })
@@ -137,7 +146,7 @@ ORDER BY (domain, email, imported_at)`
   })
 
   describe('buildCatchupInsertSql', () => {
-    test('copies rows imported after cutoff, excluding content keys already present, deduplicated against itself, with disk-spill and a raised timeout', () => {
+    test('copies rows imported after cutoff, excluding content keys already present, deduplicated against itself, with disk-spill, bounded threads, and a raised timeout', () => {
       const sql = buildCatchupInsertSql('2026-07-07 15:07:51')
       expect(sql).toContain('INSERT INTO ulp.credentials')
       expect(sql).toContain(`FROM ${AUTO_PREDUP_TABLE}`)
@@ -146,6 +155,8 @@ ORDER BY (domain, email, imported_at)`
       expect(sql).toContain(`ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}`)
       expect(sql).toContain(`LIMIT 1 BY ${CONTENT_KEY}`)
       expect(sql).toContain(`max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}`)
+      expect(sql).toContain(`max_threads = ${CONTENT_DEDUP_MAX_THREADS}`)
+      expect(sql).toContain(`max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}`)
       expect(sql).toContain('max_execution_time = 1800')
       expect(sql).toContain("timeout_overflow_mode = 'throw'")
     })
