@@ -265,12 +265,21 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
     const expectedRows = Number(cutoffRow?.expected_rows ?? -1)
     if (!cutoff) throw new Error('[content-dedup] failed to capture cutoff timestamp')
 
-    // 2. Drop the previous run's retained rollback safety net.
-    await client.exec({ query: `DROP TABLE IF EXISTS ${AUTO_PREDUP_TABLE}` })
+    // 2. Drop the previous run's retained rollback safety net. SYNC matters:
+    // ClickHouse's Atomic database engine (the default) doesn't drop a
+    // ReplicatedMergeTree table's ZooKeeper replica registration immediately
+    // -- it's deferred by database_atomic_delay_before_drop_table_sec
+    // (default 480s). Without SYNC, a CREATE TABLE reusing this ZK path
+    // moments later can race the still-pending cleanup and fail with
+    // REPLICA_ALREADY_EXISTS -- confirmed live 2026-07-08, retrying this
+    // exact tick right after a prior drop hit exactly that.
+    await client.exec({ query: `DROP TABLE IF EXISTS ${AUTO_PREDUP_TABLE} SYNC` })
 
     // 3. Drop any partial build left over from a crashed run -- an unattended
-    // tick always starts fresh rather than trying to resume.
-    await client.exec({ query: `DROP TABLE IF EXISTS ${AUTO_DEDUP_TABLE}` })
+    // tick always starts fresh rather than trying to resume. SYNC for the
+    // same reason as step 2: this table's ZK path is about to be reused by
+    // step 4's CREATE TABLE moments later.
+    await client.exec({ query: `DROP TABLE IF EXISTS ${AUTO_DEDUP_TABLE} SYNC` })
 
     // 4. Create the deduped-table clone (schema + rewritten ZK path).
     const showCreateRes = await client.query({ query: 'SHOW CREATE TABLE ulp.credentials', format: 'JSONEachRow' })
@@ -299,7 +308,7 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
       console.error(
         `[content-dedup] verification failed (cdedup_rows=${cdedupRows} expected_rows=${expectedRows} excess_after=${excessAfter}) -- aborting, original table untouched`,
       )
-      await client.exec({ query: `DROP TABLE IF EXISTS ${AUTO_DEDUP_TABLE}` })
+      await client.exec({ query: `DROP TABLE IF EXISTS ${AUTO_DEDUP_TABLE} SYNC` })
       return { total, excess, applied: false }
     }
 
