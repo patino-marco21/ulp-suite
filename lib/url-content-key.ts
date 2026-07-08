@@ -2,7 +2,7 @@
  * Scheme- and trailing-slash-insensitive form of a credential's `url` column.
  * This is the URL component of the content-identity key shared by:
  *  - lib/ulp-dedupe.ts                     (view-level browser dedupe, reversible)
- *  - lib/content-dedup.ts                  (daily cron, destructive ALTER TABLE DELETE)
+ *  - lib/content-dedup.ts                  (scheduled cron, destructive rewrite+swap)
  *  - scripts/dedup-credentials-content.sh  (manual purge, destructive — hand-copy this
  *    exact expression there too; bash can't import TS)
  *
