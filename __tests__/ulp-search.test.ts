@@ -64,8 +64,67 @@ describe('parseULPQuery — token type detection', () => {
     expect(tokens[0].type).toBe('email_full')
   })
 
-  test('word with dot → type: like', () => {
+  test('two-label dotted word → type: domain (not like)', () => {
+    // "pass.word" fits the domain shape (word.word) even though it isn't a real
+    // TLD -- the classifier recognizes the shape, it doesn't validate TLDs.
     const tokens = parseULPQuery('pass.word')
+    expect(tokens[0].type).toBe('domain')
+  })
+
+  test('dotted word with a path segment → type: like (unchanged)', () => {
+    const tokens = parseULPQuery('pass.word/path')
+    expect(tokens[0].type).toBe('like')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// § 1b  parseULPQuery — domain-shaped token type detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('parseULPQuery — domain-shaped token type detection', () => {
+  test('two-label domain → type: domain', () => {
+    const tokens = parseULPQuery('ledger.com')
+    expect(tokens[0].type).toBe('domain')
+    expect(tokens[0].value).toBe('ledger.com')
+  })
+
+  test('another two-label domain → type: domain', () => {
+    const tokens = parseULPQuery('trezor.io')
+    expect(tokens[0].type).toBe('domain')
+  })
+
+  test('three-label domain (subdomain) → type: domain', () => {
+    const tokens = parseULPQuery('mail.google.com')
+    expect(tokens[0].type).toBe('domain')
+  })
+
+  test('IP address → type: domain (intentional; the domain branch never calls hasToken(), so there is no separator-character error risk)', () => {
+    const tokens = parseULPQuery('192.168.1.1')
+    expect(tokens[0].type).toBe('domain')
+  })
+
+  test('trailing dot → type: like (not domain)', () => {
+    const tokens = parseULPQuery('ledger.')
+    expect(tokens[0].type).toBe('like')
+  })
+
+  test('leading dot → type: like (not domain)', () => {
+    const tokens = parseULPQuery('.com')
+    expect(tokens[0].type).toBe('like')
+  })
+
+  test('double dot (empty label) → type: like (not domain)', () => {
+    const tokens = parseULPQuery('ledger..com')
+    expect(tokens[0].type).toBe('like')
+  })
+
+  test('domain with a path → type: like (not domain)', () => {
+    const tokens = parseULPQuery('ledger.com/login')
+    expect(tokens[0].type).toBe('like')
+  })
+
+  test('domain with a space → type: like (not domain)', () => {
+    const tokens = parseULPQuery('ledger .com')
     expect(tokens[0].type).toBe('like')
   })
 })
@@ -218,6 +277,59 @@ describe('buildULPWhere — token type SQL generation', () => {
     expect(clause).toContain('LIKE')
     const paramValues = Object.values(params)
     expect(paramValues.some(v => typeof v === 'string' && v.includes('passw0rd!'))).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// § 6b  buildULPWhere — domain type → SQL expression
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('buildULPWhere — domain type SQL generation', () => {
+  test('domain type → exact match, subdomain suffix, url_host, and email_domain LIKE, OR-joined', () => {
+    const tokens = parseULPQuery('ledger.com')
+    const { clause } = buildULPWhere(tokens)
+    expect(clause).toContain('domain =')
+    expect(clause).toContain('domain LIKE')
+    expect(clause).toContain('url_host LIKE')
+    expect(clause).toContain('email_domain LIKE')
+    expect(clause).not.toContain('hasToken')
+  })
+
+  test('domain type params: exact value, subdomain suffix pattern, substring pattern', () => {
+    const tokens = parseULPQuery('ledger.com')
+    const { params } = buildULPWhere(tokens)
+    const paramValues = Object.values(params)
+    expect(paramValues).toContain('ledger.com')
+    expect(paramValues).toContain('%.ledger.com')
+    expect(paramValues).toContain('%ledger.com%')
+  })
+
+  test('domain type lowercases the value', () => {
+    const tokens = parseULPQuery('Ledger.COM')
+    const { params } = buildULPWhere(tokens)
+    const paramValues = Object.values(params)
+    expect(paramValues).toContain('ledger.com')
+    expect(paramValues.some(v => typeof v === 'string' && v.includes('Ledger'))).toBe(false)
+  })
+
+  test('domain type escapes underscores in the LIKE patterns', () => {
+    const tokens = parseULPQuery('my_site.com')
+    const { params } = buildULPWhere(tokens)
+    const paramValues = Object.values(params)
+    expect(paramValues).toContain('%my\\_site.com%')
+  })
+
+  test('negated domain term produces NOT (...)', () => {
+    const tokens = parseULPQuery('-ledger.com')
+    const { clause } = buildULPWhere(tokens)
+    expect(clause).toMatch(/^NOT\s+\(/)
+  })
+
+  test('domain clause is valid ClickHouse parameter syntax (no string literals)', () => {
+    const tokens = parseULPQuery('ledger.com')
+    const { clause } = buildULPWhere(tokens)
+    const literalStrings = clause.match(/'[^']*'/g) ?? []
+    expect(literalStrings).toHaveLength(0)
   })
 })
 

@@ -20,6 +20,27 @@
  *                → email_domain LIKE '%' || lower(value) || '%'
  *                   Same logic for the email domain column (idx_ngram_email_domain).
  *
+ *   domain     — 2+ dot-separated labels e.g. ledger.com, trezor.io, mail.google.com
+ *                → domain = lower(value)
+ *                   Exact site match. `domain` is the table's own leading ORDER BY
+ *                   column, so this is accelerated by the primary key itself, not a
+ *                   skip index (confirmed live: 11/8833 granules read via binary
+ *                   search, ~100ms).
+ *                → domain LIKE '%.' || lower(value)
+ *                   Subdomains (beta.ledger.com). Not primary-key accelerated (the
+ *                   leading wildcard defeats prefix binary search), but scanning the
+ *                   compact `domain` column alone is cheap even unindexed.
+ *                → url_host LIKE '%' || lower(value) || '%'
+ *                   Compound/embedded matches (coinledger.io, or a phishing domain
+ *                   that embeds the target string) — same ngrambf_v1-accelerated
+ *                   mechanism as the token type's url_host clause above.
+ *                → email_domain LIKE '%' || lower(value) || '%'
+ *                   Credentials with a matching email domain.
+ *                   Deliberately does NOT use hasToken(): it throws
+ *                   (BAD_ARGUMENTS, "Needle must not contain whitespace or separator
+ *                   characters") on any needle containing a separator character —
+ *                   confirmed live — so a dotted value can never be passed to it.
+ *
  *   email_full — full email e.g. john@gmail.com
  *                → email = lower(value)
  *                   Hits the bloom_filter(email) skip index for O(1) granule
@@ -36,7 +57,7 @@
 
 interface ParsedToken {
   negate: boolean
-  type: 'token' | 'email_full' | 'email_dom' | 'like'
+  type: 'token' | 'domain' | 'email_full' | 'email_dom' | 'like'
   value: string
   /** For email_full and email_dom: the lowercased domain part after @ */
   emailDomain?: string
@@ -71,7 +92,20 @@ export function parseULPQuery(raw: string): ParsedToken[] {
 
       // Pure word token (alphanumeric + hyphen only) → hasToken()
       const isCleanToken = /^[\w-]+$/.test(value)
-      return { negate, type: isCleanToken ? 'token' as const : 'like' as const, value }
+      if (isCleanToken) return { negate, type: 'token' as const, value }
+
+      // Domain-shaped: two or more dot-separated labels (word chars/hyphens only)
+      // → domain/host matching (see buildULPWhere's 'domain' branch for why this
+      // is NOT routed through hasToken() -- it throws on any needle containing a
+      // separator character, dots included). IP-shaped values like 192.168.1.1
+      // also match this pattern and are intentionally included: domain =
+      // '192.168.1.1' is a correct, useful lookup for IP-hosted credentials, and
+      // this branch never touches hasToken() so there's no separator-character
+      // error risk either way.
+      const isDomainShaped = /^[\w-]+(\.[\w-]+)+$/.test(value)
+      if (isDomainShaped) return { negate, type: 'domain' as const, value }
+
+      return { negate, type: 'like' as const, value }
     })
     .filter(t => t.value.length > 0)
 }
@@ -131,6 +165,29 @@ export function buildULPWhere(tokens: ParsedToken[]): { clause: string; params: 
       params[p] = lower
       params[lp] = `%${lower.replace(/_/g, '\\_')}%`
       match = `(hasToken(url, {${p}:String}) OR hasToken(email, {${p}:String}) OR hasToken(password, {${p}:String}) OR url_host LIKE {${lp}:String} OR email_domain LIKE {${lp}:String})`
+
+    } else if (token.type === 'domain') {
+      // Domain-shaped (e.g. "ledger.com"): matches the canonical site column
+      // directly rather than hasToken(), which throws (BAD_ARGUMENTS, "Needle
+      // must not contain whitespace or separator characters" -- confirmed live)
+      // on a needle containing a separator character. `domain = ` is
+      // accelerated by the table's own primary key (domain is the leading
+      // ORDER BY column) -- confirmed live: 11/8833 granules via binary search,
+      // ~100ms. The LIKE '%.value' suffix condition is NOT a prefix condition
+      // (leading wildcard), so it does not get that same acceleration, but
+      // scanning the compact `domain` column alone is cheap regardless.
+      // url_host / email_domain LIKE reuse the same ngrambf_v1-accelerated
+      // mechanism as the 'token' branch above. '_' is escaped in the LIKE
+      // patterns for the same reason as the 'token' branch.
+      const lowerExact = token.value.toLowerCase()
+      const lowerEscaped = lowerExact.replace(/_/g, '\\_')
+      const ep = `dom${i}`
+      const sp = `domsuf${i}`
+      const lp2 = `domlk${i}`
+      params[ep] = lowerExact
+      params[sp] = `%.${lowerEscaped}`
+      params[lp2] = `%${lowerEscaped}%`
+      match = `(domain = {${ep}:String} OR domain LIKE {${sp}:String} OR url_host LIKE {${lp2}:String} OR email_domain LIKE {${lp2}:String})`
 
     } else {
       // LIKE fallback for tokens with special characters (no skip index)
