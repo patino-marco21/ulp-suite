@@ -272,11 +272,22 @@ approaches equally) rather than the `UNION` restructuring.
 
 ## Error Handling
 
-Consistent with the existing migration runner: each DDL statement is wrapped by the
-existing `runMigration()` helper (non-fatal errors logged via `console.warn`, not
-thrown), and `MATERIALIZE INDEX` is fire-and-forget in the background, matching
-every prior DDL version. The content-dedup swap-safety addition (Section 3) follows
-the same non-fatal pattern already used for the rest of that file's error handling —
-if the index-ensuring step fails, it logs and the swap proceeds (the same
-degraded-but-functional state as today, not a new failure mode), rather than
-blocking the swap on index creation succeeding.
+DDL v17 (Section 1): consistent with the existing migration runner — each statement
+is wrapped by the existing `runMigration()` helper (non-fatal errors logged via
+`console.warn`, not thrown), and `MATERIALIZE INDEX` is fire-and-forget in the
+background, matching every prior DDL version. Partial success here is acceptable:
+this is exactly the same one-statement-fails-others-still-run tolerance that let v9
+apply the ngram indexes even when other statements in the same run had problems.
+
+The content-dedup swap-safety addition (Section 3) is deliberately **not**
+non-fatal, unlike DDL v17. It does not wrap its statements in anything like
+`runMigration()`'s swallow-and-continue behavior — an error there propagates to
+`runContentDedupTick`'s existing outer `try`/`catch`, which aborts the whole tick
+(the clone table is left for the next tick's step 3 to clean up; the original
+`ulp.credentials` is never touched; `applied: false` is returned, same as any other
+tick failure today). This is intentional, not an oversight: letting the swap
+proceed after a failed index-ensure step would silently reproduce the exact bug
+this addition exists to prevent — a live table missing a search index with no
+automatic signal that anything is wrong. A cycle where dedup is deferred to the
+next tick is a strictly better failure mode than a cycle where search quietly gets
+worse.
