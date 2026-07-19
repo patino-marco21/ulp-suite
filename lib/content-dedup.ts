@@ -42,28 +42,38 @@
  * it further — the part-touching problem is structural, not scale-specific,
  * and recurs for any future incremental use of a mutation-based approach.
  *
- * CUTOFF/STATS SCALE: buildStatsSql() and buildCutoffSql() (both removed)
- * ran uniqExact(cityHash64(CONTENT_KEY)) as a single ungrouped aggregate
- * over the whole table -- confirmed live 2026-07-19 to hit
- * MEMORY_LIMIT_EXCEEDED at 562M rows / ~470M distinct content keys, right
- * at this server's 16 GiB ceiling. Unlike the populate step's own memory
- * fix below, neither max_threads bounding nor
- * max_bytes_before_external_group_by spilling has any effect here (both
- * confirmed live to make no difference, including reshaped into a real
- * multi-group GROUP BY) -- a zero-key uniqExact holds one hash set for the
- * query's whole duration with nothing for either lever to act on.
- * buildCutoffTimestampSql()/buildContentKeyStatsSqlForBucket() replace
- * them, bucketing the distinct-count the same way the populate step below
- * buckets its INSERT -- summing per-bucket uniqExact counts is exact, not
- * approximate, via the same content-duplicate-group-hashes-to-one-bucket
- * guarantee. buildContentKeyStatsSqlForBucket() returns count() alongside
- * uniqExact() from the SAME per-bucket query rather than a separate,
- * earlier, unbucketed total query -- an earlier design computed total from
- * one fast query before the (slower, multi-bucket) distinct-count scan,
- * which let ongoing live inserts land between the two, understating (or
- * negating) the reported excess. Since count() >= uniqExact() always holds
- * within one query's single-pass read, summing both from the same buckets
- * keeps excess exact and never negative, by construction. Full design:
+ * DISTINCT-COUNT SCALE: buildStatsSql(), buildCutoffSql(), and
+ * buildVerifyDedupedTableSql() (all removed) each ran
+ * uniqExact(cityHash64(CONTENT_KEY)) as a single ungrouped aggregate over a
+ * large table (ulp.credentials for the first two, AUTO_DEDUP_TABLE for the
+ * third -- itself the same order of magnitude once populated, since a
+ * successfully-built dedup table has ~one row per distinct content key) --
+ * confirmed live 2026-07-19 to hit MEMORY_LIMIT_EXCEEDED at 562M rows /
+ * ~470M distinct content keys, right at this server's 16 GiB ceiling.
+ * Unlike the populate step's own memory fix below, neither max_threads
+ * bounding nor max_bytes_before_external_group_by spilling has any effect
+ * here (both confirmed live to make no difference, including reshaped into
+ * a real multi-group GROUP BY) -- a zero-key uniqExact holds one hash set
+ * for the query's whole duration with nothing for either lever to act on.
+ * buildCutoffTimestampSql()/buildContentKeyStatsSqlForBucket()/
+ * buildVerifyDedupedTableSqlForBucket() replace them, bucketing the
+ * distinct-count the same way the populate step below buckets its INSERT --
+ * summing per-bucket uniqExact counts is exact, not approximate, via the
+ * same content-duplicate-group-hashes-to-one-bucket guarantee.
+ * buildContentKeyStatsSqlForBucket() and buildVerifyDedupedTableSqlForBucket()
+ * both return count() alongside uniqExact() from the SAME per-bucket query
+ * rather than a separate, earlier, unbucketed total query -- an earlier
+ * design computed total from one fast query before the (slower,
+ * multi-bucket) distinct-count scan, which let ongoing live inserts land
+ * between the two, understating (or negating) the reported excess. Since
+ * count() >= uniqExact() always holds within one query's single-pass read,
+ * summing both from the same buckets keeps excess exact and never negative,
+ * by construction. buildVerifyDedupedTableSqlForBucket() was found and
+ * fixed in a second pass after the first two -- AUTO_DEDUP_TABLE isn't
+ * concurrently written during verify (nothing else writes to it mid-tick),
+ * so the timing-skew risk that motivated the combined-query shape for
+ * ulp.credentials doesn't strictly apply here, but the same shape is used
+ * anyway for consistency and because it costs nothing extra. Full design:
  * docs/superpowers/specs/2026-07-19-content-dedup-cutoff-stats-bucketing-design.md
  *
  * POPULATE SCALE: six live attempts against the real table each hit
@@ -251,17 +261,24 @@ export function buildPopulateDedupedTableSqlForBucket(bucketIndex: number, bucke
 }
 
 /**
- * AUTO_DEDUP_TABLE's own row count and internal excess -- does not query the
- * original table (that comparison uses the cutoff step's expectedRows,
- * captured before the build started, via runContentDedupTick's `>=` check --
- * see buildContentKeyStatsSqlForBucket's comment for why a fresh
- * query here would be wrong).
+ * AUTO_DEDUP_TABLE's own row count and internal excess, one bucket at a
+ * time -- does not query the original table (that comparison uses the
+ * cutoff step's expectedRows, captured before the build started, via
+ * runContentDedupTick's `>=` check -- see buildContentKeyStatsSqlForBucket's
+ * comment for why a fresh query here would be wrong). Bucketed for the same
+ * reason buildContentKeyStatsSqlForBucket is: an ungrouped
+ * uniqExact(cityHash64(CONTENT_KEY)) over AUTO_DEDUP_TABLE is the identical
+ * memory risk once the table is populated (~470M rows, nearly all distinct
+ * by construction -- a successful dedup leaves ~one row per content key, so
+ * this table's distinct-to-row ratio is if anything higher than
+ * ulp.credentials' was). See the file's DISTINCT-COUNT SCALE comment.
  */
-export function buildVerifyDedupedTableSql(): string {
+export function buildVerifyDedupedTableSqlForBucket(bucketIndex: number, bucketCount: number): string {
   return `SELECT
-    count() AS cdedup_rows,
-    count() - uniqExact(cityHash64(${CONTENT_KEY})) AS excess_after
+    count() AS bucket_total,
+    uniqExact(cityHash64(${CONTENT_KEY})) AS bucket_distinct
   FROM ${AUTO_DEDUP_TABLE}
+  WHERE cityHash64(${CONTENT_KEY}) % ${bucketCount} = ${bucketIndex}
   SETTINGS max_execution_time = 300`
 }
 
@@ -355,19 +372,27 @@ export interface DedupTickResult {
 }
 
 /**
- * Sums buckets' row totals and distinct-content-key counts sequentially --
- * shared by both the stats step (uses both fields) and the cutoff step
- * below (uses distinctCreds only, as expectedRows). Not exported/unit-tested
- * separately: this file only unit-tests pure SQL builders, matching the
- * existing convention that the populate step's own bucket loop (inside
- * runContentDedupTick) isn't unit-tested either, only its SQL-builder
- * function is. Exercised by Tasks 2-4 of this plan instead.
+ * Sums a bucketed query's row totals and distinct-content-key counts
+ * sequentially -- shared by the stats step, the cutoff step, and the verify
+ * step below, each passing its own per-bucket SQL builder
+ * (buildContentKeyStatsSqlForBucket or buildVerifyDedupedTableSqlForBucket).
+ * Both builders alias their two aggregates identically (`bucket_total`,
+ * `bucket_distinct`) specifically so this loop can stay generic across
+ * tables. Not exported/unit-tested separately: this file only unit-tests
+ * pure SQL builders, matching the existing convention that the populate
+ * step's own bucket loop (inside runContentDedupTick) isn't unit-tested
+ * either, only its SQL-builder function is. Exercised by Tasks 3-5 of this
+ * plan instead.
  */
-async function sumBucketedContentKeyStats(client: ClickHouseClient, bucketCount: number): Promise<{ total: number; distinctCreds: number }> {
+async function sumBucketedTotalAndDistinct(
+  client: ClickHouseClient,
+  bucketCount: number,
+  buildBucketSql: (bucketIndex: number, bucketCount: number) => string,
+): Promise<{ total: number; distinctCreds: number }> {
   let total = 0
   let distinctCreds = 0
   for (let bucket = 0; bucket < bucketCount; bucket++) {
-    const res = await client.query({ query: buildContentKeyStatsSqlForBucket(bucket, bucketCount), format: 'JSONEachRow' })
+    const res = await client.query({ query: buildBucketSql(bucket, bucketCount), format: 'JSONEachRow' })
     const [row] = (await res.json()) as Array<{ bucket_total: string; bucket_distinct: string }>
     total += Number(row?.bucket_total ?? 0)
     distinctCreds += Number(row?.bucket_distinct ?? 0)
@@ -386,7 +411,7 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
   try {
     const client = getClient()
     const bucketCount = contentDedupBucketCount()
-    const { total, distinctCreds } = await sumBucketedContentKeyStats(client, bucketCount)
+    const { total, distinctCreds } = await sumBucketedTotalAndDistinct(client, bucketCount, buildContentKeyStatsSqlForBucket)
     const excess = total - distinctCreds
     const applyOn = contentDedupApplyEnabled()
     const willApply = applyOn && excess >= minExcessToApply()
@@ -414,7 +439,7 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
     const [cutoffRow] = (await cutoffRes.json()) as Array<{ cutoff: string }>
     const cutoff = cutoffRow?.cutoff
     if (!cutoff) throw new Error('[content-dedup] failed to capture cutoff timestamp')
-    const { distinctCreds: expectedRows } = await sumBucketedContentKeyStats(client, bucketCount)
+    const { distinctCreds: expectedRows } = await sumBucketedTotalAndDistinct(client, bucketCount, buildContentKeyStatsSqlForBucket)
 
     // 2. Drop the previous run's retained rollback safety net. SYNC matters:
     // ClickHouse's Atomic database engine (the default) doesn't drop a
@@ -455,19 +480,19 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
       await client.exec({ query: buildPopulateDedupedTableSqlForBucket(bucket, bucketCount) })
     }
 
-    // 6. Verify before swapping. cdedupRows >= expectedRows (not ==): the
-    // build may have picked up a few rows imported just after cutoff in
-    // addition to everything that existed at that moment -- a good outcome,
-    // not a mismatch (see buildContentKeyStatsSqlForBucket's
-    // comment). A count BELOW expectedRows means the build genuinely lost
-    // pre-existing content keys, which is the real failure this check
-    // exists to catch. excessAfter stays a strict == 0 check regardless of
-    // timing -- a LIMIT 1 BY-built table must never have internal
-    // duplicates.
-    const verifyRes = await client.query({ query: buildVerifyDedupedTableSql(), format: 'JSONEachRow' })
-    const [verify] = (await verifyRes.json()) as Array<{ cdedup_rows: string; excess_after: string }>
-    const cdedupRows = Number(verify?.cdedup_rows ?? -1)
-    const excessAfter = Number(verify?.excess_after ?? -1)
+    // 6. Verify before swapping, one bucket at a time -- see the file's
+    // DISTINCT-COUNT SCALE comment for why AUTO_DEDUP_TABLE needs the same
+    // bucketing treatment as ulp.credentials' own stats/cutoff queries.
+    // cdedupRows >= expectedRows (not ==): the build may have picked up a
+    // few rows imported just after cutoff in addition to everything that
+    // existed at that moment -- a good outcome, not a mismatch (see
+    // buildContentKeyStatsSqlForBucket's comment). A count BELOW
+    // expectedRows means the build genuinely lost pre-existing content
+    // keys, which is the real failure this check exists to catch.
+    // excessAfter stays a strict == 0 check regardless of timing -- a
+    // LIMIT 1 BY-built table must never have internal duplicates.
+    const { total: cdedupRows, distinctCreds: cdedupDistinct } = await sumBucketedTotalAndDistinct(client, bucketCount, buildVerifyDedupedTableSqlForBucket)
+    const excessAfter = cdedupRows - cdedupDistinct
     if (cdedupRows < expectedRows || excessAfter !== 0) {
       console.error(
         `[content-dedup] verification failed (cdedup_rows=${cdedupRows} expected_rows=${expectedRows} excess_after=${excessAfter}) -- aborting, original table untouched`,

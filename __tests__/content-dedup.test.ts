@@ -13,7 +13,7 @@ import {
   contentDedupBucketCount,
   buildPopulateDedupedTableSqlForBucket,
   buildEnsureSearchIndexesSql,
-  buildVerifyDedupedTableSql,
+  buildVerifyDedupedTableSqlForBucket,
   buildRenameSwapSql,
   buildCatchupInsertSql,
   dedupCronHours,
@@ -176,18 +176,35 @@ ORDER BY (domain, email, imported_at)`
     })
   })
 
-  describe('buildVerifyDedupedTableSql', () => {
-    test('reports the deduped table\'s own row count and internal excess only -- does not separately query the original table', () => {
-      const sql = buildVerifyDedupedTableSql()
+  describe('buildVerifyDedupedTableSqlForBucket', () => {
+    test('counts one bucket\'s row total and distinct content keys together, against AUTO_DEDUP_TABLE only', () => {
+      const sql = buildVerifyDedupedTableSqlForBucket(5, 32)
+      expect(sql).toContain('count() AS bucket_total')
+      expect(sql).toContain(`uniqExact(cityHash64(${CONTENT_KEY})) AS bucket_distinct`)
       expect(sql).toContain(`FROM ${AUTO_DEDUP_TABLE}`)
-      expect(sql).toContain(`uniqExact(cityHash64(${CONTENT_KEY}))`)
-      expect(sql).toContain('AS cdedup_rows')
-      expect(sql).toContain('AS excess_after')
+      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 5`)
+      expect(sql).toContain('max_execution_time = 300')
       // Exactly one data source (AUTO_DEDUP_TABLE) -- the old design queried
       // the original ulp.credentials too, which is what caused the
       // moving-target verification bug this shape fixes.
       expect(sql.match(/FROM/g)?.length).toBe(1)
       expect(sql).not.toContain('expected_rows')
+    })
+
+    test('a different bucket index changes only the bucket filter', () => {
+      const sql = buildVerifyDedupedTableSqlForBucket(0, 32)
+      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 0`)
+    })
+  })
+
+  describe('bucket_total/bucket_distinct alias consistency', () => {
+    test('buildContentKeyStatsSqlForBucket and buildVerifyDedupedTableSqlForBucket use the same field aliases -- sumBucketedTotalAndDistinct depends on this to stay generic across both', () => {
+      const statsSql = buildContentKeyStatsSqlForBucket(0, 8)
+      const verifySql = buildVerifyDedupedTableSqlForBucket(0, 8)
+      expect(statsSql).toContain('AS bucket_total')
+      expect(statsSql).toContain('AS bucket_distinct')
+      expect(verifySql).toContain('AS bucket_total')
+      expect(verifySql).toContain('AS bucket_distinct')
     })
   })
 
