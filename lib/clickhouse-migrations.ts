@@ -9,6 +9,7 @@ import { buildLoginTypeExpression } from './login-type'
 import { buildFreeWebmailInClause } from './webmail-providers'
 import { NOISE_EXPR } from './ulp-noise'
 import { dbGet, dbRun } from './sqlite'
+import { SEARCH_INDEX_DEFINITIONS } from './search-index-definitions'
 
 // Per-process guard (still useful to avoid redundant calls within one process)
 let migrationsDone = false
@@ -115,7 +116,40 @@ let migrationsDone = false
 //     fire when email or password still carries an embedded ':' (only ~3% of the
 //     blank+blank population has neither — genuinely bare credentials are still
 //     exempt). Same MODIFY COLUMN + MATERIALIZE COLUMN pattern as v12/v13/v15.
-const DDL_VERSION = 16
+// v17 — two independent fixes to the search-box index infrastructure, found via
+//     live investigation of why credential search performance/recall didn't match
+//     the code's own assumptions (full write-up:
+//     docs/superpowers/specs/2026-07-19-credentials-search-domain-fix-design.md):
+//
+//     (a) idx_inv_url / idx_inv_email / idx_inv_password — the text() indexes meant
+//         to accelerate hasToken() (intended by v6/v7) were never successfully
+//         applied to this table. system.query_log shows exactly one historical
+//         attempt, and it used v5's broken `full_text(0)` syntax (Code 80, Unknown
+//         Index type) rather than v6/v7's corrected `text(tokenizer =
+//         splitByNonAlpha, ...)` syntax — the corrected syntax had never actually
+//         run against this table. Without it, hasToken() is an unindexed
+//         full-column scan (confirmed live: 11+ seconds for a single term over
+//         562M rows).
+//
+//     (b) idx_ngram_url_host / idx_ngram_email_domain — exist and are materialized
+//         (added directly against clickhouse-client on 2026-07-09, outside this
+//         migration runner — ch_ddl_version was already at 16 by then, so the
+//         version gate never re-fired v9 to do it), but EXPLAIN indexes=1 shows 0 of
+//         8833 granules pruned for a real search term even with the index fully
+//         built: ngrambf_v1(4, 1024, 1, 0) — an 8192-bit filter with 1 hash function
+//         — is undersized for this table's real cardinality (34M+ distinct
+//         url_host values) and saturates to a near-100% false-positive rate.
+//         ngrambf_v1 can't be resized in place; DROP + re-ADD with a larger filter
+//         (8192 bytes, 4 hash functions) is required. Confirmed live: strictly more
+//         pruning than the old size, and bloom filters can't produce false
+//         negatives by construction.
+//
+//     Both changes pull their exact DDL from lib/search-index-definitions.ts, the
+//     single source of truth shared with lib/content-dedup.ts's rewrite+swap clone
+//     (see that file for why: a swap clones the live table's DDL as-is, so a
+//     future swap could otherwise silently carry forward a search-index gap the
+//     same way this one did).
+const DDL_VERSION = 17
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -710,6 +744,21 @@ export async function runClickHouseMigrations(): Promise<void> {
       `ALTER TABLE ulp.credentials MATERIALIZE COLUMN is_noise`
     )
     console.warn('[ClickHouse migration] DDL v16 applied (broadened is_noise blank-domain check — MATERIALIZE running in background)')
+  }
+
+  // v17 — see the DDL_VERSION comment above for the full investigation. Drop-then-add
+  // every definition (not just the ngram ones) so this block is correct whether an
+  // index is missing entirely, present with stale parameters, or already correct --
+  // DROP INDEX IF EXISTS is a harmless no-op in the last case.
+  if (lastDdl < 17) {
+    for (const def of SEARCH_INDEX_DEFINITIONS) {
+      await runMigration(def.dropIndexSql('ulp.credentials'))
+      await runMigration(
+        def.addIndexSql('ulp.credentials'),
+        `ALTER TABLE ulp.credentials MATERIALIZE INDEX ${def.name}`,
+      )
+    }
+    console.warn('[ClickHouse migration] DDL v17 applied (hasToken text indexes added; ngram bloom filters resized — MATERIALIZE running in background)')
   }
 
   if (lastDdl < DDL_VERSION) {
