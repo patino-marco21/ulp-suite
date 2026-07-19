@@ -74,6 +74,7 @@
  */
 import { getClient } from '@/lib/clickhouse'
 import { URL_CONTENT_KEY } from '@/lib/url-content-key'
+import { SEARCH_INDEX_DEFINITIONS } from '@/lib/search-index-definitions'
 
 /** Content identity: same destination + same credential (scheme/trailing-slash-insensitive on the URL). */
 export const CONTENT_KEY = `${URL_CONTENT_KEY}, email, password`
@@ -216,6 +217,29 @@ export function buildVerifyDedupedTableSql(): string {
   SETTINGS max_execution_time = 300`
 }
 
+/**
+ * DDL to ensure AUTO_DEDUP_TABLE has the full search-index set BEFORE it's
+ * populated. Run against the still-empty clone right after it's created (see
+ * runContentDedupTick's step 4b) -- ADD INDEX on an empty table is
+ * metadata-only, and the populate INSERT that follows computes each index as
+ * it writes rows, so no MATERIALIZE backfill is ever needed here (contrast
+ * lib/clickhouse-migrations.ts's DDL v17, which DOES need MATERIALIZE because
+ * it applies to the live, already-populated table).
+ *
+ * Exists because a rewrite+swap clones the live table's DDL via `SHOW CREATE
+ * TABLE` as-is (see rewriteCreateTableDdl) -- if the source table were ever
+ * missing one of these indexes again, the swap would otherwise silently carry
+ * that gap forward into the new live table with no automatic re-check. Pulls
+ * from lib/search-index-definitions.ts, the same source DDL v17 uses, so the
+ * two callers can't drift apart.
+ */
+export function buildEnsureSearchIndexesSql(): string[] {
+  return SEARCH_INDEX_DEFINITIONS.flatMap(def => [
+    def.dropIndexSql(AUTO_DEDUP_TABLE),
+    def.addIndexSql(AUTO_DEDUP_TABLE),
+  ])
+}
+
 /** Atomic, metadata-only swap: the deduped copy becomes ulp.credentials; the original is archived under AUTO_PREDUP_TABLE. */
 export function buildRenameSwapSql(): string {
   return `RENAME TABLE ulp.credentials TO ${AUTO_PREDUP_TABLE}, ${AUTO_DEDUP_TABLE} TO ulp.credentials`
@@ -337,6 +361,13 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
     const showCreateSql = showCreateRow?.statement
     if (!showCreateSql) throw new Error('[content-dedup] SHOW CREATE TABLE returned nothing')
     await client.exec({ query: rewriteCreateTableDdl(showCreateSql, AUTO_DEDUP_TABLE) })
+
+    // 4b. Ensure the still-empty clone has the full search-index set before it's
+    // populated (see buildEnsureSearchIndexesSql's comment for why this exists
+    // and why it never needs MATERIALIZE here).
+    for (const stmt of buildEnsureSearchIndexesSql()) {
+      await client.exec({ query: stmt })
+    }
 
     // 5. Populate, one bucket at a time -- see the file's POPULATE SCALE
     // comment for why this runs as a sequential loop instead of one INSERT.

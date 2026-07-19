@@ -12,6 +12,7 @@ import {
   CONTENT_DEDUP_MAX_THREADS,
   contentDedupBucketCount,
   buildPopulateDedupedTableSqlForBucket,
+  buildEnsureSearchIndexesSql,
   buildVerifyDedupedTableSql,
   buildRenameSwapSql,
   buildCatchupInsertSql,
@@ -21,6 +22,7 @@ import {
   minExcessToApply,
 } from '@/lib/content-dedup'
 import { URL_CONTENT_KEY } from '@/lib/url-content-key'
+import { SEARCH_INDEX_DEFINITIONS } from '@/lib/search-index-definitions'
 
 describe('content-dedup', () => {
   test('does not claim that an import-time hook still triggers content dedup', () => {
@@ -132,6 +134,30 @@ ORDER BY (domain, email, imported_at)`
     test('a different bucket index changes only the bucket filter', () => {
       const sql = buildPopulateDedupedTableSqlForBucket(0, 32)
       expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 0`)
+    })
+  })
+
+  describe('buildEnsureSearchIndexesSql', () => {
+    test('targets AUTO_DEDUP_TABLE (the still-empty clone), not the live table', () => {
+      const stmts = buildEnsureSearchIndexesSql()
+      expect(stmts.length).toBeGreaterThan(0)
+      for (const stmt of stmts) {
+        expect(stmt).toContain(AUTO_DEDUP_TABLE)
+      }
+    })
+
+    test('emits a DROP then an ADD for every index in SEARCH_INDEX_DEFINITIONS', () => {
+      const stmts = buildEnsureSearchIndexesSql()
+      expect(stmts).toHaveLength(SEARCH_INDEX_DEFINITIONS.length * 2)
+      for (const def of SEARCH_INDEX_DEFINITIONS) {
+        expect(stmts).toContain(def.dropIndexSql(AUTO_DEDUP_TABLE))
+        expect(stmts).toContain(def.addIndexSql(AUTO_DEDUP_TABLE))
+      }
+    })
+
+    test('never includes MATERIALIZE INDEX (the clone is empty; the populate insert builds each index as it writes rows)', () => {
+      const stmts = buildEnsureSearchIndexesSql()
+      expect(stmts.every(s => !s.includes('MATERIALIZE'))).toBe(true)
     })
   })
 
