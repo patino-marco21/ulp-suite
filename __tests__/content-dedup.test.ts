@@ -2,12 +2,12 @@ import { readFileSync } from 'fs'
 import { describe, test, expect } from 'vitest'
 import {
   CONTENT_KEY,
-  buildStatsSql,
   AUTO_DEDUP_TABLE,
   AUTO_PREDUP_TABLE,
   CONTENT_DEDUP_SURVIVOR_ORDER,
   rewriteCreateTableDdl,
-  buildCutoffSql,
+  buildCutoffTimestampSql,
+  buildContentKeyStatsSqlForBucket,
   CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES,
   CONTENT_DEDUP_MAX_THREADS,
   contentDedupBucketCount,
@@ -31,16 +31,6 @@ describe('content-dedup', () => {
   })
   test('CONTENT_KEY ignores url scheme/trailing-slash (email, password stay exact)', () => {
     expect(CONTENT_KEY).toBe(`${URL_CONTENT_KEY}, email, password`)
-  })
-
-  describe('buildStatsSql', () => {
-    const sql = buildStatsSql()
-    test('reports total and excess in one pass without a duplicate subquery', () => {
-      expect(sql).toContain(`uniqExact(cityHash64(${URL_CONTENT_KEY}, email, password))`)
-      expect(sql).toContain('AS excess')
-      expect(sql).not.toContain('AS deletable')
-      expect(sql).not.toContain('countIf(')
-    })
   })
 
   describe('AUTO_DEDUP_TABLE / AUTO_PREDUP_TABLE', () => {
@@ -161,12 +151,28 @@ ORDER BY (domain, email, imported_at)`
     })
   })
 
-  describe('buildCutoffSql', () => {
-    test('captures the clock time and the distinct content-key count together, in one query', () => {
-      const sql = buildCutoffSql()
-      expect(sql).toContain('now() AS cutoff')
-      expect(sql).toContain(`uniqExact(cityHash64(${CONTENT_KEY})) AS expected_rows`)
+  describe('buildCutoffTimestampSql', () => {
+    test('captures ClickHouse\'s own clock, nothing else', () => {
+      const sql = buildCutoffTimestampSql()
+      expect(sql).toBe('SELECT now() AS cutoff')
+    })
+  })
+
+  describe('buildContentKeyStatsSqlForBucket', () => {
+    test('counts one bucket\'s row total and distinct content keys together, bounded by max_execution_time only', () => {
+      const sql = buildContentKeyStatsSqlForBucket(5, 32)
+      expect(sql).toContain('count() AS bucket_total')
+      expect(sql).toContain(`uniqExact(cityHash64(${CONTENT_KEY})) AS bucket_distinct`)
       expect(sql).toContain('FROM ulp.credentials')
+      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 5`)
+      expect(sql).toContain('max_execution_time = 300')
+      expect(sql).not.toContain('max_threads')
+      expect(sql).not.toContain('max_bytes_before_external_group_by')
+    })
+
+    test('a different bucket index changes only the bucket filter', () => {
+      const sql = buildContentKeyStatsSqlForBucket(0, 32)
+      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 0`)
     })
   })
 
