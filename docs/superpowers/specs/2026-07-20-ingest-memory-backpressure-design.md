@@ -81,7 +81,7 @@ Both already shared by the inbox watcher and the HTTP upload route through the s
 1. **`streamCredentialsToTable`**, batch loop in `lib/upload-processor.ts` — call `await waitForHeadroom(signal)` immediately before each `insertBatch(...)` call. This is what turns "many batches hammered back-to-back on a large file" into "pause when the server's getting tight, let background merges catch up, resume."
 2. **`enqueueFile`**, `lib/inbox-watcher.ts` — call `await waitForHeadroom(signal)` before the claim (`claimFileForProcessing`), so a new file doesn't start while the server is already hot from the previous one.
 
-The batch-loop call site already has an `AbortSignal` in scope, threaded down from `withClickHouseRetry`'s operation callback. The `enqueueFile` call site has no existing signal — it needs a fresh `AbortController`, created for that single pre-claim check and aborted once `waitForHeadroom` returns (or the check is abandoned because the file vanished).
+Neither call site has an `AbortSignal` already in scope: `streamCredentialsToTable`'s loop calls `insertBatch(...)`, which creates its own signal internally via `withClickHouseRetry` — the loop itself has none — and `enqueueFile` has no signal either. Both integration points create a fresh, short-lived `AbortController` for the single pressure check, matching the pattern `sourceAlreadyImported`'s callers already use elsewhere in this file.
 
 ### Data flow
 
