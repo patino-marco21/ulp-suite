@@ -2,18 +2,18 @@ import { readFileSync } from 'fs'
 import { describe, test, expect } from 'vitest'
 import {
   CONTENT_KEY,
-  buildStatsSql,
   AUTO_DEDUP_TABLE,
   AUTO_PREDUP_TABLE,
   CONTENT_DEDUP_SURVIVOR_ORDER,
   rewriteCreateTableDdl,
-  buildCutoffSql,
+  buildCutoffTimestampSql,
+  buildContentKeyStatsSqlForBucket,
   CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES,
   CONTENT_DEDUP_MAX_THREADS,
   contentDedupBucketCount,
   buildPopulateDedupedTableSqlForBucket,
   buildEnsureSearchIndexesSql,
-  buildVerifyDedupedTableSql,
+  buildVerifyDedupedTableSqlForBucket,
   buildRenameSwapSql,
   buildCatchupInsertSql,
   dedupCronHours,
@@ -31,16 +31,6 @@ describe('content-dedup', () => {
   })
   test('CONTENT_KEY ignores url scheme/trailing-slash (email, password stay exact)', () => {
     expect(CONTENT_KEY).toBe(`${URL_CONTENT_KEY}, email, password`)
-  })
-
-  describe('buildStatsSql', () => {
-    const sql = buildStatsSql()
-    test('reports total and excess in one pass without a duplicate subquery', () => {
-      expect(sql).toContain(`uniqExact(cityHash64(${URL_CONTENT_KEY}, email, password))`)
-      expect(sql).toContain('AS excess')
-      expect(sql).not.toContain('AS deletable')
-      expect(sql).not.toContain('countIf(')
-    })
   })
 
   describe('AUTO_DEDUP_TABLE / AUTO_PREDUP_TABLE', () => {
@@ -68,25 +58,86 @@ PARTITION BY toYYYYMM(imported_at)
 ORDER BY (domain, email, imported_at)`
 
     test('rewrites the CREATE TABLE line to the target table name', () => {
-      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE)
+      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE, '1234567890')
       expect(result.split('\n')[0]).toBe(`CREATE TABLE ${AUTO_DEDUP_TABLE}`)
     })
 
-    test('rewrites the ReplicatedMergeTree ZooKeeper path to match', () => {
-      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE)
-      expect(result).toContain(`/ulp/credentials_cdedup_auto'`)
+    test('rewrites the ReplicatedMergeTree ZooKeeper path to match, suffixed with the given uniqueSuffix', () => {
+      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE, '1234567890')
+      expect(result).toContain(`/ulp/credentials_cdedup_auto_1234567890'`)
       expect(result).not.toContain(`/ulp/credentials'`)
     })
 
     test('leaves the rest of the DDL unchanged', () => {
-      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE)
+      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE, '1234567890')
       expect(result).toContain('`url` String CODEC(ZSTD(3))')
       expect(result).toContain('PARTITION BY toYYYYMM(imported_at)')
     })
 
     test('only rewrites the first occurrence of the table name (the CREATE TABLE line), not incidental matches elsewhere', () => {
-      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE)
+      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE, '1234567890')
       expect(result.match(/ulp\.credentials_cdedup_auto/g)?.length).toBe(1)
+    })
+
+    test('different uniqueSuffix values produce different ZK paths for the same target table -- the property that fixes REPLICA_ALREADY_EXISTS across successive cycles', () => {
+      const first = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE, '1111111111')
+      const second = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE, '2222222222')
+      expect(first).toContain(`/ulp/credentials_cdedup_auto_1111111111'`)
+      expect(second).toContain(`/ulp/credentials_cdedup_auto_2222222222'`)
+      expect(first).not.toBe(second)
+    })
+
+    // Confirmed live 2026-07-20: after a successful swap, ulp.credentials'
+    // REAL SHOW CREATE TABLE output has a ZK path already ending in
+    // /ulp/credentials_cdedup_auto (not /ulp/credentials) -- RENAME TABLE
+    // never moves a table's ZK registration, so a table that was ever the
+    // build target keeps that path forever, even after being renamed to
+    // ulp.credentials. A live retry against this exact shape silently
+    // failed to rewrite the ZK path at all (no exception -- a literal
+    // string .replace() targeting '/ulp/credentials\'' simply found no
+    // match and returned the DDL unchanged), reproducing
+    // REPLICA_ALREADY_EXISTS via a completely different mechanism than the
+    // bug this file's uniqueSuffix parameter was built to fix. This fixture
+    // mirrors that real shape so this exact regression can't recur silently.
+    const alreadySwappedFixture = `CREATE TABLE ulp.credentials
+(
+    \`url\` String CODEC(ZSTD(3)),
+    \`email\` String CODEC(ZSTD(3)),
+    \`imported_at\` DateTime DEFAULT now() CODEC(Delta(4), ZSTD(1))
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/ulp/credentials_cdedup_auto', '{replica}')
+PARTITION BY toYYYYMM(imported_at)
+ORDER BY (domain, email, imported_at)`
+
+    test('rewrites the ZK path correctly even when the source table\'s CURRENT path already ends in something other than plain "credentials" (post-swap shape)', () => {
+      const result = rewriteCreateTableDdl(alreadySwappedFixture, AUTO_DEDUP_TABLE, '1234567890')
+      expect(result).toContain(`/ulp/credentials_cdedup_auto_1234567890'`)
+      expect(result).not.toContain(`/ulp/credentials_cdedup_auto'`)
+    })
+
+    test('the same uniqueSuffix produces the identical target ZK path regardless of which shape the source table\'s current path was in -- the target path only ever depends on targetTable and uniqueSuffix', () => {
+      const fromNeverSwapped = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE, '1234567890')
+      const fromAlreadySwapped = rewriteCreateTableDdl(alreadySwappedFixture, AUTO_DEDUP_TABLE, '1234567890')
+      const zkPath = (s: string) => s.match(/ReplicatedMergeTree\('([^']+)'/)?.[1]
+      expect(zkPath(fromNeverSwapped)).toBe(zkPath(fromAlreadySwapped))
+    })
+
+    // Defense-in-depth per the final whole-branch review: the structural
+    // regex is confirmed correct against the real live schema today, but a
+    // literal-string match was ALSO "confirmed correct" once before this
+    // session (see the alreadySwappedFixture comment above) and then wasn't.
+    // Rather than trust the next fix to be right, this makes a no-op
+    // rewrite fail loudly (an Error, caught safely by the existing outer
+    // try/catch) instead of silently returning a DDL that would go on to
+    // collide with an existing table's ZK path.
+    test('throws if the ZK path could not be rewritten, instead of silently returning unrewritten DDL', () => {
+      const noZkPathFixture = `CREATE TABLE ulp.credentials
+(
+    \`url\` String CODEC(ZSTD(3))
+)
+ENGINE = MergeTree()
+ORDER BY url`
+      expect(() => rewriteCreateTableDdl(noZkPathFixture, AUTO_DEDUP_TABLE, '1234567890')).toThrow()
     })
   })
 
@@ -161,27 +212,60 @@ ORDER BY (domain, email, imported_at)`
     })
   })
 
-  describe('buildCutoffSql', () => {
-    test('captures the clock time and the distinct content-key count together, in one query', () => {
-      const sql = buildCutoffSql()
-      expect(sql).toContain('now() AS cutoff')
-      expect(sql).toContain(`uniqExact(cityHash64(${CONTENT_KEY})) AS expected_rows`)
-      expect(sql).toContain('FROM ulp.credentials')
+  describe('buildCutoffTimestampSql', () => {
+    test('captures ClickHouse\'s own clock, nothing else', () => {
+      const sql = buildCutoffTimestampSql()
+      expect(sql).toBe('SELECT now() AS cutoff')
     })
   })
 
-  describe('buildVerifyDedupedTableSql', () => {
-    test('reports the deduped table\'s own row count and internal excess only -- does not separately query the original table', () => {
-      const sql = buildVerifyDedupedTableSql()
+  describe('buildContentKeyStatsSqlForBucket', () => {
+    test('counts one bucket\'s row total and distinct content keys together, bounded by max_execution_time only', () => {
+      const sql = buildContentKeyStatsSqlForBucket(5, 32)
+      expect(sql).toContain('count() AS bucket_total')
+      expect(sql).toContain(`uniqExact(cityHash64(${CONTENT_KEY})) AS bucket_distinct`)
+      expect(sql).toContain('FROM ulp.credentials')
+      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 5`)
+      expect(sql).toContain('max_execution_time = 300')
+      expect(sql).not.toContain('max_threads')
+      expect(sql).not.toContain('max_bytes_before_external_group_by')
+    })
+
+    test('a different bucket index changes only the bucket filter', () => {
+      const sql = buildContentKeyStatsSqlForBucket(0, 32)
+      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 0`)
+    })
+  })
+
+  describe('buildVerifyDedupedTableSqlForBucket', () => {
+    test('counts one bucket\'s row total and distinct content keys together, against AUTO_DEDUP_TABLE only', () => {
+      const sql = buildVerifyDedupedTableSqlForBucket(5, 32)
+      expect(sql).toContain('count() AS bucket_total')
+      expect(sql).toContain(`uniqExact(cityHash64(${CONTENT_KEY})) AS bucket_distinct`)
       expect(sql).toContain(`FROM ${AUTO_DEDUP_TABLE}`)
-      expect(sql).toContain(`uniqExact(cityHash64(${CONTENT_KEY}))`)
-      expect(sql).toContain('AS cdedup_rows')
-      expect(sql).toContain('AS excess_after')
+      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 5`)
+      expect(sql).toContain('max_execution_time = 300')
       // Exactly one data source (AUTO_DEDUP_TABLE) -- the old design queried
       // the original ulp.credentials too, which is what caused the
       // moving-target verification bug this shape fixes.
       expect(sql.match(/FROM/g)?.length).toBe(1)
       expect(sql).not.toContain('expected_rows')
+    })
+
+    test('a different bucket index changes only the bucket filter', () => {
+      const sql = buildVerifyDedupedTableSqlForBucket(0, 32)
+      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 0`)
+    })
+  })
+
+  describe('bucket_total/bucket_distinct alias consistency', () => {
+    test('buildContentKeyStatsSqlForBucket and buildVerifyDedupedTableSqlForBucket use the same field aliases -- sumBucketedTotalAndDistinct depends on this to stay generic across both', () => {
+      const statsSql = buildContentKeyStatsSqlForBucket(0, 8)
+      const verifySql = buildVerifyDedupedTableSqlForBucket(0, 8)
+      expect(statsSql).toContain('AS bucket_total')
+      expect(statsSql).toContain('AS bucket_distinct')
+      expect(verifySql).toContain('AS bucket_total')
+      expect(verifySql).toContain('AS bucket_distinct')
     })
   })
 
