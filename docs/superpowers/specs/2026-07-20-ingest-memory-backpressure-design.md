@@ -6,10 +6,12 @@
 
 ## Problem
 
-`inbox/done/` was found empty during an unrelated investigation into why no files appeared to have ever succeeded. Root cause of *that* was a separate, working-as-designed 7-day cleanup sweep (`cleanupOldFiles` in `lib/inbox-watcher.ts`) combined with 10 days of no new inbox activity — not a bug. But the same investigation surfaced a real one: `inbox/failed/` holds 11 large files (35GB total, all 2–4.2GB dumps) that failed permanently, all with the same class of error, read from `processing_jobs` (SQLite):
+`inbox/done/` was found empty during an unrelated investigation into why no files appeared to have ever succeeded. Root cause of *that* was a separate, working-as-designed 7-day cleanup sweep (`cleanupOldFiles` in `lib/inbox-watcher.ts`) combined with 10 days of no new inbox activity — not a bug. But the same investigation surfaced a real one: `inbox/failed/` holds 11 files (35GB total), which `processing_jobs` (SQLite) breaks down into four distinct causes, matched by filename against the physical directory listing:
 
-- 9 files: `(total) memory limit exceeded: would use ~14.05 GiB ... OvercommitTracker decision: Query was selected to stop ... While executing WaitForAsyncInsert.`
-- 2 files: `Timeout exceeded while reading from socket ... 30000 ms.`
+- **7 files** (all 3.7–4.2GB `DUMP ULP ... Base34` dumps): `(total) memory limit exceeded: would use ~14.05 GiB ... OvercommitTracker decision: Query was selected to stop ... While executing WaitForAsyncInsert.` — the target of this fix.
+- **2 files** (also multi-GB dumps): `Timeout exceeded while reading from socket ... 30000 ms.` — also the target of this fix; a server under the same memory pressure can stall a socket read without the query itself being hung.
+- **1 file** (`DUMP ULP 01.07.2026 Base34 3.txt`, 4.18GB): `Interrupted mid-import (app restart) — may be partially imported; review before re-adding.` A different immediate cause (the app container itself restarted mid-import, triggering `lib/inbox-watcher.ts`'s crash-recovery sweep), but same size profile as the other 9 — plausibly the same underlying pressure, and will benefit from the same fix on retry regardless of root cause.
+- **1 file** (`🐊 TG @KURZL0GS_UP - 29.04.2026 - ULP PRIVATE.08`, 81MB): `Unsupported file extension ".08"`. Correctly rejected — this is working as designed and has nothing to do with memory pressure. Included here only because it happens to sit in the same directory; retrying it will just reproduce the same correct rejection.
 
 All 11 failed with `imported: 0, skipped: 0` — none partially succeeded, none reached `recordSource()` (which only fires when `imported > 0`), so none are recorded in `ulp.sources`.
 
@@ -79,7 +81,7 @@ Both already shared by the inbox watcher and the HTTP upload route through the s
 1. **`streamCredentialsToTable`**, batch loop in `lib/upload-processor.ts` — call `await waitForHeadroom(signal)` immediately before each `insertBatch(...)` call. This is what turns "many batches hammered back-to-back on a large file" into "pause when the server's getting tight, let background merges catch up, resume."
 2. **`enqueueFile`**, `lib/inbox-watcher.ts` — call `await waitForHeadroom(signal)` before the claim (`claimFileForProcessing`), so a new file doesn't start while the server is already hot from the previous one.
 
-Both call sites already have an `AbortSignal` in scope (from `withClickHouseRetry`'s operation callback, or can be created fresh for the pre-claim check) to thread through.
+The batch-loop call site already has an `AbortSignal` in scope, threaded down from `withClickHouseRetry`'s operation callback. The `enqueueFile` call site has no existing signal — it needs a fresh `AbortController`, created for that single pre-claim check and aborted once `waitForHeadroom` returns (or the check is abandoned because the file vanished).
 
 ### Data flow
 
@@ -93,7 +95,7 @@ Both call sites already have an `AbortSignal` in scope (from `withClickHouseRetr
 
 ### Recovering the 11 stuck files
 
-No new tooling needed — `POST /api/inbox/retry` with `{ all: true }` (→ `lib/inbox-helpers.ts`'s `retryAllFailed()`) already exists and is wired to the Inbox Monitor UI's **Retry All** button. Since the pipeline is already single-file-at-a-time (`pLimit(1)`), it's safe to retry all 11 at once — they queue and process sequentially, each covered by the new guard. Sequence:
+No new tooling needed — `POST /api/inbox/retry` with `{ all: true }` (→ `lib/inbox-helpers.ts`'s `retryAllFailed()`) already exists and is wired to the Inbox Monitor UI's **Retry All** button. Since the pipeline is already single-file-at-a-time (`pLimit(1)`), it's safe to retry all 11 at once — they queue and process sequentially, each covered by the new guard. Expect 10 of the 11 to succeed; the `.08`-extension file will immediately bounce back to `failed/` with the same "unsupported extension" message as before — expected, not a regression. Sequence:
 
 1. Deploy this fix (rebuild + restart `ulpsuite_app`, restart `ulpsuite_clickhouse` to pick up the config change).
 2. Click **Retry All** in the Inbox Monitor (or `POST /api/inbox/retry {"all": true}` directly).
