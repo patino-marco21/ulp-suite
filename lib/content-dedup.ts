@@ -188,12 +188,26 @@ export const CONTENT_DEDUP_SURVIVOR_ORDER = 'url, email, password, imported_at'
  * just a leftover build table. Left as a caller-supplied parameter (not
  * generated internally) so this function stays pure and its existing
  * exact-match unit tests keep working with a fixed value.
+ *
+ * Throws if the rewrite didn't actually land -- defense in depth per the
+ * final review of the 2026-07-19/20 fixes: a "confirmed correct against the
+ * real schema" match has already gone silently stale once this session (the
+ * literal-suffix match this structural one replaced). Rather than trust the
+ * next such assumption to hold forever, a no-op rewrite fails loudly here
+ * (caught safely by runContentDedupTick's existing outer try/catch) instead
+ * of silently returning DDL that would go on to collide with an existing
+ * table's ZK path.
  */
 export function rewriteCreateTableDdl(showCreateSql: string, targetTable: string, uniqueSuffix: string): string {
   const targetShortName = targetTable.split('.')[1]
   const lines = showCreateSql.split('\n')
   lines[0] = lines[0].replace('ulp.credentials', targetTable)
-  return lines.join('\n').replace(/(\/ulp\/)[^']*'/, `$1${targetShortName}_${uniqueSuffix}'`)
+  const rewritten = lines.join('\n').replace(/(\/ulp\/)[^']*'/, `$1${targetShortName}_${uniqueSuffix}'`)
+  const expectedMarker = `${targetShortName}_${uniqueSuffix}'`
+  if (!rewritten.includes(expectedMarker)) {
+    throw new Error(`[content-dedup] rewriteCreateTableDdl failed to rewrite the ZK path -- expected to find '${expectedMarker}' in the output but didn't. Refusing to return unrewritten DDL.`)
+  }
+  return rewritten
 }
 
 /**

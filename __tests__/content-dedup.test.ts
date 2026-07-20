@@ -121,6 +121,24 @@ ORDER BY (domain, email, imported_at)`
       const zkPath = (s: string) => s.match(/ReplicatedMergeTree\('([^']+)'/)?.[1]
       expect(zkPath(fromNeverSwapped)).toBe(zkPath(fromAlreadySwapped))
     })
+
+    // Defense-in-depth per the final whole-branch review: the structural
+    // regex is confirmed correct against the real live schema today, but a
+    // literal-string match was ALSO "confirmed correct" once before this
+    // session (see the alreadySwappedFixture comment above) and then wasn't.
+    // Rather than trust the next fix to be right, this makes a no-op
+    // rewrite fail loudly (an Error, caught safely by the existing outer
+    // try/catch) instead of silently returning a DDL that would go on to
+    // collide with an existing table's ZK path.
+    test('throws if the ZK path could not be rewritten, instead of silently returning unrewritten DDL', () => {
+      const noZkPathFixture = `CREATE TABLE ulp.credentials
+(
+    \`url\` String CODEC(ZSTD(3))
+)
+ENGINE = MergeTree()
+ORDER BY url`
+      expect(() => rewriteCreateTableDdl(noZkPathFixture, AUTO_DEDUP_TABLE, '1234567890')).toThrow()
+    })
   })
 
   describe('CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES', () => {
