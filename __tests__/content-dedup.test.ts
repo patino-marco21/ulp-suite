@@ -58,25 +58,33 @@ PARTITION BY toYYYYMM(imported_at)
 ORDER BY (domain, email, imported_at)`
 
     test('rewrites the CREATE TABLE line to the target table name', () => {
-      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE)
+      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE, '1234567890')
       expect(result.split('\n')[0]).toBe(`CREATE TABLE ${AUTO_DEDUP_TABLE}`)
     })
 
-    test('rewrites the ReplicatedMergeTree ZooKeeper path to match', () => {
-      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE)
-      expect(result).toContain(`/ulp/credentials_cdedup_auto'`)
+    test('rewrites the ReplicatedMergeTree ZooKeeper path to match, suffixed with the given uniqueSuffix', () => {
+      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE, '1234567890')
+      expect(result).toContain(`/ulp/credentials_cdedup_auto_1234567890'`)
       expect(result).not.toContain(`/ulp/credentials'`)
     })
 
     test('leaves the rest of the DDL unchanged', () => {
-      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE)
+      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE, '1234567890')
       expect(result).toContain('`url` String CODEC(ZSTD(3))')
       expect(result).toContain('PARTITION BY toYYYYMM(imported_at)')
     })
 
     test('only rewrites the first occurrence of the table name (the CREATE TABLE line), not incidental matches elsewhere', () => {
-      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE)
+      const result = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE, '1234567890')
       expect(result.match(/ulp\.credentials_cdedup_auto/g)?.length).toBe(1)
+    })
+
+    test('different uniqueSuffix values produce different ZK paths for the same target table -- the property that fixes REPLICA_ALREADY_EXISTS across successive cycles', () => {
+      const first = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE, '1111111111')
+      const second = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE, '2222222222')
+      expect(first).toContain(`/ulp/credentials_cdedup_auto_1111111111'`)
+      expect(second).toContain(`/ulp/credentials_cdedup_auto_2222222222'`)
+      expect(first).not.toBe(second)
     })
   })
 

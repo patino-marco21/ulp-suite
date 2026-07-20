@@ -42,6 +42,26 @@
  * it further — the part-touching problem is structural, not scale-specific,
  * and recurs for any future incremental use of a mutation-based approach.
  *
+ * ZK PATH REUSE: AUTO_DEDUP_TABLE's ReplicatedMergeTree ZooKeeper path
+ * includes a per-cycle unique suffix (rewriteCreateTableDdl's third
+ * argument, `String(Date.now())` at the call site) rather than being a
+ * fixed string derived from the table name alone. Confirmed live
+ * 2026-07-19: RENAME TABLE is metadata-only and never moves a table's
+ * underlying ZK registration -- so after the first successful swap,
+ * whichever physical table becomes ulp.credentials permanently keeps the ZK
+ * path it was originally built with. A fixed AUTO_DEDUP_TABLE path
+ * therefore collides with the LIVE table on every cycle after the first
+ * successful one, not just with a leftover build table -- reproduced on
+ * disposable tables and confirmed this is not scale- or data-specific. The
+ * per-cycle suffix sidesteps this entirely: each cycle's build table gets a
+ * ZK path no prior or future cycle can ever reuse, so this cannot recur
+ * regardless of how many cycles run or what state a prior one left behind.
+ * Steps 2/3's cleanup and buildRenameSwapSql's RENAME are unaffected --
+ * both operate on the fixed SQL table names, not the ZK path, so they work
+ * identically regardless of which physical path either name currently
+ * points to. Full design:
+ * docs/superpowers/specs/2026-07-19-content-dedup-zk-path-reuse-design.md
+ *
  * DISTINCT-COUNT SCALE: buildStatsSql(), buildCutoffSql(), and
  * buildVerifyDedupedTableSql() (all removed) each ran
  * uniqExact(cityHash64(CONTENT_KEY)) as a single ungrouped aggregate over a
@@ -141,12 +161,20 @@ export const CONTENT_DEDUP_SURVIVOR_ORDER = 'url, email, password, imported_at'
  * fixed prefix, so it works regardless of the exact path prefix ClickHouse
  * uses (confirmed live: the real path is `/clickhouse/tables/{shard}/ulp/credentials`,
  * which still ends in exactly that suffix).
+ *
+ * `uniqueSuffix` is appended to the ZK path so it can never collide with a
+ * path any prior or future cycle used -- see the file's ZK PATH REUSE
+ * comment for why a fixed path (this function's shape before 2026-07-19)
+ * eventually collides with the live table itself, not just a leftover build
+ * table. Left as a caller-supplied parameter (not generated internally) so
+ * this function stays pure and its existing exact-match unit tests keep
+ * working with a fixed value.
  */
-export function rewriteCreateTableDdl(showCreateSql: string, targetTable: string): string {
+export function rewriteCreateTableDdl(showCreateSql: string, targetTable: string, uniqueSuffix: string): string {
   const targetShortName = targetTable.split('.')[1]
   const lines = showCreateSql.split('\n')
   lines[0] = lines[0].replace('ulp.credentials', targetTable)
-  return lines.join('\n').replace("/ulp/credentials'", `/ulp/${targetShortName}'`)
+  return lines.join('\n').replace("/ulp/credentials'", `/ulp/${targetShortName}_${uniqueSuffix}'`)
 }
 
 /**
@@ -457,12 +485,14 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
     // step 4's CREATE TABLE moments later.
     await client.exec({ query: `DROP TABLE IF EXISTS ${AUTO_DEDUP_TABLE} SYNC` })
 
-    // 4. Create the deduped-table clone (schema + rewritten ZK path).
+    // 4. Create the deduped-table clone (schema + rewritten ZK path, unique
+    // to this cycle -- see the file's ZK PATH REUSE comment for why a fixed
+    // path eventually collides with the live table itself).
     const showCreateRes = await client.query({ query: 'SHOW CREATE TABLE ulp.credentials', format: 'JSONEachRow' })
     const [showCreateRow] = (await showCreateRes.json()) as Array<{ statement: string }>
     const showCreateSql = showCreateRow?.statement
     if (!showCreateSql) throw new Error('[content-dedup] SHOW CREATE TABLE returned nothing')
-    await client.exec({ query: rewriteCreateTableDdl(showCreateSql, AUTO_DEDUP_TABLE) })
+    await client.exec({ query: rewriteCreateTableDdl(showCreateSql, AUTO_DEDUP_TABLE, String(Date.now())) })
 
     // 4b. Ensure the still-empty clone has the full search-index set before it's
     // populated (see buildEnsureSearchIndexesSql's comment for why this exists
@@ -474,7 +504,7 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
     // 5. Populate, one bucket at a time -- see the file's POPULATE SCALE
     // comment for why this runs as a sequential loop instead of one INSERT.
     // bucketCount was already captured in step 0 above (shared with the
-    // stats/cutoff distinct-count buckets -- see CUTOFF/STATS SCALE).
+    // stats/cutoff distinct-count buckets -- see DISTINCT-COUNT SCALE).
     console.log(`[content-dedup] ${trigger}: building deduped table across ${bucketCount} buckets (~${excess} duplicate rows to remove)`)
     for (let bucket = 0; bucket < bucketCount; bucket++) {
       await client.exec({ query: buildPopulateDedupedTableSqlForBucket(bucket, bucketCount) })
