@@ -86,6 +86,41 @@ ORDER BY (domain, email, imported_at)`
       expect(second).toContain(`/ulp/credentials_cdedup_auto_2222222222'`)
       expect(first).not.toBe(second)
     })
+
+    // Confirmed live 2026-07-20: after a successful swap, ulp.credentials'
+    // REAL SHOW CREATE TABLE output has a ZK path already ending in
+    // /ulp/credentials_cdedup_auto (not /ulp/credentials) -- RENAME TABLE
+    // never moves a table's ZK registration, so a table that was ever the
+    // build target keeps that path forever, even after being renamed to
+    // ulp.credentials. A live retry against this exact shape silently
+    // failed to rewrite the ZK path at all (no exception -- a literal
+    // string .replace() targeting '/ulp/credentials\'' simply found no
+    // match and returned the DDL unchanged), reproducing
+    // REPLICA_ALREADY_EXISTS via a completely different mechanism than the
+    // bug this file's uniqueSuffix parameter was built to fix. This fixture
+    // mirrors that real shape so this exact regression can't recur silently.
+    const alreadySwappedFixture = `CREATE TABLE ulp.credentials
+(
+    \`url\` String CODEC(ZSTD(3)),
+    \`email\` String CODEC(ZSTD(3)),
+    \`imported_at\` DateTime DEFAULT now() CODEC(Delta(4), ZSTD(1))
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/ulp/credentials_cdedup_auto', '{replica}')
+PARTITION BY toYYYYMM(imported_at)
+ORDER BY (domain, email, imported_at)`
+
+    test('rewrites the ZK path correctly even when the source table\'s CURRENT path already ends in something other than plain "credentials" (post-swap shape)', () => {
+      const result = rewriteCreateTableDdl(alreadySwappedFixture, AUTO_DEDUP_TABLE, '1234567890')
+      expect(result).toContain(`/ulp/credentials_cdedup_auto_1234567890'`)
+      expect(result).not.toContain(`/ulp/credentials_cdedup_auto'`)
+    })
+
+    test('the same uniqueSuffix produces the identical target ZK path regardless of which shape the source table\'s current path was in -- the target path only ever depends on targetTable and uniqueSuffix', () => {
+      const fromNeverSwapped = rewriteCreateTableDdl(fixture, AUTO_DEDUP_TABLE, '1234567890')
+      const fromAlreadySwapped = rewriteCreateTableDdl(alreadySwappedFixture, AUTO_DEDUP_TABLE, '1234567890')
+      const zkPath = (s: string) => s.match(/ReplicatedMergeTree\('([^']+)'/)?.[1]
+      expect(zkPath(fromNeverSwapped)).toBe(zkPath(fromAlreadySwapped))
+    })
   })
 
   describe('CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES', () => {

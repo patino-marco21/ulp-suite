@@ -59,7 +59,17 @@
  * Steps 2/3's cleanup and buildRenameSwapSql's RENAME are unaffected --
  * both operate on the fixed SQL table names, not the ZK path, so they work
  * identically regardless of which physical path either name currently
- * points to. Full design:
+ * points to. A live retry surfaced a second bug from this same root fact:
+ * rewriteCreateTableDdl's ZK-path match was a literal-string suffix
+ * (`/ulp/credentials'`) that assumed ulp.credentials' own current path
+ * always ends that way -- false as soon as the table has ever been through
+ * one successful swap, at which point its real path already ends in
+ * /ulp/credentials_cdedup_auto. That mismatch made the match silently find
+ * nothing and leave the ZK path completely unrewritten (no exception),
+ * reproducing REPLICA_ALREADY_EXISTS via a different path than the
+ * uniqueSuffix fix targets. Fixed by matching the ZK path structurally
+ * (`/ulp/` plus whatever follows to the closing quote) instead of assuming
+ * a fixed suffix -- see rewriteCreateTableDdl's own comment. Full design:
  * docs/superpowers/specs/2026-07-19-content-dedup-zk-path-reuse-design.md
  *
  * DISTINCT-COUNT SCALE: buildStatsSql(), buildCutoffSql(), and
@@ -155,26 +165,35 @@ export const CONTENT_DEDUP_SURVIVOR_ORDER = 'url, email, password, imported_at'
  * collides with Code REPLICA_ALREADY_EXISTS. Pure function so the rewrite
  * logic is unit-testable without a live database; runContentDedupTick() is
  * responsible for fetching showCreateSql via a live SHOW CREATE TABLE first.
- * Mirrors scripts/dedup-credentials-content.sh's sed rewrite exactly: only
- * the CREATE TABLE line's table name is rewritten (not any other line), and
- * the ZK path is matched by its `/ulp/credentials'` suffix rather than a
- * fixed prefix, so it works regardless of the exact path prefix ClickHouse
- * uses (confirmed live: the real path is `/clickhouse/tables/{shard}/ulp/credentials`,
- * which still ends in exactly that suffix).
+ *
+ * The ZK path is matched structurally -- `/ulp/` followed by whatever comes
+ * next up to the closing quote -- and that whole tail is replaced, rather
+ * than matching a fixed literal suffix (`/ulp/credentials'`, this function's
+ * shape before 2026-07-20). Confirmed live 2026-07-20: after a successful
+ * swap, ulp.credentials' REAL current ZK path already ends in
+ * /ulp/credentials_cdedup_auto, not /ulp/credentials (RENAME TABLE never
+ * moves a table's ZK registration -- see the file's ZK PATH REUSE comment).
+ * A literal-suffix match against that shape found no match and silently
+ * left the DDL's ZK path completely unrewritten -- no exception, just a
+ * no-op `.replace()` -- reproducing REPLICA_ALREADY_EXISTS via a different
+ * mechanism than the bug uniqueSuffix (below) exists to fix. The structural
+ * match is agnostic to whatever the source's current path actually is: the
+ * target path only ever depends on targetTable and uniqueSuffix, confirmed
+ * by a unit test asserting identical output from both a never-swapped and
+ * an already-swapped source fixture.
  *
  * `uniqueSuffix` is appended to the ZK path so it can never collide with a
  * path any prior or future cycle used -- see the file's ZK PATH REUSE
- * comment for why a fixed path (this function's shape before 2026-07-19)
- * eventually collides with the live table itself, not just a leftover build
- * table. Left as a caller-supplied parameter (not generated internally) so
- * this function stays pure and its existing exact-match unit tests keep
- * working with a fixed value.
+ * comment for why a fixed path collides with the live table itself, not
+ * just a leftover build table. Left as a caller-supplied parameter (not
+ * generated internally) so this function stays pure and its existing
+ * exact-match unit tests keep working with a fixed value.
  */
 export function rewriteCreateTableDdl(showCreateSql: string, targetTable: string, uniqueSuffix: string): string {
   const targetShortName = targetTable.split('.')[1]
   const lines = showCreateSql.split('\n')
   lines[0] = lines[0].replace('ulp.credentials', targetTable)
-  return lines.join('\n').replace("/ulp/credentials'", `/ulp/${targetShortName}_${uniqueSuffix}'`)
+  return lines.join('\n').replace(/(\/ulp\/)[^']*'/, `$1${targetShortName}_${uniqueSuffix}'`)
 }
 
 /**
