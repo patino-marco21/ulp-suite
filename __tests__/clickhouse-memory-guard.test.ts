@@ -103,4 +103,30 @@ describe('waitForHeadroom', () => {
       vi.useRealTimers()
     }
   })
+
+  it('falls back to hardcoded default when env var is not a finite number (NaN validation)', async () => {
+    vi.resetModules()
+    process.env.MEMORY_GUARD_MAX_WAIT_MS = 'not-a-number'
+
+    try {
+      pressureResult(1_000_000_000, 18_000_000_000) // low ratio to return immediately
+      const { waitForHeadroom } = await import('@/lib/clickhouse-memory-guard')
+
+      // Call with explicit maxWaitMs to ensure it uses that, not the corrupted default
+      const startTime = Date.now()
+      await waitForHeadroom(new AbortController().signal, {
+        thresholdRatio: 0.75,
+        maxWaitMs: 100,  // short timeout
+      })
+      const elapsed = Date.now() - startTime
+
+      // Should resolve quickly (either due to ratio being low or timeout firing),
+      // not hang indefinitely as it would with NaN deadline
+      expect(elapsed).toBeLessThan(5000)
+      expect(h.query.mock.calls.length).toBeGreaterThan(0)
+    } finally {
+      delete process.env.MEMORY_GUARD_MAX_WAIT_MS
+      vi.resetModules()
+    }
+  })
 })

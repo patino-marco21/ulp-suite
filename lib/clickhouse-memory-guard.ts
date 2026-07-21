@@ -18,8 +18,14 @@ export interface MemoryPressure {
   ratio:        number
 }
 
-const DEFAULT_THRESHOLD_RATIO  = Number(process.env.MEMORY_GUARD_THRESHOLD_RATIO ?? '0.75')
-const DEFAULT_MAX_WAIT_MS      = Number(process.env.MEMORY_GUARD_MAX_WAIT_MS ?? String(10 * 60 * 1_000))
+function parseEnvNumber(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+const DEFAULT_THRESHOLD_RATIO  = parseEnvNumber(process.env.MEMORY_GUARD_THRESHOLD_RATIO, 0.75)
+const DEFAULT_MAX_WAIT_MS      = parseEnvNumber(process.env.MEMORY_GUARD_MAX_WAIT_MS, 10 * 60 * 1_000)
 const DEFAULT_POLL_INTERVAL_MS = 5_000
 
 /** Live snapshot of ClickHouse's own memory tracker vs. its configured ceiling. */
