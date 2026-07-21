@@ -104,28 +104,55 @@ describe('waitForHeadroom', () => {
     }
   })
 
-  it('falls back to hardcoded default when env var is not a finite number (NaN validation)', async () => {
+  it('falls back to the real 600000ms default when MEMORY_GUARD_MAX_WAIT_MS is malformed, instead of hanging on a NaN deadline', async () => {
+    vi.useFakeTimers()
     vi.resetModules()
     process.env.MEMORY_GUARD_MAX_WAIT_MS = 'not-a-number'
+    h.query.mockResolvedValue({ json: async () => [{ used: '17000000000', ceiling: '18000000000' }] }) // ~0.94, always over threshold
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
     try {
-      pressureResult(1_000_000_000, 18_000_000_000) // low ratio to return immediately
+      const { waitForHeadroom } = await import('@/lib/clickhouse-memory-guard')
+      // No explicit maxWaitMs override -- this must fall through to DEFAULT_MAX_WAIT_MS,
+      // which is only exercised via the (corrupted) env var read at module load time.
+      const promise = waitForHeadroom(new AbortController().signal, {
+        thresholdRatio: 0.75, pollIntervalMs: 5_000,
+      })
+
+      // Advance to (and past) the real 600_000ms fallback. If the malformed env var
+      // had produced a NaN default, `deadline` would be NaN, `Date.now() >= deadline`
+      // would never be true, and this advance would hang instead of settling.
+      await vi.advanceTimersByTimeAsync(605_000)
+      await promise
+
+      expect(warnSpy.mock.calls.flat().join(' ')).toContain('wait budget')
+    } finally {
+      warnSpy.mockRestore()
+      vi.useRealTimers()
+      delete process.env.MEMORY_GUARD_MAX_WAIT_MS
+      vi.resetModules()
+    }
+  })
+
+  it('falls back to the real 0.75 threshold when MEMORY_GUARD_THRESHOLD_RATIO is an empty string, instead of becoming 0', async () => {
+    vi.useFakeTimers()
+    vi.resetModules()
+    process.env.MEMORY_GUARD_THRESHOLD_RATIO = ''
+    pressureResult(50_000_000, 18_000_000_000) // ratio ~0.0028 -- comfortably under a real 0.75 threshold
+
+    try {
       const { waitForHeadroom } = await import('@/lib/clickhouse-memory-guard')
 
-      // Call with explicit maxWaitMs to ensure it uses that, not the corrupted default
-      const startTime = Date.now()
-      await waitForHeadroom(new AbortController().signal, {
-        thresholdRatio: 0.75,
-        maxWaitMs: 100,  // short timeout
-      })
-      const elapsed = Date.now() - startTime
+      // No explicit thresholdRatio override -- this must fall through to
+      // DEFAULT_THRESHOLD_RATIO. If '' had silently become 0, `ratio < 0` could never
+      // be true, so this would block on the poll loop's setTimeout (never advanced in
+      // this test) instead of returning on the fast path below.
+      await waitForHeadroom(new AbortController().signal, {})
 
-      // Should resolve quickly (either due to ratio being low or timeout firing),
-      // not hang indefinitely as it would with NaN deadline
-      expect(elapsed).toBeLessThan(5000)
-      expect(h.query.mock.calls.length).toBeGreaterThan(0)
+      expect(h.query).toHaveBeenCalledTimes(1)
     } finally {
-      delete process.env.MEMORY_GUARD_MAX_WAIT_MS
+      vi.useRealTimers()
+      delete process.env.MEMORY_GUARD_THRESHOLD_RATIO
       vi.resetModules()
     }
   })

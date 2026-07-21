@@ -19,7 +19,7 @@ export interface MemoryPressure {
 }
 
 function parseEnvNumber(value: string | undefined, fallback: number): number {
-  if (value === undefined) return fallback
+  if (value === undefined || value.trim() === '') return fallback
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : fallback
 }
