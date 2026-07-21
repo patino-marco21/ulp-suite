@@ -436,3 +436,29 @@ describe('live ingest-metrics wiring', () => {
     }
   })
 })
+
+describe('memory-guard wiring', () => {
+  it('streamCredentialsToTable calls waitForHeadroom once per batch, before the insert', async () => {
+    vi.resetModules()
+    const callOrder: string[] = []
+    const guard = { waitForHeadroom: vi.fn().mockImplementation(async () => { callOrder.push('guard') }) }
+    vi.doMock('@/lib/clickhouse-memory-guard', () => guard)
+    h.insert.mockImplementation(async () => { callOrder.push('insert') })
+
+    try {
+      const { processTextStream } = await import('@/lib/upload-processor')
+      await processTextStream(
+        Readable.toWeb(Readable.from([Buffer.from('https://example.com/login:user@example.com:mypassword\n')])) as ReadableStream<Uint8Array>,
+        'guard-wiring.txt',
+      )
+
+      expect(guard.waitForHeadroom).toHaveBeenCalledTimes(1)
+      // callOrder includes: guard (from batch loop), then insert (batch credentials), then insert (recordSource)
+      expect(callOrder[0]).toBe('guard')
+      expect(callOrder[1]).toBe('insert')
+    } finally {
+      vi.doUnmock('@/lib/clickhouse-memory-guard')
+      vi.resetModules()
+    }
+  })
+})

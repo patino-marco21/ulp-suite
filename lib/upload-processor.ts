@@ -21,6 +21,7 @@ import {
   withClickHouseRetry,
   type ClickHouseRetryOptions,
 } from '@/lib/clickhouse-retry'
+import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 import { batchDedupToken } from '@/lib/upload-dedup'
 import { parseIngestPolicy, policyActive, shouldDropAtIngest, makeHardDropPredicate } from '@/lib/ingest-filter'
 import { checkMonitorsForULPUpload } from '@/lib/domain-monitor'
@@ -301,6 +302,9 @@ export async function streamCredentialsToTable(
         rejection_breakdown[k as RejectionReason] =
           (rejection_breakdown[k as RejectionReason] ?? 0) + v
       }
+
+      const guardController = new AbortController()
+      await waitForHeadroom(guardController.signal)
 
       const tInsert = performance.now()
       await insertBatch(creds, breach_name, undefined, { table })
