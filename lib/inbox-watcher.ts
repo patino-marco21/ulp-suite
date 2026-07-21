@@ -38,6 +38,7 @@ import { uploadQueue, queueSize, setCurrentJob } from '@/lib/upload-queue'
 import { logJob } from '@/lib/processing-log'
 import { processTextStream, processZipFile } from '@/lib/upload-processor'
 import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable } from '@/lib/inbox-claim'
+import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 
 const INBOX = path.resolve('./inbox')
 const DONE  = path.resolve('./inbox/done')
@@ -266,6 +267,9 @@ async function enqueueFile(filePath: string): Promise<void> {
     let skipped  = 0
     let procPath: string | null = null
     try {
+      const guardController = new AbortController()
+      await waitForHeadroom(guardController.signal)
+
       // CLAIM: atomically move the file out of inbox/ into processing/ BEFORE
       // reading it. If the rename returns null the file is already gone (a
       // concurrent attempt or a pre-restart claim won), so we must NOT import
