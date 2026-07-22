@@ -45,24 +45,30 @@
     </merge_tree>
 
     <!-- ── Memory ceiling ────────────────────────────────────────────────────────
-         UNRESOLVED: whether mark_cache/uncompressed_cache bytes are counted inside
-         max_server_memory_usage's own hard limit, or only show up in real container
-         RSS outside of it, is NOT settled — see the 2026-06-27 memory-pressure
-         investigation notes. The enforced ceiling has actually measured ~14.05 GiB
-         in production (twice: 2026-06-21 and 2026-06-27), 2 GiB below this 16 GiB
-         setting, which is consistent with caches counting inside it — but a prior
-         2026-06-07 fix (commit 6fced4c) was itself motivated by a real cgroup
-         OOM-kill that's only explainable if caches are real RSS OUTSIDE this limit.
-         Don't raise max_server_memory_usage based on either theory alone without
-         verifying directly against this host (compare system.metrics
-         'MemoryTracking' + system.asynchronous_metrics cache bytes against actual
-         process RSS) — under the OOM-motivated model, raising it without also
-         raising the container's mem_limit (docker-compose.yml, currently 20g)
-         would remove the safety margin that fix was protecting.
+         RESOLVED 2026-07-20 (see docs/superpowers/specs/2026-07-20-ingest-memory-backpressure-design.md):
+         verified live that system.metrics 'MemoryTracking' (612 MB at idle) and
+         the container's actual cgroup RSS (11 GB at idle, from
+         /sys/fs/cgroup/memory.current) are NOT the same number — the ~10 GB gap
+         is Linux page cache from reading/writing ClickHouse's data files, which
+         cgroup v2 counts in memory.current but is reclaimable and outside
+         MemoryTracking. mark_cache (256 MB) + uncompressed_cache (512 MB) cannot
+         explain a 10 GB gap either. MemoryTracking vs. max_server_memory_usage is
+         a real, independent, allocator-level ceiling, not conflated with page
+         cache or those caches.
+
+         Raised 16 GB → 18 GB on that basis: idle usage is 612 MB against either
+         ceiling, so there was real headroom. 2 GB margin kept under the
+         container's hard 20 GB mem_limit (docker-compose.yml) intentionally — if
+         ClickHouse's own tracked usage ever did reach this ceiling, the
+         alternative to OvercommitTracker gracefully killing one query is the
+         kernel cgroup-OOM-killing the entire server process, the failure mode
+         the 2026-06-07 fix (commit 6fced4c) was protecting against. As of this
+         change, imports also proactively back off before reaching this ceiling
+         (lib/clickhouse-memory-guard.ts, default threshold 75% = ~13.5 GB).
 
          max_server_memory_usage covers: query execution, query result cache,
          query condition cache, background merge buffers, connection overhead. -->
-    <max_server_memory_usage>17179869184</max_server_memory_usage>      <!-- 16 GB -->
+    <max_server_memory_usage>19327352832</max_server_memory_usage>      <!-- 18 GB -->
 
     <!-- ── Mark cache ─────────────────────────────────────────────────────────────
          Stores granule-to-column-file offsets.

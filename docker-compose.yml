@@ -24,9 +24,9 @@ services:
       CLICKHOUSE_PASSWORD: ""
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     # Memory: 32 GB total — 20 GB ClickHouse + 8 GB App + 4 GB OS/kernel headroom.
-    # Whether mark_cache (256 MB) + uncompressed_cache (512 MB) count inside or
-    # outside max_server_memory_usage (16 GB) is unresolved — see the memory
-    # ceiling comment in ulp-performance.xml before changing any of these values.
+    # max_server_memory_usage (ulp-performance.xml) is 18 GB, 2 GB under this
+    # container limit intentionally — see the memory ceiling comment there for
+    # the live verification behind that number.
     mem_limit: 20g
     mem_reservation: 12g
     ulimits:
