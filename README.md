@@ -157,8 +157,17 @@ without raising peak memory beyond one extra batch. Two environment knobs:
 - `IMPORT_PIPELINE` — `off` disables pipelining and reverts to strictly
   sequential parse→insert (kill-switch / A-B testing). Default: on.
 - `UPLOAD_CONCURRENCY` — number of files processed at once. Default `1`.
-  Raising it multiplies peak memory (each file holds its own in-flight batch and
-  its own dedup set), so only raise it on hardware with memory headroom.
+  Raising it multiplies peak memory (each concurrent file holds its own
+  in-flight batch and its own dedup set). Since `lib/clickhouse-memory-guard.ts`
+  (see `docs/superpowers/specs/2026-07-20-ingest-memory-backpressure-design.md`)
+  paces every batch and file claim against ClickHouse's own live memory
+  pressure, raising this to 2–3 is reasonable on hosts with memory headroom —
+  this deployment runs at 2. Known limitation: the Inbox Monitor's live
+  progress display is a single slot, not per-job — at concurrency > 1 a
+  still-running file's progress can go invisible if another concurrent file
+  finishes first. Every file still gets its own row in the job log / Inbox
+  Monitor history regardless; this only affects the live in-progress
+  indicator.
 
 Batch size stays a fixed 100,000 rows; inserts remain synchronous, in-order, and
 retryable (unchanged from the resilience work).

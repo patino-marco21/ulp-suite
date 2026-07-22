@@ -122,6 +122,12 @@ services:
       INGEST_FILTER_DROP_TIERS: ${INGEST_FILTER_DROP_TIERS:-}
       INGEST_FILTER_KEEP_SUFFIXES: ${INGEST_FILTER_KEEP_SUFFIXES:-}
       INGEST_FILTER_DROP_SUFFIXES: ${INGEST_FILTER_DROP_SUFFIXES:-}
+      # Ingest concurrency — optional, configured in .env. Must be forwarded
+      # explicitly (see comment above). Default 1 (sequential) is safe on any
+      # hardware; raise only where memory headroom is confirmed — see
+      # docs/superpowers/specs/2026-07-20-ingest-memory-backpressure-design.md
+      # and docs/superpowers/specs/2026-07-22-upload-concurrency-design.md.
+      UPLOAD_CONCURRENCY: ${UPLOAD_CONCURRENCY:-1}
       # Exact-content dedup worker — report-only unless explicitly enabled.
       CONTENT_DEDUP_APPLY: ${CONTENT_DEDUP_APPLY:-false}
       DEDUP_CRON_HOURS: ${DEDUP_CRON_HOURS:-24}
