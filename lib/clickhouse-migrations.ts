@@ -149,7 +149,7 @@ let migrationsDone = false
 //     (see that file for why: a swap clones the live table's DDL as-is, so a
 //     future swap could otherwise silently carry forward a search-index gap the
 //     same way this one did).
-const DDL_VERSION = 17
+const DDL_VERSION = 18
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -759,6 +759,23 @@ export async function runClickHouseMigrations(): Promise<void> {
       )
     }
     console.warn('[ClickHouse migration] DDL v17 applied (hasToken text indexes added; ngram bloom filters resized — MATERIALIZE running in background)')
+  }
+
+  // v18 — content_key_hash materialized column for the "Unique" dedupe/count
+  // filter. Same shape as v12 (is_noise): ADD COLUMN is metadata-only/instant;
+  // new inserts compute it for free. MATERIALIZE COLUMN backfills existing
+  // parts as a background mutation -- until it finishes, content_key_hash is
+  // computed on the fly for old parts (i.e. dedupe/count stays slow for rows
+  // in those parts), so monitor system.mutations and expect the speedup once
+  // it completes. This table has grown substantially since the v12 backfill
+  // ran (1.48B rows at time of writing) -- expect this to take meaningfully
+  // longer; do not assume a duration.
+  if (lastDdl < 18) {
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD COLUMN IF NOT EXISTS content_key_hash UInt64 MATERIALIZED cityHash64(replaceRegexpOne(replaceRegexpOne(url, '^(?i:https?://)', ''), '/$', ''), email, password)`,
+      `ALTER TABLE ulp.credentials MATERIALIZE COLUMN content_key_hash`
+    )
+    console.warn('[ClickHouse migration] DDL v18 applied (added content_key_hash column — MATERIALIZE running in background)')
   }
 
   if (lastDdl < DDL_VERSION) {
