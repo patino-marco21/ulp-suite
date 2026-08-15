@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { useAuth, isAdmin } from "@/hooks/useAuth"
 import { useToast } from "@/hooks/use-toast"
+import { IngestHealthPanel } from "@/components/ingest-health-panel"
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -333,6 +334,10 @@ export default function InboxPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* Ingest health — same ClickHouse-pressure signal shown on /upload; the
+          underlying metrics already cover both HTTP uploads and this watcher. */}
+      <IngestHealthPanel />
 
       {/* Waiting */}
       <Card>
