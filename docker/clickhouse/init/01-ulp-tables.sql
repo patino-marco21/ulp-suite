@@ -253,6 +253,18 @@ CREATE TABLE IF NOT EXISTS ulp.credentials
         OR match(domain, '[ @]')
     ),
 
+    -- content_key_hash: precomputed dedupe/count identity for the browser's
+    -- default-on "Unique" filter (see lib/ulp-dedupe.ts DEDUPE_BY). Computed
+    -- ONCE here instead of live per query -- the "Unique" count previously ran
+    -- an unbounded uniq() over a live double-regex URL expression across the
+    -- whole table (58-63s at 1.48B rows). Mirrors is_noise's MATERIALIZED
+    -- pattern above. See DDL v18 in lib/clickhouse-migrations.ts and
+    -- docs/superpowers/specs/2026-08-15-credentials-dedupe-materialized-key-design.md.
+    content_key_hash UInt64 MATERIALIZED cityHash64(
+        replaceRegexpOne(replaceRegexpOne(url, '^(?i:https?://)', ''), '/$', ''),
+        email, password
+    ),
+
     -- ── Skip indexes ──────────────────────────────────────────────────────────
     -- text() inverted indexes on url/email/password are added by DDL v6 in
     -- lib/clickhouse-migrations.ts (requires ClickHouse 26.2+; not defined here
