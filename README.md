@@ -85,7 +85,7 @@ ClickHouse       SQLite
 
 | Component | Default `mem_limit` | Notes |
 |---|---|---|
-| App (Node.js 22) | 6 GB | 4 GB heap + 2 GB headroom |
+| App (Node.js 24) | 6 GB | 4 GB heap + 2 GB headroom |
 | ClickHouse | 6 GB | Scales caches to limit |
 | OS | ~2 GB minimum | |
 | **Total** | **~14 GB** | 16 GB laptop recommended |
@@ -236,8 +236,8 @@ curl -s -b cookies.txt http://localhost:3000/api/monitoring/slow-queries | jq
 Run ClickHouse in Docker, Next.js on the host:
 
 ```bash
-# Install Node.js 22 via nvm
-nvm install 22 && nvm alias default 22
+# Install Node.js 24 via nvm
+nvm install 24 && nvm alias default 24
 
 # Start ClickHouse only
 docker compose up -d clickhouse
