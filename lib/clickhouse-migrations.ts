@@ -149,6 +149,12 @@ let migrationsDone = false
 //     (see that file for why: a swap clones the live table's DDL as-is, so a
 //     future swap could otherwise silently carry forward a search-index gap the
 //     same way this one did).
+// v18: content_key_hash UInt64 MATERIALIZED column for the "Unique" dedupe/count
+//     filter. Same shape as v12 (is_noise): ADD COLUMN is metadata-only/instant;
+//     new inserts compute it for free. MATERIALIZE COLUMN backfills existing parts
+//     in the background — the speedup lands once that mutation completes. This table
+//     has grown substantially since v12 (1.48B rows at time of writing) — expect this
+//     to take meaningfully longer; do not assume a duration.
 const DDL_VERSION = 18
 
 // Per-version persistence: stored in SQLite app_settings.
