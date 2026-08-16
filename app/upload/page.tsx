@@ -92,10 +92,7 @@ export default function UploadPage() {
       setProgress(20)
       setErrorMsg('')
 
-      const formData = new FormData()
-      formData.append('file', file)
-
-      fetch('/api/upload', { method: 'POST', body: formData })
+      fetch(`/api/upload?filename=${encodeURIComponent(file.name)}`, { method: 'POST', body: file })
         .then(r => r.json())
         .then((data: any) => {
           setProgress(90)
