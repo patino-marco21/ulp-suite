@@ -21,7 +21,6 @@ export default function ClientLayoutWithSidebar({ children, initialUserRole }: C
   let title = "ULP Suite";
   if (pathname === "/") title = "ULP Suite - Search";
   else if (pathname === "/upload") title = "ULP Suite - Upload";
-  else if (pathname === "/debug-zip") title = "ULP Suite - Debug ZIP";
 
   // Don't render sidebar/header for standalone pages (login, public check portal)
   if (pathname === "/login" || pathname === "/check") {
