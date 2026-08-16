@@ -1,6 +1,6 @@
 /**
  * Upload API v1 — ULP Credentials Upload
- * POST /api/v1/upload  (multipart: file .txt/.csv/.zip)
+ * POST /api/v1/upload?filename=<name>  (raw file bytes as the request body)
  *
  * API-key authenticated (admin role).  Goes through the shared uploadQueue
  * (pLimit 1) so v1 API uploads are serialised with browser uploads and the
@@ -8,15 +8,18 @@
  *
  * Uses the same processing pipeline as the HTTP upload route:
  *   - processTextStream  for .txt/.csv  (streaming, 500K-row batches)
- *   - processZipFile     for .zip       (yauzl lazy entry streaming)
+ *   - processZipFile     for .zip       (yauzl lazy entry streaming, disk-buffered)
  *   - logJob             for observability (appears in /inbox monitor)
  *   - checkMonitorsForULPUpload  for domain monitor alerts
  */
 
+import fs from 'fs'
+import { pipeline } from 'stream/promises'
+import { Readable } from 'stream'
 import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
 import { uploadQueue } from "@/lib/upload-queue"
-import { processTextStream, type ProcessResult } from "@/lib/upload-processor"
+import { processTextStream, processZipFile, type ProcessResult } from "@/lib/upload-processor"
 import { logJob } from "@/lib/processing-log"
 
 export const dynamic    = "force-dynamic"
@@ -37,17 +40,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: false, error: 'File too large (max 10 GB)' }, { status: 413 })
   }
 
-  let formData: FormData
-  try {
-    formData = await request.formData()
-  } catch {
-    return NextResponse.json({ success: false, error: 'Invalid form data' }, { status: 400 })
+  const originalFilename = request.nextUrl.searchParams.get('filename')
+  if (!originalFilename) {
+    return NextResponse.json({ success: false, error: 'No filename provided' }, { status: 400 })
   }
 
-  const file = formData.get('file') as File | null
-  if (!file) return NextResponse.json({ success: false, error: 'No file provided' }, { status: 400 })
+  if (!request.body) {
+    return NextResponse.json({ success: false, error: 'No file data received' }, { status: 400 })
+  }
+  const body = request.body
 
-  const name = file.name.toLowerCase()
+  const name = originalFilename.toLowerCase()
 
   const startAt = Date.now()
 
@@ -62,12 +65,12 @@ export async function POST(request: NextRequest) {
       let result!: ProcessResult
 
       await uploadQueue(async () => {
-        result = await processTextStream(file.stream(), file.name)
+        result = await processTextStream(body, originalFilename)
       })
       const r = result
       logJob({
         source:      'http',
-        filename:    file.name,
+        filename:    originalFilename,
         status:      'done',
         imported:    r.imported,
         skipped:     r.skipped,
@@ -86,28 +89,33 @@ export async function POST(request: NextRequest) {
     }
 
     // ── ZIP archive ───────────────────────────────────────────────────────────
-    // processZipFile uses yauzl.open — streams entry contents from disk
-    // without buffering the whole archive (unlike JSZip).
-    // Because v1 receives the file via multipart, we still need the buffer
-    // for yauzl.fromBuffer; but entries are decompressed lazily one at a time.
+    // Stream the upload body to a temp file on disk before processing, same
+    // pattern as app/api/upload/route.ts — peak RAM stays at ~200 MB
+    // regardless of archive size, instead of buffering the whole zip in heap.
     if (name.endsWith('.zip')) {
-      const buffer  = Buffer.from(await file.arrayBuffer())
+      const tmpPath = `/tmp/ulp-zip-${crypto.randomUUID()}.zip`
       const results: ProcessResult[] = []
       let totalErrors = 0
       const failedEntries: string[] = []
 
-      await uploadQueue(async () => {
-        // processZipBuffer (not processZipFile) because we have a Buffer,
-        // not a file path — same lazy-entry streaming under the hood.
-        const { processZipBuffer } = await import('@/lib/upload-processor')
-        await processZipBuffer(buffer, result => {
-          if (result.imported > 0) results.push(result)
-          if (result.errors > 0) {
-            totalErrors += result.errors
-            failedEntries.push(result.filename)
-          }
+      try {
+        await pipeline(
+          Readable.fromWeb(body as import('stream/web').ReadableStream<Uint8Array>),
+          fs.createWriteStream(tmpPath),
+        )
+
+        await uploadQueue(async () => {
+          await processZipFile(tmpPath, result => {
+            if (result.imported > 0) results.push(result)
+            if (result.errors > 0) {
+              totalErrors += result.errors
+              failedEntries.push(result.filename)
+            }
+          })
         })
-      })
+      } finally {
+        fs.unlink(tmpPath, () => {})
+      }
 
       let totalImported = 0
       let totalSkipped  = 0
@@ -115,7 +123,7 @@ export async function POST(request: NextRequest) {
 
       logJob({
         source:      'http',
-        filename:    file.name,
+        filename:    originalFilename,
         status:      'done',
         imported:    totalImported,
         skipped:     totalSkipped,
@@ -131,7 +139,7 @@ export async function POST(request: NextRequest) {
         skipped:  totalSkipped,
         errors:   totalErrors,
         files:    results.map(r => ({ filename: r.filename, imported: r.imported })),
-        filename: file.name,
+        filename: originalFilename,
       })
       return addRateLimitHeaders(response, authResult.rateLimit)
     }
@@ -141,7 +149,7 @@ export async function POST(request: NextRequest) {
     console.error('v1 upload error:', error)
     logJob({
       source:        'http',
-      filename:      file.name,
+      filename:      originalFilename,
       status:        'failed',
       imported:      0,
       skipped:       0,
