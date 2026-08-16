@@ -112,8 +112,8 @@ export default function SettingsPage() {
                 </AlertDescription>
               </Alert>
               <div className="pt-4">
-                <Button variant="outline" onClick={() => router.push('/dashboard')}>
-                  Go to Dashboard
+                <Button variant="outline" onClick={() => window.history.back()}>
+                  Go Back
                 </Button>
               </div>
             </CardContent>

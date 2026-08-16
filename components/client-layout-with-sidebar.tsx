@@ -19,8 +19,7 @@ export default function ClientLayoutWithSidebar({ children, initialUserRole }: C
 
   // Determine page title based on pathname
   let title = "ULP Suite";
-  if (pathname === "/dashboard") title = "ULP Suite - Dashboard";
-  else if (pathname === "/") title = "ULP Suite - Search";
+  if (pathname === "/") title = "ULP Suite - Search";
   else if (pathname === "/upload") title = "ULP Suite - Upload";
   else if (pathname === "/debug-zip") title = "ULP Suite - Debug ZIP";
 

@@ -112,8 +112,8 @@ export default function LoginPage() {
           variant: "default",
         });
 
-        // Redirect to dashboard or redirect param
-        const redirect = searchParams.get("redirect") || "/dashboard";
+        // Redirect to the default landing page or redirect param
+        const redirect = searchParams.get("redirect") || "/credentials";
 
         // Short delay so the toast is visible before navigation
         setTimeout(() => {
@@ -164,7 +164,7 @@ export default function LoginPage() {
           variant: "default",
         });
         
-        const redirect = searchParams.get("redirect") || "/dashboard";
+        const redirect = searchParams.get("redirect") || "/credentials";
         setTimeout(() => {
           window.location.replace(redirect);
         }, 2000);
