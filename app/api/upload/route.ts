@@ -90,7 +90,7 @@ export async function POST(request: NextRequest) {
   const adminError = requireAdminRole(user)
   if (adminError) return adminError
 
-  // Rate limit: 5 uploads per IP per 5 minutes
+  // Rate limit: 60 uploads per IP per 5 minutes
   const ip       = getClientIP(request)
   const rlResult = checkLimit(uploadLimiter, ip, 60, 5 * 60_000)
   if (!rlResult.allowed) {
@@ -118,41 +118,39 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  let formData: FormData
-  try {
-    formData = await request.formData()
-  } catch {
+  const originalFilename = request.nextUrl.searchParams.get('filename')
+  if (!originalFilename) {
     return NextResponse.json(
-      { success: false, error: 'Invalid form data' },
+      { success: false, error: 'No filename provided' },
       { status: 400 },
     )
   }
 
-  const file = formData.get('file') as File | null
-  if (!file) {
+  if (!request.body) {
     return NextResponse.json(
-      { success: false, error: 'No file provided' },
+      { success: false, error: 'No file data received' },
       { status: 400 },
     )
   }
+  const body = request.body
 
-  const filename = file.name.toLowerCase()
+  const filename = originalFilename.toLowerCase()
 
   try {
     // ── Plain text / CSV ──────────────────────────────────────────────────────
     if (filename.endsWith('.txt') || filename.endsWith('.csv')) {
       const jobId       = crypto.randomUUID()
       const totalLines  = contentLength ? Math.floor(parseInt(contentLength) / 60) : 0
-      const breach_name = matchBreach(file.name)
+      const breach_name = matchBreach(originalFilename)
       createJob(jobId, totalLines, breach_name)
 
       runWithProgress(
         jobId,
-        file.name,
+        originalFilename,
         () => uploadQueue(async () => {
-          setCurrentJob(file.name)
+          setCurrentJob(originalFilename)
           try {
-            return await processTextStream(file.stream(), file.name, jobId)
+            return await processTextStream(body, originalFilename, jobId)
           } finally {
             setCurrentJob(null)
           }
@@ -173,29 +171,20 @@ export async function POST(request: NextRequest) {
       const results: ProcessResult[] = []
 
       // Stream the upload body to a temp file on disk BEFORE processing.
-      //
-      // The previous approach — Buffer.from(await file.arrayBuffer()) — copied
-      // the entire ZIP into the Node.js heap.  A 6 GB ZIP immediately exhausted
-      // the 6 GB heap limit (--max-old-space-size=6144) and OOM-crashed the app.
-      //
-      // Instead: pipe the Web ReadableStream → Node.js Writable → /tmp file,
-      // then call processZipFile() which uses yauzl.open() to read lazily from
-      // disk (lazyEntries: true).  Peak RAM stays at ~200 MB (one 500K-row
-      // batch at a time) regardless of archive size.  This matches exactly what
-      // the inbox watcher does for files that land in /app/inbox.
+      // Peak RAM stays at ~200 MB (one 500K-row batch at a time) regardless
+      // of archive size — see lib/upload-processor.ts.
       const tmpPath = `/tmp/ulp-zip-${crypto.randomUUID()}.zip`
       let totalErrors = 0
       const failedEntries: string[] = []
 
       try {
-        // Pipe Web ReadableStream → Node.js Writable (Node 18+ Readable.fromWeb)
         await pipeline(
-          Readable.fromWeb(file.stream() as import('stream/web').ReadableStream<Uint8Array>),
+          Readable.fromWeb(body as import('stream/web').ReadableStream<Uint8Array>),
           fs.createWriteStream(tmpPath),
         )
 
         await uploadQueue(async () => {
-          setCurrentJob(file.name)
+          setCurrentJob(originalFilename)
           try {
             await processZipFile(tmpPath, result => {
               if (result.imported > 0) results.push(result)
@@ -209,7 +198,6 @@ export async function POST(request: NextRequest) {
           }
         })
       } finally {
-        // Fire-and-forget: remove the temp file whether processing succeeded or failed.
         fs.unlink(tmpPath, () => {})
       }
 
@@ -229,7 +217,7 @@ export async function POST(request: NextRequest) {
 
       logJob({
         source:      'http',
-        filename:    file.name,
+        filename:    originalFilename,
         status:      'done',
         imported:    totalImported,
         skipped:     totalSkipped,
@@ -253,7 +241,7 @@ export async function POST(request: NextRequest) {
           breach_name: r.breach_name,
           imported:    r.imported,
         })),
-        filename: file.name,
+        filename: originalFilename,
       })
     }
 
