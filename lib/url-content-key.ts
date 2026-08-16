@@ -1,10 +1,19 @@
 /**
  * Scheme- and trailing-slash-insensitive form of a credential's `url` column.
  * This is the URL component of the content-identity key shared by:
- *  - lib/ulp-dedupe.ts                     (view-level browser dedupe, reversible)
- *  - lib/content-dedup.ts                  (scheduled cron, destructive rewrite+swap)
- *  - scripts/dedup-credentials-content.sh  (manual purge, destructive — hand-copy this
- *    exact expression there too; bash can't import TS)
+ *  - lib/content-dedup.ts (scheduled cron, destructive rewrite+swap) —
+ *    imports this.
+ *  - lib/clickhouse-migrations.ts (DDL v18 content_key_hash MATERIALIZED
+ *    column) — imports this, so it can't drift out of sync.
+ *  - docker/clickhouse/init/01-ulp-tables.sql (fresh-deploy content_key_hash
+ *    column definition) — hand-copy this exact expression there too; plain
+ *    SQL can't import TS.
+ *  - scripts/dedup-credentials-content.sh (manual purge, destructive —
+ *    hand-copy this exact expression there too; bash can't import TS)
+ *
+ * lib/ulp-dedupe.ts (view-level browser dedupe) no longer computes this
+ * expression live — it references the content_key_hash column by name
+ * instead (see DDL v18 in lib/clickhouse-migrations.ts).
  *
  * The same physical credential is often captured with a different or missing
  * scheme, or a trailing slash, depending on what the logging tool recorded at

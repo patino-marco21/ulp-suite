@@ -10,6 +10,7 @@ import { buildFreeWebmailInClause } from './webmail-providers'
 import { NOISE_EXPR } from './ulp-noise'
 import { dbGet, dbRun } from './sqlite'
 import { SEARCH_INDEX_DEFINITIONS } from './search-index-definitions'
+import { URL_CONTENT_KEY } from './url-content-key'
 
 // Per-process guard (still useful to avoid redundant calls within one process)
 let migrationsDone = false
@@ -778,7 +779,7 @@ export async function runClickHouseMigrations(): Promise<void> {
   // longer; do not assume a duration.
   if (lastDdl < 18) {
     await runMigration(
-      `ALTER TABLE ulp.credentials ADD COLUMN IF NOT EXISTS content_key_hash UInt64 MATERIALIZED cityHash64(replaceRegexpOne(replaceRegexpOne(url, '^(?i:https?://)', ''), '/$', ''), email, password)`,
+      `ALTER TABLE ulp.credentials ADD COLUMN IF NOT EXISTS content_key_hash UInt64 MATERIALIZED cityHash64(${URL_CONTENT_KEY}, email, password)`,
       `ALTER TABLE ulp.credentials MATERIALIZE COLUMN content_key_hash`
     )
     console.warn('[ClickHouse migration] DDL v18 applied (added content_key_hash column — MATERIALIZE running in background)')

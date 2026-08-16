@@ -21,9 +21,7 @@
  * in the active sort order) + `uniq(<hash>)` for the count (HyperLogLog —
  * cheap/low-memory at any scale; ~0.5% error is fine for a result tally,
  * unchanged from before — this is the same hash uniq() already computed
- * internally, just relocated from query-time to insert-time). The identifiers
- * resolve to the SELECT's normalized url/email/password aliases, so dedup
- * matches what the user actually sees.
+ * internally, just relocated from query-time to insert-time).
  *
  * Semantics: with keyset cursor pagination the LIMIT BY collapses dupes within
  * each page window. After the storage dedup that's effectively all of them; a
