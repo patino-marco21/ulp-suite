@@ -26,3 +26,20 @@ describe('credentials route — dedupe + non-domain-sort memory cap (MEMORY_LIMI
     expect(getFn).toContain(`timeout_overflow_mode = 'throw'`)
   })
 })
+
+describe('credentials route — raw_total (unfiltered count alongside the noise/dedupe-filtered total)', () => {
+  const source = readFileSync(new URL('../app/api/credentials/route.ts', import.meta.url), 'utf8')
+  const getFn = source.slice(source.indexOf('export async function GET'))
+
+  test('builds a WHERE clause without the noise filter, for the raw total', () => {
+    expect(source).toMatch(/whereRaw\s*=/)
+  })
+
+  test('computes raw_total via a plain count(), not uniq() — cheap trivial-count path', () => {
+    expect(getFn).toMatch(/SELECT count\(\) AS raw_total FROM ulp\.credentials WHERE \$\{whereRaw\}/)
+  })
+
+  test('response includes raw_total', () => {
+    expect(getFn).toMatch(/raw_total\s*[,:]/)
+  })
+})

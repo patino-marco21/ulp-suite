@@ -58,6 +58,10 @@ interface ApiResult {
   success:     boolean
   results:     Credential[]
   total:       number
+  // Plain count() for the same search, without Declutter/Unique applied — lets
+  // the header show "X of Y total imported" instead of a bare filtered number
+  // that looks like missing data. null on cursor pages (not recomputed there).
+  raw_total?:  number | null
   next_cursor: string | null
   query_ms?:   number
   timed_out?:  boolean   // true when query_ms > 200s — results may be incomplete
@@ -863,6 +867,11 @@ export default function CredentialsPage() {
               <>
                 <p className="text-sm text-muted-foreground">
                   {data.total.toLocaleString()} records
+                  {data.raw_total != null && data.raw_total !== data.total && (
+                    <span className="opacity-50">
+                      {' '}of {data.raw_total.toLocaleString()} total imported
+                    </span>
+                  )}
                   {(() => {
                     // total_ms is wall clock (request → parsed response) — what you
                     // actually waited. query_ms is ClickHouse-only time and is shown

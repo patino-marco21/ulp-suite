@@ -157,6 +157,11 @@ export async function GET(request: NextRequest) {
   if (pwMasks.length) {
     conditions.push(`password_mask IN (${pwMasks.map(m => `'${m}'`).join(',')})`)
   }
+  // Captured before the noise filter below, so whereRaw (raw_total) reflects
+  // "how many rows match your search" without the Declutter/Unique view-only
+  // restrictions — see raw_total below.
+  const conditionsRaw = [...conditions]
+
   // Non-destructive: hides the row from this result set, never deletes it.
   // Filters the precomputed is_noise column (cheap UInt8 → PREWHERE), NOT a
   // per-row function chain — see lib/ulp-noise.ts for why.
@@ -164,7 +169,8 @@ export async function GET(request: NextRequest) {
 
   const tierExtra      = tierWhereMulti(incTiers, excTiers)
   const loginTypeExtra = loginTypeWhere(loginTypes)
-  const where = conditions.join(' AND ') + tierExtra + loginTypeExtra
+  const where    = conditions.join(' AND ') + tierExtra + loginTypeExtra
+  const whereRaw = conditionsRaw.join(' AND ') + tierExtra + loginTypeExtra
 
   // Cursor values are captured from result rows (which are normalized via NORM_COLS)
   // and compared against raw storage columns in buildCursorWhere. This is safe because
@@ -212,8 +218,25 @@ export async function GET(request: NextRequest) {
           params
         )
 
-    const [countResult, rows] = await Promise.all([
+    // raw_total: plain count() (not uniq()) against whereRaw — the same search,
+    // without the Declutter/Unique restrictions. A WHERE-free or lightly-filtered
+    // count() hits optimize_trivial_count_query same as countPromise, so this is
+    // effectively free next to the existing count. Lets the UI show "X of Y total
+    // imported" instead of a bare filtered number that looks like missing data.
+    const rawTotalPromise: Promise<Array<{ raw_total?: unknown }> | null> = cursorToken
+      ? Promise.resolve(null)
+      : executeQuery(
+          `SELECT count() AS raw_total FROM ulp.credentials WHERE ${whereRaw}
+           SETTINGS optimize_trivial_count_query = 1,
+                    max_execution_time = 300,
+                    timeout_overflow_mode = 'break',
+                    use_query_cache = 0`,
+          params
+        )
+
+    const [countResult, rawTotalResult, rows] = await Promise.all([
       countPromise,
+      rawTotalPromise,
       executeQuery(
         // Data query uses throw so a timeout produces a clear error (caught below)
         // rather than silently returning 0 rows (timeout_overflow_mode=break with
@@ -241,6 +264,7 @@ export async function GET(request: NextRequest) {
     const query_ms = Date.now() - t0
     // null on cursor pages (count skipped above) — the client keeps the page-1 total.
     const total = countResult ? Number(countResult[0]?.total || 0) : null
+    const raw_total = rawTotalResult ? Number(rawTotalResult[0]?.raw_total || 0) : null
     const timed_out = query_ms > 250_000
 
     const nextCursor = (rows as unknown[]).length === limit
@@ -251,6 +275,7 @@ export async function GET(request: NextRequest) {
       success:     true,
       results:     rows,
       total,
+      raw_total,
       next_cursor: nextCursor,
       query_ms,
       timed_out,
