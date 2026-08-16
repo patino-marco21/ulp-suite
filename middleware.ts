@@ -9,6 +9,10 @@ const PUBLIC_PATHS = [
   "/api/auth/verify-totp",
   "/api/auth/check-users",
   "/api/auth/register-first-user",
+  // Logout must work even with an expired/invalid/missing token, so a stale
+  // cookie can always be cleared — the route itself only clears whatever
+  // cookie the caller's browser presents, so it needs no auth check.
+  "/api/auth/logout",
   "/api/v1", // API v1 uses API key authentication, not JWT
   "/_next",
   "/favicon.ico"
@@ -104,11 +108,24 @@ export const config = {
   matcher: [
     /*
      * Match all request paths except for the ones starting with:
-     * - api (API routes)
+     * - api (API routes — each one enforces its own auth: validateRequest()
+     *   for JWT-based routes, withApiKeyAuth() for /api/v1/*, or an explicit
+     *   PUBLIC_PATHS entry above for the intentionally-open ones. Excluded
+     *   here so Next.js never has a reason to clone API request bodies into
+     *   memory at the middleware layer — it does that unconditionally for
+     *   any matched non-GET/HEAD request, regardless of whether middleware()
+     *   itself reads the body. See next.config.mjs history for the incident
+     *   this caused with large uploads.)
      * - _next/static (static files)
      * - _next/image (image optimization files)
      * - favicon.ico (favicon file)
      */
-    '/((?!_next/static|_next/image|favicon.ico).*)',
+    '/((?!api|_next/static|_next/image|favicon.ico).*)',
+    // Re-included despite being under /api: the brute-force rate limiter
+    // above (checkAuthRateLimit) only runs inside this middleware function,
+    // so these two must still be matched or rate limiting silently stops.
+    // Their bodies are tiny (email+password / a TOTP code) — safe to clone.
+    '/api/auth/login',
+    '/api/auth/verify-totp',
   ],
 };
