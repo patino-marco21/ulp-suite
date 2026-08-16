@@ -11,6 +11,7 @@ import { uploadQueue, setCurrentJob } from '@/lib/upload-queue'
 import { processTextStream, processZipFile, type ProcessResult } from '@/lib/upload-processor'
 import { checkLimit, getClientIP } from '@/lib/rate-limiter'
 import { logJob } from '@/lib/processing-log'
+import { capWebStream, MaxBytesExceededError } from '@/lib/size-capped-stream'
 
 // 60 uploads per IP per 5 minutes — permits batch multi-file uploads while
 // still blocking runaway automation.  Admin-only endpoint; session auth is the
@@ -132,7 +133,11 @@ export async function POST(request: NextRequest) {
       { status: 400 },
     )
   }
-  const body = request.body
+  // Content-Length (checked above) is only a client-supplied claim — it can
+  // be omitted entirely (chunked transfer-encoding) or simply not match what
+  // the client actually sends. This enforces the same 10 GB ceiling against
+  // bytes actually observed, for both branches below.
+  const body = capWebStream(request.body, MAX_FILE_SIZE)
 
   const filename = originalFilename.toLowerCase()
 
@@ -170,20 +175,15 @@ export async function POST(request: NextRequest) {
       const startAt = Date.now()
       const results: ProcessResult[] = []
 
-      // Stream the upload body to a temp file on disk BEFORE processing.
-      // Once request.body reaches this handler, peak RAM here stays at
-      // ~200 MB (one 500K-row batch at a time) regardless of archive size —
-      // see lib/upload-processor.ts. NOTE: this does not bound the request's
-      // total peak RSS. Next.js's middleware layer clones (fully buffers)
-      // the request body upstream of this handler for every
-      // middleware-matched request, regardless of whether the middleware
-      // function reads it, adding roughly one payload-size of peak RSS on
-      // top of this ~200 MB (measured 2026-08-16: ~611 MB real peak vs
-      // ~34 MB if that upstream clone were skipped, for a 300 MB upload).
-      // Closing that gap means excluding /api from middleware.ts's matcher,
-      // which first needs auditing that every API route already enforces
-      // its own auth independent of middleware — tracked separately, not
-      // part of this change.
+      // Stream the upload body to a temp file on disk before processing.
+      // Peak RAM here stays at ~200 MB (one 500K-row batch at a time)
+      // regardless of archive size — see lib/upload-processor.ts. middleware.ts's
+      // matcher excludes /api, so Next.js no longer clones this request's body
+      // at the middleware layer on top of this (measured 2026-08-16: ~611 MB
+      // real peak vs ~34 MB once that upstream clone was removed, for a
+      // 300 MB upload). body above is also capped independently of
+      // Content-Length, so a lying/absent header can't make this write past
+      // MAX_FILE_SIZE either.
       const tmpPath = `/tmp/ulp-zip-${crypto.randomUUID()}.zip`
       let totalErrors = 0
       const failedEntries: string[] = []
@@ -261,6 +261,12 @@ export async function POST(request: NextRequest) {
       { status: 400 },
     )
   } catch (error) {
+    if (error instanceof MaxBytesExceededError) {
+      return NextResponse.json(
+        { success: false, error: 'File too large (max 10 GB)' },
+        { status: 413 },
+      )
+    }
     console.error('Upload error:', error)
     return NextResponse.json(
       { success: false, error: error instanceof Error ? error.message : 'Upload failed' },

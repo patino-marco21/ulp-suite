@@ -21,6 +21,7 @@ import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-ke
 import { uploadQueue } from "@/lib/upload-queue"
 import { processTextStream, processZipFile, type ProcessResult } from "@/lib/upload-processor"
 import { logJob } from "@/lib/processing-log"
+import { capWebStream, MaxBytesExceededError } from "@/lib/size-capped-stream"
 
 export const dynamic    = "force-dynamic"
 export const maxDuration = 300  // 5 minutes — large uploads need sustained time
@@ -48,7 +49,11 @@ export async function POST(request: NextRequest) {
   if (!request.body) {
     return NextResponse.json({ success: false, error: 'No file data received' }, { status: 400 })
   }
-  const body = request.body
+  // Content-Length (checked above) is only a client-supplied claim — it can
+  // be omitted entirely (chunked transfer-encoding) or simply not match what
+  // the client actually sends. This enforces the same 10 GB ceiling against
+  // bytes actually observed, for both branches below.
+  const body = capWebStream(request.body, MAX_FILE_SIZE)
 
   const name = originalFilename.toLowerCase()
 
@@ -92,9 +97,10 @@ export async function POST(request: NextRequest) {
     // Stream the upload body to a temp file on disk before processing, same
     // pattern as app/api/upload/route.ts — peak RAM here stays at ~200 MB
     // regardless of archive size, instead of buffering the whole zip in
-    // heap. NOTE: this does not bound the request's total peak RSS — see
-    // the equivalent comment in app/api/upload/route.ts's zip branch for
-    // why (Next.js middleware body-cloning, tracked separately).
+    // heap. body above is also capped independently of Content-Length, and
+    // middleware.ts's matcher excludes /api so Next.js doesn't separately
+    // clone this request's body upstream — see the equivalent comment in
+    // app/api/upload/route.ts's zip branch for the measured numbers.
     if (name.endsWith('.zip')) {
       const tmpPath = `/tmp/ulp-zip-${crypto.randomUUID()}.zip`
       const results: ProcessResult[] = []
@@ -159,6 +165,12 @@ export async function POST(request: NextRequest) {
       duration_ms:   Date.now() - startAt,
       error_message: error instanceof Error ? error.message : String(error),
     })
+    if (error instanceof MaxBytesExceededError) {
+      return NextResponse.json(
+        { success: false, error: 'File too large (max 10 GB)' },
+        { status: 413 },
+      )
+    }
     return NextResponse.json(
       { success: false, error: error instanceof Error ? error.message : 'Upload failed' },
       { status: 500 }
