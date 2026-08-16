@@ -286,28 +286,45 @@ function initSchema(db: Database.Database): void {
   settingsInsert.run('upload_api_concurrency', '2', 'Max concurrent API upload jobs')
   settingsInsert.run('upload_temp_cleanup_hours', '24', 'Orphan temp file retention in hours')
 
-  // Seed default admin from env if no users exist
-  const count = (db.prepare('SELECT COUNT(*) as c FROM users').get() as { c: number }).c
-  if (count === 0) {
-    const email = process.env.ADMIN_EMAIL || 'admin@ulp.local'
-    const raw   = process.env.ADMIN_PASSWORD || 'admin'
+  seedDefaultAdmin(db)
+}
 
-    // SECURITY: warn loudly when the default password is still in use so it's
-    // visible in Docker logs on every startup.  This does NOT block startup —
-    // the seeded account is needed for first login — but you MUST change the
-    // password immediately after.
-    if (!process.env.ADMIN_PASSWORD || raw === 'admin') {
-      console.warn(
-        '[SECURITY WARNING] ADMIN_PASSWORD is unset or still "admin". ' +
-        'Set a strong password in .env and restart, then change it in the UI.'
-      )
+/**
+ * Seed the default admin user from env if no users exist yet.
+ *
+ * Wrapped in an IMMEDIATE transaction (not the default deferred one) so
+ * concurrent callers against the same DB file — e.g. multiple processes
+ * racing on first boot — can't both observe count===0 and both attempt the
+ * insert. IMMEDIATE acquires the write lock before the SELECT runs, so a
+ * second caller either sees the first caller's completed insert (count===1,
+ * skips) or blocks up to busy_timeout and throws SQLITE_BUSY — never a
+ * UNIQUE constraint failure from racing past a stale read.
+ */
+export function seedDefaultAdmin(db: Database.Database): void {
+  const seed = db.transaction(() => {
+    const count = (db.prepare('SELECT COUNT(*) as c FROM users').get() as { c: number }).c
+    if (count === 0) {
+      const email = process.env.ADMIN_EMAIL || 'admin@ulp.local'
+      const raw   = process.env.ADMIN_PASSWORD || 'admin'
+
+      // SECURITY: warn loudly when the default password is still in use so it's
+      // visible in Docker logs on every startup.  This does NOT block startup —
+      // the seeded account is needed for first login — but you MUST change the
+      // password immediately after.
+      if (!process.env.ADMIN_PASSWORD || raw === 'admin') {
+        console.warn(
+          '[SECURITY WARNING] ADMIN_PASSWORD is unset or still "admin". ' +
+          'Set a strong password in .env and restart, then change it in the UI.'
+        )
+      }
+
+      const hash = bcrypt.hashSync(raw, 12)
+      db.prepare(
+        `INSERT INTO users (email, password_hash, name, role) VALUES (?, ?, ?, 'admin')`
+      ).run(email, hash, 'Admin')
     }
-
-    const hash = bcrypt.hashSync(raw, 12)
-    db.prepare(
-      `INSERT INTO users (email, password_hash, name, role) VALUES (?, ?, ?, 'admin')`
-    ).run(email, hash, 'Admin')
-  }
+  })
+  seed.immediate()
 }
 
 // ─── Query helpers ────────────────────────────────────────────────────────────
