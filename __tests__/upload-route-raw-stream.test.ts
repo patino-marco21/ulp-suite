@@ -43,14 +43,23 @@ vi.mock('@/lib/api-key-auth', () => ({
   addRateLimitHeaders: vi.fn((response) => response),
   logApiRequest: vi.fn().mockResolvedValue(undefined),
 }))
+vi.mock('@/lib/settings', () => ({
+  settingsManager: {
+    getMaxUploadFileSizeBytes: vi.fn().mockResolvedValue(10 * 1024 ** 3),
+  },
+}))
 
 import { readFileSync } from 'fs'
 import { processTextStream, processZipFile } from '@/lib/upload-processor'
+import { settingsManager } from '@/lib/settings'
+import { logJob } from '@/lib/processing-log'
 import { POST } from '@/app/api/upload/route'
 import { POST as POST_V1 } from '@/app/api/v1/upload/route'
 
 const mockProcessTextStream = processTextStream as ReturnType<typeof vi.fn>
 const mockProcessZipFile = processZipFile as ReturnType<typeof vi.fn>
+const mockGetMaxUploadFileSizeBytes = settingsManager.getMaxUploadFileSizeBytes as ReturnType<typeof vi.fn>
+const mockLogJob = logJob as ReturnType<typeof vi.fn>
 
 describe('POST /api/upload — raw-stream body', () => {
   beforeEach(() => {
@@ -119,6 +128,52 @@ describe('POST /api/upload — raw-stream body', () => {
     const [, filenameArg] = mockProcessTextStream.mock.calls[0]
     expect(filenameArg).toBe('Mixed-Case-Dump.TXT')
   })
+
+  it('respects a smaller admin-configured max file size, not just the 10 GB default', async () => {
+    mockGetMaxUploadFileSizeBytes.mockResolvedValueOnce(10) // 10 bytes, for this call only
+    const req = new NextRequest('http://localhost/api/upload?filename=dump.txt', {
+      method: 'POST',
+      body: 'this body is well over 10 bytes long',
+    })
+    const res = await POST(req)
+    expect(res.status).toBe(200) // job accepted synchronously; the cap trips downstream
+
+    // The text/csv branch is fire-and-forget: processTextStream's mock (see
+    // top of file) drains the capped stream itself, so it rejects as soon as
+    // the cap trips, and runWithProgress's catch logs the failure — give
+    // that a turn before asserting.
+    await new Promise(r => setTimeout(r, 10))
+    expect(mockLogJob).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'failed', error_message: expect.stringContaining('exceeded 10 bytes') })
+    )
+  })
+
+  it('surfaces a skipped zip entry\'s actual reason in the response, not just its filename', async () => {
+    mockProcessZipFile.mockImplementationOnce(async (_path: string, onEntry: (r: unknown) => void) => {
+      onEntry({
+        imported: 0, skipped: 0, errors: 1, filename: 'bomb.txt', breach_name: 'test',
+        rejection_breakdown: {}, alreadyImported: false, tierDropped: 0,
+        error_reason: 'entry uncompressed size 999999999999 exceeds 53687091200-byte cap',
+      })
+    })
+    const req = new NextRequest('http://localhost/api/upload?filename=archive.zip', {
+      method: 'POST',
+      body: 'irrelevant — processZipFile is mocked, only the onEntry wiring is under test',
+    })
+    const res = await POST(req)
+    expect(res.status).toBe(200)
+    const json = await res.json()
+    expect(json.errors).toBe(1)
+
+    // The summary reaches the admin via logJob's error_message (shown in the
+    // /inbox monitor) — filename alone ("1 entry skipped: bomb.txt") used to
+    // be all that was visible; the reason was only ever console.error'd.
+    expect(mockLogJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error_message: expect.stringContaining('bomb.txt (entry uncompressed size 999999999999 exceeds 53687091200-byte cap)'),
+      })
+    )
+  })
 })
 
 describe('POST /api/v1/upload — raw-stream body', () => {
@@ -162,5 +217,17 @@ describe('POST /api/v1/upload — raw-stream body', () => {
     const source = readFileSync(new URL('../app/api/v1/upload/route.ts', import.meta.url), 'utf8')
     expect(source).not.toContain('arrayBuffer()')
     expect(source).not.toContain('processZipBuffer')
+  })
+
+  it('respects a smaller admin-configured max file size, not just the 10 GB default', async () => {
+    mockGetMaxUploadFileSizeBytes.mockResolvedValueOnce(10) // 10 bytes, for this call only
+    const req = new NextRequest('http://localhost/api/v1/upload?filename=dump.txt', {
+      method: 'POST',
+      body: 'this body is well over 10 bytes long',
+    })
+    const res = await POST_V1(req) // fully awaited here, unlike the fire-and-forget /api/upload
+    expect(res.status).toBe(413)
+    const json = await res.json()
+    expect(json).toEqual({ success: false, error: 'File too large (max 10 Bytes)' })
   })
 })

@@ -12,6 +12,8 @@ import { processTextStream, processZipFile, type ProcessResult } from '@/lib/upl
 import { checkLimit, getClientIP } from '@/lib/rate-limiter'
 import { logJob } from '@/lib/processing-log'
 import { capWebStream, MaxBytesExceededError } from '@/lib/size-capped-stream'
+import { settingsManager } from '@/lib/settings'
+import { formatBytes } from '@/lib/utils'
 
 // 60 uploads per IP per 5 minutes — permits batch multi-file uploads while
 // still blocking runaway automation.  Admin-only endpoint; session auth is the
@@ -23,8 +25,8 @@ export const dynamic = 'force-dynamic'
 // 5 minutes — large uploads (GBs of text) need sustained time.
 export const maxDuration = 300
 
-// 10 GB per file maximum.
-const MAX_FILE_SIZE = 10 * 1024 * 1024 * 1024
+// Admin-configurable via Settings ("Max File Size") — see lib/settings.ts's
+// getMaxUploadFileSizeBytes() for the clamp range and default (10 GB).
 
 // ─── SSE progress wrapper ─────────────────────────────────────────────────────
 
@@ -111,10 +113,12 @@ export async function POST(request: NextRequest) {
 
   await runClickHouseMigrations()
 
+  const MAX_FILE_SIZE = await settingsManager.getMaxUploadFileSizeBytes()
+
   const contentLength = request.headers.get('content-length')
   if (contentLength && parseInt(contentLength) > MAX_FILE_SIZE) {
     return NextResponse.json(
-      { success: false, error: 'File too large (max 10 GB)' },
+      { success: false, error: `File too large (max ${formatBytes(MAX_FILE_SIZE)})` },
       { status: 413 },
     )
   }
@@ -201,7 +205,9 @@ export async function POST(request: NextRequest) {
               if (result.imported > 0) results.push(result)
               if (result.errors > 0) {
                 totalErrors += result.errors
-                failedEntries.push(result.filename)
+                failedEntries.push(
+                  result.error_reason ? `${result.filename} (${result.error_reason})` : result.filename
+                )
               }
             })
           } finally {
@@ -263,7 +269,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     if (error instanceof MaxBytesExceededError) {
       return NextResponse.json(
-        { success: false, error: 'File too large (max 10 GB)' },
+        { success: false, error: `File too large (max ${formatBytes(error.limitBytes)})` },
         { status: 413 },
       )
     }

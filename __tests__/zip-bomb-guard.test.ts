@@ -56,6 +56,9 @@ describe('zip decompression-bomb guards (lib/upload-processor.ts processZipEntri
     expect(opened).toContain('normal.txt') // guard didn't block the next entry
     expect(results).toHaveLength(2)
     expect(results[0]).toMatchObject({ filename: 'bomb.txt', errors: 1, imported: 0 })
+    // The reason must actually be visible to the admin (not just console.error'd
+    // and lost) — this is what app/api/upload/route.ts's failedEntries surfaces.
+    expect(results[0].error_reason).toMatch(/uncompressed size .* exceeds .*-byte cap/)
   })
 
   it('skips an entry whose compression ratio exceeds the cap, without ever opening it', async () => {
@@ -69,6 +72,7 @@ describe('zip decompression-bomb guards (lib/upload-processor.ts processZipEntri
 
     expect(opened).not.toContain('high-ratio.txt')
     expect(results).toEqual([expect.objectContaining({ filename: 'high-ratio.txt', errors: 1 })])
+    expect(results[0].error_reason).toMatch(/compression ratio .* exceeds .* cap \(possible zip bomb\)/)
   })
 
   it('does not flag a small entry even with a high nominal ratio (below the absolute floor)', async () => {

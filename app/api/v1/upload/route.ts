@@ -22,11 +22,11 @@ import { uploadQueue } from "@/lib/upload-queue"
 import { processTextStream, processZipFile, type ProcessResult } from "@/lib/upload-processor"
 import { logJob } from "@/lib/processing-log"
 import { capWebStream, MaxBytesExceededError } from "@/lib/size-capped-stream"
+import { settingsManager } from "@/lib/settings"
+import { formatBytes } from "@/lib/utils"
 
 export const dynamic    = "force-dynamic"
 export const maxDuration = 300  // 5 minutes — large uploads need sustained time
-
-const MAX_FILE_SIZE = 10 * 1024 * 1024 * 1024  // 10 GB
 
 export async function POST(request: NextRequest) {
   const authResult = await withApiKeyAuth(request, ['admin'])
@@ -36,9 +36,13 @@ export async function POST(request: NextRequest) {
 
   await logApiRequest(authResult.apiKey!, request, 'v1/upload')
 
+  // Admin-configurable via Settings ("Max File Size") — see lib/settings.ts's
+  // getMaxUploadFileSizeBytes() for the clamp range and default (10 GB).
+  const MAX_FILE_SIZE = await settingsManager.getMaxUploadFileSizeBytes()
+
   const contentLength = request.headers.get('content-length')
   if (contentLength && parseInt(contentLength) > MAX_FILE_SIZE) {
-    return NextResponse.json({ success: false, error: 'File too large (max 10 GB)' }, { status: 413 })
+    return NextResponse.json({ success: false, error: `File too large (max ${formatBytes(MAX_FILE_SIZE)})` }, { status: 413 })
   }
 
   const originalFilename = request.nextUrl.searchParams.get('filename')
@@ -118,7 +122,9 @@ export async function POST(request: NextRequest) {
             if (result.imported > 0) results.push(result)
             if (result.errors > 0) {
               totalErrors += result.errors
-              failedEntries.push(result.filename)
+              failedEntries.push(
+                result.error_reason ? `${result.filename} (${result.error_reason})` : result.filename
+              )
             }
           })
         })
@@ -167,7 +173,7 @@ export async function POST(request: NextRequest) {
     })
     if (error instanceof MaxBytesExceededError) {
       return NextResponse.json(
-        { success: false, error: 'File too large (max 10 GB)' },
+        { success: false, error: `File too large (max ${formatBytes(error.limitBytes)})` },
         { status: 413 },
       )
     }

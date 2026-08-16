@@ -17,6 +17,18 @@ export const SETTING_KEYS = {
 
 export type SettingKey = typeof SETTING_KEYS[keyof typeof SETTING_KEYS]
 
+// Bytes, matching how upload_max_file_size is actually stored (see
+// lib/sqlite.ts's seed, '10737418240') and how the settings page reads/
+// writes it (Math.round(bytes / 1024**3), formData.maxFileSizeGB * 1024**3)
+// — NOT megabytes, despite this file's previous default/comment claiming so.
+const DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES = 10 * 1024 ** 3
+const MIN_UPLOAD_MAX_FILE_SIZE_BYTES = 1024 * 1024
+// Matches the settings page's own form validation ceiling (0.1-100 GB) —
+// the generic /api/settings POST endpoint has no server-side bound of its
+// own, so a value outside this range must not translate into a broken
+// (near-zero or unbounded) upload cap.
+const MAX_UPLOAD_MAX_FILE_SIZE_BYTES = 100 * 1024 ** 3
+
 class SettingsManager {
   private cache = new Map<string, AppSetting>()
   private cacheExpiry = new Map<string, number>()
@@ -68,6 +80,18 @@ class SettingsManager {
     ) as AppSetting[]
   }
 
+  /**
+   * Admin-configurable upload size ceiling, in bytes, clamped to
+   * [MIN_UPLOAD_MAX_FILE_SIZE_BYTES, MAX_UPLOAD_MAX_FILE_SIZE_BYTES]
+   * regardless of what's actually stored (see MAX_UPLOAD_MAX_FILE_SIZE_BYTES
+   * above for why this can't just trust the raw value).
+   */
+  async getMaxUploadFileSizeBytes(): Promise<number> {
+    const n = Number(await this.getSetting<number>(SETTING_KEYS.UPLOAD_MAX_FILE_SIZE, DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES))
+    if (!Number.isFinite(n) || n < MIN_UPLOAD_MAX_FILE_SIZE_BYTES) return DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES
+    return Math.min(n, MAX_UPLOAD_MAX_FILE_SIZE_BYTES)
+  }
+
   /** Convenience: upload-related settings (max_file_size, concurrency, cleanup) */
   async getUploadSettings(): Promise<{
     max_file_size: number
@@ -75,7 +99,7 @@ class SettingsManager {
     temp_cleanup_hours: number
   }> {
     return {
-      max_file_size:      await this.getSetting<number>(SETTING_KEYS.UPLOAD_MAX_FILE_SIZE,   10240),  // 10 GB in MB
+      max_file_size:      await this.getMaxUploadFileSizeBytes(),
       api_concurrency:    await this.getSetting<number>(SETTING_KEYS.UPLOAD_API_CONCURRENCY,      4),
       temp_cleanup_hours: await this.getSetting<number>(SETTING_KEYS.UPLOAD_TEMP_CLEANUP_HOURS,  24),
     }

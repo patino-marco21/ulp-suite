@@ -42,6 +42,8 @@ export interface ProcessResult {
   alreadyImported:     boolean
   /** Rows dropped pre-insert by the ingest tier filter (lib/ingest-filter.ts). */
   tierDropped:         number
+  /** Set when errors > 0 from a skipped zip entry — why it was skipped (oversized, bad ratio, corrupted, encrypted, ...). */
+  error_reason?:       string
 }
 
 export const UPLOAD_BATCH_SIZE = 100_000
@@ -499,10 +501,8 @@ export function processZipEntries(
       const entryName = entry.fileName.split('/').pop() || entry.fileName
 
       const skipEntry = (entryErr: unknown) => {
-        console.error(
-          `[upload-processor] skipping zip entry "${entry.fileName}": ` +
-          (entryErr instanceof Error ? entryErr.message : String(entryErr))
-        )
+        const reason = entryErr instanceof Error ? entryErr.message : String(entryErr)
+        console.error(`[upload-processor] skipping zip entry "${entry.fileName}": ${reason}`)
         onEntry({
           imported:            0,
           skipped:             0,
@@ -512,6 +512,7 @@ export function processZipEntries(
           rejection_breakdown: makeRejectionMap(),
           alreadyImported:     false,
           tierDropped:         0,
+          error_reason:        reason,
         })
         zipfile.readEntry()
       }

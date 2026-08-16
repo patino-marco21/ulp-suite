@@ -16,9 +16,15 @@ export async function GET(request: NextRequest) {
   try {
     const uploadSettings = await settingsManager.getUploadSettings()
 
+    // app/settings/page.tsx reads these as camelCase (maxFileSize,
+    // apiConcurrency, tempCleanupHours) — getUploadSettings() itself returns
+    // snake_case (it's also used directly elsewhere), so map here rather
+    // than change that shape underneath other callers.
     return NextResponse.json({
-      success: true,
-      ...uploadSettings,
+      success:         true,
+      maxFileSize:     uploadSettings.max_file_size,
+      apiConcurrency:  uploadSettings.api_concurrency,
+      tempCleanupHours: uploadSettings.temp_cleanup_hours,
     })
   } catch (error) {
     console.error("Error getting upload settings:", error)
