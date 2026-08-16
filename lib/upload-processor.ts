@@ -425,6 +425,23 @@ class ZipEntryStreamError extends Error {
   }
 }
 
+// Decompression-bomb guards, checked against each entry's central-directory
+// metadata BEFORE ever calling openReadStream. yauzl's validateEntrySizes
+// (on by default — see node_modules/yauzl) only checks that the actual
+// decompressed byte count MATCHES what an entry claims; it doesn't cap how
+// large that claim is allowed to be, so an honestly-reported multi-TB entry
+// from a handful of compressed bytes would otherwise decompress in full.
+export const MAX_ZIP_ENTRIES = 100_000
+// 50 GB — generous for one huge stealer log (legitimate archives here
+// bundle "dozens" of files, per processZipEntries' own docs above), but finite.
+export const MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES = 50 * 1024 ** 3
+// Ordinary text rarely exceeds ~10-20:1 with DEFLATE, even highly repetitive
+// structured log data. Real zip bombs routinely claim 1000:1+.
+export const MAX_ZIP_COMPRESSION_RATIO = 300
+// Don't flag tiny entries on ratio alone — a 50-byte entry expanding to 5KB
+// is a 100:1 ratio but poses no real resource risk.
+export const MIN_RATIO_CHECK_BYTES = 10 * 1024 * 1024
+
 /**
  * Drive a yauzl ZipFile through its .txt/.csv entries one at a time.
  *
@@ -442,12 +459,13 @@ class ZipEntryStreamError extends Error {
  * onEntry is called after each processed entry — successful or not — so the
  * caller can accumulate results incrementally.
  */
-function processZipEntries(
+export function processZipEntries(
   zipfile: yauzl.ZipFile,
   onEntry: (result: ProcessResult) => void,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     let settled = false
+    let entriesSeen = 0
     const rejectArchive = (error: unknown) => {
       if (settled) return
       settled = true
@@ -458,6 +476,17 @@ function processZipEntries(
     zipfile.readEntry()
 
     zipfile.on('entry', (entry: yauzl.Entry) => {
+      // Archive-level guard: too many entries is itself the resource cost
+      // (central-directory iteration), so this aborts the whole archive
+      // rather than skipping one entry — there's no safe way to "continue".
+      entriesSeen++
+      if (entriesSeen > MAX_ZIP_ENTRIES) {
+        rejectArchive(new Error(
+          `ZIP archive exceeds ${MAX_ZIP_ENTRIES} entries — refusing to process further (possible zip bomb)`
+        ))
+        return
+      }
+
       // Skip directory entries
       if (/\/$/.test(entry.fileName)) { zipfile.readEntry(); return }
 
@@ -485,6 +514,27 @@ function processZipEntries(
           tierDropped:         0,
         })
         zipfile.readEntry()
+      }
+
+      // Per-entry decompression-bomb guard — checked against claimed
+      // metadata before ever opening a read stream, so a bomb entry is
+      // never actually decompressed.
+      if (entry.uncompressedSize > MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES) {
+        skipEntry(new Error(
+          `entry uncompressed size ${entry.uncompressedSize} exceeds ${MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES}-byte cap`
+        ))
+        return
+      }
+      if (
+        entry.uncompressedSize > MIN_RATIO_CHECK_BYTES &&
+        entry.compressedSize > 0 &&
+        entry.uncompressedSize / entry.compressedSize > MAX_ZIP_COMPRESSION_RATIO
+      ) {
+        skipEntry(new Error(
+          `entry compression ratio ${Math.round(entry.uncompressedSize / entry.compressedSize)}:1 exceeds ` +
+          `${MAX_ZIP_COMPRESSION_RATIO}:1 cap (possible zip bomb)`
+        ))
+        return
       }
 
       zipfile.openReadStream(entry, (streamErr, readStream) => {
