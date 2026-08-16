@@ -793,18 +793,18 @@ export default function DocsPage() {
               <CardContent className="space-y-6">
                 {/* Parameters */}
                 <div>
-                  <h4 className="font-semibold mb-3 text-foreground">Form Data Parameters</h4>
+                  <h4 className="font-semibold mb-3 text-foreground">Query Parameters</h4>
                   <ParameterTable params={[
-                    { name: "file", type: "file", required: true, description: "Credential file in .txt, .csv, or .zip format. ZIP archives may contain multiple .txt/.csv files." },
+                    { name: "filename", type: "string", required: true, description: "Original filename, used to determine .txt/.csv/.zip handling and breach-name matching. The request body is the raw file bytes." },
                   ]} />
                 </div>
 
                 {/* Example Request */}
                 <div>
                   <h4 className="font-semibold mb-3 text-foreground">Example Request</h4>
-                  <CodeBlock code={`curl -X POST "${baseUrl}/api/v1/upload" \\
+                  <CodeBlock code={`curl -X POST "${baseUrl}/api/v1/upload?filename=stealer_logs.zip" \\
   -H "X-API-Key: bv_admin_api_key" \\
-  -F "file=@stealer_logs.zip"`} />
+  --data-binary @stealer_logs.zip`} />
                 </div>
 
                 {/* Response */}
