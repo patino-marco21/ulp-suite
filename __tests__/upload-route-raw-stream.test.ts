@@ -11,10 +11,26 @@ vi.mock('@/lib/clickhouse-migrations', () => ({
 vi.mock('@/lib/processing-log', () => ({
   logJob: vi.fn(),
 }))
+vi.mock('@/lib/breach-matcher', () => ({
+  matchBreach: vi.fn().mockReturnValue('test-breach'),
+}))
+
+const captured = vi.hoisted(() => ({ text: '' }))
+
 vi.mock('@/lib/upload-processor', () => ({
-  processTextStream: vi.fn().mockResolvedValue({
-    imported: 1, skipped: 0, errors: 0, filename: 'dump.txt',
-    breach_name: 'test', rejection_breakdown: {}, alreadyImported: false, tierDropped: 0,
+  processTextStream: vi.fn(async (stream: ReadableStream<Uint8Array>) => {
+    const reader = stream.getReader()
+    const chunks: Uint8Array[] = []
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      chunks.push(value)
+    }
+    captured.text = Buffer.concat(chunks.map(c => Buffer.from(c))).toString('utf8')
+    return {
+      imported: 1, skipped: 0, errors: 0, filename: 'dump.txt',
+      breach_name: 'test', rejection_breakdown: {}, alreadyImported: false, tierDropped: 0,
+    }
   }),
   processZipFile: vi.fn().mockResolvedValue(undefined),
 }))
@@ -40,6 +56,7 @@ describe('POST /api/upload — raw-stream body', () => {
   beforeEach(() => {
     mockProcessTextStream.mockClear()
     mockProcessZipFile.mockClear()
+    captured.text = ''
   })
 
   it('rejects a request with no filename query param', async () => {
@@ -85,6 +102,7 @@ describe('POST /api/upload — raw-stream body', () => {
     expect(streamArg).toBeInstanceOf(ReadableStream)
     expect(filenameArg).toBe('dump.txt')
     expect(jobIdArg).toBe(json.jobId)
+    expect(captured.text).toBe('https://a.com:user@a.com:pass\n')
   })
 
   it('preserves original filename casing for processing while matching extensions case-insensitively', async () => {
@@ -107,6 +125,7 @@ describe('POST /api/v1/upload — raw-stream body', () => {
   beforeEach(() => {
     mockProcessTextStream.mockClear()
     mockProcessZipFile.mockClear()
+    captured.text = ''
   })
 
   it('rejects a request with no filename query param', async () => {
@@ -136,6 +155,7 @@ describe('POST /api/v1/upload — raw-stream body', () => {
     const [streamArg, filenameArg] = mockProcessTextStream.mock.calls[0]
     expect(streamArg).toBeInstanceOf(ReadableStream)
     expect(filenameArg).toBe('dump.txt')
+    expect(captured.text).toBe('https://a.com:user@a.com:pass\n')
   })
 
   it('no longer buffers zip uploads into memory before processing (regression test for the v1 OOM-pattern fix)', () => {

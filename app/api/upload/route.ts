@@ -171,8 +171,19 @@ export async function POST(request: NextRequest) {
       const results: ProcessResult[] = []
 
       // Stream the upload body to a temp file on disk BEFORE processing.
-      // Peak RAM stays at ~200 MB (one 500K-row batch at a time) regardless
-      // of archive size — see lib/upload-processor.ts.
+      // Once request.body reaches this handler, peak RAM here stays at
+      // ~200 MB (one 500K-row batch at a time) regardless of archive size —
+      // see lib/upload-processor.ts. NOTE: this does not bound the request's
+      // total peak RSS. Next.js's middleware layer clones (fully buffers)
+      // the request body upstream of this handler for every
+      // middleware-matched request, regardless of whether the middleware
+      // function reads it, adding roughly one payload-size of peak RSS on
+      // top of this ~200 MB (measured 2026-08-16: ~611 MB real peak vs
+      // ~34 MB if that upstream clone were skipped, for a 300 MB upload).
+      // Closing that gap means excluding /api from middleware.ts's matcher,
+      // which first needs auditing that every API route already enforces
+      // its own auth independent of middleware — tracked separately, not
+      // part of this change.
       const tmpPath = `/tmp/ulp-zip-${crypto.randomUUID()}.zip`
       let totalErrors = 0
       const failedEntries: string[] = []

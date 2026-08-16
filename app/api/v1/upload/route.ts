@@ -90,8 +90,11 @@ export async function POST(request: NextRequest) {
 
     // ── ZIP archive ───────────────────────────────────────────────────────────
     // Stream the upload body to a temp file on disk before processing, same
-    // pattern as app/api/upload/route.ts — peak RAM stays at ~200 MB
-    // regardless of archive size, instead of buffering the whole zip in heap.
+    // pattern as app/api/upload/route.ts — peak RAM here stays at ~200 MB
+    // regardless of archive size, instead of buffering the whole zip in
+    // heap. NOTE: this does not bound the request's total peak RSS — see
+    // the equivalent comment in app/api/upload/route.ts's zip branch for
+    // why (Next.js middleware body-cloning, tracked separately).
     if (name.endsWith('.zip')) {
       const tmpPath = `/tmp/ulp-zip-${crypto.randomUUID()}.zip`
       const results: ProcessResult[] = []

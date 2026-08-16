@@ -804,7 +804,7 @@ export default function DocsPage() {
                   <h4 className="font-semibold mb-3 text-foreground">Example Request</h4>
                   <CodeBlock code={`curl -X POST "${baseUrl}/api/v1/upload?filename=stealer_logs.zip" \\
   -H "X-API-Key: bv_admin_api_key" \\
-  --data-binary @stealer_logs.zip`} />
+  -T stealer_logs.zip`} />
                 </div>
 
                 {/* Response */}
@@ -818,19 +818,10 @@ export default function DocsPage() {
                     language="json"
                     code={`{
   "success": true,
-  "filename": "credentials.txt",
   "imported": 45230,
   "skipped": 4770,
   "errors": 0,
-  "import_pct": 90.5,
-  "breach_name": "AutoDetected2024",
-  "rejection_breakdown": {
-    "blank": 1200,
-    "no_login": 890,
-    "pass_too_short": 680,
-    "dedup": 540,
-    "no_fields": 1460
-  }
+  "filename": "credentials.txt"
 }`}
                   />
                 </div>
