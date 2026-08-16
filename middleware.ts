@@ -3,14 +3,12 @@ import { validateRequest } from "@/lib/auth"
 
 const PUBLIC_PATHS = [
   "/login",
-  "/db-sync",
   "/check",       // self-service email check portal (unauthenticated)
   "/api/check",   // self-service check API (rate-limited, no credentials exposed)
   "/api/auth/login",
   "/api/auth/verify-totp",
   "/api/auth/check-users",
   "/api/auth/register-first-user",
-  "/api/db-sync",
   "/api/v1", // API v1 uses API key authentication, not JWT
   "/_next",
   "/favicon.ico"
