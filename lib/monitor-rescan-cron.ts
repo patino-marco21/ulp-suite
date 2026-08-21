@@ -15,6 +15,7 @@ import { dbQuery, dbRun } from '@/lib/sqlite'
 import { executeQuery as executeClickHouseQuery } from '@/lib/clickhouse'
 import { NORM_DOMAIN_EXPR, NORM_EMAIL_EXPR } from '@/lib/ulp-normalize'
 import { attemptDelivery, enqueueFailedDelivery, runWebhookOutboxTick } from '@/lib/webhook-outbox-worker'
+import { matchModeToMatchType, type MatchMode } from '@/lib/domain-match'
 import crypto from 'crypto'
 
 const TICK_MS = 15 * 60 * 1000  // 15 minutes
@@ -42,12 +43,25 @@ function credentialFingerprint(email: string, password: string, domain: string):
     .toString('hex')
 }
 
+// ─── Matching ───────────────────────────────────────────────────────────────
+
+/** Build the subdomain-aware WHERE fragment for a monitor's match_mode. Params: {domain}, {domainSuffix}. Mirrors lib/domain-monitor.ts. */
+function matchConditionSQL(mode: MatchMode): string {
+  const urlCond = `((${NORM_DOMAIN_EXPR}) = {domain:String} OR endsWith((${NORM_DOMAIN_EXPR}), {domainSuffix:String}))`
+  const emailDomainExpr = `substring(lower(${NORM_EMAIL_EXPR}), position(lower(${NORM_EMAIL_EXPR}), '@') + 1)`
+  const emailCond = `((${emailDomainExpr}) = {domain:String} OR endsWith((${emailDomainExpr}), {domainSuffix:String}))`
+  if (mode === 'url') return urlCond
+  if (mode === 'credential') return emailCond
+  return `(${urlCond} OR ${emailCond})`
+}
+
 // ─── Tick ────────────────────────────────────────────────────────────────────
 
 interface DueMonitorRow {
   id: number
   name: string
   domains: string
+  match_mode: MatchMode
   rescan_mode: 'dedup' | 'digest'
   rescan_interval_hours: number
 }
@@ -68,10 +82,10 @@ interface CredentialRow {
   domain: string
 }
 
-async function runTick(): Promise<void> {
+export async function runTick(): Promise<void> {
   // Query SQLite for active monitors whose rescan interval has elapsed
   const dueMonitors = dbQuery(`
-    SELECT id, name, domains, rescan_mode, rescan_interval_hours
+    SELECT id, name, domains, match_mode, rescan_mode, rescan_interval_hours
     FROM domain_monitors
     WHERE is_active = 1
       AND (
@@ -106,10 +120,9 @@ async function runTick(): Promise<void> {
         const rows = await executeClickHouseQuery(
           `SELECT url, email, password, (${NORM_DOMAIN_EXPR}) AS domain
            FROM ulp.credentials
-           WHERE (${NORM_DOMAIN_EXPR}) = {domain:String}
-              OR endsWith(lower(${NORM_EMAIL_EXPR}), {emailSuffix:String})
+           WHERE ${matchConditionSQL(monitorRow.match_mode)}
            LIMIT 100`,
-          { domain: d, emailSuffix: `@${d}` }
+          { domain: d, domainSuffix: `.${d}` }
         ) as CredentialRow[]
         matchedRows.push(...rows)
       }
@@ -179,8 +192,8 @@ async function runTick(): Promise<void> {
           `INSERT INTO monitor_alerts
              (monitor_id, webhook_id, source_file, matched_domain, match_type,
               credential_match_count, payload_sent, status, http_status, retry_count)
-           VALUES (?, ?, '[scheduled-rescan]', ?, 'credential_email', ?, ?, ?, ?, 0)`,
-          [monitorRow.id, wr.id, matchedDomain,
+           VALUES (?, ?, '[scheduled-rescan]', ?, ?, ?, ?, ?, ?, 0)`,
+          [monitorRow.id, wr.id, matchedDomain, matchModeToMatchType(monitorRow.match_mode),
            unseenRows.length, payloadJson, result.ok ? 'success' : 'failed', result.status ?? null],
         )
         dbRun(`UPDATE monitor_webhooks SET last_triggered_at = datetime('now') WHERE id = ?`, [wr.id])
