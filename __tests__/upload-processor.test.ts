@@ -514,4 +514,69 @@ describe('domain-monitor wiring — in-process matching', () => {
     // Uses this file's static top-level mock: getActiveMonitors resolves to [].
     expect(dm.fireMonitorAlertsFromMatches).not.toHaveBeenCalled()
   })
+
+  it('still imports the file when getActiveMonitors rejects (monitoring is a side-channel, not on the critical path)', async () => {
+    vi.resetModules()
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const dm = {
+      getActiveMonitors: vi.fn().mockRejectedValue(Object.assign(new Error('SQLITE_READONLY'), { code: 'SQLITE_READONLY' })),
+      fireMonitorAlertsFromMatches: vi.fn().mockResolvedValue(undefined),
+    }
+    vi.doMock('@/lib/domain-monitor', () => dm)
+
+    try {
+      const { processTextStream } = await import('@/lib/upload-processor')
+      const result = await processTextStream(
+        Readable.toWeb(Readable.from([Buffer.from('https://example.com/login:user@example.com:mypassword\n')])) as ReadableStream<Uint8Array>,
+        'monitor-getactive-failure.txt',
+      )
+
+      expect(result.imported).toBe(1)
+      expect(dm.fireMonitorAlertsFromMatches).not.toHaveBeenCalled()
+      expect(errSpy).toHaveBeenCalled()
+    } finally {
+      errSpy.mockRestore()
+      vi.doUnmock('@/lib/domain-monitor')
+      vi.resetModules()
+    }
+  })
+
+  it('caps in-process monitor matches at MAX_INPROCESS_MATCHES and warns once', async () => {
+    vi.resetModules()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const dm = {
+      getActiveMonitors: vi.fn().mockResolvedValue([
+        { id: 1, name: 'Broad', domains: ['example.com'], match_mode: 'both', is_active: true,
+          created_by: null, last_triggered_at: null, total_alerts: 0,
+          rescan_mode: 'dedup', rescan_interval_hours: 24, created_at: '', updated_at: '' },
+      ]),
+      fireMonitorAlertsFromMatches: vi.fn().mockResolvedValue(undefined),
+    }
+    vi.doMock('@/lib/domain-monitor', () => dm)
+
+    try {
+      const { processTextStream, MAX_INPROCESS_MATCHES } = await import('@/lib/upload-processor')
+      const lines = Array.from(
+        { length: MAX_INPROCESS_MATCHES + 50 },
+        (_, i) => `https://example.com/login:user${i}@example.com:pw${i}`,
+      ).join('\n') + '\n'
+
+      const result = await processTextStream(
+        Readable.toWeb(Readable.from([Buffer.from(lines)])) as ReadableStream<Uint8Array>,
+        'match-cap.txt',
+      )
+
+      // All rows still import — the cap bounds monitor-match accumulation only,
+      // never the ingest pipeline itself.
+      expect(result.imported).toBe(MAX_INPROCESS_MATCHES + 50)
+      expect(dm.fireMonitorAlertsFromMatches).toHaveBeenCalledOnce()
+      const [, matches] = dm.fireMonitorAlertsFromMatches.mock.calls[0]
+      expect(matches).toHaveLength(MAX_INPROCESS_MATCHES)
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      warnSpy.mockRestore()
+      vi.doUnmock('@/lib/domain-monitor')
+      vi.resetModules()
+    }
+  })
 })

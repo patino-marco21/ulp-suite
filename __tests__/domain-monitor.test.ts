@@ -75,8 +75,9 @@ describe('fireMonitorAlertsFromMatches', () => {
   })
 
   test('delivers a webhook and logs an alert with the correct match_type for a new match', async () => {
-    mockDbGet.mockReturnValueOnce(undefined)       // fingerprint not seen
-    mockDbQuery.mockReturnValueOnce([WEBHOOK_ROW])  // active webhooks for monitor
+    mockDbQuery
+      .mockReturnValueOnce([])            // seen-fingerprint IN-query — nothing seen
+      .mockReturnValueOnce([WEBHOOK_ROW])  // active webhooks for monitor
 
     const monitors = new Map([[1, parsedMonitor({ match_mode: 'url' })]])
     await fireMonitorAlertsFromMatches('file.txt', [MATCH], monitors)
@@ -92,7 +93,14 @@ describe('fireMonitorAlertsFromMatches', () => {
   })
 
   test('skips a credential whose fingerprint was already alerted', async () => {
-    mockDbGet.mockReturnValueOnce({ 1: 1 })  // fingerprint already seen (truthy row)
+    // Seen-fingerprint IN-query: report the (only) requested fingerprint as
+    // already seen. Reads it back out of the query params rather than
+    // hardcoding credentialFingerprint's hash output, since that hash isn't
+    // exported from lib/domain-monitor.ts.
+    mockDbQuery.mockImplementationOnce((_sql: unknown, params: unknown) => {
+      const fp = (params as string[])[1]
+      return [{ fingerprint: fp }]
+    })
 
     const monitors = new Map([[1, parsedMonitor()]])
     await fireMonitorAlertsFromMatches('file.txt', [MATCH], monitors)
@@ -101,8 +109,9 @@ describe('fireMonitorAlertsFromMatches', () => {
   })
 
   test('groups multiple matches for the same monitor into one alert', async () => {
-    mockDbGet.mockReturnValueOnce(undefined).mockReturnValueOnce(undefined)
-    mockDbQuery.mockReturnValueOnce([WEBHOOK_ROW])
+    mockDbQuery
+      .mockReturnValueOnce([])            // seen-fingerprint IN-query — nothing seen
+      .mockReturnValueOnce([WEBHOOK_ROW])  // active webhooks for monitor
 
     const second: MatchedCredential = { ...MATCH, email: 'user2@aave.com' }
     const monitors = new Map([[1, parsedMonitor()]])
@@ -115,12 +124,39 @@ describe('fireMonitorAlertsFromMatches', () => {
   })
 
   test('does not deliver when the monitor has no active webhooks', async () => {
-    mockDbGet.mockReturnValueOnce(undefined)
-    mockDbQuery.mockReturnValueOnce([])  // no active webhooks
+    mockDbQuery
+      .mockReturnValueOnce([])  // seen-fingerprint IN-query — nothing seen
+      .mockReturnValueOnce([])  // no active webhooks
 
     const monitors = new Map([[1, parsedMonitor()]])
     await fireMonitorAlertsFromMatches('file.txt', [MATCH], monitors)
 
     expect(mockAttemptDelivery).not.toHaveBeenCalled()
+  })
+
+  test('payload_sent matches array contains only {url, email, password, domain} — no monitorId or other fields', async () => {
+    // Regression guard: a prior fix (see git log -p lib/domain-monitor.ts)
+    // stripped a monitorId field that had leaked into the webhook payload /
+    // payload_sent audit column. Locks in the correct shape going forward.
+    mockDbQuery
+      .mockReturnValueOnce([])            // seen-fingerprint IN-query — nothing seen
+      .mockReturnValueOnce([WEBHOOK_ROW])  // active webhooks for monitor
+
+    const monitors = new Map([[1, parsedMonitor()]])
+    await fireMonitorAlertsFromMatches('file.txt', [MATCH], monitors)
+
+    const insertAlertCall = mockDbRun.mock.calls.find(([sql]) => (sql as string).includes('INSERT INTO monitor_alerts'))
+    expect(insertAlertCall).toBeDefined()
+    const [, params] = insertAlertCall as [string, unknown[]]
+    // payload_sent is params[6] — see the column-list comment above.
+    const payload = JSON.parse(params[6] as string)
+    expect(payload.matches).toHaveLength(1)
+    expect(Object.keys(payload.matches[0]).sort()).toEqual(['domain', 'email', 'password', 'url'])
+    expect(payload.matches[0]).toEqual({
+      url: MATCH.url,
+      email: MATCH.email,
+      password: MATCH.password,
+      domain: MATCH.domain,
+    })
   })
 })

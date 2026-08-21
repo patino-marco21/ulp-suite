@@ -7,10 +7,12 @@
  * inbox watcher — no RAM spikes from concurrent streams.
  *
  * Uses the same processing pipeline as the HTTP upload route:
- *   - processTextStream  for .txt/.csv  (streaming, 500K-row batches)
+ *   - processTextStream  for .txt/.csv  (streaming, 500K-row batches; also
+ *                         matches credentials against domain monitors
+ *                         in-process and fires alerts via
+ *                         fireMonitorAlertsFromMatches — not a separate step)
  *   - processZipFile     for .zip       (yauzl lazy entry streaming, disk-buffered)
  *   - logJob             for observability (appears in /inbox monitor)
- *   - checkMonitorsForULPUpload  for domain monitor alerts
  */
 
 import fs from 'fs'

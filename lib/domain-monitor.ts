@@ -346,12 +346,28 @@ export async function fireMonitorAlertsFromMatches(
     const monitor = monitorsById.get(monitorId)
     if (!monitor) continue
     try {
+      // Batch N+1 fix (mirrors lib/monitor-rescan-cron.ts's runTick): compute
+      // all fingerprints, then query the seen set in one IN-query instead of
+      // one dbGet per match. better-sqlite3 is synchronous, so a per-match
+      // dbGet call blocks the event loop once per match — potentially
+      // thousands of times for a single broadly-matching upload.
+      const fingerprintMap = new Map(
+        monitorMatches.map(row => [
+          credentialFingerprint(row.email, row.password, row.domain),
+          row,
+        ])
+      )
+      const fps = Array.from(fingerprintMap.keys())
+      const placeholders = fps.map(() => '?').join(',')
+      const seenRows = dbQuery(
+        `SELECT fingerprint FROM monitor_credential_seen WHERE monitor_id = ? AND fingerprint IN (${placeholders})`,
+        [monitorId, ...fps]
+      ) as { fingerprint: string }[]
+      const seenSet = new Set(seenRows.map(r => r.fingerprint))
+
       const unseenRows = monitorMatches.filter(row => {
         const fp = credentialFingerprint(row.email, row.password, row.domain)
-        return !dbGet(
-          `SELECT 1 FROM monitor_credential_seen WHERE monitor_id = ? AND fingerprint = ?`,
-          [monitorId, fp]
-        )
+        return !seenSet.has(fp)
       })
 
       if (unseenRows.length === 0) {
@@ -420,6 +436,13 @@ export async function fireMonitorAlertsFromMatches(
         [webhookRows.length, monitorId]
       )
     } catch (err) {
+      // logFn currently has no callers anywhere in the codebase (verified via
+      // grep), so `log` silently no-ops in production without this — a SQLite
+      // failure or any other error while processing one monitor's alerts would
+      // otherwise be completely invisible. Mirrors lib/monitor-rescan-cron.ts's
+      // equivalent catch block, which already logs to console for this class
+      // of error.
+      console.error(`[domain-monitor] error processing alerts for monitor "${monitor.name}": ${err}`)
       log(`Error processing monitor alerts for monitor "${monitor.name}": ${err}`, 'error')
     }
   }

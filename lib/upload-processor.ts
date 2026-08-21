@@ -49,6 +49,15 @@ export interface ProcessResult {
 
 export const UPLOAD_BATCH_SIZE = 100_000
 
+// Cap on in-process domain-monitor matches (lib/domain-match.ts) accumulated
+// for a single upload (see processTextStream's monitorMatches). Without a cap,
+// a broad monitor could accumulate matches for the entire file's duration,
+// unbounded — breaking this file's "peak RAM stays bounded regardless of file
+// size" invariant (see processTextStream's docstring below). The old (deleted)
+// per-domain ClickHouse query this in-process matching replaced was itself
+// capped at LIMIT 100 per monitored domain; this plays the same role.
+export const MAX_INPROCESS_MATCHES = 5_000
+
 // Longer than withClickHouseRetry's base 30-minute default: this pipeline is meant
 // to be queued up and left running unattended for hours (many large files, one at a
 // time). A server can plausibly stay near its memory ceiling for longer than 30
@@ -384,10 +393,19 @@ export async function processTextStream(
   // instead of re-querying ClickHouse per monitor domain after the fact. One
   // extra SQLite SELECT per upload attempt (even one that turns out to import
   // nothing) — negligible next to the cost this replaces.
-  const monitors      = await getActiveMonitors()
+  //
+  // Monitor matching is a side-channel on top of the core ingest pipeline, so
+  // a SQLite failure here (this project has a known-open issue with
+  // SQLITE_READONLY symptoms) must degrade to "no monitor matching for this
+  // upload" rather than reject the whole import — the file should still land.
+  const monitors      = await getActiveMonitors().catch((err): DomainMonitor[] => {
+    console.error('[upload-processor] getActiveMonitors failed, skipping monitor matching for this upload:', err)
+    return []
+  })
   const monitorsById  = new Map<number, DomainMonitor>(monitors.map(m => [m.id, m]))
   const monitorIndex  = buildMonitorDomainIndex(monitors)
   const monitorMatches: MatchedCredential[] = []
+  let matchCapWarned = false
 
   startIngest(filename)
   let result
@@ -406,7 +424,20 @@ export async function processTextStream(
       },
       onBatchMetrics: recordBatch,
       onBatchCredentials: monitorIndex.size > 0
-        ? creds => { monitorMatches.push(...matchCredentialsAgainstIndex(creds, monitorIndex)) }
+        ? creds => {
+            // Cap accumulation — see MAX_INPROCESS_MATCHES above. Once hit, stop
+            // computing further matches too (not just stop pushing), so a huge
+            // broadly-matching file doesn't keep paying matchCredentialsAgainstIndex's
+            // cost for matches that will be discarded anyway.
+            if (monitorMatches.length >= MAX_INPROCESS_MATCHES) return
+            const batchMatches = matchCredentialsAgainstIndex(creds, monitorIndex)
+            const room = MAX_INPROCESS_MATCHES - monitorMatches.length
+            monitorMatches.push(...batchMatches.slice(0, room))
+            if (monitorMatches.length >= MAX_INPROCESS_MATCHES && !matchCapWarned) {
+              matchCapWarned = true
+              console.warn(`[upload-processor] ${filename}: hit MAX_INPROCESS_MATCHES cap (${MAX_INPROCESS_MATCHES}) — further monitor matches in this upload will not be alerted`)
+            }
+          }
         : undefined,
     })
   } finally {
