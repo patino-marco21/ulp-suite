@@ -118,6 +118,17 @@ describe('runTick — email-domain false-match guard (regression)', () => {
 
     await runTick()
 
+    // The behavioral assertion below only proves this mock's own re-simulation
+    // of the guard works — it can't detect the SQL guard being weakened (e.g.
+    // '> 0 AND' silently loosened to '> 0 OR', which would match every '@'-
+    // containing email in credential/both mode) or the last-'@' extraction
+    // regressing to first-'@'. Assert on the actual generated SQL text too, so
+    // a mutation of either kind fails here even if it happens to keep some
+    // other test green.
+    const [emailConditionSql] = mockExecuteQuery.mock.calls[0] as [string]
+    expect(emailConditionSql).toContain("position(lower(email), '@') > 0 AND")
+    expect(emailConditionSql).toContain("arrayElement(splitByChar('@', lower(email)), -1)")
+
     const insertAlertCall = mockDbRun.mock.calls.find(([sql]) => (sql as string).includes('INSERT INTO monitor_alerts'))
     expect(insertAlertCall).toBeUndefined()
   })
