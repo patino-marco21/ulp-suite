@@ -374,7 +374,7 @@ export async function fireMonitorAlertsFromMatches(
         monitor_name: monitor.name,
         source_file: sourceFile,
         matched_domains: monitor.domains,
-        matches: unseenRows.slice(0, 50),
+        matches: unseenRows.slice(0, 50).map(({ url, email, password, domain }) => ({ url, email, password, domain })),
         total_matches: unseenRows.length,
       }
       const payloadJson = JSON.stringify(payload)
@@ -420,7 +420,7 @@ export async function fireMonitorAlertsFromMatches(
         [webhookRows.length, monitorId]
       )
     } catch (err) {
-      log(`Error processing monitor alerts for monitor ${monitorId}: ${err}`, 'error')
+      log(`Error processing monitor alerts for monitor "${monitor.name}": ${err}`, 'error')
     }
   }
 }
