@@ -2,6 +2,7 @@ import { dbQuery, dbGet, dbRun } from '@/lib/sqlite'
 import { executeQuery as executeClickHouseQuery } from '@/lib/clickhouse'
 import { NORM_DOMAIN_EXPR, NORM_EMAIL_EXPR } from '@/lib/ulp-normalize'
 import { attemptDelivery, enqueueFailedDelivery } from '@/lib/webhook-outbox-worker'
+import { matchModeToMatchType, type MatchMode } from '@/lib/domain-match'
 import crypto from 'crypto'
 
 // ─── Fingerprinting ───────────────────────────────────────────────────────────
@@ -319,6 +320,16 @@ export async function getAlertStats(): Promise<{ total: number; today: number; s
   return { total: row.total || 0, today: row.today || 0, success: row.success || 0, failed: row.failed || 0 }
 }
 
+/** Build the subdomain-aware WHERE fragment for a monitor's match_mode. Params: {domain}, {domainSuffix}. */
+function matchConditionSQL(mode: MatchMode): string {
+  const urlCond = `((${NORM_DOMAIN_EXPR}) = {domain:String} OR endsWith((${NORM_DOMAIN_EXPR}), {domainSuffix:String}))`
+  const emailDomainExpr = `substring(lower(${NORM_EMAIL_EXPR}), position(lower(${NORM_EMAIL_EXPR}), '@') + 1)`
+  const emailCond = `((${emailDomainExpr}) = {domain:String} OR endsWith((${emailDomainExpr}), {domainSuffix:String}))`
+  if (mode === 'url') return urlCond
+  if (mode === 'credential') return emailCond
+  return `(${urlCond} OR ${emailCond})`
+}
+
 // ─── ULP monitoring ───────────────────────────────────────────────────────────
 
 export async function checkMonitorsForULPUpload(
@@ -342,9 +353,9 @@ export async function checkMonitorsForULPUpload(
             `SELECT url, email, password, (${NORM_DOMAIN_EXPR}) AS domain
              FROM ulp.credentials
              WHERE source_file = {sourceFile:String}
-               AND ((${NORM_DOMAIN_EXPR}) = {domain:String} OR endsWith(lower(${NORM_EMAIL_EXPR}), {emailSuffix:String}))
+               AND ${matchConditionSQL(monitor.match_mode)}
              LIMIT 100`,
-            { sourceFile, domain: d, emailSuffix: `@${d}` }
+            { sourceFile, domain: d, domainSuffix: `.${d}` }
           ) as Array<{ url: string; email: string; password: string; domain: string }>
           matchedRows.push(...rows)
         }
@@ -395,8 +406,8 @@ export async function checkMonitorsForULPUpload(
             `INSERT INTO monitor_alerts
                (monitor_id, webhook_id, source_file, matched_domain, match_type,
                 credential_match_count, payload_sent, status, http_status, retry_count)
-             VALUES (?, ?, ?, ?, 'credential_email', ?, ?, ?, ?, 0)`,
-            [monitor.id, webhook.id, sourceFile, matchedDomain,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+            [monitor.id, webhook.id, sourceFile, matchedDomain, matchModeToMatchType(monitor.match_mode),
              unseenRows.length, payloadJson, result.ok ? 'success' : 'failed', result.status ?? null],
           )
           dbRun(`UPDATE monitor_webhooks SET last_triggered_at = datetime('now') WHERE id = ?`, [webhook.id])
