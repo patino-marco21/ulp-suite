@@ -7,7 +7,10 @@ const h = vi.hoisted(() => ({
   query:  vi.fn(),
 }))
 vi.mock('@/lib/clickhouse', () => ({ getClient: () => ({ insert: h.insert, query: h.query }) }))
-vi.mock('@/lib/domain-monitor', () => ({ checkMonitorsForULPUpload: vi.fn().mockResolvedValue(undefined) }))
+vi.mock('@/lib/domain-monitor', () => ({
+  getActiveMonitors: vi.fn().mockResolvedValue([]),
+  fireMonitorAlertsFromMatches: vi.fn().mockResolvedValue(undefined),
+}))
 vi.mock('@/lib/upload-jobs', () => ({ updateJob: vi.fn() }))
 
 const webStream = (s: string) =>

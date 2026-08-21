@@ -10,6 +10,10 @@ const h = vi.hoisted(() => ({
   insert: vi.fn().mockResolvedValue(undefined),
   query: vi.fn().mockResolvedValue({ json: async () => [{ c: 0 }] }),
 }))
+const dm = vi.hoisted(() => ({
+  getActiveMonitors: vi.fn().mockResolvedValue([]),
+  fireMonitorAlertsFromMatches: vi.fn().mockResolvedValue(undefined),
+}))
 
 vi.mock('@/lib/clickhouse', () => ({
   getClient: () => ({
@@ -17,9 +21,7 @@ vi.mock('@/lib/clickhouse', () => ({
     query: h.query,
   }),
 }))
-vi.mock('@/lib/domain-monitor', () => ({
-  checkMonitorsForULPUpload: vi.fn().mockResolvedValue(undefined),
-}))
+vi.mock('@/lib/domain-monitor', () => dm)
 vi.mock('@/lib/upload-jobs', () => ({ updateJob: vi.fn() }))
 vi.mock('@/lib/content-dedup', () => ({ runContentDedupTick: vi.fn().mockResolvedValue(undefined) }))
 
@@ -28,6 +30,10 @@ beforeEach(() => {
   h.insert.mockResolvedValue(undefined)
   h.query.mockReset()
   h.query.mockResolvedValue({ json: async () => [{ c: 0 }] })
+  dm.getActiveMonitors.mockReset()
+  dm.getActiveMonitors.mockResolvedValue([])
+  dm.fireMonitorAlertsFromMatches.mockReset()
+  dm.fireMonitorAlertsFromMatches.mockResolvedValue(undefined)
 })
 
 // ─── Fake yauzl ZipFile ───────────────────────────────────────────────────────
@@ -460,5 +466,52 @@ describe('memory-guard wiring', () => {
       vi.doUnmock('@/lib/clickhouse-memory-guard')
       vi.resetModules()
     }
+  })
+})
+
+describe('domain-monitor wiring — in-process matching', () => {
+  it('accumulates matched credentials in-process and fires alerts once per file', async () => {
+    vi.resetModules()
+    const dm = {
+      getActiveMonitors: vi.fn().mockResolvedValue([
+        { id: 1, name: 'Test', domains: ['example.com'], match_mode: 'both', is_active: true,
+          created_by: null, last_triggered_at: null, total_alerts: 0,
+          rescan_mode: 'dedup', rescan_interval_hours: 24, created_at: '', updated_at: '' },
+      ]),
+      fireMonitorAlertsFromMatches: vi.fn().mockResolvedValue(undefined),
+    }
+    vi.doMock('@/lib/domain-monitor', () => dm)
+
+    try {
+      const { processTextStream } = await import('@/lib/upload-processor')
+      await processTextStream(
+        Readable.toWeb(Readable.from([Buffer.from('https://example.com/login:user@example.com:mypassword\n')])) as ReadableStream<Uint8Array>,
+        'monitor-wiring.txt',
+      )
+
+      expect(dm.getActiveMonitors).toHaveBeenCalledOnce()
+      expect(dm.fireMonitorAlertsFromMatches).toHaveBeenCalledOnce()
+      const [sourceFile, matches, monitorsById] = dm.fireMonitorAlertsFromMatches.mock.calls[0]
+      expect(sourceFile).toBe('monitor-wiring.txt')
+      expect(matches).toEqual([
+        expect.objectContaining({ monitorId: 1, email: 'user@example.com', domain: 'example.com' }),
+      ])
+      expect(monitorsById.get(1)).toMatchObject({ id: 1, domains: ['example.com'] })
+    } finally {
+      vi.doUnmock('@/lib/domain-monitor')
+      vi.resetModules()
+    }
+  })
+
+  it('does not call fireMonitorAlertsFromMatches when there are no active monitors', async () => {
+    dm.getActiveMonitors.mockResolvedValue([])
+    dm.fireMonitorAlertsFromMatches.mockClear()
+    const { processTextStream } = await import('@/lib/upload-processor')
+    await processTextStream(
+      Readable.toWeb(Readable.from([Buffer.from('https://example.com/login:user@example.com:mypassword\n')])) as ReadableStream<Uint8Array>,
+      'no-monitors.txt',
+    )
+    // Uses this file's static top-level mock: getActiveMonitors resolves to [].
+    expect(dm.fireMonitorAlertsFromMatches).not.toHaveBeenCalled()
   })
 })

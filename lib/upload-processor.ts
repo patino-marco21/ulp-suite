@@ -24,7 +24,8 @@ import {
 import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 import { batchDedupToken } from '@/lib/upload-dedup'
 import { parseIngestPolicy, policyActive, shouldDropAtIngest, makeHardDropPredicate } from '@/lib/ingest-filter'
-import { checkMonitorsForULPUpload } from '@/lib/domain-monitor'
+import { getActiveMonitors, fireMonitorAlertsFromMatches, type DomainMonitor } from '@/lib/domain-monitor'
+import { buildMonitorDomainIndex, matchCredentialsAgainstIndex, type MatchedCredential } from '@/lib/domain-match'
 import { matchBreach } from '@/lib/breach-matcher'
 import { updateJob } from '@/lib/upload-jobs'
 import { startIngest, recordBatch, finishIngest } from '@/lib/ingest-metrics'
@@ -241,6 +242,8 @@ export interface StreamToTableOptions {
   timings?: { parseMs: number; insertMs: number }
   /** Per-batch live metrics (ingest-health panel). Not passed by the benchmark. */
   onBatchMetrics?: (m: { rows: number; parseMs: number; insertMs: number; tierDropped: number }) => void
+  /** Called with each batch's actually-inserted credentials, right after insertBatch succeeds. Not passed by the benchmark — keeps that path free of monitor side effects. */
+  onBatchCredentials?: (creds: ULPCredential[]) => void
 }
 
 export interface StreamToTableResult {
@@ -312,6 +315,7 @@ export async function streamCredentialsToTable(
       await insertBatch(creds, breach_name, undefined, { table })
       const batchInsertMs = performance.now() - tInsert
       if (timings) timings.insertMs += batchInsertMs
+      options.onBatchCredentials?.(creds)
 
       imported += creds.length
       options.onProgress?.(imported, skipped)
@@ -376,6 +380,15 @@ export async function processTextStream(
   const softPolicy     = { ...policy, hardTiers: new Set<string>() }
   const filterOn       = policyActive(softPolicy)
 
+  // Load active monitors once up front and match in-process as batches insert,
+  // instead of re-querying ClickHouse per monitor domain after the fact. One
+  // extra SQLite SELECT per upload attempt (even one that turns out to import
+  // nothing) — negligible next to the cost this replaces.
+  const monitors      = await getActiveMonitors()
+  const monitorsById  = new Map<number, DomainMonitor>(monitors.map(m => [m.id, m]))
+  const monitorIndex  = buildMonitorDomainIndex(monitors)
+  const monitorMatches: MatchedCredential[] = []
+
   startIngest(filename)
   let result
   try {
@@ -392,6 +405,9 @@ export async function processTextStream(
         if (onBatch) onBatch(imp)
       },
       onBatchMetrics: recordBatch,
+      onBatchCredentials: monitorIndex.size > 0
+        ? creds => { monitorMatches.push(...matchCredentialsAgainstIndex(creds, monitorIndex)) }
+        : undefined,
     })
   } finally {
     finishIngest()
@@ -408,9 +424,11 @@ export async function processTextStream(
 
   if (imported > 0) {
     await recordSource(filename, imported)
-    checkMonitorsForULPUpload(filename).catch(err =>
-      console.error('Domain monitor check error:', err)
-    )
+    if (monitorMatches.length > 0) {
+      fireMonitorAlertsFromMatches(filename, monitorMatches, monitorsById).catch(err =>
+        console.error('Domain monitor alert error:', err)
+      )
+    }
     // Cross-file content dedup remains available through the scheduled/manual
     // dedup flows; imports no longer trigger a full-table dedup hook here.
   }
