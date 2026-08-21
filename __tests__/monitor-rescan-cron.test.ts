@@ -81,6 +81,48 @@ describe('runTick — query construction', () => {
   })
 })
 
+describe('runTick — email-domain false-match guard (regression)', () => {
+  test('does not fire an alert for a credential row whose email has no "@" (would otherwise false-match the raw email string)', async () => {
+    // Dispatch by SQL content (not call order/count): the "wrongly matched"
+    // branch of this test needs the seen-fingerprint and webhook-lookup calls
+    // to resolve non-trivially too, but exactly how many times (if at all)
+    // those are reached depends on the very behavior under test — a fixed
+    // .mockReturnValueOnce(...) queue would either under- or over-supply
+    // values depending on which branch runs, leaking unconsumed entries into
+    // later tests. Matching on SQL text keeps this correct either way.
+    mockDbQuery.mockImplementation((sql: unknown) => {
+      const s = sql as string
+      if (s.includes('FROM domain_monitors')) {
+        return [dueMonitorRow({ match_mode: 'credential', domains: JSON.stringify(['google.com']) })]
+      }
+      if (s.includes('monitor_credential_seen')) return []            // nothing seen yet
+      if (s.includes('FROM monitor_webhooks')) return [WEBHOOK_ROW]   // an active webhook exists
+      return []
+    })
+
+    // Simulate ClickHouse evaluating the REAL WHERE clause runTick built: only
+    // "return" the row if the SQL's own guard — position(lower(email), '@') > 0
+    // — would let it through, not some separate app-side check. A row whose
+    // email has no '@' must be excluded by the SQL itself. If that guard clause
+    // ever regresses out of matchConditionSQL, this mock (correctly) reverts to
+    // returning the row — reproducing the pre-fix bug — which (via the webhook
+    // mock above) drives all the way to an actual INSERT INTO monitor_alerts,
+    // so this test fails for the right reason rather than trivially passing
+    // because no webhook was configured.
+    const noAtRow = { url: 'https://accounts.google.com/signin', email: 'accounts.google.com', password: 'hunter2', domain: 'accounts.google.com' }
+    mockExecuteQuery.mockImplementationOnce(async (sql: unknown) => {
+      const hasAtGuard = (sql as string).includes("position(lower(email), '@') > 0")
+      const emailHasAt = noAtRow.email.includes('@')
+      return hasAtGuard && !emailHasAt ? [] : [noAtRow]
+    })
+
+    await runTick()
+
+    const insertAlertCall = mockDbRun.mock.calls.find(([sql]) => (sql as string).includes('INSERT INTO monitor_alerts'))
+    expect(insertAlertCall).toBeUndefined()
+  })
+})
+
 describe('runTick — match_type persistence', () => {
   test('writes match_type matching the monitor mode', async () => {
     mockDbQuery

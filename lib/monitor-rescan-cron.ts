@@ -45,11 +45,19 @@ function credentialFingerprint(email: string, password: string, domain: string):
 
 // ─── Matching ───────────────────────────────────────────────────────────────
 
-/** Build the subdomain-aware WHERE fragment for a monitor's match_mode. Params: {domain}, {domainSuffix}. Mirrors lib/domain-monitor.ts. */
+/** Build the subdomain-aware WHERE fragment for a monitor's match_mode. Params: {domain}, {domainSuffix}. */
 function matchConditionSQL(mode: MatchMode): string {
   const urlCond = `((${NORM_DOMAIN_EXPR}) = {domain:String} OR endsWith((${NORM_DOMAIN_EXPR}), {domainSuffix:String}))`
-  const emailDomainExpr = `substring(lower(${NORM_EMAIL_EXPR}), position(lower(${NORM_EMAIL_EXPR}), '@') + 1)`
-  const emailCond = `((${emailDomainExpr}) = {domain:String} OR endsWith((${emailDomainExpr}), {domainSuffix:String}))`
+  const emailLower = `lower(${NORM_EMAIL_EXPR})`
+  // Domain after the LAST '@', mirroring lib/domain-match.ts's emailDomainMatches
+  // (lastIndexOf('@')). The position(...) > 0 guard is required: ClickHouse's
+  // position() returns 0 (not -1) when '@' is absent, which without the guard
+  // would make the old substring(email, 0+1) expression equal the WHOLE email
+  // string — false-matching any row whose raw email column happens to equal or
+  // end with a monitored domain (common on corrupted rows with no '@' at all;
+  // see lib/ulp-normalize.ts's docstring on Cases A-D).
+  const emailDomainExpr = `arrayElement(splitByChar('@', ${emailLower}), -1)`
+  const emailCond = `(position(${emailLower}, '@') > 0 AND ((${emailDomainExpr}) = {domain:String} OR endsWith((${emailDomainExpr}), {domainSuffix:String})))`
   if (mode === 'url') return urlCond
   if (mode === 'credential') return emailCond
   return `(${urlCond} OR ${emailCond})`

@@ -52,6 +52,35 @@ describe('emailDomainMatches', () => {
   })
 })
 
+describe('emailDomainMatches — corrupted-row regression table', () => {
+  // Locks in the exact behavior lib/monitor-rescan-cron.ts's SQL email-domain
+  // extraction must agree with (matchConditionSQL's emailDomainExpr, verified
+  // against a live ClickHouse instance against this same table). This function
+  // is the authoritative oracle — see lib/ulp-normalize.ts's docstring on
+  // Cases A-D for why raw email columns can lack '@' entirely.
+  const monitored = 'google.com'
+
+  test('an email with no "@" does not match, even when it equals the monitored domain', () => {
+    expect(emailDomainMatches('google.com', monitored)).toBe(false)
+  })
+
+  test('an email with no "@" does not match, even when it looks like a subdomain', () => {
+    expect(emailDomainMatches('accounts.google.com', monitored)).toBe(false)
+  })
+
+  test('uses the domain after the LAST "@" when the email contains more than one', () => {
+    expect(emailDomainMatches('a@b@google.com', monitored)).toBe(true)
+  })
+
+  test('matches a subdomain of the monitored domain', () => {
+    expect(emailDomainMatches('u@app.google.com', monitored)).toBe(true)
+  })
+
+  test('does not match an unrelated domain', () => {
+    expect(emailDomainMatches('user@notgoogle.com', monitored)).toBe(false)
+  })
+})
+
 describe('credentialMatchesDomain', () => {
   const cred = { domain: 'other.com', email: 'user@app.aave.com' }
 

@@ -2,45 +2,28 @@
  * Tests for NORM_EXPR sweep part 2.
  *
  * Coverage:
- *  - domain-monitor WHERE fragment uses NORM_DOMAIN_EXPR, not raw 'domain'
  *  - export route WHERE fragment uses NORM_DOMAIN_EXPR, not raw 'domain'
+ *
+ * This file previously also guarded a "domain-monitor WHERE fragment" shape,
+ * asserted as a hardcoded literal string (not a call into real code) rather
+ * than anything exported from lib/domain-monitor.ts. That literal described
+ * domain-monitor.ts's live-upload ClickHouse query, which was deleted
+ * entirely when the upload-triggered check was rewritten to match credentials
+ * in-process instead (see lib/domain-match.ts's matchCredentialsAgainstIndex) —
+ * so the section was testing a string against itself and guarding nothing
+ * real. Removed rather than retargeted at lib/monitor-rescan-cron.ts's
+ * matchConditionSQL: that function is intentionally unexported (a singleton,
+ * not a mirrored pair — see the comment above it), and real coverage of its
+ * SQL shape already exists in __tests__/monitor-rescan-cron.test.ts via
+ * actual runTick() calls inspecting the real SQL text sent to executeQuery,
+ * which is a stronger guard than re-typing a literal here ever was.
  */
 
 import { describe, test, expect } from 'vitest'
-import { NORM_DOMAIN_EXPR, NORM_EMAIL_EXPR } from '@/lib/ulp-normalize'
+import { NORM_DOMAIN_EXPR } from '@/lib/ulp-normalize'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// § 1  domain-monitor live-upload WHERE fragment
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('domain-monitor WHERE fragment', () => {
-  const whereFragment = `(${NORM_DOMAIN_EXPR}) = {domain:String} OR endsWith(lower(${NORM_EMAIL_EXPR}), {emailSuffix:String})`
-
-  test('contains if( — uses normalizing expression not raw column', () => {
-    expect(whereFragment).toContain('if(')
-  })
-
-  test('does not contain bare "domain ="', () => {
-    expect(whereFragment).not.toMatch(/\bdomain\s*=\s*\{/)
-  })
-
-  test('contains {domain:String} parameter placeholder', () => {
-    expect(whereFragment).toContain('{domain:String}')
-  })
-
-  test('contains {emailSuffix:String} parameter placeholder', () => {
-    expect(whereFragment).toContain('{emailSuffix:String}')
-  })
-
-  test('endsWith uses NORM_EMAIL_EXPR — email expression, not domain expression', () => {
-    // A domain value (e.g. "example.com") can never end with "@example.com".
-    // Only the email expression can match the @domain suffix.
-    expect(whereFragment).toContain(NORM_EMAIL_EXPR)
-  })
-})
-
-// ─────────────────────────────────────────────────────────────────────────────
-// § 2  export route domain filter WHERE fragment
+// export route domain filter WHERE fragment
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('export route domain filter WHERE fragment', () => {
