@@ -1,8 +1,6 @@
 import { dbQuery, dbGet, dbRun } from '@/lib/sqlite'
-import { executeQuery as executeClickHouseQuery } from '@/lib/clickhouse'
-import { NORM_DOMAIN_EXPR, NORM_EMAIL_EXPR } from '@/lib/ulp-normalize'
 import { attemptDelivery, enqueueFailedDelivery } from '@/lib/webhook-outbox-worker'
-import { matchModeToMatchType, type MatchMode } from '@/lib/domain-match'
+import { matchModeToMatchType, type MatchedCredential } from '@/lib/domain-match'
 import crypto from 'crypto'
 
 // ─── Fingerprinting ───────────────────────────────────────────────────────────
@@ -320,128 +318,110 @@ export async function getAlertStats(): Promise<{ total: number; today: number; s
   return { total: row.total || 0, today: row.today || 0, success: row.success || 0, failed: row.failed || 0 }
 }
 
-/** Build the subdomain-aware WHERE fragment for a monitor's match_mode. Params: {domain}, {domainSuffix}. */
-function matchConditionSQL(mode: MatchMode): string {
-  const urlCond = `((${NORM_DOMAIN_EXPR}) = {domain:String} OR endsWith((${NORM_DOMAIN_EXPR}), {domainSuffix:String}))`
-  const emailDomainExpr = `substring(lower(${NORM_EMAIL_EXPR}), position(lower(${NORM_EMAIL_EXPR}), '@') + 1)`
-  const emailCond = `((${emailDomainExpr}) = {domain:String} OR endsWith((${emailDomainExpr}), {domainSuffix:String}))`
-  if (mode === 'url') return urlCond
-  if (mode === 'credential') return emailCond
-  return `(${urlCond} OR ${emailCond})`
-}
-
 // ─── ULP monitoring ───────────────────────────────────────────────────────────
 
-export async function checkMonitorsForULPUpload(
+/**
+ * Fire webhook alerts for credentials matched in-process during an upload
+ * (see lib/upload-processor.ts, lib/domain-match.ts's matchCredentialsAgainstIndex).
+ * Groups matches by monitor, applies the same dedup-fingerprint/webhook/alert-log
+ * flow checkMonitorsForULPUpload used to run per ClickHouse-queried domain.
+ */
+export async function fireMonitorAlertsFromMatches(
   sourceFile: string,
-  logFn?: (msg: string, type?: 'info' | 'success' | 'warning' | 'error') => void
+  matches: MatchedCredential[],
+  monitorsById: Map<number, DomainMonitor>,
+  logFn?: (msg: string, type?: 'info' | 'success' | 'warning' | 'error') => void,
 ): Promise<void> {
   const log = logFn || (() => {})
-  try {
-    const monitors = await getActiveMonitors()
-    if (monitors.length === 0) return
+  if (matches.length === 0) return
 
-    log(`Checking ${monitors.length} domain monitor(s) against: ${sourceFile}`, 'info')
+  const byMonitor = new Map<number, MatchedCredential[]>()
+  for (const m of matches) {
+    const list = byMonitor.get(m.monitorId)
+    if (list) list.push(m)
+    else byMonitor.set(m.monitorId, [m])
+  }
 
-    for (const monitor of monitors) {
-      try {
-        const matchedRows: Array<{ url: string; email: string; password: string; domain: string }> = []
+  for (const [monitorId, monitorMatches] of byMonitor) {
+    const monitor = monitorsById.get(monitorId)
+    if (!monitor) continue
+    try {
+      const unseenRows = monitorMatches.filter(row => {
+        const fp = credentialFingerprint(row.email, row.password, row.domain)
+        return !dbGet(
+          `SELECT 1 FROM monitor_credential_seen WHERE monitor_id = ? AND fingerprint = ?`,
+          [monitorId, fp]
+        )
+      })
 
-        for (const domain of monitor.domains) {
-          const d = domain.toLowerCase().trim()
-          const rows = await executeClickHouseQuery(
-            `SELECT url, email, password, (${NORM_DOMAIN_EXPR}) AS domain
-             FROM ulp.credentials
-             WHERE source_file = {sourceFile:String}
-               AND ${matchConditionSQL(monitor.match_mode)}
-             LIMIT 100`,
-            { sourceFile, domain: d, domainSuffix: `.${d}` }
-          ) as Array<{ url: string; email: string; password: string; domain: string }>
-          matchedRows.push(...rows)
-        }
+      if (unseenRows.length === 0) {
+        log(`Monitor "${monitor.name}": all ${monitorMatches.length} matched credential(s) already alerted — skipping`, 'info')
+        continue
+      }
 
-        if (matchedRows.length === 0) continue
+      log(`Monitor "${monitor.name}" matched ${unseenRows.length} new credential(s) (${monitorMatches.length - unseenRows.length} already seen)`, 'success')
 
-        // Dedup: filter credentials whose fingerprint has already triggered an alert
-        // for this monitor — prevents duplicate notifications on re-uploads.
-        const unseenRows = matchedRows.filter(row => {
-          const fp = credentialFingerprint(row.email, row.password, row.domain)
-          return !dbGet(
-            `SELECT 1 FROM monitor_credential_seen WHERE monitor_id = ? AND fingerprint = ?`,
-            [monitor.id, fp]
-          )
-        })
+      const webhookRows = dbQuery(
+        `SELECT mw.* FROM monitor_webhooks mw
+         JOIN monitor_webhook_map mwm ON mwm.webhook_id = mw.id
+         WHERE mwm.monitor_id = ? AND mw.is_active = 1`,
+        [monitorId]
+      ) as Record<string, unknown>[]
 
-        if (unseenRows.length === 0) {
-          log(`Monitor "${monitor.name}": all ${matchedRows.length} matched credential(s) already alerted — skipping`, 'info')
-          continue
-        }
+      if (webhookRows.length === 0) continue
 
-        log(`Monitor "${monitor.name}" matched ${unseenRows.length} new credential(s) (${matchedRows.length - unseenRows.length} already seen)`, 'success')
+      const payload = {
+        monitor_name: monitor.name,
+        source_file: sourceFile,
+        matched_domains: monitor.domains,
+        matches: unseenRows.slice(0, 50),
+        total_matches: unseenRows.length,
+      }
+      const payloadJson = JSON.stringify(payload)
+      const matchedDomain = monitor.domains.join(',')
+      const matchType = matchModeToMatchType(monitor.match_mode)
 
-        const webhookRows = dbQuery(
-          `SELECT mw.* FROM monitor_webhooks mw
-           JOIN monitor_webhook_map mwm ON mwm.webhook_id = mw.id
-           WHERE mwm.monitor_id = ? AND mw.is_active = 1`,
-          [monitor.id]
-        ) as Record<string, unknown>[]
-
-        if (webhookRows.length === 0) continue
-
-        const payload = {
-          monitor_name: monitor.name,
-          source_file: sourceFile,
-          matched_domains: monitor.domains,
-          matches: unseenRows.slice(0, 50),
-          total_matches: unseenRows.length,
-        }
-        const payloadJson = JSON.stringify(payload)
-
-        // Sequential delivery is intentional: inline attempt + outbox enqueue must not race.
-        const matchedDomain = monitor.domains.join(',')
-        for (const wr of webhookRows) {
-          const webhook = parseWebhookRow(wr)
-          const result = await attemptDelivery(webhook, payloadJson)
-          dbRun(
-            `INSERT INTO monitor_alerts
-               (monitor_id, webhook_id, source_file, matched_domain, match_type,
-                credential_match_count, payload_sent, status, http_status, retry_count)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-            [monitor.id, webhook.id, sourceFile, matchedDomain, matchModeToMatchType(monitor.match_mode),
-             unseenRows.length, payloadJson, result.ok ? 'success' : 'failed', result.status ?? null],
-          )
-          dbRun(`UPDATE monitor_webhooks SET last_triggered_at = datetime('now') WHERE id = ?`, [webhook.id])
-          if (!result.ok) {
-            if (result.status !== null && result.status >= 400 && result.status < 500) {
-              // 4xx — permanent client error, don't retry
-              log(`Webhook delivery permanently failed (4xx, not queued): ${result.error}`, 'warning')
-            } else {
-              // Network error or 5xx — queue for retry
-              enqueueFailedDelivery(monitor.id, webhook.id, payloadJson, sourceFile, matchedDomain, unseenRows.length)
-              log(`Webhook delivery failed (queued for retry): ${result.error}`, 'warning')
-            }
+      // Sequential delivery is intentional: inline attempt + outbox enqueue must not race.
+      for (const wr of webhookRows) {
+        const webhook = parseWebhookRow(wr)
+        const result = await attemptDelivery(webhook, payloadJson)
+        dbRun(
+          `INSERT INTO monitor_alerts
+             (monitor_id, webhook_id, source_file, matched_domain, match_type,
+              credential_match_count, payload_sent, status, http_status, retry_count)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+          [monitorId, webhook.id, sourceFile, matchedDomain, matchType,
+           unseenRows.length, payloadJson, result.ok ? 'success' : 'failed', result.status ?? null],
+        )
+        dbRun(`UPDATE monitor_webhooks SET last_triggered_at = datetime('now') WHERE id = ?`, [webhook.id])
+        if (!result.ok) {
+          if (result.status !== null && result.status >= 400 && result.status < 500) {
+            // 4xx — permanent client error, don't retry
+            log(`Webhook delivery permanently failed (4xx, not queued): ${result.error}`, 'warning')
+          } else {
+            // Network error or 5xx — queue for retry
+            enqueueFailedDelivery(monitorId, webhook.id, payloadJson, sourceFile, matchedDomain, unseenRows.length)
+            log(`Webhook delivery failed (queued for retry): ${result.error}`, 'warning')
           }
         }
-
-        // Record fingerprints so future uploads of the same credentials don't re-alert
-        for (const row of unseenRows) {
-          const fp = credentialFingerprint(row.email, row.password, row.domain)
-          dbRun(
-            `INSERT OR IGNORE INTO monitor_credential_seen (monitor_id, fingerprint) VALUES (?, ?)`,
-            [monitor.id, fp]
-          )
-        }
-
-        dbRun(
-          `UPDATE domain_monitors SET last_triggered_at = datetime('now'), total_alerts = total_alerts + ? WHERE id = ?`,
-          [webhookRows.length, monitor.id]
-        )
-      } catch (err) {
-        log(`Error processing monitor "${monitor.name}": ${err}`, 'error')
       }
+
+      // Record fingerprints so future uploads of the same credentials don't re-alert
+      for (const row of unseenRows) {
+        const fp = credentialFingerprint(row.email, row.password, row.domain)
+        dbRun(
+          `INSERT OR IGNORE INTO monitor_credential_seen (monitor_id, fingerprint) VALUES (?, ?)`,
+          [monitorId, fp]
+        )
+      }
+
+      dbRun(
+        `UPDATE domain_monitors SET last_triggered_at = datetime('now'), total_alerts = total_alerts + ? WHERE id = ?`,
+        [webhookRows.length, monitorId]
+      )
+    } catch (err) {
+      log(`Error processing monitor alerts for monitor ${monitorId}: ${err}`, 'error')
     }
-  } catch (err) {
-    log(`ULP monitor check error: ${err}`, 'error')
   }
 }
 
