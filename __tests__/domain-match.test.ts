@@ -1,5 +1,15 @@
-import { describe, test, expect } from 'vitest'
-import { domainMatches, emailDomainMatches, credentialMatchesDomain, matchModeToMatchType, domainSuffixChain, buildMonitorDomainIndex, matchCredentialsAgainstIndex } from '@/lib/domain-match'
+import { vi, describe, test, expect } from 'vitest'
+
+vi.mock('@/lib/ulp-normalize', () => ({
+  NORM_DOMAIN_EXPR: 'domain',
+  NORM_EMAIL_EXPR: 'email',
+}))
+
+import {
+  domainMatches, emailDomainMatches, credentialMatchesDomain, matchModeToMatchType,
+  domainSuffixChain, buildMonitorDomainIndex, matchCredentialsAgainstIndex,
+  matchConditionSQL, buildDomainSetWhereClause,
+} from '@/lib/domain-match'
 
 describe('domainMatches', () => {
   test('matches the exact domain', () => {
@@ -160,5 +170,51 @@ describe('buildMonitorDomainIndex + matchCredentialsAgainstIndex', () => {
   test('returns no matches when the index is empty', () => {
     const cred = { url: 'https://aave.com', email: 'user@aave.com', password: 'x', domain: 'aave.com' }
     expect(matchCredentialsAgainstIndex([cred], new Map())).toEqual([])
+  })
+})
+
+describe('matchConditionSQL', () => {
+  test('mode "url" is just the domain condition', () => {
+    expect(matchConditionSQL('url')).toBe(
+      '((domain) = {domain:String} OR endsWith((domain), {domainSuffix:String}))'
+    )
+  })
+
+  test('mode "credential" guards against missing "@" and uses the last "@"', () => {
+    const sql = matchConditionSQL('credential')
+    expect(sql).toContain("position(lower(email), '@') > 0 AND")
+    expect(sql).toContain("arrayElement(splitByChar('@', lower(email)), -1)")
+  })
+
+  test('mode "both" ORs the url and credential conditions', () => {
+    const sql = matchConditionSQL('both')
+    expect(sql.startsWith('(((domain)')).toBe(true)
+    expect(sql).toContain(' OR (position(lower(email)')
+  })
+})
+
+describe('buildDomainSetWhereClause', () => {
+  test('builds one OR-joined clause with indexed params per domain', () => {
+    const { clause, params } = buildDomainSetWhereClause(['aave.com', 'lido.fi'], 'url')
+    expect(clause).toBe(
+      '(((domain) = {domain0:String} OR endsWith((domain), {domainSuffix0:String})) OR ' +
+      '((domain) = {domain1:String} OR endsWith((domain), {domainSuffix1:String})))'
+    )
+    expect(params).toEqual({
+      domain0: 'aave.com', domainSuffix0: '.aave.com',
+      domain1: 'lido.fi',  domainSuffix1: '.lido.fi',
+    })
+  })
+
+  test('lowercases and trims each domain', () => {
+    const { params } = buildDomainSetWhereClause([' AAVE.com '], 'url')
+    expect(params.domain0).toBe('aave.com')
+    expect(params.domainSuffix0).toBe('.aave.com')
+  })
+
+  test('returns a never-true clause for an empty domain list', () => {
+    const { clause, params } = buildDomainSetWhereClause([], 'both')
+    expect(clause).toBe('0')
+    expect(params).toEqual({})
   })
 })

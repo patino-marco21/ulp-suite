@@ -1,11 +1,21 @@
 /**
- * Pure domain-matching predicates shared by the upload-triggered monitor
- * check and the scheduled rescan (lib/domain-monitor.ts, lib/monitor-rescan-cron.ts).
+ * Domain-matching predicates and SQL builders shared by the upload-triggered
+ * monitor check, the scheduled rescan, and the live monitor-matches endpoint
+ * (lib/domain-monitor.ts, lib/monitor-rescan-cron.ts,
+ * app/api/monitoring/monitors/[id]/matches/route.ts).
  *
  * "Matches" means: the candidate is the monitored domain itself, or any
  * subdomain of it (label-boundary suffix match — "aave.com" matches
  * "app.aave.com" but not "notaave.com").
+ *
+ * domainMatches/emailDomainMatches/credentialMatchesDomain/matchCredentialsAgainstIndex
+ * are pure, zero-dependency JS predicates for in-process matching.
+ * matchConditionSQL/buildDomainSetWhereClause build the equivalent condition
+ * as ClickHouse SQL — same semantics, different execution engine — and do
+ * depend on lib/ulp-normalize's column expressions.
  */
+
+import { NORM_DOMAIN_EXPR, NORM_EMAIL_EXPR } from '@/lib/ulp-normalize'
 
 export type MatchMode = 'credential' | 'url' | 'both'
 
@@ -121,4 +131,61 @@ export function matchCredentialsAgainstIndex(
   }
 
   return matches
+}
+
+// ─── ClickHouse SQL condition builders ─────────────────────────────────────
+
+/**
+ * Build the subdomain-aware WHERE fragment for one domain, using the given
+ * ClickHouse named-parameter names for its {domain}/{domainSuffix} values.
+ * Shared building block for matchConditionSQL (one domain, fixed param
+ * names) and buildDomainSetWhereClause (many domains, indexed param names).
+ */
+function domainConditionSQL(mode: MatchMode, domainParam: string, domainSuffixParam: string): string {
+  const urlCond = `((${NORM_DOMAIN_EXPR}) = {${domainParam}:String} OR endsWith((${NORM_DOMAIN_EXPR}), {${domainSuffixParam}:String}))`
+  const emailLower = `lower(${NORM_EMAIL_EXPR})`
+  // Domain after the LAST '@'. The position(...) > 0 guard is required:
+  // ClickHouse's position() returns 0 (not -1) when '@' is absent, which
+  // without the guard would make the extraction equal the WHOLE email
+  // string — false-matching any row whose raw email column happens to
+  // equal or end with a monitored domain (common on corrupted rows with no
+  // '@' at all; see lib/ulp-normalize.ts's docstring on Cases A-D).
+  const emailDomainExpr = `arrayElement(splitByChar('@', ${emailLower}), -1)`
+  const emailCond = `(position(${emailLower}, '@') > 0 AND ((${emailDomainExpr}) = {${domainParam}:String} OR endsWith((${emailDomainExpr}), {${domainSuffixParam}:String})))`
+  if (mode === 'url') return urlCond
+  if (mode === 'credential') return emailCond
+  return `(${urlCond} OR ${emailCond})`
+}
+
+/**
+ * Build the subdomain-aware WHERE fragment for a monitor's match_mode
+ * against a single domain, bound via ClickHouse named parameters {domain}
+ * and {domainSuffix}. Moved here from lib/monitor-rescan-cron.ts so the
+ * live-matches endpoint and the scheduled rescan share one implementation
+ * instead of two.
+ */
+export function matchConditionSQL(mode: MatchMode): string {
+  return domainConditionSQL(mode, 'domain', 'domainSuffix')
+}
+
+/**
+ * Build a single WHERE fragment matching ANY of the given domains, each
+ * bound to its own indexed ClickHouse named parameters (domain0/domainSuffix0,
+ * domain1/domainSuffix1, ...) so a monitor's whole domain set can be queried
+ * in one ClickHouse round trip instead of one query per domain.
+ */
+export function buildDomainSetWhereClause(
+  domains: string[],
+  mode: MatchMode,
+): { clause: string; params: Record<string, string> } {
+  const params: Record<string, string> = {}
+  const parts = domains.map((domain, i) => {
+    const d = domain.toLowerCase().trim()
+    const domainParam = `domain${i}`
+    const domainSuffixParam = `domainSuffix${i}`
+    params[domainParam] = d
+    params[domainSuffixParam] = `.${d}`
+    return domainConditionSQL(mode, domainParam, domainSuffixParam)
+  })
+  return { clause: parts.length ? `(${parts.join(' OR ')})` : '0', params }
 }
