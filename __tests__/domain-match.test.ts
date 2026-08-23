@@ -8,7 +8,7 @@ vi.mock('@/lib/ulp-normalize', () => ({
 import {
   domainMatches, emailDomainMatches, credentialMatchesDomain, matchModeToMatchType,
   domainSuffixChain, buildMonitorDomainIndex, matchCredentialsAgainstIndex,
-  matchConditionSQL, buildDomainSetWhereClause,
+  matchConditionSQL, buildDomainSetWhereClause, credentialFingerprint,
 } from '@/lib/domain-match'
 
 describe('domainMatches', () => {
@@ -216,5 +216,23 @@ describe('buildDomainSetWhereClause', () => {
     const { clause, params } = buildDomainSetWhereClause([], 'both')
     expect(clause).toBe('0')
     expect(params).toEqual({})
+  })
+})
+
+describe('credentialFingerprint', () => {
+  test('is deterministic for the same inputs', () => {
+    expect(credentialFingerprint('user@aave.com', 'hunter2', 'aave.com'))
+      .toBe(credentialFingerprint('user@aave.com', 'hunter2', 'aave.com'))
+  })
+
+  test('is a 16-char hex string', () => {
+    expect(credentialFingerprint('user@aave.com', 'hunter2', 'aave.com')).toMatch(/^[0-9a-f]{16}$/)
+  })
+
+  test('differs when any one field differs', () => {
+    const base = credentialFingerprint('user@aave.com', 'hunter2', 'aave.com')
+    expect(credentialFingerprint('other@aave.com', 'hunter2', 'aave.com')).not.toBe(base)
+    expect(credentialFingerprint('user@aave.com', 'other', 'aave.com')).not.toBe(base)
+    expect(credentialFingerprint('user@aave.com', 'hunter2', 'other.com')).not.toBe(base)
   })
 })

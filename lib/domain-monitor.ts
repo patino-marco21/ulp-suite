@@ -1,25 +1,7 @@
 import { dbQuery, dbGet, dbRun } from '@/lib/sqlite'
 import { attemptDelivery, enqueueFailedDelivery } from '@/lib/webhook-outbox-worker'
-import { matchModeToMatchType, type MatchedCredential } from '@/lib/domain-match'
+import { matchModeToMatchType, credentialFingerprint, type MatchedCredential } from '@/lib/domain-match'
 import crypto from 'crypto'
-
-// ─── Fingerprinting ───────────────────────────────────────────────────────────
-
-/**
- * Compute a 64-bit hex fingerprint for a credential triple (email, password, domain).
- * Uses 8 bytes (16 hex chars) of SHA-256 — collision probability negligible even at
- * billions of stored fingerprints (birthday bound ~2^32 with 4 bytes was dangerously low).
- * Stored as TEXT in SQLite (holds up to 2^63-1 as INTEGER, but hex avoids signedness issues).
- */
-function credentialFingerprint(email: string, password: string, domain: string): string {
-  return crypto.createHash('sha256')
-    .update(email).update('\0')
-    .update(password).update('\0')
-    .update(domain)
-    .digest()
-    .slice(0, 8)
-    .toString('hex')
-}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -384,7 +366,26 @@ export async function fireMonitorAlertsFromMatches(
         [monitorId]
       ) as Record<string, unknown>[]
 
-      if (webhookRows.length === 0) continue
+      // Record fingerprints regardless of whether any webhook exists to
+      // deliver to — this is what lets a webhook-less monitor's matches
+      // still show up in the live saved-search / unread-tracking views.
+      for (const row of unseenRows) {
+        const fp = credentialFingerprint(row.email, row.password, row.domain)
+        dbRun(
+          `INSERT OR IGNORE INTO monitor_credential_seen (monitor_id, fingerprint) VALUES (?, ?)`,
+          [monitorId, fp]
+        )
+      }
+
+      if (webhookRows.length === 0) {
+        // No webhook to deliver to, but the monitor was still checked and
+        // its matches recorded above — bump last_triggered_at so the rescan
+        // cron doesn't treat it as never-checked, without touching
+        // total_alerts (that column counts webhook deliveries, not matches).
+        dbRun(`UPDATE domain_monitors SET last_triggered_at = datetime('now') WHERE id = ?`, [monitorId])
+        log(`Monitor "${monitor.name}" matched ${unseenRows.length} new credential(s) — no active webhooks, recorded only`, 'info')
+        continue
+      }
 
       const payload = {
         monitor_name: monitor.name,
@@ -420,15 +421,6 @@ export async function fireMonitorAlertsFromMatches(
             log(`Webhook delivery failed (queued for retry): ${result.error}`, 'warning')
           }
         }
-      }
-
-      // Record fingerprints so future uploads of the same credentials don't re-alert
-      for (const row of unseenRows) {
-        const fp = credentialFingerprint(row.email, row.password, row.domain)
-        dbRun(
-          `INSERT OR IGNORE INTO monitor_credential_seen (monitor_id, fingerprint) VALUES (?, ?)`,
-          [monitorId, fp]
-        )
       }
 
       dbRun(

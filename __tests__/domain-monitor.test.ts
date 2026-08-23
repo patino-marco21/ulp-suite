@@ -123,7 +123,7 @@ describe('fireMonitorAlertsFromMatches', () => {
     expect(params[5]).toBe(2)  // credential_match_count
   })
 
-  test('does not deliver when the monitor has no active webhooks', async () => {
+  test('does not deliver when the monitor has no active webhooks, but still records the match', async () => {
     mockDbQuery
       .mockReturnValueOnce([])  // seen-fingerprint IN-query — nothing seen
       .mockReturnValueOnce([])  // no active webhooks
@@ -132,6 +132,17 @@ describe('fireMonitorAlertsFromMatches', () => {
     await fireMonitorAlertsFromMatches('file.txt', [MATCH], monitors)
 
     expect(mockAttemptDelivery).not.toHaveBeenCalled()
+
+    // Still recorded so it's visible to the live-matches view and counted as
+    // "seen" for unread tracking, even with no webhook to deliver to.
+    const seenInsertCall = mockDbRun.mock.calls.find(([sql]) => (sql as string).includes('INSERT OR IGNORE INTO monitor_credential_seen'))
+    expect(seenInsertCall).toBeDefined()
+    const lastTriggeredCall = mockDbRun.mock.calls.find(([sql]) => (sql as string).includes('UPDATE domain_monitors SET last_triggered_at'))
+    expect(lastTriggeredCall).toBeDefined()
+
+    // No monitor_alerts row without a webhook_id to attach it to (NOT NULL + FK).
+    const insertAlertCall = mockDbRun.mock.calls.find(([sql]) => (sql as string).includes('INSERT INTO monitor_alerts'))
+    expect(insertAlertCall).toBeUndefined()
   })
 
   test('payload_sent matches array contains only {url, email, password, domain} — no monitorId or other fields', async () => {

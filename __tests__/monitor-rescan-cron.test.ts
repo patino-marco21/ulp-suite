@@ -155,3 +155,23 @@ describe('runTick — match_type persistence', () => {
     expect(params[3]).toBe('credential_email')
   })
 })
+
+describe('runTick — match recording without webhooks', () => {
+  test('records a seen-fingerprint and bumps last_triggered_at even when the monitor has no active webhooks', async () => {
+    mockDbQuery
+      .mockReturnValueOnce([dueMonitorRow()])  // due monitors
+      .mockReturnValueOnce([])                 // seen-fingerprint IN-query — nothing seen
+      .mockReturnValueOnce([])                 // no active webhooks
+    mockExecuteQuery.mockResolvedValueOnce([MATCHED_ROW])
+
+    await runTick()
+
+    const seenInsertCall = mockDbRun.mock.calls.find(([sql]) => (sql as string).includes('INSERT OR IGNORE INTO monitor_credential_seen'))
+    expect(seenInsertCall).toBeDefined()
+    const lastTriggeredCall = mockDbRun.mock.calls.find(([sql]) => (sql as string).includes('UPDATE domain_monitors SET last_triggered_at'))
+    expect(lastTriggeredCall).toBeDefined()
+    // No webhook to deliver to, so no alert row (webhook_id is NOT NULL + FK).
+    const insertAlertCall = mockDbRun.mock.calls.find(([sql]) => (sql as string).includes('INSERT INTO monitor_alerts'))
+    expect(insertAlertCall).toBeUndefined()
+  })
+})

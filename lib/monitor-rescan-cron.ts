@@ -15,8 +15,7 @@ import { dbQuery, dbRun } from '@/lib/sqlite'
 import { executeQuery as executeClickHouseQuery } from '@/lib/clickhouse'
 import { NORM_DOMAIN_EXPR } from '@/lib/ulp-normalize'
 import { attemptDelivery, enqueueFailedDelivery, runWebhookOutboxTick } from '@/lib/webhook-outbox-worker'
-import { matchModeToMatchType, matchConditionSQL, type MatchMode } from '@/lib/domain-match'
-import crypto from 'crypto'
+import { matchModeToMatchType, matchConditionSQL, credentialFingerprint, type MatchMode } from '@/lib/domain-match'
 
 const TICK_MS = 15 * 60 * 1000  // 15 minutes
 
@@ -29,18 +28,6 @@ export function startMonitorRescanCron(): void {
   // First tick after 30s (let server warm up)
   setTimeout(() => { runTick().catch(console.error) }, 30_000)
   setInterval(() => { runTick().catch(console.error) }, TICK_MS)
-}
-
-// ─── Fingerprinting (mirrors lib/domain-monitor.ts) ─────────────────────────
-
-function credentialFingerprint(email: string, password: string, domain: string): string {
-  return crypto.createHash('sha256')
-    .update(email).update('\0')
-    .update(password).update('\0')
-    .update(domain)
-    .digest()
-    .slice(0, 8)
-    .toString('hex')
 }
 
 // ─── Tick ────────────────────────────────────────────────────────────────────
@@ -154,6 +141,17 @@ export async function runTick(): Promise<void> {
         [monitorRow.id]
       ) as WebhookRow[]
 
+      // Record seen fingerprints regardless of webhook count — see
+      // lib/domain-monitor.ts's mirrored comment for why a webhook-less
+      // monitor still needs its matches recorded.
+      for (const row of unseenRows) {
+        const fp = credentialFingerprint(row.email, row.password, row.domain)
+        dbRun(
+          'INSERT OR IGNORE INTO monitor_credential_seen (monitor_id, fingerprint) VALUES (?, ?)',
+          [monitorRow.id, fp]
+        )
+      }
+
       if (webhookRows.length === 0) {
         // Still update last_triggered_at so we don't hammer ClickHouse
         dbRun(`UPDATE domain_monitors SET last_triggered_at = datetime('now') WHERE id = ?`, [monitorRow.id])
@@ -195,15 +193,6 @@ export async function runTick(): Promise<void> {
             console.error(`[monitor-rescan] webhook delivery failed (queued for retry): ${result.error}`)
           }
         }
-      }
-
-      // Record seen fingerprints (dedup mode) or after re-clear (digest mode)
-      for (const row of unseenRows) {
-        const fp = credentialFingerprint(row.email, row.password, row.domain)
-        dbRun(
-          'INSERT OR IGNORE INTO monitor_credential_seen (monitor_id, fingerprint) VALUES (?, ?)',
-          [monitorRow.id, fp]
-        )
       }
 
       dbRun(

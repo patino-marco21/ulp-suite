@@ -16,6 +16,25 @@
  */
 
 import { NORM_DOMAIN_EXPR, NORM_EMAIL_EXPR } from '@/lib/ulp-normalize'
+import crypto from 'crypto'
+
+/**
+ * Compute a 64-bit hex fingerprint for a credential triple (email, password, domain).
+ * Uses 8 bytes (16 hex chars) of SHA-256 — collision probability negligible even at
+ * billions of stored fingerprints (birthday bound ~2^32 with 4 bytes was dangerously low).
+ * Shared by the upload-triggered check, the scheduled rescan, and the live-matches
+ * endpoint's new-since-last-viewed comparison — all three need the exact same
+ * fingerprint for a given (email, password, domain) to agree on monitor_credential_seen.
+ */
+export function credentialFingerprint(email: string, password: string, domain: string): string {
+  return crypto.createHash('sha256')
+    .update(email).update('\0')
+    .update(password).update('\0')
+    .update(domain)
+    .digest()
+    .slice(0, 8)
+    .toString('hex')
+}
 
 export type MatchMode = 'credential' | 'url' | 'both'
 
