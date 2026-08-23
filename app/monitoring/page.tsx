@@ -15,9 +15,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import {
-  Radio, Webhook, Bell, Plus, Trash2, RefreshCw, Eye,
+  Radio, Webhook, Bell, Plus, Trash2, RefreshCw, Eye, Search,
   CheckCircle2, XCircle, AlertCircle, Globe, Send, Pencil,
-  Activity, Shield
+  Activity, Shield, Loader2
 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 
@@ -92,6 +92,12 @@ export default function MonitoringPage() {
   const [monitorsLoading, setMonitorsLoading] = useState(true)
   const [showMonitorDialog, setShowMonitorDialog] = useState(false)
   const [editingMonitor, setEditingMonitor] = useState<DomainMonitor | null>(null)
+
+  // Live matches ("saved search") state
+  const [matchesMonitor, setMatchesMonitor] = useState<DomainMonitor | null>(null)
+  const [matches, setMatches] = useState<{ url: string; email: string; password: string; domain: string }[]>([])
+  const [matchesLoading, setMatchesLoading] = useState(false)
+  const [matchesLimited, setMatchesLimited] = useState(false)
   const [monitorForm, setMonitorForm] = useState({
     name: "",
     domains: "",
@@ -206,6 +212,27 @@ export default function MonitoringPage() {
   }, [authLoading, user, fetchStats, fetchMonitors, fetchWebhooks, fetchAlerts])
 
   // ===================== MONITOR HANDLERS =====================
+
+  const openMatches = async (monitor: DomainMonitor) => {
+    setMatchesMonitor(monitor)
+    setMatchesLoading(true)
+    setMatches([])
+    setMatchesLimited(false)
+    try {
+      const res = await fetch(`/api/monitoring/monitors/${monitor.id}/matches`)
+      const data = await res.json()
+      if (data.success) {
+        setMatches(data.results || [])
+        setMatchesLimited(Boolean(data.limited))
+      } else {
+        toast({ title: "Failed to load matches", description: data.error, variant: "destructive" })
+      }
+    } catch {
+      toast({ title: "Failed to load matches", variant: "destructive" })
+    } finally {
+      setMatchesLoading(false)
+    }
+  }
 
   const openCreateMonitorDialog = () => {
     setEditingMonitor(null)
@@ -635,20 +662,26 @@ export default function MonitoringPage() {
                           {monitor.match_mode === "both" ? "Email + URL" : monitor.match_mode === "credential" ? "Email Only" : "URL Only"}
                         </Badge>
                       </div>
-                      {userIsAdmin && (
-                        <div className="flex items-center gap-2">
-                          <Switch
-                            checked={monitor.is_active}
-                            onCheckedChange={() => handleToggleMonitor(monitor)}
-                          />
-                          <Button variant="ghost" size="icon" onClick={() => openEditMonitorDialog(monitor)}>
-                            <Pencil className="h-4 w-4" />
-                          </Button>
-                          <Button variant="ghost" size="icon" onClick={() => handleDeleteMonitor(monitor)} className="text-destructive hover:text-destructive">
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      )}
+                      <div className="flex items-center gap-2">
+                        <Button variant="outline" size="sm" onClick={() => openMatches(monitor)}>
+                          <Search className="h-4 w-4 mr-1.5" />
+                          View Matches
+                        </Button>
+                        {userIsAdmin && (
+                          <div className="flex items-center gap-2">
+                            <Switch
+                              checked={monitor.is_active}
+                              onCheckedChange={() => handleToggleMonitor(monitor)}
+                            />
+                            <Button variant="ghost" size="icon" onClick={() => openEditMonitorDialog(monitor)}>
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                            <Button variant="ghost" size="icon" onClick={() => handleDeleteMonitor(monitor)} className="text-destructive hover:text-destructive">
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </CardHeader>
                   <CardContent>
@@ -1137,6 +1170,50 @@ export default function MonitoringPage() {
               {editingWebhook ? "Update" : "Create"} Webhook
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={matchesMonitor !== null} onOpenChange={open => !open && setMatchesMonitor(null)}>
+        <DialogContent className="max-w-4xl max-h-[80vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Matches — {matchesMonitor?.name}</DialogTitle>
+            <DialogDescription>
+              Credentials currently matching this monitor&apos;s domains, queried live.
+              {matchesLimited && ` Showing first ${matches.length} — more may exist.`}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 overflow-auto">
+            {matchesLoading ? (
+              <div className="flex h-32 items-center justify-center">
+                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+              </div>
+            ) : matches.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-8 text-center">No current matches.</p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-background border-b">
+                  <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
+                    <th className="px-3 py-2 font-medium">URL</th>
+                    <th className="px-3 py-2 font-medium">Email</th>
+                    <th className="px-3 py-2 font-medium">Password</th>
+                    <th className="px-3 py-2 font-medium">Domain</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {matches.map((m, i) => (
+                    <tr key={i} className="border-b hover:bg-muted/40">
+                      <td className="max-w-xs truncate px-3 py-2 font-mono text-xs text-muted-foreground" title={m.url}>{m.url}</td>
+                      <td className="max-w-xs truncate px-3 py-2 font-mono text-xs" title={m.email}>{m.email}</td>
+                      <td className="max-w-xs truncate px-3 py-2 font-mono text-xs font-medium" title={m.password}>{m.password}</td>
+                      <td className="px-3 py-2">
+                        <Badge variant="outline" className="text-xs font-normal">{m.domain}</Badge>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
         </DialogContent>
       </Dialog>
 
