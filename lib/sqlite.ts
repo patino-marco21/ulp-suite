@@ -157,6 +157,20 @@ function initSchema(db: Database.Database): void {
       PRIMARY KEY (monitor_id, fingerprint)
     );
 
+    -- Per-admin "last looked at this monitor's matches" cursor. Compared
+    -- against monitor_credential_seen.seen_at to flag which matches are new
+    -- since a given admin's last view. Deliberately keyed per (monitor_id,
+    -- user_id) rather than a single column on domain_monitors — unread state
+    -- is per-admin, not shared.
+    CREATE TABLE IF NOT EXISTS monitor_views (
+      monitor_id     INTEGER NOT NULL,
+      user_id        INTEGER NOT NULL,
+      last_viewed_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (monitor_id, user_id),
+      FOREIGN KEY (monitor_id) REFERENCES domain_monitors(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
     -- Named data breach catalog (HIBP-compatible schema).
     -- Populated via HIBP sync or manually created for non-HIBP sources.
     CREATE TABLE IF NOT EXISTS breaches (

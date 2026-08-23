@@ -23,7 +23,7 @@ vi.mock('@/lib/webhook-outbox-worker', () => ({
   enqueueFailedDelivery: vi.fn(),
 }))
 
-import { fireMonitorAlertsFromMatches, type DomainMonitor } from '@/lib/domain-monitor'
+import { fireMonitorAlertsFromMatches, getLastViewedAt, recordMonitorViewed, type DomainMonitor } from '@/lib/domain-monitor'
 import { dbQuery, dbGet, dbRun } from '@/lib/sqlite'
 import { attemptDelivery } from '@/lib/webhook-outbox-worker'
 import type { MatchedCredential } from '@/lib/domain-match'
@@ -169,5 +169,28 @@ describe('fireMonitorAlertsFromMatches', () => {
       password: MATCH.password,
       domain: MATCH.domain,
     })
+  })
+})
+
+describe('getLastViewedAt / recordMonitorViewed', () => {
+  test('returns null when the user has never viewed the monitor', async () => {
+    mockDbGet.mockReturnValueOnce(undefined)
+    const result = await getLastViewedAt(1, 7)
+    expect(result).toBeNull()
+  })
+
+  test('returns the stored timestamp when present', async () => {
+    mockDbGet.mockReturnValueOnce({ last_viewed_at: '2026-08-20 10:00:00' })
+    const result = await getLastViewedAt(1, 7)
+    expect(result).toBe('2026-08-20 10:00:00')
+  })
+
+  test('recordMonitorViewed upserts keyed on (monitor_id, user_id)', async () => {
+    await recordMonitorViewed(1, 7)
+    expect(mockDbRun).toHaveBeenCalledOnce()
+    const [sql, params] = mockDbRun.mock.calls[0] as [string, unknown[]]
+    expect(sql).toContain('INSERT INTO monitor_views')
+    expect(sql).toContain('ON CONFLICT(monitor_id, user_id) DO UPDATE')
+    expect(params).toEqual([1, 7])
   })
 })

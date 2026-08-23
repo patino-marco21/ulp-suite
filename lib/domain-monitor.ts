@@ -474,3 +474,22 @@ export async function testWebhook(webhookId: number): Promise<{ success: boolean
     return { success: false, error: err instanceof Error ? err.message : String(err) }
   }
 }
+
+// ─── Per-admin view tracking ─────────────────────────────────────────────────────
+
+export async function getLastViewedAt(monitorId: number, userId: number): Promise<string | null> {
+  const row = dbGet(
+    `SELECT last_viewed_at FROM monitor_views WHERE monitor_id = ? AND user_id = ?`,
+    [monitorId, userId]
+  ) as { last_viewed_at: string } | undefined
+  return row?.last_viewed_at ?? null
+}
+
+export async function recordMonitorViewed(monitorId: number, userId: number): Promise<void> {
+  dbRun(
+    `INSERT INTO monitor_views (monitor_id, user_id, last_viewed_at)
+     VALUES (?, ?, datetime('now'))
+     ON CONFLICT(monitor_id, user_id) DO UPDATE SET last_viewed_at = datetime('now')`,
+    [monitorId, userId]
+  )
+}
