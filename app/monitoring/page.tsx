@@ -95,9 +95,10 @@ export default function MonitoringPage() {
 
   // Live matches ("saved search") state
   const [matchesMonitor, setMatchesMonitor] = useState<DomainMonitor | null>(null)
-  const [matches, setMatches] = useState<{ url: string; email: string; password: string; domain: string }[]>([])
+  const [matches, setMatches] = useState<{ url: string; email: string; password: string; domain: string; is_new: boolean }[]>([])
   const [matchesLoading, setMatchesLoading] = useState(false)
   const [matchesLimited, setMatchesLimited] = useState(false)
+  const [matchesNewCount, setMatchesNewCount] = useState(0)
   const [monitorForm, setMonitorForm] = useState({
     name: "",
     domains: "",
@@ -218,12 +219,14 @@ export default function MonitoringPage() {
     setMatchesLoading(true)
     setMatches([])
     setMatchesLimited(false)
+    setMatchesNewCount(0)
     try {
       const res = await fetch(`/api/monitoring/monitors/${monitor.id}/matches`)
       const data = await res.json()
       if (data.success) {
         setMatches(data.results || [])
         setMatchesLimited(Boolean(data.limited))
+        setMatchesNewCount(data.new_count || 0)
       } else {
         toast({ title: "Failed to load matches", description: data.error, variant: "destructive" })
       }
@@ -1179,6 +1182,7 @@ export default function MonitoringPage() {
             <DialogTitle>Matches — {matchesMonitor?.name}</DialogTitle>
             <DialogDescription>
               Credentials currently matching this monitor&apos;s domains, queried live.
+              {matchesNewCount > 0 && ` ${matchesNewCount} new since your last view.`}
               {matchesLimited && ` Showing first ${matches.length} — more may exist.`}
             </DialogDescription>
           </DialogHeader>
@@ -1207,6 +1211,9 @@ export default function MonitoringPage() {
                       <td className="max-w-xs truncate px-3 py-2 font-mono text-xs font-medium" title={m.password}>{m.password}</td>
                       <td className="px-3 py-2">
                         <Badge variant="outline" className="text-xs font-normal">{m.domain}</Badge>
+                        {m.is_new && (
+                          <Badge className="text-xs font-normal ml-1.5 bg-primary/10 text-primary border-primary/20">NEW</Badge>
+                        )}
                       </td>
                     </tr>
                   ))}

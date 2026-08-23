@@ -27,4 +27,21 @@ describe('monitor matches route — bounded unordered snapshot (MEMORY_LIMIT_EXC
     expect(getFn).toContain('validateRequest(request)')
     expect(getFn).not.toContain('requireAdminRole')
   })
+
+  test('computes is_new against the per-admin last-viewed cursor, and records the new view', () => {
+    expect(source).toContain('getLastViewedAt(monitorId, userId)')
+    expect(source).toContain('credentialFingerprint(row.email, row.password, row.domain)')
+    expect(source).toContain('recordMonitorViewed(monitorId, userId)')
+  })
+
+  test('reads the previous last-viewed cursor before advancing it', () => {
+    // Must read the OLD cursor (to compute is_new against) before calling
+    // recordMonitorViewed (which advances it to now) — reversing this order
+    // would make every match look "new" forever, since the cursor would
+    // already be current by the time is_new is computed.
+    const getViewedIdx = source.indexOf('getLastViewedAt(monitorId, userId)')
+    const recordViewedIdx = source.indexOf('recordMonitorViewed(monitorId, userId)')
+    expect(getViewedIdx).toBeGreaterThan(-1)
+    expect(recordViewedIdx).toBeGreaterThan(getViewedIdx)
+  })
 })
