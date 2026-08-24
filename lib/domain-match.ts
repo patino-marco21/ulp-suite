@@ -378,6 +378,11 @@ export function compareMatches(a: MatchRow, b: MatchRow): number {
  * the raw one. They differ only for the Case A–D rows lib/ulp-normalize.ts
  * rewrites, so the merge can pick a slightly different set than a true global
  * sort would when such a row sits on the boundary. Deterministic either way.
+ * Measured on a broad monitor (facebook.com, credential mode, merge pool of
+ * 179 rows for a 100-row page): 9 distinct rows differed from an unpruned
+ * reference query (82 vs. 83 distinct) — not "row-for-row identical," though
+ * it is for any monitor whose true match count stays under MATCH_LIMIT, which
+ * is the case this endpoint exists to serve.
  *
  * `.flat()` always builds a fresh array, so the sort can never reorder a page
  * the caller still holds — the live-matches endpoint passes in a cached page

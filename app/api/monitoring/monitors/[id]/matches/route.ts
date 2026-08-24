@@ -172,6 +172,14 @@ interface CandidateResolution {
    * it (see the buildCandidateValueBranches call in GET) so the two never
    * return the same row. It is also CACHED, so nothing downstream may sort or
    * otherwise mutate it in place; mergeMatchPages copies before sorting.
+   *
+   * Sole ownership means sole freshness path too: a newly imported row in this
+   * bucket (credential/both mode) now only becomes visible once this cache
+   * entry expires (CANDIDATE_TTL_MS below), not on the next request the way
+   * phase 2's fresh-every-request branches do. Up to that lag, it can combine
+   * with the known recordMonitorViewed limitation (see GET below) to render
+   * without a "new" badge on first real appearance — the row still shows, only
+   * the badge is affected.
    */
   legacyRows: MatchRow[]
   /** True when a value set hit CANDIDATE_LIMIT — use the fallback plan instead. */
