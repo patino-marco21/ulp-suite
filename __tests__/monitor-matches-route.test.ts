@@ -78,6 +78,24 @@ describe('monitor matches route — two-phase query plan', () => {
     expect(source).toContain(`timeout_overflow_mode = 'throw'`)
   })
 
+  test('the phases can never together outlast the route budget', () => {
+    // Phase 1 runs, THEN phase 2 or the fallback. If their caps can sum past
+    // maxDuration the platform kills the request first and the client gets a
+    // generic gateway error instead of the specific timeout response below —
+    // which would defeat timeout_overflow_mode = 'throw' and put the dialog
+    // back in the "failure indistinguishable from no matches" state this pass
+    // exists to fix.
+    const num = (name: string) => {
+      const m = source.match(new RegExp(`${name}\\s*=\\s*(\\d+)`))
+      expect(m, `${name} not found`).toBeTruthy()
+      return Number(m![1])
+    }
+    const budget = num('maxDuration')
+    const phase1 = num('PHASE1_MAX_EXECUTION_TIME')
+    const worstSecondPhase = Math.max(num('PHASE2_MAX_EXECUTION_TIME'), num('FALLBACK_MAX_EXECUTION_TIME'))
+    expect(phase1 + worstSecondPhase).toBeLessThan(budget)
+  })
+
   test('phase 2 ANDs the exact match condition on top of every candidate branch', () => {
     // The IN-lists are pruning accelerators built from raw column values, so
     // they may be over-inclusive; only the shared builder's condition decides

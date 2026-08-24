@@ -93,8 +93,16 @@ const PHASE1_MAX_EXECUTION_TIME = 45
  */
 const PHASE2_MAX_EXECUTION_TIME = 30
 
-/** Fallback plan for monitors too broad to enumerate; measured 0.61–4.81 s. */
-const FALLBACK_MAX_EXECUTION_TIME = 60
+/**
+ * Fallback plan for monitors too broad to enumerate; measured 0.61–4.81 s.
+ *
+ * The phases run in sequence, so their caps have to SUM to less than
+ * maxDuration — otherwise the platform kills the request first and the client
+ * gets a generic gateway error instead of the specific timeout response below,
+ * which is the whole point of timeout_overflow_mode = 'throw'. 45 + 30 = 75
+ * against a 90 s budget; at 60 s here the worst case was 105 s.
+ */
+const FALLBACK_MAX_EXECUTION_TIME = 30
 
 /**
  * The ONE sort key every plan here uses: EXACTLY ulp.credentials' primary-key
