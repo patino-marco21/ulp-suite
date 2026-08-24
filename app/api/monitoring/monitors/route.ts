@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { validateRequest, requireAdminRole } from "@/lib/auth"
-import { createMonitor, listMonitors } from "@/lib/domain-monitor"
+import { createMonitor, listMonitors, attachLastViewedAt } from "@/lib/domain-monitor"
 
 export const dynamic = 'force-dynamic'
 
@@ -21,10 +21,11 @@ export async function GET(request: NextRequest) {
     const offset = parseInt(searchParams.get("offset") || "0")
 
     const result = await listMonitors({ activeOnly, limit, offset })
+    const monitorsWithLastViewed = await attachLastViewedAt(result.monitors, parseInt(user.userId))
 
     return NextResponse.json({
       success: true,
-      data: result.monitors,
+      data: monitorsWithLastViewed,
       total: result.total,
     })
   } catch (error) {

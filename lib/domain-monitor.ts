@@ -494,6 +494,18 @@ export async function recordMonitorViewed(monitorId: number, userId: number): Pr
   )
 }
 
+export async function attachLastViewedAt<T extends { id: number }>(
+  monitors: T[],
+  userId: number
+): Promise<Array<T & { last_viewed_at: string | null }>> {
+  return Promise.all(
+    monitors.map(async monitor => ({
+      ...monitor,
+      last_viewed_at: await getLastViewedAt(monitor.id, userId),
+    }))
+  )
+}
+
 /**
  * Flag which of `rows` are new since this admin last viewed the monitor.
  *
