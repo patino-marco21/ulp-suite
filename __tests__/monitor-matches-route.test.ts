@@ -23,10 +23,11 @@ describe('monitor matches route — two-phase query plan', () => {
     expect(source).toContain(`const MATCH_ORDER_BY = 'domain, email'`)
     // Display order is still fully pinned — in-process, where sorting 100 rows
     // on all four fields is free — so dropping the SQL tiebreak costs no
-    // determinism. Both plans re-sort.
+    // determinism. Both plans re-sort: the fallback directly, the pruned plan
+    // inside mergeMatchPages. The four-field tiebreak itself is covered
+    // behaviorally in __tests__/domain-match.test.ts.
     expect(source).toContain('page.sort(compareMatches)')
-    expect(source).toContain('a.url.localeCompare(b.url)')
-    expect(source).toContain('a.password.localeCompare(b.password)')
+    expect(source).toContain('mergeMatchPages(')
   })
 
   test('the only ORDER BY is the single primary-key-led constant', () => {
@@ -108,16 +109,27 @@ describe('monitor matches route — two-phase query plan', () => {
     // `domain IN (...) OR email_domain IN (...)` is prunable by neither the
     // primary key nor either bloom filter. Measured on a 'both'-mode monitor:
     // 5.65 s ORed vs 0.25 s split.
-    expect(source).toContain('buildCandidateValueBranches(candidates.columns)')
-    expect(source).toContain('mergeMatchPages([...pages, candidates.legacyRows])')
-    expect(source).toContain('nonEmpty.flat().sort(compareMatches).slice(0, MATCH_LIMIT)')
+    expect(source).toContain('buildCandidateValueBranches(candidates.columns, NORMALIZED_LEGACY_DOMAINS)')
+    expect(source).toContain('mergeMatchPages([...pages, candidates.legacyRows], MATCH_LIMIT)')
   })
 
   test('keeps the legacy-normalization bucket out of phase 2 entirely', () => {
     // Folding '' into phase 2's IN-list drags all 21.3M domain-less rows into
     // every request (measured 8.2 s per view). Phase 1 resolves those matches
     // as rows once per cache entry instead, and phase 2 must not re-read them.
+    //
+    // Both halves are load-bearing and neither replaces the other. Filtering
+    // the resolved values keeps the IN-lists small, but only covers the
+    // `domain` branch. The `email_domain` branch reaches those same rows
+    // WITHOUT their raw `domain` ever appearing in an IN-list — they carry a
+    // real email_domain despite a blank/scheme-only domain — so the branch's
+    // own `domain NOT IN` is what actually keeps the two pages disjoint.
+    // Measured before that exclusion existed: example.com in `both` mode
+    // returned 100 rows carrying 42 distinct ones, with every row the `domain`
+    // branch found evicted by the duplicates. The merged-page behavior is
+    // covered in __tests__/domain-match.test.ts.
     expect(source).toContain('entry.values.filter(v => !NORMALIZED_LEGACY_DOMAINS.includes(v))')
+    expect(source).toContain('buildCandidateValueBranches(candidates.columns, NORMALIZED_LEGACY_DOMAINS)')
     expect(source).toMatch(/legacyRows/)
   })
 

@@ -6,8 +6,11 @@ import {
   buildDomainSetWhereClause,
   buildCandidateColumnWhereClause,
   buildCandidateValueBranches,
+  compareMatches,
+  mergeMatchPages,
   type CandidateColumn,
   type MatchMode,
+  type MatchRow,
 } from "@/lib/domain-match"
 import { NORM_DOMAIN_EXPR } from "@/lib/ulp-normalize"
 import { checkLimit, getClientIP } from "@/lib/rate-limiter"
@@ -150,13 +153,6 @@ const MATCH_ORDER_BY = 'domain, email'
  */
 const NORMALIZED_LEGACY_DOMAINS = ['', 'http', 'https']
 
-interface MatchRow {
-  url: string
-  email: string
-  password: string
-  domain: string
-}
-
 interface CandidateResolution {
   /**
    * Exact column values phase 2 may restrict to. Ordered most-selective
@@ -171,6 +167,11 @@ interface CandidateResolution {
    * measured 8.2 s per view on a monitor that has such a match, versus 0.2 s
    * once they are resolved here and phase 2 skips that bucket entirely.
    * They age with the cache entry like everything else phase 1 resolves.
+   *
+   * This page is the SOLE owner of that bucket — every phase-2 branch excludes
+   * it (see the buildCandidateValueBranches call in GET) so the two never
+   * return the same row. It is also CACHED, so nothing downstream may sort or
+   * otherwise mutate it in place; mergeMatchPages copies before sorting.
    */
   legacyRows: MatchRow[]
   /** True when a value set hit CANDIDATE_LIMIT — use the fallback plan instead. */
@@ -241,7 +242,11 @@ async function resolveCandidates(mode: MatchMode, domains: string[]): Promise<Ca
   for (const entry of scanResults) {
     if (entry.values.length > CANDIDATE_LIMIT) overflowed = true
     // Phase 2 must never re-read the legacy bucket: legacyRows already covers
-    // it, and pulling it back into the IN-list is the 8.2 s regression.
+    // it, so re-reading it is both the 8.2 s regression AND a duplicate row.
+    // Dropping the values here keeps the IN-list small; the branch's own
+    // `domain NOT IN` is what actually guarantees the two pages stay disjoint,
+    // since an email_domain branch can reach those rows without their raw
+    // `domain` ever appearing in any IN-list.
     entry.values = entry.values.filter(v => !NORMALIZED_LEGACY_DOMAINS.includes(v))
   }
 
@@ -302,54 +307,6 @@ function selectMatches(
 }
 
 /**
- * Full-tiebreak display order. Deliberately finer than MATCH_ORDER_BY, which
- * stops at the primary-key prefix ClickHouse can sort for free: applying this
- * to the returned page pins the order completely without asking the database
- * to sort on (url, password) across a broad candidate set.
- */
-function compareMatches(a: MatchRow, b: MatchRow): number {
-  return (
-    a.domain.localeCompare(b.domain) ||
-    a.email.localeCompare(b.email) ||
-    a.url.localeCompare(b.url) ||
-    a.password.localeCompare(b.password)
-  )
-}
-
-/**
- * Merge the per-branch pages back into one ordered page.
- *
- * Each page is its own top-MATCH_LIMIT in the shared sort order and the pages
- * cover disjoint row sets, so merging them and keeping the first MATCH_LIMIT
- * yields the same page a single combined query would — if a row is in the
- * global top-MATCH_LIMIT then fewer than MATCH_LIMIT rows sort before it, so
- * it is also within its own page's top-MATCH_LIMIT.
- *
- * Two things make the merge order finer than the query order, so the merged
- * page can differ from a true global sort for rows sitting exactly on the
- * MATCH_LIMIT boundary. Both are bounded and deterministic, which is all the
- * is_new badge requires, and neither is reachable by a monitor small enough to
- * return under MATCH_LIMIT rows in the first place.
- *
- * First, compareMatches breaks ties on (url, password) while MATCH_ORDER_BY
- * stops at (domain, email) — deliberately, since asking ClickHouse for that
- * tiebreak costs 14.88 s against 1.25 s on a broad candidate set. So when a
- * single (domain, email) group straddles the LIMIT, WHICH of its rows the
- * database returned is not pinned.
- *
- * Second, the merge compares the NORMALIZED domain while the queries sorted on
- * the raw one. They differ only for the Case A–D rows lib/ulp-normalize.ts rewrites,
- * so the merge can pick a slightly different set than a true global sort would
- * when such a row sits on the boundary. Deterministic either way, which is what
- * the is_new badge needs.
- */
-function mergeMatchPages(pages: MatchRow[][]): MatchRow[] {
-  const nonEmpty = pages.filter(page => page.length > 0)
-  if (nonEmpty.length <= 1) return nonEmpty[0] ?? []
-  return nonEmpty.flat().sort(compareMatches).slice(0, MATCH_LIMIT)
-}
-
-/**
  * GET /api/monitoring/monitors/[id]/matches
  * Live saved-search: up to MATCH_LIMIT credentials currently matching this
  * monitor's domains, queried directly against ClickHouse. Independent of
@@ -403,7 +360,12 @@ export async function GET(
   try {
     const candidates = await getCandidates(monitor.match_mode, domains)
     const { clause, params: domainParams } = buildDomainSetWhereClause(domains, monitor.match_mode)
-    const candidateBranches = buildCandidateValueBranches(candidates.columns)
+    // NORMALIZED_LEGACY_DOMAINS belongs to candidates.legacyRows and to nothing
+    // else. Without the exclusion the email_domain branch re-reads that bucket —
+    // its rows carry a real email_domain even though their `domain` is blank or
+    // scheme-only — and mergeMatchPages, which does not deduplicate, pads the
+    // page with duplicates that evict distinct matches.
+    const candidateBranches = buildCandidateValueBranches(candidates.columns, NORMALIZED_LEGACY_DOMAINS)
 
     let rows: MatchRow[]
     if (candidates.overflowed) {
@@ -422,7 +384,7 @@ export async function GET(
           PHASE2_MAX_EXECUTION_TIME,
         ))
       )
-      rows = mergeMatchPages([...pages, candidates.legacyRows])
+      rows = mergeMatchPages([...pages, candidates.legacyRows], MATCH_LIMIT)
     }
 
     const results = await markMatchesNewSinceLastView(monitorId, userId, rows)

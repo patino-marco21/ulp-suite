@@ -273,6 +273,20 @@ export interface CandidateBranch {
  * form would produce, not a doubled one. `columns` order is therefore
  * significant: put the most selective column first.
  *
+ * `excludedDomains` extends that same disjointness to rows the caller resolves
+ * by some OTHER means and merges in separately — for the live-matches endpoint,
+ * the `domain IN ('', 'http', 'https')` bucket whose matches phase 1 fetches as
+ * rows because normalization can rewrite them into a different domain entirely.
+ * Without it that bucket belongs to two pages at once: an `email_domain` branch
+ * happily returns the very rows the caller already holds (those rows carry a
+ * real `email_domain` even though their `domain` is blank or scheme-only), and
+ * mergeMatchPages — which assumes its pages are disjoint — pads the result with
+ * duplicates that evict genuinely distinct matches. Measured on real data:
+ * `example.com` in `both` mode merged 100 rows carrying just 42 distinct ones,
+ * with every row the `domain` branch found evicted. Excluding the bucket in SQL
+ * is prunable on the primary key's leading column, so it also stops phase 2
+ * from reading the large `domain = ''` range at all.
+ *
  * These are pruning accelerators only. The caller still ANDs the real
  * buildDomainSetWhereClause condition onto every branch, so an over-inclusive
  * value set costs time but can never return a wrong row.
@@ -283,6 +297,7 @@ export interface CandidateBranch {
  */
 export function buildCandidateValueBranches(
   columns: Array<{ column: CandidateColumn; values: string[] }>,
+  excludedDomains: string[] = [],
 ): CandidateBranch[] {
   const present = columns.filter(c => c.values.length > 0)
   return present.map(({ column, values }, i) => {
@@ -293,6 +308,81 @@ export function buildCandidateValueBranches(
       params[priorParam] = prior.values
       return ` AND NOT ${prior.column} IN {${priorParam}:Array(String)}`
     })
+    if (excludedDomains.length > 0) {
+      params.excludedDomains = excludedDomains
+      exclusions.push(` AND domain NOT IN {excludedDomains:Array(String)}`)
+    }
     return { clause: `${column} IN {${param}:Array(String)}${exclusions.join('')}`, params }
   })
+}
+
+// ─── Bounded match pages ───────────────────────────────────────────────────
+
+/**
+ * One credential as the live-matches endpoint returns it: raw columns plus the
+ * normalized domain lib/ulp-normalize.ts derives (see NORM_DOMAIN_EXPR), which
+ * is what the reader actually sees and what credentialFingerprint hashes.
+ */
+export interface MatchRow {
+  url: string
+  email: string
+  password: string
+  domain: string
+}
+
+/**
+ * Full-tiebreak display order for a match page.
+ *
+ * Deliberately finer than the ClickHouse-side sort, which stops at the
+ * primary-key prefix `(domain, email)` because that is the only sort the table
+ * can give away for free — asking it for the `(url, password)` tiebreak too
+ * measured 14.88 s against 1.25 s on a broad candidate set. Applying the finer
+ * order to the already-bounded page pins display order completely at no cost.
+ */
+export function compareMatches(a: MatchRow, b: MatchRow): number {
+  return (
+    a.domain.localeCompare(b.domain) ||
+    a.email.localeCompare(b.email) ||
+    a.url.localeCompare(b.url) ||
+    a.password.localeCompare(b.password)
+  )
+}
+
+/**
+ * Merge per-branch pages back into one ordered page of at most `limit` rows.
+ *
+ * PRECONDITION: the pages cover DISJOINT row sets. Nothing here deduplicates,
+ * and the argument below is only valid while that holds — overlapping pages
+ * silently pad the result with duplicates that evict distinct matches. The
+ * caller owns that invariant; for the live-matches endpoint it is
+ * buildCandidateValueBranches' `excludedDomains` that enforces it.
+ *
+ * Given disjoint pages, each its own top-`limit` in the shared sort order,
+ * merging them and keeping the first `limit` yields the same page a single
+ * combined query would: if a row is in the global top-`limit` then fewer than
+ * `limit` rows sort before it, so it is also within its own page's top-`limit`.
+ *
+ * Two things make the merge order finer than the query order, so the merged
+ * page can differ from a true global sort for rows sitting exactly on the
+ * boundary. Both are bounded and deterministic, which is all the is_new badge
+ * requires, and neither is reachable by a monitor small enough to return under
+ * `limit` rows in the first place.
+ *
+ * First, compareMatches breaks ties on (url, password) while the query's sort
+ * stops at (domain, email) — deliberately, since asking ClickHouse for that
+ * tiebreak costs 14.88 s against 1.25 s on a broad candidate set. So when a
+ * single (domain, email) group straddles the limit, WHICH of its rows the
+ * database returned is not pinned.
+ *
+ * Second, the merge compares the NORMALIZED domain while the queries sorted on
+ * the raw one. They differ only for the Case A–D rows lib/ulp-normalize.ts
+ * rewrites, so the merge can pick a slightly different set than a true global
+ * sort would when such a row sits on the boundary. Deterministic either way.
+ *
+ * `.flat()` always builds a fresh array, so the sort can never reorder a page
+ * the caller still holds — the live-matches endpoint passes in a cached page
+ * that gets served again on the next request inside the cache TTL.
+ */
+export function mergeMatchPages(pages: MatchRow[][], limit: number): MatchRow[] {
+  return pages.flat().sort(compareMatches).slice(0, limit)
 }
