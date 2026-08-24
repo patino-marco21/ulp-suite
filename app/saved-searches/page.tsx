@@ -146,7 +146,7 @@ export default function SavedSearchesPage() {
         limited={matchesLimited}
         newCount={matchesNewCount}
         error={matchesError}
-        onClose={closeMatches}
+        onClose={() => { closeMatches(); fetchSearches() }}
       />
     </main>
   )
