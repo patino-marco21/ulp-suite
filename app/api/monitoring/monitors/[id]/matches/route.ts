@@ -352,20 +352,20 @@ export async function GET(
     return NextResponse.json({ success: false, error: "Invalid monitor ID" }, { status: 400 })
   }
 
-  const monitor = await getMonitor(monitorId)
-  if (!monitor) {
-    return NextResponse.json({ success: false, error: "Monitor not found" }, { status: 404 })
-  }
-
-  // A blank entry would build `domain = ''`, matching every domain-less row.
-  const domains = monitor.domains.map(d => d.toLowerCase().trim()).filter(Boolean)
-  if (domains.length === 0) {
-    return NextResponse.json({ success: true, results: [], total_shown: 0, new_count: 0, limited: false })
-  }
-
   const userId = parseInt(user.userId)
 
   try {
+    const monitor = await getMonitor(monitorId)
+    if (!monitor) {
+      return NextResponse.json({ success: false, error: "Monitor not found" }, { status: 404 })
+    }
+
+    // A blank entry would build `domain = ''`, matching every domain-less row.
+    const domains = monitor.domains.map(d => d.toLowerCase().trim()).filter(Boolean)
+    if (domains.length === 0) {
+      return NextResponse.json({ success: true, results: [], total_shown: 0, new_count: 0, limited: false })
+    }
+
     const candidates = await getCandidates(monitor.match_mode, domains)
     const { clause, params: domainParams } = buildDomainSetWhereClause(domains, monitor.match_mode)
     // NORMALIZED_LEGACY_DOMAINS belongs to candidates.legacyRows and to nothing
@@ -406,7 +406,16 @@ export async function GET(
     // time cursor with a row-level monitor_credential_shown(monitor_id,
     // user_id, fingerprint) ledger — a data-model change deliberately out of
     // scope here.
-    await recordMonitorViewed(monitorId, userId)
+    //
+    // Best-effort: `results` above is already computed and correct, so a
+    // failure here must not cost the admin the query they just waited on.
+    // Worst case the is_new badge is stale on the next view.
+    try {
+      await recordMonitorViewed(monitorId, userId)
+    } catch (viewError) {
+      const viewMsg = viewError instanceof Error ? viewError.message : String(viewError)
+      console.error('Failed to record monitor viewed:', viewMsg)
+    }
 
     return NextResponse.json({
       success: true,
