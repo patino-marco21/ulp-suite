@@ -13,36 +13,41 @@ import { describe, test, expect } from 'vitest'
 describe('monitor matches route — two-phase query plan', () => {
   const source = readFileSync(new URL('../app/api/monitoring/monitors/[id]/matches/route.ts', import.meta.url), 'utf8')
 
-  test('the fallback plan sorts on exactly the primary-key prefix', () => {
-    // Adding (url, password) to the fallback's sort forces a sort inside every
-    // (domain, email) group: measured 54.97 s vs 4.03 s on a broad monitor.
-    // The pruned plan can afford the full tiebreak; the unpruned one cannot.
-    expect(source).toContain(`const MATCH_ORDER_BY = 'domain, email, url, password'`)
-    expect(source).toContain(`const FALLBACK_ORDER_BY = 'domain, email'`)
-    expect(source).toContain('FALLBACK_MAX_EXECUTION_TIME, FALLBACK_ORDER_BY)')
-    // Its page is re-sorted in-process so the display order still matches.
+  test('every plan sorts on exactly the primary-key prefix, no tiebreak', () => {
+    // Adding a (url, password) tiebreak forces a sort inside every
+    // (domain, email) group. That is affordable only while the candidate set is
+    // small, and it is not always small: facebook.com in credential mode
+    // resolves 181 email_domain values, so it takes the PRUNED path, where the
+    // fuller key measured 14.88 s / 54.75 GiB against 1.25 s / 3.24 GiB for the
+    // bare prefix. On a narrow monitor the two are indistinguishable.
+    expect(source).toContain(`const MATCH_ORDER_BY = 'domain, email'`)
+    // Display order is still fully pinned — in-process, where sorting 100 rows
+    // on all four fields is free — so dropping the SQL tiebreak costs no
+    // determinism. Both plans re-sort.
     expect(source).toContain('page.sort(compareMatches)')
+    expect(source).toContain('a.url.localeCompare(b.url)')
+    expect(source).toContain('a.password.localeCompare(b.password)')
   })
 
-  test('every ORDER BY leads with the primary-key column', () => {
+  test('the only ORDER BY is the single primary-key-led constant', () => {
     // ulp.credentials is ORDER BY (domain, email, imported_at). A sort whose
     // leading column is `domain` lets ClickHouse read in primary-key order and
     // stop at LIMIT; anything else materializes and sorts the whole filtered
     // set first — the MEMORY_LIMIT_EXCEEDED production incident documented in
     // app/api/credentials/route.ts's SORT_MAX_MEMORY_BYTES.
-    // Every sort key the route can interpolate into `ORDER BY ${orderBy}`.
     const orderKeys = [...source.matchAll(/_ORDER_BY = '([^']+)'/g)].map(m => m[1])
     expect(orderKeys.length).toBeGreaterThan(0)
     for (const key of orderKeys) {
       expect(key).toMatch(/^domain\b/)
     }
-    // …and nothing else may be interpolated there.
+    // One sort key, interpolated in one place — no per-call-site override that
+    // could reintroduce an unaffordable sort.
     const orderBys = source
       .split('\n')
       .map(line => line.trim())
       // SQL lines only — the surrounding prose explains why this rule exists.
       .filter(line => /^ORDER BY /.test(line))
-    expect(orderBys).toEqual(['ORDER BY ${orderBy}'])
+    expect(orderBys).toEqual(['ORDER BY ${MATCH_ORDER_BY}'])
   })
 
   test('applies NORM_DOMAIN_EXPR outside the filtered subquery, never beside the WHERE', () => {

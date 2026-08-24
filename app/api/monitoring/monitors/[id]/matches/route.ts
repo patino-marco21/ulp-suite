@@ -14,8 +14,8 @@ import { checkLimit, getClientIP } from "@/lib/rate-limiter"
 
 export const dynamic = 'force-dynamic'
 
-// Phase 1 measured 21.4 s cold (see below); the route budget has to cover that
-// plus phase 2, with headroom for a colder page cache.
+// Worst measured cold path is phase 1 + phase 2 on a broad-but-enumerable
+// monitor, ~20 s (see below); the budget keeps real headroom over that.
 export const maxDuration = 90
 
 // Bounded "what's currently matching" snapshot.
@@ -44,20 +44,31 @@ const MATCH_LIMIT = 100
  * (url, email, password) for every granule.
  *
  * So:
- *   Phase 1 (cacheable, expensive) resolves the SET of exact `domain` /
- *     `email_domain` column values that could belong to a matching row, by
- *     scanning ONLY that one narrow column. Measured cold on a fresh domain
- *     set: 20.24 s / 40.90 GiB for the full `domain` column, 8.79 s for
- *     `email_domain` (its ngram skip index does serve endsWith, unlike
- *     anything on `domain`), 21.4 s wall with the probe below in parallel.
+ *   Phase 1 (cacheable) resolves the SET of exact `domain` / `email_domain`
+ *     column values that could belong to a matching row, by scanning ONLY that
+ *     one narrow column. Cheap for a reason worth knowing: `SELECT DISTINCT
+ *     domain` reads the LEADING primary-key column, so with the server's
+ *     `optimize_distinct_in_order = 1` ClickHouse seeks between distinct key
+ *     values instead of reading every granule — measured 0.14–0.35 s over
+ *     4.72M rows / 73 marks for aave.com + trezor.io. That optimization, not
+ *     index pruning, is what makes phase 1 affordable: forcing the same query
+ *     to scan (`optimize_distinct_in_order = 0, use_skip_indexes = 0`) costs
+ *     10.58 s over 2.40 billion rows / 40.90 GiB / 37350 marks — and returns
+ *     the identical 15 values, which is the check that phase 1 is COMPLETE and
+ *     not merely fast. `email_domain` is not a key column but carries a bloom
+ *     filter and an ngram index: 0.17 s narrow, 5.5 s for a broad provider.
+ *     The real cost driver is the legacy-normalization probe below (5–13 s).
  *   Phase 2 (per request, cheap) filters `domain IN (<those values>)`, an
  *     exact-value IN-list, which IS primary-key and bloom-filter prunable:
- *     37350 granules to 38. Measured 0.25 s for the same aave.com + trezor.io
- *     monitor that used to time out at 60 s, returning the identical row set
- *     (620 matches under both plans).
+ *     37350 granules to 38. Measured 0.22 s for the same aave.com + trezor.io
+ *     monitor that used to time out at 60 s, returning the identical row set.
  *
  * Phase 2 keeps the full buildDomainSetWhereClause condition ANDed on top, so
  * the IN-list only ever prunes work — it can never widen the result set.
+ *
+ * Measure with `use_query_cache = 0`. lib/clickhouse.ts enables the query cache
+ * (TTL 30 s) for every app query, so a re-run inside that window reports the
+ * cache's timing rather than the plan's.
  */
 
 /**
@@ -69,34 +80,49 @@ const MATCH_LIMIT = 100
  */
 const CANDIDATE_LIMIT = 1000
 
-/** Phase 1 is a full column scan; measured 21.4 s cold, so allow real headroom. */
+/**
+ * Phase 1's slowest branch is the legacy probe, measured 5.3–13.5 s; the column
+ * scans run 0.14–6.5 s. 45 s leaves room for a colder cache without letting a
+ * pathological domain set sit on a connection for a minute.
+ */
 const PHASE1_MAX_EXECUTION_TIME = 45
 
-/** Phase 2 reads a pruned candidate set; measured 0.25 s. */
+/**
+ * Phase 2 reads a pruned candidate set: 0.22 s narrow, 1.25 s for the broadest
+ * still-enumerable monitor measured (facebook.com in credential mode).
+ */
 const PHASE2_MAX_EXECUTION_TIME = 30
 
-/** Fallback plan for monitors too broad to enumerate; measured 4.03 s. */
+/** Fallback plan for monitors too broad to enumerate; measured 0.61–4.81 s. */
 const FALLBACK_MAX_EXECUTION_TIME = 60
 
 /**
- * Sort key for the pruned plan. Fully deterministic — without it each view
- * samples a different arbitrary MATCH_LIMIT rows and the is_new badge flickers
- * — and cheap, because the candidate set is already small: measured 0.2–1.1 s.
- * Leads with `domain`, ulp.credentials' primary-key first column.
+ * The ONE sort key every plan here uses: EXACTLY ulp.credentials' primary-key
+ * prefix (the table is `ORDER BY (domain, email, imported_at)`), so ClickHouse
+ * reads in key order and stops at LIMIT instead of materializing and sorting
+ * the filtered set.
+ *
+ * Some stable sort is required: the old unordered LIMIT sampled a different
+ * arbitrary MATCH_LIMIT rows per view, so is_new badges flickered independently
+ * of actual newness.
+ *
+ * Adding a (url, password) tiebreak forces a sort inside every (domain, email)
+ * group, and that is affordable only when the candidate set is small. It is not
+ * always small: a monitor whose value set is BROAD but still under
+ * CANDIDATE_LIMIT — facebook.com in credential mode resolves just 181
+ * email_domain values — takes the pruned path, and there the fuller key
+ * measured 14.88 s / 838.7M rows / 54.75 GiB against 1.25 s / 54.4M rows /
+ * 3.24 GiB for this prefix. On a narrow monitor the two are indistinguishable
+ * (0.22 s vs 0.20 s), so the prefix costs nothing where the tiebreak was cheap
+ * and saves an order of magnitude where it was not.
+ *
+ * Determinism is not lost by dropping the tiebreak: every page is re-sorted
+ * in-process by compareMatches, which DOES compare all four fields, so display
+ * order is fully pinned. What stays unpinned is only WHICH rows of a single
+ * (domain, email) group land in the page when that one group straddles the
+ * LIMIT — and a monitor narrow enough for the badge to matter never reaches it.
  */
-const MATCH_ORDER_BY = 'domain, email, url, password'
-
-/**
- * Sort key for the fallback plan: EXACTLY the table's primary-key prefix, so
- * ClickHouse reads in order and stops at LIMIT rather than sorting. The extra
- * (url, password) tiebreak forces a sort inside every (domain, email) group
- * and measured 54.97 s on roblox.com + facebook.com, against 4.03 s for this
- * prefix (and 0.48 s for the old unordered form). The caller re-sorts the
- * returned page with compareMatches so its display order still matches the
- * pruned plan's; what stays unpinned is only WHICH rows of a single
- * (domain, email) group land in the page when that group straddles the LIMIT.
- */
-const FALLBACK_ORDER_BY = 'domain, email'
+const MATCH_ORDER_BY = 'domain, email'
 
 /**
  * Raw `domain` values that lib/ulp-normalize.ts's Case A–D corrections can
@@ -252,7 +278,6 @@ function selectMatches(
   where: string,
   params: Record<string, unknown>,
   maxExecutionTime: number,
-  orderBy: string = MATCH_ORDER_BY,
 ) {
   return executeQuery(
     `SELECT url, email, password, (${NORM_DOMAIN_EXPR}) AS domain
@@ -260,7 +285,7 @@ function selectMatches(
        SELECT url, email, password, domain
        FROM ulp.credentials
        WHERE ${where}
-       ORDER BY ${orderBy}
+       ORDER BY ${MATCH_ORDER_BY}
        LIMIT {matchLimit:UInt32}
      ) AS t
      SETTINGS max_execution_time = ${maxExecutionTime}, timeout_overflow_mode = 'throw'`,
@@ -268,7 +293,12 @@ function selectMatches(
   ) as Promise<MatchRow[]>
 }
 
-/** Same comparator selectMatches sorts by, so merged branches stay in one order. */
+/**
+ * Full-tiebreak display order. Deliberately finer than MATCH_ORDER_BY, which
+ * stops at the primary-key prefix ClickHouse can sort for free: applying this
+ * to the returned page pins the order completely without asking the database
+ * to sort on (url, password) across a broad candidate set.
+ */
 function compareMatches(a: MatchRow, b: MatchRow): number {
   return (
     a.domain.localeCompare(b.domain) ||
@@ -360,7 +390,7 @@ export async function GET(
       // The unpruned condition already covers the legacy bucket, so
       // candidates.legacyRows must NOT be merged in here — that would double
       // any row appearing in both.
-      const page = await selectMatches(clause, domainParams, FALLBACK_MAX_EXECUTION_TIME, FALLBACK_ORDER_BY)
+      const page = await selectMatches(clause, domainParams, FALLBACK_MAX_EXECUTION_TIME)
       rows = page.sort(compareMatches)
     } else {
       // No branches means phase 1 enumerated every candidate value and found
