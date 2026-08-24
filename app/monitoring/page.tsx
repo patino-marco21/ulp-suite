@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useAuth, isAdmin as checkIsAdmin } from "@/hooks/useAuth"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -99,6 +99,13 @@ export default function MonitoringPage() {
   const [matchesLoading, setMatchesLoading] = useState(false)
   const [matchesLimited, setMatchesLimited] = useState(false)
   const [matchesNewCount, setMatchesNewCount] = useState(0)
+  // Distinct from "loaded, zero rows" on purpose — see the dialog's render
+  // branches. An empty table must never stand in for a failed query.
+  const [matchesError, setMatchesError] = useState<string | null>(null)
+  // Only the newest openMatches call may write state. A cold phase-1 cache
+  // makes this request seconds long, so switching monitors mid-flight would
+  // otherwise let the first monitor's response land in the second's dialog.
+  const matchesRequestId = useRef(0)
   const [monitorForm, setMonitorForm] = useState({
     name: "",
     domains: "",
@@ -215,25 +222,32 @@ export default function MonitoringPage() {
   // ===================== MONITOR HANDLERS =====================
 
   const openMatches = async (monitor: DomainMonitor) => {
+    const requestId = ++matchesRequestId.current
     setMatchesMonitor(monitor)
     setMatchesLoading(true)
     setMatches([])
     setMatchesLimited(false)
     setMatchesNewCount(0)
+    setMatchesError(null)
     try {
       const res = await fetch(`/api/monitoring/monitors/${monitor.id}/matches`)
       const data = await res.json()
+      if (requestId !== matchesRequestId.current) return
       if (data.success) {
         setMatches(data.results || [])
         setMatchesLimited(Boolean(data.limited))
         setMatchesNewCount(data.new_count || 0)
       } else {
-        toast({ title: "Failed to load matches", description: data.error, variant: "destructive" })
+        const message = data.error || "The match query failed. Results below are unavailable — this is not a confirmation that nothing matches."
+        setMatchesError(message)
+        toast({ title: "Failed to load matches", description: message, variant: "destructive" })
       }
     } catch {
+      if (requestId !== matchesRequestId.current) return
+      setMatchesError("Could not reach the server. Results are unavailable — this is not a confirmation that nothing matches.")
       toast({ title: "Failed to load matches", variant: "destructive" })
     } finally {
-      setMatchesLoading(false)
+      if (requestId === matchesRequestId.current) setMatchesLoading(false)
     }
   }
 
@@ -1182,8 +1196,8 @@ export default function MonitoringPage() {
             <DialogTitle>Matches — {matchesMonitor?.name}</DialogTitle>
             <DialogDescription>
               Credentials currently matching this monitor&apos;s domains, queried live.
-              {matchesNewCount > 0 && ` ${matchesNewCount} new since your last view.`}
-              {matchesLimited && ` Showing first ${matches.length} — more may exist.`}
+              {!matchesError && matchesNewCount > 0 && ` ${matchesNewCount} new since your last view.`}
+              {!matchesError && matchesLimited && ` Showing first ${matches.length} — more may exist.`}
             </DialogDescription>
           </DialogHeader>
           <div className="flex-1 overflow-auto">
@@ -1191,6 +1205,14 @@ export default function MonitoringPage() {
               <div className="flex h-32 items-center justify-center">
                 <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
               </div>
+            ) : matchesError ? (
+              /* Must come before the empty-state branch: a failed query is not
+                 evidence of zero matches, and rendering "No current matches"
+                 for one is an authoritative false negative. */
+              <Alert variant="destructive" className="my-4">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{matchesError}</AlertDescription>
+              </Alert>
             ) : matches.length === 0 ? (
               <p className="text-sm text-muted-foreground py-8 text-center">No current matches.</p>
             ) : (
