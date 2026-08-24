@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { Bookmark, Globe, RefreshCw, Search } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -32,12 +32,20 @@ export default function SavedSearchesPage() {
     openMatches, closeMatches,
   } = useMonitorMatches()
 
-  const fetchSearches = useCallback(async () => {
+  // Refresh button and closing the matches dialog (which just advanced this
+  // user's view cursor server-side) can both trigger a fetch in close
+  // succession — guard against a slower, stale response landing after a
+  // newer one, same idiom useMonitorMatches.ts uses for the same reason.
+  const fetchRequestId = useRef(0)
+
+  const fetchSearches = useCallback(async (silent = false) => {
+    const requestId = ++fetchRequestId.current
     try {
-      setLoading(true)
+      if (!silent) setLoading(true)
       setError(null)
       const res = await fetch("/api/monitoring/monitors?active_only=true", { credentials: "include", cache: "no-store" })
       const data = await res.json()
+      if (requestId !== fetchRequestId.current) return
       if (data.success) {
         setSearches(data.data || [])
       } else {
@@ -45,10 +53,11 @@ export default function SavedSearchesPage() {
         toast({ variant: "destructive", title: "Error", description: data.error || "Failed to load saved searches" })
       }
     } catch (_error) {
+      if (requestId !== fetchRequestId.current) return
       setError("Failed to load saved searches")
       toast({ variant: "destructive", title: "Error", description: "Failed to load saved searches" })
     } finally {
-      setLoading(false)
+      if (requestId === fetchRequestId.current && !silent) setLoading(false)
     }
   }, [toast])
 
@@ -79,7 +88,7 @@ export default function SavedSearchesPage() {
               Credentials currently matching your team&apos;s monitored domains, queried live.
             </p>
           </div>
-          <Button variant="outline" size="sm" onClick={fetchSearches}>
+          <Button variant="outline" size="sm" onClick={() => fetchSearches()}>
             <RefreshCw className="h-4 w-4 mr-2" />
             Refresh
           </Button>
@@ -146,7 +155,7 @@ export default function SavedSearchesPage() {
         limited={matchesLimited}
         newCount={matchesNewCount}
         error={matchesError}
-        onClose={() => { closeMatches(); fetchSearches() }}
+        onClose={() => { closeMatches(); fetchSearches(true) }}
       />
     </main>
   )
