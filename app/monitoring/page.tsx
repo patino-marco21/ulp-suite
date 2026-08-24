@@ -17,7 +17,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import {
   Radio, Webhook, Bell, Plus, Trash2, RefreshCw, Eye, Search,
   CheckCircle2, XCircle, AlertCircle, Globe, Send, Pencil,
-  Activity, Shield, Loader2
+  Activity, Shield
 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { useMonitorMatches } from "@/hooks/useMonitorMatches"
