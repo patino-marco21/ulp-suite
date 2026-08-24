@@ -9,6 +9,7 @@ import {
   domainMatches, emailDomainMatches, credentialMatchesDomain, matchModeToMatchType,
   domainSuffixChain, buildMonitorDomainIndex, matchCredentialsAgainstIndex,
   matchConditionSQL, buildDomainSetWhereClause, credentialFingerprint,
+  buildCandidateColumnWhereClause, buildCandidateValueBranches,
 } from '@/lib/domain-match'
 
 describe('domainMatches', () => {
@@ -216,6 +217,73 @@ describe('buildDomainSetWhereClause', () => {
     const { clause, params } = buildDomainSetWhereClause([], 'both')
     expect(clause).toBe('0')
     expect(params).toEqual({})
+  })
+})
+
+describe('buildCandidateColumnWhereClause', () => {
+  test('tests the bare column, never a normalization expression', () => {
+    // The whole point of phase 1 is that ClickHouse reads ONE narrow column;
+    // wrapping it would drag url/email/password into the scan.
+    const { clause } = buildCandidateColumnWhereClause('domain', ['aave.com'])
+    expect(clause).toBe('((domain = {domainEq0:String} OR endsWith(domain, {domainSuffix0:String})))')
+  })
+
+  test('keeps the domain-or-subdomain semantics of the shared matcher', () => {
+    const { params } = buildCandidateColumnWhereClause('email_domain', [' AAVE.com '])
+    expect(params.email_domainEq0).toBe('aave.com')
+    expect(params.email_domainSuffix0).toBe('.aave.com')
+  })
+
+  test('ORs every domain in the set, with per-domain parameter names', () => {
+    const { clause, params } = buildCandidateColumnWhereClause('domain', ['a.com', 'b.com'])
+    expect(clause).toContain(' OR ')
+    expect(Object.keys(params).sort()).toEqual(['domainEq0', 'domainEq1', 'domainSuffix0', 'domainSuffix1'])
+  })
+
+  test('returns a never-true clause for an empty domain list', () => {
+    expect(buildCandidateColumnWhereClause('domain', []).clause).toBe('0')
+  })
+})
+
+describe('buildCandidateValueBranches', () => {
+  test('emits one branch per column instead of a single ORed clause', () => {
+    // An OR across two columns is prunable by neither the primary key nor
+    // either bloom filter — separate branches keep each one prunable.
+    const branches = buildCandidateValueBranches([
+      { column: 'domain', values: ['aave.com'] },
+      { column: 'email_domain', values: ['aave.com'] },
+    ])
+    expect(branches).toHaveLength(2)
+    expect(branches[0].clause).toBe('domain IN {domainValues:Array(String)}')
+    expect(branches[0].clause).not.toContain(' OR ')
+  })
+
+  test('later branches exclude what earlier ones already returned', () => {
+    // Without this a row matching on BOTH columns comes back twice, which the
+    // ORed form would never do.
+    const branches = buildCandidateValueBranches([
+      { column: 'domain', values: ['aave.com'] },
+      { column: 'email_domain', values: ['aave.com'] },
+    ])
+    expect(branches[1].clause).toBe(
+      'email_domain IN {email_domainValues:Array(String)} AND NOT domain IN {domainValues:Array(String)}'
+    )
+    expect(branches[1].params).toEqual({ email_domainValues: ['aave.com'], domainValues: ['aave.com'] })
+  })
+
+  test('drops columns with no resolved values rather than emitting an empty IN', () => {
+    // ClickHouse cannot infer the element type of an empty array literal.
+    const branches = buildCandidateValueBranches([
+      { column: 'domain', values: [] },
+      { column: 'email_domain', values: ['aave.com'] },
+    ])
+    expect(branches).toHaveLength(1)
+    expect(branches[0].clause).toBe('email_domain IN {email_domainValues:Array(String)}')
+  })
+
+  test('returns no branches when phase 1 resolved nothing at all', () => {
+    expect(buildCandidateValueBranches([{ column: 'domain', values: [] }])).toEqual([])
+    expect(buildCandidateValueBranches([])).toEqual([])
   })
 })
 

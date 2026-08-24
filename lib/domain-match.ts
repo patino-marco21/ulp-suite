@@ -208,3 +208,91 @@ export function buildDomainSetWhereClause(
   })
   return { clause: parts.length ? `(${parts.join(' OR ')})` : '0', params }
 }
+
+// ─── Two-phase candidate resolution ────────────────────────────────────────
+//
+// buildDomainSetWhereClause's endsWith() subdomain test is not prunable by any
+// index on ulp.credentials: confirmed via `EXPLAIN indexes=1` that a bare
+// `domain = 'x'` prunes 37350 granules to 38, while adding `OR endsWith(...)`
+// leaves 37350/37350. Without a LIMIT's worth of matching rows to short-circuit
+// on, that means a full scan of a 2.4-billion-row table.
+//
+// The fix is to split the work: resolve which *exact* column values could
+// belong to a matching row (phase 1, one narrow column), then filter on that
+// value set (phase 2, an exact-value IN-list, which IS prunable). See
+// app/api/monitoring/monitors/[id]/matches/route.ts for the measured numbers.
+
+/**
+ * Raw stored columns a phase-1 candidate scan can resolve values from.
+ * `domain` is ulp.credentials' primary-key leading column; `email_domain` is a
+ * MATERIALIZED column holding the raw email's domain, covered by both a
+ * bloom-filter and an ngram skip index.
+ */
+export type CandidateColumn = 'domain' | 'email_domain'
+
+/**
+ * Phase 1: which values of ONE raw stored column could belong to a row
+ * matching this domain set. Same domain-or-subdomain semantics as
+ * domainConditionSQL, but evaluated against a bare column rather than
+ * NORM_DOMAIN_EXPR/NORM_EMAIL_EXPR, so ClickHouse reads only that one column
+ * instead of the whole (url, email, password) row.
+ */
+export function buildCandidateColumnWhereClause(
+  column: CandidateColumn,
+  domains: string[],
+): { clause: string; params: Record<string, string> } {
+  const params: Record<string, string> = {}
+  const parts = domains.map((domain, i) => {
+    const d = domain.toLowerCase().trim()
+    const eqParam = `${column}Eq${i}`
+    const suffixParam = `${column}Suffix${i}`
+    params[eqParam] = d
+    params[suffixParam] = `.${d}`
+    return `(${column} = {${eqParam}:String} OR endsWith(${column}, {${suffixParam}:String}))`
+  })
+  return { clause: parts.length ? `(${parts.join(' OR ')})` : '0', params }
+}
+
+/** One index-prunable phase-2 read, restricted to one column's resolved values. */
+export interface CandidateBranch {
+  clause: string
+  params: Record<string, string[]>
+}
+
+/**
+ * Phase 2: restrict the scan to the exact column values phase 1 resolved —
+ * ONE branch per column, to be run separately and merged, rather than a single
+ * ORed clause. `domain IN (...) OR email_domain IN (...)` is prunable by
+ * neither the primary key nor either bloom filter, because a granule can only
+ * be skipped when the whole expression is provably false and each index sees
+ * the other side of the OR as unknown. Measured on a 'both'-mode monitor:
+ * 5.65 s as one ORed query, 0.24 s as two branches run in parallel.
+ *
+ * Each branch excludes the columns already covered by the branches before it,
+ * so a row matching two columns is returned once — the same row set the ORed
+ * form would produce, not a doubled one. `columns` order is therefore
+ * significant: put the most selective column first.
+ *
+ * These are pruning accelerators only. The caller still ANDs the real
+ * buildDomainSetWhereClause condition onto every branch, so an over-inclusive
+ * value set costs time but can never return a wrong row.
+ *
+ * Columns with no resolved values are dropped (ClickHouse cannot infer the
+ * element type of an empty array). No branches at all means phase 1 proved
+ * there is nothing to find.
+ */
+export function buildCandidateValueBranches(
+  columns: Array<{ column: CandidateColumn; values: string[] }>,
+): CandidateBranch[] {
+  const present = columns.filter(c => c.values.length > 0)
+  return present.map(({ column, values }, i) => {
+    const param = `${column}Values`
+    const params: Record<string, string[]> = { [param]: values }
+    const exclusions = present.slice(0, i).map(prior => {
+      const priorParam = `${prior.column}Values`
+      params[priorParam] = prior.values
+      return ` AND NOT ${prior.column} IN {${priorParam}:Array(String)}`
+    })
+    return { clause: `${column} IN {${param}:Array(String)}${exclusions.join('')}`, params }
+  })
+}
