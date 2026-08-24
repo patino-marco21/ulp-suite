@@ -317,8 +317,20 @@ function compareMatches(a: MatchRow, b: MatchRow): number {
  * global top-MATCH_LIMIT then fewer than MATCH_LIMIT rows sort before it, so
  * it is also within its own page's top-MATCH_LIMIT.
  *
- * The merge compares the NORMALIZED domain while the queries sorted on the raw
- * one. They differ only for the Case A–D rows lib/ulp-normalize.ts rewrites,
+ * Two things make the merge order finer than the query order, so the merged
+ * page can differ from a true global sort for rows sitting exactly on the
+ * MATCH_LIMIT boundary. Both are bounded and deterministic, which is all the
+ * is_new badge requires, and neither is reachable by a monitor small enough to
+ * return under MATCH_LIMIT rows in the first place.
+ *
+ * First, compareMatches breaks ties on (url, password) while MATCH_ORDER_BY
+ * stops at (domain, email) — deliberately, since asking ClickHouse for that
+ * tiebreak costs 14.88 s against 1.25 s on a broad candidate set. So when a
+ * single (domain, email) group straddles the LIMIT, WHICH of its rows the
+ * database returned is not pinned.
+ *
+ * Second, the merge compares the NORMALIZED domain while the queries sorted on
+ * the raw one. They differ only for the Case A–D rows lib/ulp-normalize.ts rewrites,
  * so the merge can pick a slightly different set than a true global sort would
  * when such a row sits on the boundary. Deterministic either way, which is what
  * the is_new badge needs.
