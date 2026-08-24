@@ -493,3 +493,37 @@ export async function recordMonitorViewed(monitorId: number, userId: number): Pr
     [monitorId, userId]
   )
 }
+
+/**
+ * Flag which of `rows` are new since this admin last viewed the monitor.
+ *
+ * "New" = the credential's fingerprint is NOT recorded in
+ * monitor_credential_seen at or before this admin's monitor_views cursor. A
+ * fingerprint absent from monitor_credential_seen entirely (e.g. the rescan
+ * cron hasn't caught up with a freshly uploaded credential yet) also counts as
+ * new — never-recorded is not the same as already-seen.
+ *
+ * Extracted from app/api/monitoring/monitors/[id]/matches/route.ts so the
+ * cross-referencing can be exercised against a real database
+ * (__tests__/monitor-is-new.test.ts) rather than only grepped for in the route
+ * source. MUST be called before recordMonitorViewed advances the cursor.
+ */
+export async function markMatchesNewSinceLastView<
+  T extends { email: string; password: string; domain: string },
+>(monitorId: number, userId: number, rows: T[]): Promise<Array<T & { is_new: boolean }>> {
+  const lastViewedAt = await getLastViewedAt(monitorId, userId)
+
+  let oldFingerprints = new Set<string>()
+  if (lastViewedAt !== null && rows.length > 0) {
+    const seenRows = dbQuery(
+      `SELECT fingerprint FROM monitor_credential_seen WHERE monitor_id = ? AND seen_at <= ?`,
+      [monitorId, lastViewedAt]
+    ) as { fingerprint: string }[]
+    oldFingerprints = new Set(seenRows.map(r => r.fingerprint))
+  }
+
+  return rows.map(row => ({
+    ...row,
+    is_new: !oldFingerprints.has(credentialFingerprint(row.email, row.password, row.domain)),
+  }))
+}
