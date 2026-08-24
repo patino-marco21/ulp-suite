@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { useAuth, isAdmin as checkIsAdmin } from "@/hooks/useAuth"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -20,6 +20,8 @@ import {
   Activity, Shield, Loader2
 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
+import { useMonitorMatches } from "@/hooks/useMonitorMatches"
+import { MonitorMatchesDialog } from "@/components/monitor-matches-dialog"
 
 // ===================== TYPES =====================
 
@@ -93,19 +95,11 @@ export default function MonitoringPage() {
   const [showMonitorDialog, setShowMonitorDialog] = useState(false)
   const [editingMonitor, setEditingMonitor] = useState<DomainMonitor | null>(null)
 
-  // Live matches ("saved search") state
-  const [matchesMonitor, setMatchesMonitor] = useState<DomainMonitor | null>(null)
-  const [matches, setMatches] = useState<{ url: string; email: string; password: string; domain: string; is_new: boolean }[]>([])
-  const [matchesLoading, setMatchesLoading] = useState(false)
-  const [matchesLimited, setMatchesLimited] = useState(false)
-  const [matchesNewCount, setMatchesNewCount] = useState(0)
-  // Distinct from "loaded, zero rows" on purpose — see the dialog's render
-  // branches. An empty table must never stand in for a failed query.
-  const [matchesError, setMatchesError] = useState<string | null>(null)
-  // Only the newest openMatches call may write state. A cold phase-1 cache
-  // makes this request seconds long, so switching monitors mid-flight would
-  // otherwise let the first monitor's response land in the second's dialog.
-  const matchesRequestId = useRef(0)
+  // Live matches ("saved search") state — shared with app/saved-searches/page.tsx
+  const {
+    matchesMonitor, matches, matchesLoading, matchesLimited, matchesNewCount, matchesError,
+    openMatches, closeMatches,
+  } = useMonitorMatches()
   const [monitorForm, setMonitorForm] = useState({
     name: "",
     domains: "",
@@ -220,36 +214,6 @@ export default function MonitoringPage() {
   }, [authLoading, user, fetchStats, fetchMonitors, fetchWebhooks, fetchAlerts])
 
   // ===================== MONITOR HANDLERS =====================
-
-  const openMatches = async (monitor: DomainMonitor) => {
-    const requestId = ++matchesRequestId.current
-    setMatchesMonitor(monitor)
-    setMatchesLoading(true)
-    setMatches([])
-    setMatchesLimited(false)
-    setMatchesNewCount(0)
-    setMatchesError(null)
-    try {
-      const res = await fetch(`/api/monitoring/monitors/${monitor.id}/matches`)
-      const data = await res.json()
-      if (requestId !== matchesRequestId.current) return
-      if (data.success) {
-        setMatches(data.results || [])
-        setMatchesLimited(Boolean(data.limited))
-        setMatchesNewCount(data.new_count || 0)
-      } else {
-        const message = data.error || "The match query failed. Results below are unavailable — this is not a confirmation that nothing matches."
-        setMatchesError(message)
-        toast({ title: "Failed to load matches", description: message, variant: "destructive" })
-      }
-    } catch {
-      if (requestId !== matchesRequestId.current) return
-      setMatchesError("Could not reach the server. Results are unavailable — this is not a confirmation that nothing matches.")
-      toast({ title: "Failed to load matches", variant: "destructive" })
-    } finally {
-      if (requestId === matchesRequestId.current) setMatchesLoading(false)
-    }
-  }
 
   const openCreateMonitorDialog = () => {
     setEditingMonitor(null)
@@ -1190,61 +1154,15 @@ export default function MonitoringPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={matchesMonitor !== null} onOpenChange={open => !open && setMatchesMonitor(null)}>
-        <DialogContent className="max-w-4xl max-h-[80vh] flex flex-col">
-          <DialogHeader>
-            <DialogTitle>Matches — {matchesMonitor?.name}</DialogTitle>
-            <DialogDescription>
-              Credentials currently matching this monitor&apos;s domains, queried live.
-              {!matchesError && matchesNewCount > 0 && ` ${matchesNewCount} new since your last view.`}
-              {!matchesError && matchesLimited && ` Showing first ${matches.length} — more may exist.`}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex-1 overflow-auto">
-            {matchesLoading ? (
-              <div className="flex h-32 items-center justify-center">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-              </div>
-            ) : matchesError ? (
-              /* Must come before the empty-state branch: a failed query is not
-                 evidence of zero matches, and rendering "No current matches"
-                 for one is an authoritative false negative. */
-              <Alert variant="destructive" className="my-4">
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription>{matchesError}</AlertDescription>
-              </Alert>
-            ) : matches.length === 0 ? (
-              <p className="text-sm text-muted-foreground py-8 text-center">No current matches.</p>
-            ) : (
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 bg-background border-b">
-                  <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
-                    <th className="px-3 py-2 font-medium">URL</th>
-                    <th className="px-3 py-2 font-medium">Email</th>
-                    <th className="px-3 py-2 font-medium">Password</th>
-                    <th className="px-3 py-2 font-medium">Domain</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {matches.map((m, i) => (
-                    <tr key={i} className="border-b hover:bg-muted/40">
-                      <td className="max-w-xs truncate px-3 py-2 font-mono text-xs text-muted-foreground" title={m.url}>{m.url}</td>
-                      <td className="max-w-xs truncate px-3 py-2 font-mono text-xs" title={m.email}>{m.email}</td>
-                      <td className="max-w-xs truncate px-3 py-2 font-mono text-xs font-medium" title={m.password}>{m.password}</td>
-                      <td className="px-3 py-2">
-                        <Badge variant="outline" className="text-xs font-normal">{m.domain}</Badge>
-                        {m.is_new && (
-                          <Badge className="text-xs font-normal ml-1.5 bg-primary/10 text-primary border-primary/20">NEW</Badge>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
+      <MonitorMatchesDialog
+        monitor={matchesMonitor}
+        matches={matches}
+        loading={matchesLoading}
+        limited={matchesLimited}
+        newCount={matchesNewCount}
+        error={matchesError}
+        onClose={closeMatches}
+      />
 
       {/* ============ VIEW PAYLOAD DIALOG ============ */}
       <Dialog open={viewPayload !== null} onOpenChange={() => setViewPayload(null)}>
