@@ -198,6 +198,16 @@ function domainConditionSQL(mode: MatchMode, domainParam: string, domainSuffixPa
  * and {domainSuffix}. Moved here from lib/monitor-rescan-cron.ts so the
  * live-matches endpoint and the scheduled rescan share one implementation
  * instead of two.
+ *
+ * No production callers as of this branch — the cron's old per-domain loop
+ * that called this was replaced by lib/monitor-match-resolver.ts's
+ * resolveMonitorMatches (one batched two-phase query per monitor via
+ * buildDomainSetWhereClause, not one query per domain). Kept exported, with
+ * its own direct test coverage (__tests__/domain-match.test.ts), as a
+ * correct, potentially-reusable building block — e.g. for a future
+ * single-domain live-check feature — rather than deleted: removing an
+ * exported, tested, still-correct function is a bigger and riskier change
+ * than this fix pass warrants.
  */
 export function matchConditionSQL(mode: MatchMode): string {
   return domainConditionSQL(mode, 'domain', 'domainSuffix')

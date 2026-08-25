@@ -65,8 +65,8 @@ live on every panel open, with a manual escape hatch for "check right now."
 ### 1. ClickHouse query fix: `idx_ngram_domain`
 
 Current predicate ([lib/domain-match.ts:163-177](../../../lib/domain-match.ts)) is
-`domain = {d} OR endsWith(domain, '.'+{d})`. Per the route's own `EXPLAIN
-indexes=1` finding ([route.ts:27-75](../../../app/api/monitoring/monitors/[id]/matches/route.ts)),
+`domain = {d} OR endsWith(domain, '.'+{d})`. Per the resolver's own `EXPLAIN
+indexes=1` finding ([lib/monitor-match-resolver.ts:10-57](../../../lib/monitor-match-resolver.ts)),
 the `endsWith` half defeats `idx_bf_domain` entirely (37350→37350 granules;
 equality alone prunes to 38) — because `idx_bf_domain` is a plain `bloom_filter`,
 which only accelerates equality.
@@ -95,7 +95,7 @@ alone with no other index present — that combination was not separately
 re-measured for this domain pair; the "prunes nothing on its own" characterization
 above (37350→37350) is `email_domain`/`domain`'s originally-documented finding
 (pre-dating this fix, no `ngrambf_v1` index existing yet — see
-[route.ts:27-75](../../../app/api/monitoring/monitors/[id]/matches/route.ts)),
+[lib/monitor-match-resolver.ts:10-57](../../../lib/monitor-match-resolver.ts)),
 not a re-measurement for this specific pair. Both figures are real; they answer
 different questions ("does bloom_filter help at all, in isolation" vs. "what does
 the final combined plan's index list show"). The number that actually settles
@@ -181,11 +181,12 @@ CREATE TABLE IF NOT EXISTS monitor_rescan_status (
 ```
 
 `monitor_matches` is fully replaced per monitor on every successful rescan
-(delete-then-insert in one transaction) — it's a cache, not a history. `is_new` is
-computed and stored at write time (against `monitor_credential_seen`, same logic
-`markMatchesNewSinceLastView` already does, moved from read-time to write-time)
-rather than recomputed on every read, so it isn't a stored column here — it's
-derived once when the API layer reads the cache (see §4).
+(delete-then-insert in one transaction) — it's a cache, not a history. `is_new`
+isn't a stored column here: it's derived at READ time, when the API layer reads
+the cache and cross-references `monitor_credential_seen` via
+`markMatchesNewSinceLastView` (see §4) — the same function and the same
+read-time computation this codebase used before this design, just now fed from
+the cache instead of a live ClickHouse result.
 
 `monitor_rescan_status` tracks the two things a cache consumer needs that aren't
 derivable from `monitor_matches` rows alone: `attempted_at`/`status`/`error`
@@ -213,10 +214,11 @@ query resolves:
   unchanged) — this is the fix for the silent-failure bug. `monitor_matches` is
   left untouched; a cache is more useful stale than empty.
 
-This also depends on §1: today's per-domain loop query
-([lib/monitor-rescan-cron.ts:93-103](../../../lib/monitor-rescan-cron.ts)) doesn't
-even use the two-phase optimization the live route has, so it's the slowest path
-in the system today. It moves to the same fixed predicate.
+This also depended on §1: the cron's old per-domain loop query didn't use the
+two-phase optimization the live route had, making it the slowest path in the
+system before this rewire. That loop is gone — the cron now calls the same
+`resolveMonitorMatches` two-phase plan as the GET route and the manual rescan
+endpoint (one query per monitor, not one per domain).
 
 ### 4. API changes
 
@@ -277,9 +279,11 @@ one-off script, TBD in the implementation plan).
 
 ## Data flow
 
-1. Cron tick (every 15 min, production only) or "Rescan now" click → fixed
-   ClickHouse query (§1) → `monitor_matches` + `monitor_rescan_status` written
-   (§2/§3).
+1. Cron tick (every 15 min, production only — but only actually rescans a
+   given monitor once its own `rescan_interval_hours` [default 24] has
+   elapsed since `last_triggered_at`, so a healthy monitor's cache refreshes
+   far less often than every tick) or "Rescan now" click → fixed ClickHouse
+   query (§1) → `monitor_matches` + `monitor_rescan_status` written (§2/§3).
 2. Dialog open → `GET .../matches` → pure SQLite read (§4), always fast, three
    distinguishable states (never-scanned / fresh / stale-after-failure).
 3. "Rescan now" → `POST .../matches/rescan` → same write path as the cron,

@@ -519,6 +519,22 @@ export async function attachLastViewedAt<T extends { id: number }>(
  * cross-referencing can be exercised against a real database
  * (__tests__/monitor-is-new.test.ts) rather than only grepped for in the route
  * source. MUST be called before recordMonitorViewed advances the cursor.
+ *
+ * KNOWN LIMITATION — this is the authoritative explanation; the GET
+ * .../matches/route.ts and POST .../matches/rescan/route.ts call sites (both
+ * advance the same per-user view cursor) point here rather than each
+ * carrying their own copy: recordMonitorViewed advances this admin's cursor
+ * to "now" for the WHOLE monitor on every call, not per credential.
+ * monitor_credential_seen can record a fingerprint as seen (e.g. via the
+ * upload-triggered check in fireMonitorAlertsFromMatches, or a prior rescan)
+ * before that same credential ever appears in this admin's actual result
+ * page — including a match sitting outside the resolver's MATCH_LIMIT window
+ * (lib/monitor-match-resolver.ts) at the time of a given rescan. If this
+ * admin's cursor advances during that gap, the credential can later render
+ * with no "new" badge on its first real appearance to them, even though they
+ * never actually saw it. Fixing this properly needs a row-level
+ * `monitor_credential_shown` ledger (which credential, which admin, first
+ * shown when) instead of one cursor per (monitor, admin) — out of scope here.
  */
 export async function markMatchesNewSinceLastView<
   T extends { email: string; password: string; domain: string },
