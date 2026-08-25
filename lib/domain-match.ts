@@ -77,6 +77,22 @@ export function domainSuffixChain(domain: string): string[] {
   return chain
 }
 
+/**
+ * Normalize a user-entered domain into the bare-hostname shape
+ * ulp.credentials.domain/email_domain store, so domainMatches/SQL predicates
+ * can ever compare equal. Strips a leading scheme and everything from the
+ * first '/' onward — "https://trezor.io/" and "trezor.io/some/path" both
+ * become "trezor.io". A stored value with an unstripped trailing slash or
+ * path can never match anything: see the design doc's §"Problem".
+ */
+export function normalizeDomainInput(raw: string): string {
+  let d = raw.trim().toLowerCase()
+  d = d.replace(/^https?:\/\//, '')
+  const slashIdx = d.indexOf('/')
+  if (slashIdx !== -1) d = d.slice(0, slashIdx)
+  return d.trim()
+}
+
 export interface MonitorDomainIndexEntry {
   monitorId: number
   mode: MatchMode

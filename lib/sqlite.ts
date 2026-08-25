@@ -2,6 +2,7 @@ import Database from 'better-sqlite3'
 import path from 'path'
 import fs from 'fs'
 import bcrypt from 'bcryptjs'
+import { normalizeDomainInput } from '@/lib/domain-match'
 
 const DB_PATH = process.env.SQLITE_PATH || path.join(process.cwd(), 'data', 'ulp.db')
 
@@ -297,6 +298,22 @@ function initSchema(db: Database.Database): void {
   // Add rescan columns to existing databases (idempotent — catch swallows "duplicate column" errors)
   try { db.exec(`ALTER TABLE domain_monitors ADD COLUMN rescan_mode TEXT NOT NULL DEFAULT 'dedup' CHECK(rescan_mode IN ('dedup','digest'))`) } catch {}
   try { db.exec(`ALTER TABLE domain_monitors ADD COLUMN rescan_interval_hours INTEGER NOT NULL DEFAULT 24`) } catch {}
+
+  // One-time-in-effect, idempotent: re-normalize any monitor domains stored
+  // before normalizeDomainInput existed (trailing slash/path/scheme). No-op
+  // once a monitor's domains are already normalized — safe to run every
+  // startup, matches this file's existing un-gated-idempotent-ALTER style.
+  {
+    const monitorRows = db.prepare(`SELECT id, domains FROM domain_monitors`).all() as Array<{ id: number; domains: string }>
+    for (const row of monitorRows) {
+      let domains: string[]
+      try { domains = JSON.parse(row.domains) } catch { continue }
+      const normalized = domains.map(normalizeDomainInput)
+      if (JSON.stringify(normalized) !== JSON.stringify(domains)) {
+        db.prepare(`UPDATE domain_monitors SET domains = ? WHERE id = ?`).run(JSON.stringify(normalized), row.id)
+      }
+    }
+  }
 
   // Migrate monitor_credential_seen.fingerprint INTEGER → TEXT (v2 fingerprint is 16-char hex).
   // SQLite doesn't support ALTER COLUMN, so we check the type and recreate if needed.

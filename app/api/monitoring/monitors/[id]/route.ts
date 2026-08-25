@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { validateRequest, requireAdminRole } from "@/lib/auth"
 import { getMonitor, updateMonitor, deleteMonitor } from "@/lib/domain-monitor"
+import { normalizeDomainInput } from "@/lib/domain-match"
 
 export const dynamic = 'force-dynamic'
 
@@ -74,7 +75,7 @@ export async function PUT(
           { status: 400 }
         )
       }
-      updates.domains = body.domains.map((d: string) => d.trim().toLowerCase())
+      updates.domains = body.domains.map((d: string) => normalizeDomainInput(d))
     }
     if (body.match_mode !== undefined) {
       if (!["credential", "url", "both"].includes(body.match_mode)) {

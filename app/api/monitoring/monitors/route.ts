@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { validateRequest, requireAdminRole } from "@/lib/auth"
 import { createMonitor, listMonitors, attachLastViewedAt } from "@/lib/domain-monitor"
+import { normalizeDomainInput } from "@/lib/domain-match"
 
 export const dynamic = 'force-dynamic'
 
@@ -84,7 +85,7 @@ export async function POST(request: NextRequest) {
 
     const monitorId = await createMonitor({
       name: name.trim(),
-      domains: domains.map((d: string) => d.trim().toLowerCase()),
+      domains: domains.map((d: string) => normalizeDomainInput(d)),
       match_mode,
       webhook_ids: webhook_ids || [],
       created_by: user ? parseInt(user.userId) : undefined,

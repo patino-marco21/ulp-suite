@@ -7,6 +7,7 @@ vi.mock('@/lib/ulp-normalize', () => ({
 
 import {
   domainMatches, emailDomainMatches, credentialMatchesDomain, matchModeToMatchType,
+  normalizeDomainInput,
   domainSuffixChain, buildMonitorDomainIndex, matchCredentialsAgainstIndex,
   matchConditionSQL, buildDomainSetWhereClause, credentialFingerprint,
   buildCandidateColumnWhereClause, buildCandidateValueBranches,
@@ -135,6 +136,52 @@ describe('domainSuffixChain', () => {
 
   test('returns an empty chain for an empty string', () => {
     expect(domainSuffixChain('')).toEqual([])
+  })
+})
+
+describe('normalizeDomainInput', () => {
+  test('strips a trailing slash', () => {
+    expect(normalizeDomainInput('trezor.io/')).toBe('trezor.io')
+  })
+
+  test('strips a path after the domain', () => {
+    expect(normalizeDomainInput('blockstream.com/jade/')).toBe('blockstream.com')
+    expect(normalizeDomainInput('foundation.xyz/passport/')).toBe('foundation.xyz')
+  })
+
+  test('strips a leading https:// or http:// scheme', () => {
+    expect(normalizeDomainInput('https://ledger.com')).toBe('ledger.com')
+    expect(normalizeDomainInput('http://ledger.com')).toBe('ledger.com')
+  })
+
+  test('trims whitespace and lowercases', () => {
+    expect(normalizeDomainInput('  Ledger.COM  ')).toBe('ledger.com')
+  })
+
+  test('is a no-op on an already-clean domain', () => {
+    expect(normalizeDomainInput('coldcard.com')).toBe('coldcard.com')
+  })
+
+  test('handles scheme + path together', () => {
+    expect(normalizeDomainInput('https://gridplus.io/some/path')).toBe('gridplus.io')
+  })
+
+  // The exact 17 values stored for the "Dedicated / general hardware
+  // wallets" monitor as of 2026-08-24 — see the design doc's §"Problem".
+  test('normalizes every real stored domain for the existing monitor', () => {
+    const raw = [
+      'bitbox.team/', 'bitkey.world/', 'blockstream.com/jade/', 'coldcard.com/',
+      'cypherock.com/', 'dcentwallet.com/', 'ellipal.com/', 'foundation.xyz/passport/',
+      'gridplus.io/', 'keepkey.com/', 'keyst.one/', 'ledger.com/', 'ngrave.io/',
+      'onekey.so/', 'safepal.com/', 'tangem.com/', 'trezor.io/',
+    ]
+    const expected = [
+      'bitbox.team', 'bitkey.world', 'blockstream.com', 'coldcard.com',
+      'cypherock.com', 'dcentwallet.com', 'ellipal.com', 'foundation.xyz',
+      'gridplus.io', 'keepkey.com', 'keyst.one', 'ledger.com', 'ngrave.io',
+      'onekey.so', 'safepal.com', 'tangem.com', 'trezor.io',
+    ]
+    expect(raw.map(normalizeDomainInput)).toEqual(expected)
   })
 })
 

@@ -69,3 +69,30 @@ describe('monitor_matches / monitor_rescan_status schema', () => {
     expect(dbGet(`SELECT * FROM monitor_rescan_status WHERE monitor_id = 1`)).toBeUndefined()
   })
 })
+
+describe('startup domain normalization fixup', () => {
+  test('re-normalizes a previously-stored monitor whose domains have trailing slashes', async () => {
+    process.env.SQLITE_PATH = freshDbPath()
+    ;(globalThis as unknown as { _sqliteDb?: unknown })._sqliteDb = undefined
+    vi.resetModules()
+
+    // First load: insert a monitor the way the OLD (buggy) route code would
+    // have — trailing slashes intact — bypassing normalizeDomainInput
+    // entirely, simulating data written before this fix existed.
+    const sqlite1 = await import('@/lib/sqlite')
+    sqlite1.dbRun(
+      `INSERT INTO domain_monitors (id, name, domains) VALUES (1, 'Wallets', ?)`,
+      [JSON.stringify(['trezor.io/', 'ledger.com/'])]
+    )
+    const db1 = (globalThis as unknown as { _sqliteDb?: { close(): void } })._sqliteDb
+    if (db1) db1.close()
+    ;(globalThis as unknown as { _sqliteDb?: unknown })._sqliteDb = undefined
+    vi.resetModules()
+
+    // Second load re-runs initSchema (and the fixup pass) against the same
+    // file, the way a real process restart would.
+    const sqlite2 = await import('@/lib/sqlite')
+    const row = sqlite2.dbGet(`SELECT domains FROM domain_monitors WHERE id = 1`) as { domains: string }
+    expect(JSON.parse(row.domains)).toEqual(['trezor.io', 'ledger.com'])
+  })
+})
