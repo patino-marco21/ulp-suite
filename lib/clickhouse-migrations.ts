@@ -156,7 +156,7 @@ let migrationsDone = false
 //     in the background — the speedup lands once that mutation completes. This table
 //     has grown substantially since v12 (1.48B rows at time of writing) — expect this
 //     to take meaningfully longer; do not assume a duration.
-const DDL_VERSION = 18
+const DDL_VERSION = 19
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -783,6 +783,44 @@ export async function runClickHouseMigrations(): Promise<void> {
       `ALTER TABLE ulp.credentials MATERIALIZE COLUMN content_key_hash`
     )
     console.warn('[ClickHouse migration] DDL v18 applied (added content_key_hash column — MATERIALIZE running in background)')
+  }
+
+  // v19 — idx_ngram_domain: an ngram skip index on `domain`, same type/params
+  // as the existing idx_ngram_email_domain. Makes the phase-1 candidate scan
+  // in lib/domain-match.ts's buildCandidateColumnWhereClause prunable for the
+  // `domain` column: endsWith(domain, '.x') is prunable by no index on this
+  // table today (idx_bf_domain, a plain bloom_filter, measured
+  // 37350->37350 granules for that predicate — bloom filters only help
+  // equality). `email_domain` already had this exact problem solved: it
+  // carries both a bloom_filter AND an ngrambf_v1 index, and the ngram one is
+  // what actually prunes its endsWith() predicate (measured 0.24s). This
+  // gives `domain` the same second index `email_domain` already had.
+  //
+  // This DDL_VERSION went through two other approaches first, both empirically
+  // disproven against this table on 2026-08-25 (see
+  // docs/superpowers/specs/2026-08-24-domain-monitor-saved-matches-design.md §1
+  // for the full history — not repeated here to avoid this comment going
+  // stale in a different way than the code):
+  //   1. A PROJECTION ordered by reverse(domain): the planner never selects a
+  //      projection ordered by a bare function of a column for a
+  //      startsWith(reverse(domain), ...) predicate — confirmed via
+  //      SETTINGS force_optimize_projection=1 raising PROJECTION_NOT_USED.
+  //   2. A materialized domain_reversed column + minmax index on it: minmax
+  //      only prunes granules whose value range is narrow, which requires the
+  //      indexed expression to correlate with the table's physical storage
+  //      order. This table is sorted by forward `domain`; a reversed string
+  //      has no such correlation, so minmax pruned only ~35% of granules on
+  //      the real table despite pruning 24/25 on a small scratch table where
+  //      the test data happened to be inserted in a favorable order.
+  // ngram indexes don't have that ordering dependency — they hash per-granule
+  // content — which is why the identical predicate shape prunes well on both
+  // columns once each has one.
+  if (lastDdl < 19) {
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_ngram_domain domain TYPE ngrambf_v1(4, 8192, 4, 0) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_ngram_domain`
+    )
+    console.warn('[ClickHouse migration] DDL v19 applied (added idx_ngram_domain — MATERIALIZE running in background)')
   }
 
   if (lastDdl < DDL_VERSION) {
