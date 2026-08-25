@@ -69,8 +69,10 @@ import {
   type MatchRow,
 } from '@/lib/domain-match'
 
-// Bounded "what's currently matching" snapshot.
-const MATCH_LIMIT = 100
+// Bounded "what's currently matching" snapshot. Exported so the GET route
+// and the rescan route import this one constant instead of each
+// redeclaring their own copy (final-review Fix 3).
+export const MATCH_LIMIT = 100
 
 /**
  * Cap on phase 1's resolved value set. Past this the monitor is broad enough
@@ -97,14 +99,19 @@ const PHASE2_MAX_EXECUTION_TIME = 30
 /**
  * Fallback plan for monitors too broad to enumerate; measured 0.61–4.81 s.
  *
- * The phases run in sequence, so their caps have to SUM to less than the
- * caller's own request-duration budget — app/api/monitoring/monitors/[id]/
- * matches/route.ts sets `maxDuration = 90` for exactly this reason
- * (45 + 30 = 75 against a 90 s budget; at 60 s here the worst case was 105 s)
- * — otherwise the platform kills the request first and the caller gets a
- * generic gateway error instead of a specific timeout response built from the
- * TIMEOUT_EXCEEDED this throws, which is the whole point of
- * timeout_overflow_mode = 'throw'.
+ * The phases run in sequence, so their caps have to SUM to less than
+ * whatever wall-clock budget the caller actually has. None of this
+ * resolver's callers currently declares a `maxDuration` — not the GET route
+ * (which no longer calls this resolver at all; it only reads the SQLite
+ * cache now), not the rescan route, not the cron. That's correct rather
+ * than an oversight: `maxDuration` is a Vercel-only route config with no
+ * effect on this project's self-hosted Docker deployment (next.config's
+ * `output: 'standalone'`) — same reasoning documented in
+ * __tests__/monitor-matches-route.test.ts. What actually protects a caller
+ * from a runaway request is each phase's own `max_execution_time` below,
+ * together with `timeout_overflow_mode = 'throw'`: an overrun phase throws a
+ * specific TIMEOUT_EXCEEDED instead of running unbounded, independent of any
+ * platform-level request timeout.
  */
 const FALLBACK_MAX_EXECUTION_TIME = 30
 
@@ -179,10 +186,11 @@ interface CandidateResolution {
    * bucket (credential/both mode) now only becomes visible once this cache
    * entry expires (CANDIDATE_TTL_MS below), not on the next request the way
    * phase 2's fresh-every-request branches do. Up to that lag, it can combine
-   * with the known recordMonitorViewed limitation (see GET in
-   * app/api/monitoring/monitors/[id]/matches/route.ts) to render without a
-   * "new" badge on first real appearance — the row still shows, only the
-   * badge is affected.
+   * with the known recordMonitorViewed limitation (see
+   * markMatchesNewSinceLastView's doc comment in lib/domain-monitor.ts — the
+   * shared mechanism both the GET route and the rescan POST route call) to
+   * render without a "new" badge on first real appearance — the row still
+   * shows, only the badge is affected.
    */
   legacyRows: MatchRow[]
   /** True when a value set hit CANDIDATE_LIMIT — use the fallback plan instead. */
@@ -354,4 +362,50 @@ export async function resolveMonitorMatches(mode: MatchMode, domains: string[]):
   }
 
   return { rows, limited: rows.length === MATCH_LIMIT }
+}
+
+// ─── Rescan lock coordination (final-review Fix 1) ─────────────────────────
+//
+// Guards against two overlapping scans of the SAME monitor — an admin
+// double-clicking "Rescan now" (app/api/monitoring/monitors/[id]/matches/
+// rescan/route.ts), or the 15-minute cron (lib/monitor-rescan-cron.ts)
+// firing mid-manual-rescan. Shared here, rather than kept private to either
+// caller, so both actually coordinate through the same lock — a lock private
+// to one caller cannot see the other's in-flight scan, which was the
+// original bug this fix addresses: without a shared lock, an overlapping
+// cron tick + manual rescan could both run phase 2 concurrently, and
+// whichever writeMonitorMatchCache call commits LAST stamps
+// monitor_rescan_status.last_success_at, independent of which one actually
+// resolved more recent data.
+//
+// Module-level and in-memory is sufficient given this is a single-process
+// deployment (see Dockerfile/docker-compose.yml) — same tradeoff as
+// candidateCache above.
+//
+// The has()-check and the add() below MUST stay adjacent with no `await`
+// between them. JS only guarantees run-to-completion across a synchronous
+// stretch; a suspension point inserted between the read and the write (e.g.
+// moving add() after some awaited call) reopens a check-then-act race where
+// two genuinely concurrent callers each observe the set as empty before
+// either writes to it. (This exact ordering was the subject of a real,
+// previously-fixed TOCTOU bug in this codebase — don't reintroduce it.)
+const inFlightRescans = new Set<number>()
+
+/**
+ * Attempt to acquire the rescan lock for one monitor. Returns true if
+ * acquired — the caller now owns the lock and MUST release it via
+ * releaseRescanLock, typically from a `finally` so a thrown error can't
+ * leave the monitor permanently locked. Returns false if another rescan for
+ * this monitor is already in flight; the caller should skip/reject rather
+ * than proceed.
+ */
+export function tryAcquireRescanLock(monitorId: number): boolean {
+  if (inFlightRescans.has(monitorId)) return false
+  inFlightRescans.add(monitorId)
+  return true
+}
+
+/** Release a lock previously acquired via tryAcquireRescanLock. */
+export function releaseRescanLock(monitorId: number): void {
+  inFlightRescans.delete(monitorId)
 }

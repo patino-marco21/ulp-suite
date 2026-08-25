@@ -1,14 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
 import { validateRequest } from "@/lib/auth"
 import { getMonitor, getMonitorMatchesCache, markMatchesNewSinceLastView, recordMonitorViewed } from "@/lib/domain-monitor"
+import { MATCH_LIMIT } from "@/lib/monitor-match-resolver"
 
 export const dynamic = 'force-dynamic'
-
-// Mirrors lib/monitor-match-resolver.ts's own MATCH_LIMIT (not exported from
-// there) and rescan/route.ts's copy of the same constant — `limited` here is
-// re-derived from the cache read-back rather than trusted off whichever
-// writer (cron or manual rescan) last populated it.
-const MATCH_LIMIT = 100
 
 /**
  * GET /api/monitoring/monitors/[id]/matches
@@ -41,6 +36,9 @@ export async function GET(
     }
 
     const cache = await getMonitorMatchesCache(monitorId)
+    // See markMatchesNewSinceLastView's doc comment (lib/domain-monitor.ts)
+    // for the known limitation where a match can render without a "new"
+    // badge on its first real appearance to this admin.
     const results = await markMatchesNewSinceLastView(monitorId, userId, cache.rows)
     const newCount = results.filter(r => r.is_new).length
 

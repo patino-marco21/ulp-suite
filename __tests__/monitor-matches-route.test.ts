@@ -35,6 +35,16 @@ vi.mock('@/lib/domain-monitor', () => ({
   recordMonitorViewed: vi.fn().mockResolvedValue(undefined),
 }))
 
+// final-review Fix 3: the GET route now imports the shared MATCH_LIMIT
+// constant from here instead of redeclaring its own copy. Mocked as a plain
+// value (rather than vi.importActual, as other test files use when they need
+// the resolver's real lock/query behavior) so this file never transitively
+// loads lib/clickhouse.ts / lib/ulp-normalize.ts just to read one constant —
+// this route makes zero ClickHouse calls, and the mock should reflect that.
+vi.mock('@/lib/monitor-match-resolver', () => ({
+  MATCH_LIMIT: 100,
+}))
+
 describe('monitor matches route — two-phase query plan', () => {
   const routeSource = readFileSync(new URL('../app/api/monitoring/monitors/[id]/matches/route.ts', import.meta.url), 'utf8')
   const resolverSource = readFileSync(new URL('../lib/monitor-match-resolver.ts', import.meta.url), 'utf8')
@@ -187,11 +197,15 @@ describe('monitor matches route — two-phase query plan', () => {
     // still do); now it only reads the SQLite cache those two writers
     // already populated.
     expect(routeSource).not.toContain('resolveMonitorMatches')
-    // Checks the actual import, not just any mention — the route's own doc
-    // comments legitimately reference lib/monitor-match-resolver.ts by name
-    // to explain what Task 9 removed.
-    expect(routeSource).not.toContain('from "@/lib/monitor-match-resolver"')
     expect(routeSource).not.toContain('candidateCache')
+    // final-review Fix 3: the route DOES import from monitor-match-resolver
+    // now — but only the plain MATCH_LIMIT constant, not any query-resolving
+    // export. Pin the import to exactly that so a future edit can't quietly
+    // reintroduce resolveMonitorMatches (or anything else ClickHouse-shaped)
+    // under this same import statement.
+    const resolverImport = routeSource.match(/import \{([^}]*)\} from "@\/lib\/monitor-match-resolver"/)
+    expect(resolverImport).not.toBeNull()
+    expect(resolverImport![1].trim()).toBe('MATCH_LIMIT')
     expect(routeSource).toContain('getMonitorMatchesCache')
   })
 

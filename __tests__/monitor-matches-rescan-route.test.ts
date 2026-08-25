@@ -6,9 +6,23 @@ vi.mock('@/lib/auth', () => ({
   requireAdminRole: vi.fn(),
 }))
 
-vi.mock('@/lib/monitor-match-resolver', () => ({
-  resolveMonitorMatches: vi.fn(),
-}))
+// tryAcquireRescanLock/releaseRescanLock are passed through to their REAL
+// implementation (only resolveMonitorMatches is a mock) — final-review Fix 1
+// moved the in-flight-rescan lock here so the route and the cron
+// (lib/monitor-rescan-cron.ts) share it. The concurrency tests below need
+// genuine has()/add()/delete() Set behavior to prove anything real; a
+// vi.fn() stub would just re-assert whatever the test hard-codes it to
+// return. MATCH_LIMIT is likewise passed through since final-review Fix 3
+// made the route import it (rather than redeclare its own copy) from here.
+vi.mock('@/lib/monitor-match-resolver', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/monitor-match-resolver')>('@/lib/monitor-match-resolver')
+  return {
+    resolveMonitorMatches: vi.fn(),
+    MATCH_LIMIT: actual.MATCH_LIMIT,
+    tryAcquireRescanLock: actual.tryAcquireRescanLock,
+    releaseRescanLock: actual.releaseRescanLock,
+  }
+})
 
 vi.mock('@/lib/domain-monitor', () => ({
   getMonitor: vi.fn(),
@@ -80,6 +94,9 @@ describe('POST .../matches/rescan', () => {
     expect(data.success).toBe(true)
     expect(data.results).toHaveLength(1)
     expect(data.checked_at).toBe('2026-08-25 00:00:01')
+    // final-review Fix 6: field-for-field symmetry with the GET route's
+    // response shape, which already includes never_scanned.
+    expect(data.never_scanned).toBe(false)
   })
 
   test('on resolver failure, records the failure and still returns success:true with last_error (a stale/empty cache read is not itself a request failure)', async () => {
@@ -119,7 +136,7 @@ describe('POST .../matches/rescan', () => {
   })
 })
 
-describe('POST .../matches/rescan — lock acquisition is atomic', () => {
+describe('POST .../matches/rescan — lock acquisition is atomic (final-review Fix 1: lock now shared via lib/monitor-match-resolver.ts)', () => {
   // The behavioral test above ("two concurrent rescans...") only proves that
   // a SECOND request started after the first has fully settled its
   // synchronous setup (the `setTimeout(0)` gap) is rejected. It cannot prove
@@ -129,35 +146,43 @@ describe('POST .../matches/rescan — lock acquisition is atomic', () => {
   // only guarantees run-to-completion across a single synchronous stretch,
   // not across an `await`. This test pins that stretch directly by source
   // inspection: if a future edit ever inserts an `await` between the has()
-  // check and the add() write (e.g. "cleaning up" by moving add() to after
-  // `await getMonitor(...)`), two truly concurrent requests could both pass
+  // check and the add() write inside tryAcquireRescanLock (e.g. "cleaning
+  // up" by making the check itself async), two truly concurrent callers —
+  // this route AND the cron, now that they share one lock — could both pass
   // the check before either performs the write, silently reopening the
-  // check-then-act race the lock exists to close — and unlike a timing-based
-  // test, this one can't flake and can't be fooled by a convenient gap.
+  // check-then-act race the lock exists to close — and unlike a
+  // timing-based test, this one can't flake and can't be fooled by a
+  // convenient gap.
+  //
+  // This now lives in lib/monitor-match-resolver.ts, not this route — Fix 1
+  // moved the lock there specifically so the rescan cron
+  // (lib/monitor-rescan-cron.ts) can share it instead of racing a
+  // route-private Set it could never see.
   test('has() and add() are separated by no await', () => {
-    const routeSource = readFileSync(
-      new URL('../app/api/monitoring/monitors/[id]/matches/rescan/route.ts', import.meta.url),
+    const resolverSource = readFileSync(
+      new URL('../lib/monitor-match-resolver.ts', import.meta.url),
       'utf8'
     )
-    const checkIdx = routeSource.indexOf('inFlightRescans.has(monitorId)')
-    const addIdx = routeSource.indexOf('inFlightRescans.add(monitorId)')
+    const checkIdx = resolverSource.indexOf('inFlightRescans.has(monitorId)')
+    const addIdx = resolverSource.indexOf('inFlightRescans.add(monitorId)')
     expect(checkIdx).toBeGreaterThan(-1)
     expect(addIdx).toBeGreaterThan(checkIdx)
 
-    const between = routeSource.slice(checkIdx, addIdx)
+    const between = resolverSource.slice(checkIdx, addIdx)
     expect(between).not.toContain('await')
   })
 
-  test('the lock is released in a finally so a thrown error cannot leave a monitor permanently locked', () => {
+  test('the route releases the lock in a finally so a thrown error cannot leave a monitor permanently locked', () => {
     const routeSource = readFileSync(
       new URL('../app/api/monitoring/monitors/[id]/matches/rescan/route.ts', import.meta.url),
       'utf8'
     )
-    const addIdx = routeSource.indexOf('inFlightRescans.add(monitorId)')
-    const deleteIdx = routeSource.indexOf('inFlightRescans.delete(monitorId)')
-    expect(deleteIdx).toBeGreaterThan(addIdx)
-    // The delete() call must be the first statement inside a `finally`
+    const acquireIdx = routeSource.indexOf('tryAcquireRescanLock(monitorId)')
+    const releaseIdx = routeSource.indexOf('releaseRescanLock(monitorId)')
+    expect(acquireIdx).toBeGreaterThan(-1)
+    expect(releaseIdx).toBeGreaterThan(acquireIdx)
+    // The release call must be the first statement inside a `finally`
     // block, not on a success-only path that a thrown error could skip.
-    expect(routeSource.slice(0, deleteIdx)).toMatch(/finally\s*\{\s*$/)
+    expect(routeSource.slice(0, releaseIdx)).toMatch(/finally\s*\{\s*$/)
   })
 })
