@@ -11,12 +11,14 @@
  * entirely when the upload-triggered check was rewritten to match credentials
  * in-process instead (see lib/domain-match.ts's matchCredentialsAgainstIndex) —
  * so the section was testing a string against itself and guarding nothing
- * real. Removed rather than retargeted at lib/monitor-rescan-cron.ts's
- * matchConditionSQL: that function is intentionally unexported (a singleton,
- * not a mirrored pair — see the comment above it), and real coverage of its
- * SQL shape already exists in __tests__/monitor-rescan-cron.test.ts via
- * actual runTick() calls inspecting the real SQL text sent to executeQuery,
- * which is a stronger guard than re-typing a literal here ever was.
+ * real. Removed rather than retargeted at lib/domain-match.ts's
+ * matchConditionSQL: that function IS exported (kept as a correct,
+ * potentially-reusable building block with no current production caller —
+ * see the comment above it) and already has its own direct test coverage in
+ * __tests__/domain-match.test.ts, which is a stronger guard than re-typing a
+ * literal here ever was. (The cron no longer calls ClickHouse or
+ * matchConditionSQL directly at all — it delegates to
+ * lib/monitor-match-resolver.ts's resolveMonitorMatches.)
  */
 
 import { describe, test, expect } from 'vitest'

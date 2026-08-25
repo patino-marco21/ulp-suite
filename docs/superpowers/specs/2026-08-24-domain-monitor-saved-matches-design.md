@@ -102,7 +102,7 @@ the final combined plan's index list show"). The number that actually settles
 whether the fix works is the end-to-end query time: the full query for the real
 "Dedicated / general hardware wallets" monitor's 17 domains completed in
 24.9s (down from the 50.76s baseline, and — the number that actually matters —
-back inside the route's 45s phase-1 budget with real margin, where before it was
+back inside the resolver's 45s phase-1 budget with real margin, where before it was
 timing out).
 
 **Two other approaches were tried first and empirically disproven against this
