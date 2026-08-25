@@ -14,7 +14,7 @@
 import { dbQuery, dbRun } from '@/lib/sqlite'
 import { attemptDelivery, enqueueFailedDelivery, runWebhookOutboxTick } from '@/lib/webhook-outbox-worker'
 import { matchModeToMatchType, credentialFingerprint, type MatchMode } from '@/lib/domain-match'
-import { resolveMonitorMatches } from '@/lib/monitor-match-resolver'
+import { resolveMonitorMatches, tryAcquireRescanLock, releaseRescanLock } from '@/lib/monitor-match-resolver'
 import { writeMonitorMatchCache, recordMonitorRescanFailure } from '@/lib/domain-monitor'
 
 const TICK_MS = 15 * 60 * 1000  // 15 minutes
@@ -78,18 +78,66 @@ export async function runTick(): Promise<void> {
   let fired = 0
 
   for (const monitorRow of dueMonitors) {
-    try {
-      let domains: string[] = []
-      try { domains = JSON.parse(monitorRow.domains) } catch { domains = [] }
-      if (domains.length === 0) continue
+    let domains: string[] = []
+    try { domains = JSON.parse(monitorRow.domains) } catch { domains = [] }
+    if (domains.length === 0) continue
 
+    // Guards against racing a manual rescan of the SAME monitor
+    // (app/api/monitoring/monitors/[id]/matches/rescan/route.ts). Without
+    // this, an overlapping cron tick + manual rescan could both run phase 2
+    // concurrently, and whichever writeMonitorMatchCache call commits LAST
+    // would stamp last_success_at, independent of which one actually ran
+    // more recently — misreported freshness, not data corruption (the
+    // transactional write keeps rows/status consistent either way). See
+    // tryAcquireRescanLock's doc comment in lib/monitor-match-resolver.ts.
+    // Skipped here, not failed: a rescan already in flight for this monitor
+    // will itself refresh the cache, and this monitor stays due until then,
+    // so the next tick picks it up if it's still stale.
+    if (!tryAcquireRescanLock(monitorRow.id)) {
+      console.log(`[monitor-rescan] monitor "${monitorRow.name}" skipped this tick — a rescan is already in flight for it (manual rescan or another tick)`)
+      continue
+    }
+
+    let cacheWritten = false
+    try {
       // For digest mode, clear prior seen fingerprints so all matches re-fire
       if (monitorRow.rescan_mode === 'digest') {
         dbRun('DELETE FROM monitor_credential_seen WHERE monitor_id = ?', [monitorRow.id])
       }
 
-      const { rows: matchedRows } = await resolveMonitorMatches(monitorRow.match_mode, domains)
-      await writeMonitorMatchCache(monitorRow.id, matchedRows)
+      let matchedRows: CredentialRow[]
+      try {
+        // MATCH_LIMIT (100, defined in lib/monitor-match-resolver.ts) is now
+        // shared between two use cases that used to have separate limits.
+        // Before this cache rewire, alerting queried ClickHouse once PER
+        // MONITORED DOMAIN with its own `LIMIT 100`, so a 17-domain monitor
+        // could alert on up to ~1700 rows total; display (the live
+        // .../matches panel) was the only caller with a 100-row cap. Now both
+        // share this one resolveMonitorMatches call and its single 100-row
+        // cap. For a monitor with more than 100 genuine matches, that's a
+        // fixed window (the lexicographically-lowest 100 by (domain, email,
+        // url, password) — see mergeMatchPages in lib/domain-match.ts): once
+        // those fingerprints are recorded into monitor_credential_seen below,
+        // a domain that sorts after the window can never trigger a webhook
+        // alert, no matter how many new credentials arrive for it.
+        //
+        // This is NOT a regression against actual prior behavior — the old
+        // per-domain loop was timing out on every tick for the one real
+        // monitor in this system, so it wasn't alerting on anything either —
+        // and reusing this single resolver call is exactly what buys the
+        // reduced ClickHouse round-trips the design called for (see
+        // docs/superpowers/specs/2026-08-24-domain-monitor-saved-matches-design.md
+        // §3). But nobody has deliberately decided "100 total is fine for
+        // alerting too" — that's accepted for now as a known tradeoff, worth
+        // revisiting (e.g. giving the cron's call its own higher limit) if
+        // domain-starvation on a >100-match monitor becomes a real problem.
+        const resolved = await resolveMonitorMatches(monitorRow.match_mode, domains)
+        matchedRows = resolved.rows
+        await writeMonitorMatchCache(monitorRow.id, matchedRows)
+        cacheWritten = true
+      } finally {
+        releaseRescanLock(monitorRow.id)
+      }
 
       if (matchedRows.length === 0) {
         dbRun(`UPDATE domain_monitors SET last_triggered_at = datetime('now') WHERE id = ?`, [monitorRow.id])
@@ -193,10 +241,22 @@ export async function runTick(): Promise<void> {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       console.error(`[monitor-rescan] error processing monitor "${monitorRow.name}": ${err}`)
-      try {
-        await recordMonitorRescanFailure(monitorRow.id, message)
-      } catch (statusErr) {
-        console.error(`[monitor-rescan] failed to record rescan status for monitor "${monitorRow.name}": ${statusErr}`)
+      // Only a failure that happened BEFORE the cache write succeeded counts
+      // as a rescan failure. Once resolveMonitorMatches + writeMonitorMatchCache
+      // both succeed, the scan itself worked — a later throw (e.g. a SQLite
+      // write failure in the webhook/alert-logging step below) is a separate,
+      // alerting-pipeline problem and must not flip this monitor's cache
+      // status to 'failed'; that would mislabel a successful scan and show
+      // a self-contradictory "Last check failed ... showing results from
+      // just now" in the dialog. Still logged above either way — a
+      // downstream failure is worth knowing about even when it isn't
+      // attributed to the rescan's own status.
+      if (!cacheWritten) {
+        try {
+          await recordMonitorRescanFailure(monitorRow.id, message)
+        } catch (statusErr) {
+          console.error(`[monitor-rescan] failed to record rescan status for monitor "${monitorRow.name}": ${statusErr}`)
+        }
       }
     }
   }

@@ -26,9 +26,21 @@ vi.mock('@/lib/webhook-outbox-worker', () => ({
   runWebhookOutboxTick: vi.fn().mockResolvedValue(undefined),
 }))
 
-vi.mock('@/lib/monitor-match-resolver', () => ({
-  resolveMonitorMatches: vi.fn().mockResolvedValue({ rows: [], limited: false }),
-}))
+// tryAcquireRescanLock/releaseRescanLock are passed through to their REAL
+// implementation (only resolveMonitorMatches is a mock) — final-review Fix 1
+// moved the in-flight-rescan lock here so the cron and the manual rescan
+// route share it, and the lock-coordination tests below need genuine
+// has()/add()/delete() Set behavior to prove anything (a vi.fn() stub would
+// just re-assert whatever the test hard-codes it to return). Mirrors the
+// same approach in __tests__/monitor-matches-rescan-route.test.ts.
+vi.mock('@/lib/monitor-match-resolver', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/monitor-match-resolver')>('@/lib/monitor-match-resolver')
+  return {
+    resolveMonitorMatches: vi.fn().mockResolvedValue({ rows: [], limited: false }),
+    tryAcquireRescanLock: actual.tryAcquireRescanLock,
+    releaseRescanLock: actual.releaseRescanLock,
+  }
+})
 
 vi.mock('@/lib/domain-monitor', () => ({
   writeMonitorMatchCache: vi.fn().mockResolvedValue(undefined),
@@ -37,7 +49,7 @@ vi.mock('@/lib/domain-monitor', () => ({
 
 import { runTick } from '@/lib/monitor-rescan-cron'
 import { dbQuery, dbRun } from '@/lib/sqlite'
-import { resolveMonitorMatches } from '@/lib/monitor-match-resolver'
+import { resolveMonitorMatches, tryAcquireRescanLock, releaseRescanLock } from '@/lib/monitor-match-resolver'
 import { writeMonitorMatchCache, recordMonitorRescanFailure } from '@/lib/domain-monitor'
 
 const mockDbQuery = vi.mocked(dbQuery)
@@ -142,5 +154,100 @@ describe('runTick — match cache (saved, not live)', () => {
     // on a failed attempt either.
     const lastTriggeredCall = mockDbRun.mock.calls.find(([sql]) => (sql as string).includes('UPDATE domain_monitors SET last_triggered_at'))
     expect(lastTriggeredCall).toBeUndefined()
+  })
+})
+
+describe('runTick — rescan lock coordination (final-review Fix 1)', () => {
+  // Before this fix, the in-flight-rescan lock was a Set private to
+  // app/api/monitoring/monitors/[id]/matches/rescan/route.ts — the cron
+  // never checked or set it, so an overlapping cron tick + manual rescan for
+  // the same monitor could both run resolveMonitorMatches/writeMonitorMatchCache
+  // concurrently. Fix 1 moved the lock to lib/monitor-match-resolver.ts so
+  // both callers share it; these tests exercise the cron's side of that.
+
+  test('a monitor whose lock is already held (e.g. by a concurrent manual rescan) is skipped this tick, not marked failed, and the lock is genuinely released afterward so a later tick can acquire it again', async () => {
+    mockDbQuery.mockReturnValueOnce([dueMonitorRow()])  // due monitors
+
+    expect(tryAcquireRescanLock(1)).toBe(true)  // simulate a manual rescan already in flight
+
+    await runTick()
+
+    expect(mockResolveMonitorMatches).not.toHaveBeenCalled()
+    expect(mockWriteMonitorMatchCache).not.toHaveBeenCalled()
+    // Skipped, not failed — a monitor already being rescanned elsewhere
+    // must not have its status flipped to 'failed' by the tick that
+    // couldn't get the lock.
+    expect(mockRecordMonitorRescanFailure).not.toHaveBeenCalled()
+    const lastTriggeredCall = mockDbRun.mock.calls.find(([sql]) => (sql as string).includes('UPDATE domain_monitors SET last_triggered_at'))
+    expect(lastTriggeredCall).toBeUndefined()
+
+    // runTick's skip path must not have touched the lock it never acquired
+    // (e.g. an unconditional release instead of one gated on having
+    // acquired it would corrupt this). Releasing the manually-held lock
+    // (simulating the manual rescan finishing) must free it normally.
+    releaseRescanLock(1)
+    expect(tryAcquireRescanLock(1)).toBe(true)
+    releaseRescanLock(1)
+  })
+
+  test('runTick releases the lock it acquires, so a later tick (or a manual rescan) can acquire it again', async () => {
+    mockDbQuery.mockReturnValueOnce([dueMonitorRow()])
+    mockResolveMonitorMatches.mockResolvedValueOnce({ rows: [], limited: false })
+
+    await runTick()
+
+    // If runTick left the lock held after finishing, this would fail.
+    expect(tryAcquireRescanLock(1)).toBe(true)
+    releaseRescanLock(1)
+  })
+
+  test('runTick releases the lock even when resolveMonitorMatches throws', async () => {
+    mockDbQuery.mockReturnValueOnce([dueMonitorRow()])
+    mockResolveMonitorMatches.mockRejectedValueOnce(new Error('Timeout exceeded'))
+
+    await runTick()
+
+    expect(tryAcquireRescanLock(1)).toBe(true)
+    releaseRescanLock(1)
+  })
+})
+
+describe('runTick — failure narrowing after a successful cache write (final-review Fix 2)', () => {
+  // Before this fix, the per-monitor try block spanned resolveMonitorMatches
+  // through the webhook/alert-logging step, so ANY throw in that whole
+  // sequence — including a downstream SQLite failure unrelated to the scan
+  // itself — flipped monitor_rescan_status to 'failed', even when the
+  // ClickHouse resolve and the cache write had already succeeded.
+
+  test('a downstream throw (e.g. the seen-fingerprint query) after resolveMonitorMatches + writeMonitorMatchCache both succeeded does NOT record a rescan failure', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mockDbQuery
+      .mockReturnValueOnce([dueMonitorRow()])  // due monitors
+      .mockImplementationOnce(() => { throw new Error('SQLITE_READONLY: attempt to write a readonly database') })  // seen-fingerprint IN-query
+    mockResolveMonitorMatches.mockResolvedValueOnce({ rows: [MATCHED_ROW], limited: false })
+
+    await runTick()
+
+    // The scan itself succeeded — the cache write happened before the throw.
+    expect(mockWriteMonitorMatchCache).toHaveBeenCalledWith(1, [MATCHED_ROW])
+    // ...so the downstream failure must not mislabel the whole rescan as
+    // failed (the bug: the dialog would show a self-contradictory "Last
+    // check failed ... showing results from just now").
+    expect(mockRecordMonitorRescanFailure).not.toHaveBeenCalled()
+    // Still logged — a downstream failure is worth knowing about even though
+    // it isn't attributed to the monitor's rescan status.
+    expect(consoleErrorSpy).toHaveBeenCalled()
+
+    consoleErrorSpy.mockRestore()
+  })
+
+  test('a writeMonitorMatchCache throw (cache never actually written) still records a rescan failure — the cacheWritten flag only flips true AFTER the write succeeds', async () => {
+    mockDbQuery.mockReturnValueOnce([dueMonitorRow()])
+    mockResolveMonitorMatches.mockResolvedValueOnce({ rows: [MATCHED_ROW], limited: false })
+    mockWriteMonitorMatchCache.mockRejectedValueOnce(new Error('SQLITE_READONLY: attempt to write a readonly database'))
+
+    await runTick()
+
+    expect(mockRecordMonitorRescanFailure).toHaveBeenCalledWith(1, 'SQLITE_READONLY: attempt to write a readonly database')
   })
 })
