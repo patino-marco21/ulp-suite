@@ -171,6 +171,31 @@ function initSchema(db: Database.Database): void {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS monitor_matches (
+      monitor_id  INTEGER NOT NULL,
+      url         TEXT NOT NULL,
+      email       TEXT NOT NULL,
+      password    TEXT NOT NULL,
+      domain      TEXT NOT NULL,
+      fetched_at  TEXT NOT NULL,
+      PRIMARY KEY (monitor_id, url, email, password),
+      FOREIGN KEY (monitor_id) REFERENCES domain_monitors(id) ON DELETE CASCADE
+    );
+
+    -- Tracks the most recent rescan attempt per monitor, independent of
+    -- domain_monitors.last_triggered_at (which only ever advances on
+    -- success). last_success_at is separate from attempted_at so a monitor
+    -- with zero genuine matches still has a timestamp to show — there are no
+    -- monitor_matches rows to read one off in that case.
+    CREATE TABLE IF NOT EXISTS monitor_rescan_status (
+      monitor_id      INTEGER PRIMARY KEY,
+      status          TEXT NOT NULL CHECK(status IN ('ok', 'failed')),
+      error           TEXT,
+      attempted_at    TEXT NOT NULL,
+      last_success_at TEXT,
+      FOREIGN KEY (monitor_id) REFERENCES domain_monitors(id) ON DELETE CASCADE
+    );
+
     -- Named data breach catalog (HIBP-compatible schema).
     -- Populated via HIBP sync or manually created for non-HIBP sources.
     CREATE TABLE IF NOT EXISTS breaches (
