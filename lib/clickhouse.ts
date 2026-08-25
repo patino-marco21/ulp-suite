@@ -114,6 +114,21 @@ function getClickHouseClient(): ClickHouseClient {
       // Ask ClickHouse to ZSTD-compress HTTP responses.
       // The client decompresses automatically (see compression.response below).
       enable_http_compression: 1,
+
+      // A multi-hour ALTER/MATERIALIZE (see lib/clickhouse-migrations.ts) sends
+      // no response bytes until it finishes. Without a heartbeat, something in
+      // the path between here and ClickHouse (observed: Docker's network layer)
+      // silently closes the "idle" connection while the DDL is still running
+      // server-side — logged client-side as "socket was closed or ended before
+      // the response was fully read", but critically the client then hangs
+      // forever instead of rejecting (confirmed via clickhouse-js's own
+      // long-running-queries doc: the promise "neither resolves nor rejects").
+      // Observed 2026-08-25: a migration run went silent for 8+ hours this way.
+      // send_progress_in_http_headers makes ClickHouse write periodic progress
+      // frames on the same stream, keeping real bytes flowing so nothing on the
+      // path times it out as idle.
+      send_progress_in_http_headers: 1,
+      http_headers_progress_interval_ms: '10000',
     },
 
     // ── Transport-level compression ────────────────────────────────────────
