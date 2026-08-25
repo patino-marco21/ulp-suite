@@ -98,7 +98,8 @@ export default function MonitoringPage() {
   // Live matches ("saved search") state — shared with app/saved-searches/page.tsx
   const {
     matchesMonitor, matches, matchesLoading, matchesLimited, matchesNewCount, matchesError,
-    openMatches, closeMatches,
+    checkedAt, neverScanned, lastError, rescanning,
+    openMatches, closeMatches, rescanNow,
   } = useMonitorMatches()
   const [monitorForm, setMonitorForm] = useState({
     name: "",
@@ -1161,6 +1162,11 @@ export default function MonitoringPage() {
         limited={matchesLimited}
         newCount={matchesNewCount}
         error={matchesError}
+        checkedAt={checkedAt}
+        neverScanned={neverScanned}
+        lastError={lastError}
+        rescanning={rescanning}
+        onRescan={rescanNow}
         onClose={closeMatches}
       />
 

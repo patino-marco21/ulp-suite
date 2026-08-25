@@ -29,7 +29,8 @@ export default function SavedSearchesPage() {
 
   const {
     matchesMonitor, matches, matchesLoading, matchesLimited, matchesNewCount, matchesError,
-    openMatches, closeMatches,
+    checkedAt, neverScanned, lastError, rescanning,
+    openMatches, closeMatches, rescanNow,
   } = useMonitorMatches()
 
   // Refresh button and closing the matches dialog (which just advanced this
@@ -155,6 +156,11 @@ export default function SavedSearchesPage() {
         limited={matchesLimited}
         newCount={matchesNewCount}
         error={matchesError}
+        checkedAt={checkedAt}
+        neverScanned={neverScanned}
+        lastError={lastError}
+        rescanning={rescanning}
+        onRescan={rescanNow}
         onClose={() => { closeMatches(); fetchSearches(true) }}
       />
     </main>

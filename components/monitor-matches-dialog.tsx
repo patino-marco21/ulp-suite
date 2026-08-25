@@ -2,8 +2,10 @@
 
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import { AlertCircle, Loader2 } from "lucide-react"
+import { AlertCircle, Loader2, RefreshCw } from "lucide-react"
+import { formatRelativeTime } from "@/lib/format-relative-time"
 import type { MonitorMatchTarget, MonitorMatchRow } from "@/hooks/useMonitorMatches"
 
 interface MonitorMatchesDialogProps {
@@ -13,19 +15,46 @@ interface MonitorMatchesDialogProps {
   limited: boolean
   newCount: number
   error: string | null
+  checkedAt: string | null
+  neverScanned: boolean
+  lastError: string | null
+  rescanning: boolean
+  onRescan: () => void
   onClose: () => void
 }
 
+function freshnessText(checkedAt: string | null, neverScanned: boolean, lastError: string | null): string {
+  if (neverScanned) return "Not yet scanned."
+  if (lastError) {
+    return checkedAt
+      ? `Last check failed: ${lastError} — showing results from ${formatRelativeTime(checkedAt)}.`
+      : `Last check failed: ${lastError}`
+  }
+  return checkedAt ? `Last checked ${formatRelativeTime(checkedAt)}.` : ""
+}
+
 export function MonitorMatchesDialog({
-  monitor, matches, loading, limited, newCount, error, onClose,
+  monitor, matches, loading, limited, newCount, error,
+  checkedAt, neverScanned, lastError, rescanning, onRescan, onClose,
 }: MonitorMatchesDialogProps) {
   return (
     <Dialog open={monitor !== null} onOpenChange={open => !open && onClose()}>
       <DialogContent className="max-w-4xl max-h-[80vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle>Matches — {monitor?.name}</DialogTitle>
+          <div className="flex items-center justify-between gap-4">
+            <DialogTitle>Matches — {monitor?.name}</DialogTitle>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onRescan}
+              disabled={rescanning || loading}
+            >
+              <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${rescanning ? 'animate-spin' : ''}`} />
+              Rescan now
+            </Button>
+          </div>
           <DialogDescription>
-            Credentials currently matching this monitor&apos;s domains, queried live.
+            {!error && freshnessText(checkedAt, neverScanned, lastError)}
             {!error && newCount > 0 && ` ${newCount} new since your last view.`}
             {!error && limited && ` Showing first ${matches.length} — more may exist.`}
           </DialogDescription>
@@ -36,13 +65,17 @@ export function MonitorMatchesDialog({
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           ) : error ? (
-            /* Must come before the empty-state branch: a failed query is not
+            /* Must come before the empty-state branch: a failed request is not
                evidence of zero matches, and rendering "No current matches"
                for one is an authoritative false negative. */
             <Alert variant="destructive" className="my-4">
               <AlertCircle className="h-4 w-4" />
               <AlertDescription>{error}</AlertDescription>
             </Alert>
+          ) : neverScanned ? (
+            <p className="text-sm text-muted-foreground py-8 text-center">
+              Not yet scanned — click &quot;Rescan now&quot; to check.
+            </p>
           ) : matches.length === 0 ? (
             <p className="text-sm text-muted-foreground py-8 text-center">No current matches.</p>
           ) : (
