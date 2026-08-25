@@ -1,8 +1,16 @@
 /**
  * Tests for lib/monitor-rescan-cron.ts — runTick.
  *
- * Coverage: match_mode-aware, subdomain-aware WHERE-clause construction,
- * and match_type persisted on the resulting monitor_alerts row.
+ * Coverage: match_type persisted on the resulting monitor_alerts row, webhook
+ * dedup/no-webhook bookkeeping, and the match-cache rewire (Task 7) — runTick
+ * delegates "what currently matches" to resolveMonitorMatches (one call per
+ * monitor, not per domain) and records success/failure via
+ * writeMonitorMatchCache/recordMonitorRescanFailure instead of querying
+ * ClickHouse itself. See __tests__/domain-match.test.ts and
+ * __tests__/monitor-match-resolver.test.ts for match_mode-aware,
+ * subdomain-aware WHERE-clause construction and the email-domain false-match
+ * guard — that query strategy lives in lib/domain-match.ts/
+ * lib/monitor-match-resolver.ts now, not here.
  */
 
 import { vi, describe, test, expect, beforeEach } from 'vitest'
@@ -12,28 +20,31 @@ vi.mock('@/lib/sqlite', () => ({
   dbRun:   vi.fn().mockReturnValue({ lastId: 1, changes: 1 }),
 }))
 
-vi.mock('@/lib/ulp-normalize', () => ({
-  NORM_DOMAIN_EXPR: 'domain',
-  NORM_EMAIL_EXPR: 'email',
-}))
-
-vi.mock('@/lib/clickhouse', () => ({
-  executeQuery: vi.fn().mockResolvedValue([]),
-}))
-
 vi.mock('@/lib/webhook-outbox-worker', () => ({
   attemptDelivery: vi.fn().mockResolvedValue({ ok: true, status: 200, error: null }),
   enqueueFailedDelivery: vi.fn(),
   runWebhookOutboxTick: vi.fn().mockResolvedValue(undefined),
 }))
 
+vi.mock('@/lib/monitor-match-resolver', () => ({
+  resolveMonitorMatches: vi.fn().mockResolvedValue({ rows: [], limited: false }),
+}))
+
+vi.mock('@/lib/domain-monitor', () => ({
+  writeMonitorMatchCache: vi.fn().mockResolvedValue(undefined),
+  recordMonitorRescanFailure: vi.fn().mockResolvedValue(undefined),
+}))
+
 import { runTick } from '@/lib/monitor-rescan-cron'
 import { dbQuery, dbRun } from '@/lib/sqlite'
-import { executeQuery } from '@/lib/clickhouse'
+import { resolveMonitorMatches } from '@/lib/monitor-match-resolver'
+import { writeMonitorMatchCache, recordMonitorRescanFailure } from '@/lib/domain-monitor'
 
 const mockDbQuery = vi.mocked(dbQuery)
 const mockDbRun   = vi.mocked(dbRun)
-const mockExecuteQuery = vi.mocked(executeQuery)
+const mockResolveMonitorMatches = vi.mocked(resolveMonitorMatches)
+const mockWriteMonitorMatchCache = vi.mocked(writeMonitorMatchCache)
+const mockRecordMonitorRescanFailure = vi.mocked(recordMonitorRescanFailure)
 
 function dueMonitorRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -54,84 +65,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   mockDbQuery.mockReturnValue([])
   mockDbRun.mockReturnValue({ lastId: 1, changes: 1 })
-  mockExecuteQuery.mockResolvedValue([])
-})
-
-describe('runTick — query construction', () => {
-  test('sends a subdomain-suffix param alongside the exact domain', async () => {
-    mockDbQuery.mockReturnValueOnce([dueMonitorRow()])  // due-monitors query
-    mockExecuteQuery.mockResolvedValueOnce([])
-
-    await runTick()
-
-    expect(mockExecuteQuery).toHaveBeenCalledOnce()
-    const [, params] = mockExecuteQuery.mock.calls[0] as [string, Record<string, unknown>]
-    expect(params.domain).toBe('aave.com')
-    expect(params.domainSuffix).toBe('.aave.com')
-  })
-
-  test('mode "url" omits the email-domain condition', async () => {
-    mockDbQuery.mockReturnValueOnce([dueMonitorRow({ match_mode: 'url' })])
-    mockExecuteQuery.mockResolvedValueOnce([])
-
-    await runTick()
-
-    const [sql] = mockExecuteQuery.mock.calls[0] as [string, Record<string, unknown>]
-    expect(sql).not.toContain('position(lower(email)')
-  })
-})
-
-describe('runTick — email-domain false-match guard (regression)', () => {
-  test('does not fire an alert for a credential row whose email has no "@" (would otherwise false-match the raw email string)', async () => {
-    // Dispatch by SQL content (not call order/count): the "wrongly matched"
-    // branch of this test needs the seen-fingerprint and webhook-lookup calls
-    // to resolve non-trivially too, but exactly how many times (if at all)
-    // those are reached depends on the very behavior under test — a fixed
-    // .mockReturnValueOnce(...) queue would either under- or over-supply
-    // values depending on which branch runs, leaking unconsumed entries into
-    // later tests. Matching on SQL text keeps this correct either way.
-    mockDbQuery.mockImplementation((sql: unknown) => {
-      const s = sql as string
-      if (s.includes('FROM domain_monitors')) {
-        return [dueMonitorRow({ match_mode: 'credential', domains: JSON.stringify(['google.com']) })]
-      }
-      if (s.includes('monitor_credential_seen')) return []            // nothing seen yet
-      if (s.includes('FROM monitor_webhooks')) return [WEBHOOK_ROW]   // an active webhook exists
-      return []
-    })
-
-    // Simulate ClickHouse evaluating the REAL WHERE clause runTick built: only
-    // "return" the row if the SQL's own guard — position(lower(email), '@') > 0
-    // — would let it through, not some separate app-side check. A row whose
-    // email has no '@' must be excluded by the SQL itself. If that guard clause
-    // ever regresses out of matchConditionSQL, this mock (correctly) reverts to
-    // returning the row — reproducing the pre-fix bug — which (via the webhook
-    // mock above) drives all the way to an actual INSERT INTO monitor_alerts,
-    // so this test fails for the right reason rather than trivially passing
-    // because no webhook was configured.
-    const noAtRow = { url: 'https://accounts.google.com/signin', email: 'accounts.google.com', password: 'hunter2', domain: 'accounts.google.com' }
-    mockExecuteQuery.mockImplementationOnce(async (sql: unknown) => {
-      const hasAtGuard = (sql as string).includes("position(lower(email), '@') > 0")
-      const emailHasAt = noAtRow.email.includes('@')
-      return hasAtGuard && !emailHasAt ? [] : [noAtRow]
-    })
-
-    await runTick()
-
-    // The behavioral assertion below only proves this mock's own re-simulation
-    // of the guard works — it can't detect the SQL guard being weakened (e.g.
-    // '> 0 AND' silently loosened to '> 0 OR', which would match every '@'-
-    // containing email in credential/both mode) or the last-'@' extraction
-    // regressing to first-'@'. Assert on the actual generated SQL text too, so
-    // a mutation of either kind fails here even if it happens to keep some
-    // other test green.
-    const [emailConditionSql] = mockExecuteQuery.mock.calls[0] as [string]
-    expect(emailConditionSql).toContain("position(lower(email), '@') > 0 AND")
-    expect(emailConditionSql).toContain("arrayElement(splitByChar('@', lower(email)), -1)")
-
-    const insertAlertCall = mockDbRun.mock.calls.find(([sql]) => (sql as string).includes('INSERT INTO monitor_alerts'))
-    expect(insertAlertCall).toBeUndefined()
-  })
+  mockResolveMonitorMatches.mockResolvedValue({ rows: [], limited: false })
 })
 
 describe('runTick — match_type persistence', () => {
@@ -140,7 +74,7 @@ describe('runTick — match_type persistence', () => {
       .mockReturnValueOnce([dueMonitorRow({ match_mode: 'credential' })])  // due monitors
       .mockReturnValueOnce([])                                            // seen-fingerprint IN-query
       .mockReturnValueOnce([WEBHOOK_ROW])                                 // webhook lookup
-    mockExecuteQuery.mockResolvedValueOnce([MATCHED_ROW])
+    mockResolveMonitorMatches.mockResolvedValueOnce({ rows: [MATCHED_ROW], limited: false })
 
     await runTick()
 
@@ -162,7 +96,7 @@ describe('runTick — match recording without webhooks', () => {
       .mockReturnValueOnce([dueMonitorRow()])  // due monitors
       .mockReturnValueOnce([])                 // seen-fingerprint IN-query — nothing seen
       .mockReturnValueOnce([])                 // no active webhooks
-    mockExecuteQuery.mockResolvedValueOnce([MATCHED_ROW])
+    mockResolveMonitorMatches.mockResolvedValueOnce({ rows: [MATCHED_ROW], limited: false })
 
     await runTick()
 
@@ -173,5 +107,40 @@ describe('runTick — match recording without webhooks', () => {
     // No webhook to deliver to, so no alert row (webhook_id is NOT NULL + FK).
     const insertAlertCall = mockDbRun.mock.calls.find(([sql]) => (sql as string).includes('INSERT INTO monitor_alerts'))
     expect(insertAlertCall).toBeUndefined()
+  })
+})
+
+describe('runTick — match cache (saved, not live)', () => {
+  test('writes the cache with resolveMonitorMatches\' rows on success', async () => {
+    mockDbQuery.mockReturnValueOnce([dueMonitorRow()])  // due monitors
+    mockResolveMonitorMatches.mockResolvedValueOnce({ rows: [MATCHED_ROW], limited: false })
+
+    await runTick()
+
+    expect(mockWriteMonitorMatchCache).toHaveBeenCalledWith(1, [MATCHED_ROW])
+  })
+
+  test('calls resolveMonitorMatches once per monitor, not once per domain', async () => {
+    mockDbQuery.mockReturnValueOnce([dueMonitorRow({ domains: JSON.stringify(['aave.com', 'lido.fi', 'trezor.io']) })])
+    mockResolveMonitorMatches.mockResolvedValueOnce({ rows: [], limited: false })
+
+    await runTick()
+
+    expect(mockResolveMonitorMatches).toHaveBeenCalledTimes(1)
+    expect(mockResolveMonitorMatches).toHaveBeenCalledWith('both', ['aave.com', 'lido.fi', 'trezor.io'])
+  })
+
+  test('records a rescan failure (not just console.error) when resolveMonitorMatches throws', async () => {
+    mockDbQuery.mockReturnValueOnce([dueMonitorRow()])
+    mockResolveMonitorMatches.mockRejectedValueOnce(new Error('Timeout exceeded: elapsed 60049ms, maximum: 60000ms.'))
+
+    await runTick()
+
+    expect(mockRecordMonitorRescanFailure).toHaveBeenCalledWith(1, 'Timeout exceeded: elapsed 60049ms, maximum: 60000ms.')
+    // The bug being fixed: previously this was ONLY console.error'd, with no
+    // trace anywhere queryable — last_triggered_at must not silently advance
+    // on a failed attempt either.
+    const lastTriggeredCall = mockDbRun.mock.calls.find(([sql]) => (sql as string).includes('UPDATE domain_monitors SET last_triggered_at'))
+    expect(lastTriggeredCall).toBeUndefined()
   })
 })

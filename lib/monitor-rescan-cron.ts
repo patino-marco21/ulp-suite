@@ -12,10 +12,10 @@
  */
 
 import { dbQuery, dbRun } from '@/lib/sqlite'
-import { executeQuery as executeClickHouseQuery } from '@/lib/clickhouse'
-import { NORM_DOMAIN_EXPR } from '@/lib/ulp-normalize'
 import { attemptDelivery, enqueueFailedDelivery, runWebhookOutboxTick } from '@/lib/webhook-outbox-worker'
-import { matchModeToMatchType, matchConditionSQL, credentialFingerprint, type MatchMode } from '@/lib/domain-match'
+import { matchModeToMatchType, credentialFingerprint, type MatchMode } from '@/lib/domain-match'
+import { resolveMonitorMatches } from '@/lib/monitor-match-resolver'
+import { writeMonitorMatchCache, recordMonitorRescanFailure } from '@/lib/domain-monitor'
 
 const TICK_MS = 15 * 60 * 1000  // 15 minutes
 
@@ -88,19 +88,8 @@ export async function runTick(): Promise<void> {
         dbRun('DELETE FROM monitor_credential_seen WHERE monitor_id = ?', [monitorRow.id])
       }
 
-      // Query ClickHouse using NORM_DOMAIN_EXPR so Cases A-D corrupted rows match
-      const matchedRows: CredentialRow[] = []
-      for (const domain of domains) {
-        const d = domain.toLowerCase().trim()
-        const rows = await executeClickHouseQuery(
-          `SELECT url, email, password, (${NORM_DOMAIN_EXPR}) AS domain
-           FROM ulp.credentials
-           WHERE ${matchConditionSQL(monitorRow.match_mode)}
-           LIMIT 100`,
-          { domain: d, domainSuffix: `.${d}` }
-        ) as CredentialRow[]
-        matchedRows.push(...rows)
-      }
+      const { rows: matchedRows } = await resolveMonitorMatches(monitorRow.match_mode, domains)
+      await writeMonitorMatchCache(monitorRow.id, matchedRows)
 
       if (matchedRows.length === 0) {
         dbRun(`UPDATE domain_monitors SET last_triggered_at = datetime('now') WHERE id = ?`, [monitorRow.id])
@@ -122,7 +111,7 @@ export async function runTick(): Promise<void> {
       ) as { fingerprint: string }[]
       const seenSet = new Set(seenRows.map(r => r.fingerprint))
 
-      const unseenRows = matchedRows.filter(row => {
+      const unseenRows: CredentialRow[] = matchedRows.filter(row => {
         const fp = credentialFingerprint(row.email, row.password, row.domain)
         return !seenSet.has(fp)
       })
@@ -202,7 +191,13 @@ export async function runTick(): Promise<void> {
 
       fired++
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
       console.error(`[monitor-rescan] error processing monitor "${monitorRow.name}": ${err}`)
+      try {
+        await recordMonitorRescanFailure(monitorRow.id, message)
+      } catch (statusErr) {
+        console.error(`[monitor-rescan] failed to record rescan status for monitor "${monitorRow.name}": ${statusErr}`)
+      }
     }
   }
 
