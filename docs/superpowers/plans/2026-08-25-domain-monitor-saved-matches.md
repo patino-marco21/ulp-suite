@@ -4,7 +4,7 @@
 
 **Goal:** Replace the live per-open ClickHouse query behind the monitor "View Matches" panel with a cron-populated SQLite cache plus a manual "Rescan now" escape hatch, and fix the two bugs that made the existing monitor unusable (malformed stored domains; a non-index-prunable predicate causing the rescan cron to silently time out every 15 minutes).
 
-**Architecture:** A new ClickHouse projection (`proj_domain_reversed`) makes per-monitor domain-suffix matching index-prunable. A shared resolver function (`resolveMonitorMatches`, extracted from the current live route) uses it. The existing rescan cron and a new "Rescan now" endpoint both call that resolver and write results into two new SQLite tables (`monitor_matches`, `monitor_rescan_status`); the "View Matches" panel's GET endpoint becomes a pure SQLite read.
+**Architecture:** A new ClickHouse ngram skip index (`idx_ngram_domain`) makes per-monitor domain-suffix matching index-prunable — see the 2026-08-25 correction note on Tasks 3–4 below; the original plan called for a reversed-domain projection, empirically disproven during execution. A shared resolver function (`resolveMonitorMatches`, extracted from the current live route) uses the fixed predicate. The existing rescan cron and a new "Rescan now" endpoint both call that resolver and write results into two new SQLite tables (`monitor_matches`, `monitor_rescan_status`); the "View Matches" panel's GET endpoint becomes a pure SQLite read.
 
 **Tech Stack:** Next.js API routes, ClickHouse (`ALTER TABLE ... ADD PROJECTION`), better-sqlite3, Vitest.
 
@@ -13,7 +13,7 @@
 - Spec: [docs/superpowers/specs/2026-08-24-domain-monitor-saved-matches-design.md](../specs/2026-08-24-domain-monitor-saved-matches-design.md) — every task below implements a section of it; re-read a section if a step here seems to contradict it.
 - `monitor_matches` primary key is `(monitor_id, url, email, password)`, not `(monitor_id, url, email)` — a distinct password for the same url/email must not collapse.
 - Timestamps written to `monitor_matches`/`monitor_rescan_status` MUST use SQL `datetime('now')`, never JS `Date.toISOString()` — `lib/format-relative-time.ts:7` parses the SQLite `"YYYY-MM-DD HH:MM:SS"` shape specifically and will silently produce `Invalid Date` on an ISO string with a `T`/`Z` already in it.
-- The `email_domain` ClickHouse column is left untouched throughout — it measured fast (0.24s) even with the un-prunable predicate; only `domain` gets the reversed-projection treatment.
+- The `email_domain` ClickHouse column is left untouched throughout — it already had the `ngrambf_v1` index that makes its `endsWith()` predicate fast (0.24s); Task 4 gives `domain` the same index type, not a different mechanism (see the correction note below).
 
 ---
 
@@ -361,6 +361,19 @@ git commit -m "fix(monitoring): normalize monitor domains (strip scheme/path/sla
 
 ### Task 3: Reversed-domain predicate
 
+> **⚠️ SUPERSEDED (2026-08-25), during Task 4's execution.** The reversed-prefix
+> predicate below was implemented and reviewed as written, but the ClickHouse
+> mechanism it depends on (Task 4's projection) turned out not to work — see the
+> correction note on Task 4. The fix that actually works (an `ngrambf_v1` index on
+> `domain`) needs no predicate change at all: `buildCandidateColumnWhereClause` was
+> reverted to its original `endsWith(domain, ...)` form, identical in shape to the
+> `email_domain` branch. Everything below this point in Task 3 describes work that
+> was done and then undone — kept for the historical record (and because the
+> false-positive regression test it introduced, adapted to check the dot-boundary
+> on the reverted code, is still real coverage — see
+> `__tests__/domain-match.test.ts`'s `buildCandidateColumnWhereClause` describe
+> block for the current version). Do not redo this task's steps.
+
 **Files:**
 - Modify: `lib/domain-match.ts:240-254` (`buildCandidateColumnWhereClause`)
 - Test: `__tests__/domain-match.test.ts` (extend)
@@ -476,7 +489,127 @@ git commit -m "perf(monitor-matches): make the domain-column candidate scan reve
 
 ---
 
-### Task 4: ClickHouse projection migration
+### Task 4: ClickHouse index migration (`idx_ngram_domain`)
+
+> **What actually shipped, and why it differs from the original plan
+> (2026-08-25):** this task originally called for the projection described in
+> Steps 1-6 further below in this history (kept for the record, not for
+> execution). Two approaches were tried and empirically disproven against the
+> live 2.4B-row table before landing on the real fix — full account in the
+> design doc §1. Summary: a projection ordered by `reverse(domain)` is never
+> selected by ClickHouse's planner for this predicate shape (confirmed via
+> `force_optimize_projection`, which raised `PROJECTION_NOT_USED`); a
+> `domain_reversed` materialized column + `minmax` index on it *is* selected,
+> but only prunes ~35% of granules on the real table (vs. 24/25 on a
+> favorably-ordered scratch table) because `minmax` needs the indexed value to
+> correlate with physical storage order, and a reversed string doesn't
+> correlate with forward-domain sort order. **The fix that actually works:** an
+> `ngrambf_v1` skip index on `domain` — the same index type/parameters
+> `email_domain` already had, which is what made *its* `endsWith()` predicate
+> fast all along (0.24s) while `domain`'s plain `bloom_filter` index couldn't
+> help at all (bloom filters only accelerate equality). No predicate rewrite
+> needed; the original `domain = {d} OR endsWith(domain, {'.'+d})` shape is
+> unchanged — only a second index is added.
+
+**Files:**
+- Modify: `lib/clickhouse-migrations.ts` (bump `DDL_VERSION`, add v19 block)
+
+**Interfaces:**
+- Produces: ClickHouse index `idx_ngram_domain` on `ulp.credentials.domain`, `ngrambf_v1(4, 8192, 4, 0)` — same type/params as the existing `idx_ngram_email_domain`.
+
+- [ ] **Step 1: Bump the version constant**
+
+In `lib/clickhouse-migrations.ts:159`, change:
+
+```typescript
+const DDL_VERSION = 19
+```
+
+- [ ] **Step 2: Add the v19 migration block**
+
+Immediately after the existing `if (lastDdl < 18) { ... }` block, add:
+
+```typescript
+  // v19 — idx_ngram_domain: an ngram skip index on `domain`, same type/params
+  // as the existing idx_ngram_email_domain. Makes the phase-1 candidate scan
+  // in lib/domain-match.ts's buildCandidateColumnWhereClause prunable for the
+  // `domain` column: endsWith(domain, '.x') is prunable by no index on this
+  // table today (idx_bf_domain, a plain bloom_filter, measured
+  // 37350->37350 granules for that predicate — bloom filters only help
+  // equality). `email_domain` already had this exact problem solved: it
+  // carries both a bloom_filter AND an ngrambf_v1 index, and the ngram one is
+  // what actually prunes its endsWith() predicate (measured 0.24s). This
+  // gives `domain` the same second index `email_domain` already had.
+  //
+  // This DDL_VERSION went through two other approaches first, both empirically
+  // disproven against this table on 2026-08-25 — see
+  // docs/superpowers/specs/2026-08-24-domain-monitor-saved-matches-design.md §1
+  // for the full history: (1) a PROJECTION ordered by reverse(domain), never
+  // selected by the planner for this predicate shape even forced; (2) a
+  // materialized domain_reversed column + minmax index, which the planner
+  // does select but which only prunes ~35% of granules on this table because
+  // minmax needs the indexed value to correlate with physical row order, and
+  // a reversed string doesn't correlate with this table's forward-domain sort
+  // order. ngram indexes don't have that ordering dependency (they hash
+  // per-granule content), which is why this predicate prunes well on both
+  // columns once each has one.
+  if (lastDdl < 19) {
+    await runMigration(
+      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_ngram_domain domain TYPE ngrambf_v1(4, 8192, 4, 0) GRANULARITY 1`,
+      `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_ngram_domain`
+    )
+    console.warn('[ClickHouse migration] DDL v19 applied (added idx_ngram_domain — MATERIALIZE running in background)')
+  }
+```
+
+- [ ] **Step 3: Rebuild and redeploy the app container so the migration actually runs**
+
+```bash
+docker compose -f /home/cole/ulp-suite/docker-compose.yml --project-directory /home/cole/ulp-suite --env-file /home/cole/ulp-suite/.env build app
+docker compose -f /home/cole/ulp-suite/docker-compose.yml --project-directory /home/cole/ulp-suite --env-file /home/cole/ulp-suite/.env up -d app
+```
+
+Use a scoped `DOCKER_CONFIG` per [[project-docker-credstore-workaround]] if needed. **Always anchor with `--project-directory`/`--env-file` pointed at the main checkout, even when running from a worktree** — see [[project-worktree-docker-env-hazard]]: without it, Docker resolves `.env` and the `./data`/`./uploads`/`./inbox` bind mounts relative to the invocation directory, which silently blanks secrets and/or points the live app at an empty database instead of the real one. Verify the fix, don't assume it: `docker inspect ulpsuite_app --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'` should show `/home/cole/ulp-suite/...` sources.
+
+Expected: container recreated and healthy (`docker ps --filter name=ulpsuite_app`).
+
+- [ ] **Step 4: Verify the migration applied**
+
+```bash
+docker logs ulpsuite_app 2>&1 | grep "DDL v19"
+```
+
+Expected: `[ClickHouse migration] DDL v19 applied (added idx_ngram_domain — MATERIALIZE running in background)`. If this doesn't appear, check directly against `system.mutations` rather than waiting indefinitely on app logs — migrations run via the app's HTTP ClickHouse client, and a multi-hour DDL over this HTTP connection can silently hang forever without ever logging an error (see [lib/clickhouse.ts](../../../lib/clickhouse.ts)'s `send_progress_in_http_headers` fix, added this same session, and its comment for the full mechanism). Track progress directly instead:
+
+```bash
+docker exec ulpsuite_clickhouse clickhouse-client --query "SELECT is_done, parts_to_do, latest_fail_reason FROM system.mutations WHERE database='ulp' AND table='credentials' AND command LIKE '%idx_ngram_domain%' ORDER BY create_time DESC LIMIT 1 FORMAT Vertical"
+```
+
+- [ ] **Step 5: Empirically verify the index prunes the (unchanged) predicate — do not assume, measure**
+
+```bash
+docker exec ulpsuite_clickhouse clickhouse-client --query "
+EXPLAIN indexes=1
+SELECT DISTINCT domain FROM ulp.credentials
+WHERE (domain = 'trezor.io' OR endsWith(domain, '.trezor.io'))
+   OR (domain = 'ledger.com' OR endsWith(domain, '.ledger.com'))
+SETTINGS use_query_cache = 0
+"
+```
+
+Expected: `idx_ngram_domain` appears in the `Skip` indexes list with a granule count well below `idx_bf_domain`'s (measured 2026-08-25: bloom_filter alone pruned 37350→36605; adding the ngram index pruned to 6710). Also time the actual query against the monitor's full real domain list (all 17 — a 2-domain query undersells how much pruning degrades as the OR list grows; measured 2.75s for 2 domains vs. 24.9s for the real 17-domain monitor, both comfortably under the 45s phase-1 budget, both down from the 50.76s baseline that motivated this task). If not meaningfully faster than baseline, STOP and re-open the design rather than layering on a third attempt blindly.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add lib/clickhouse-migrations.ts
+git commit -m "perf(monitoring): add idx_ngram_domain ClickHouse index (DDL v19)"
+```
+
+---
+
+<details>
+<summary>Original Task 4 text (superseded, kept for the record — do not execute)</summary>
 
 **Files:**
 - Modify: `lib/clickhouse-migrations.ts` (bump `DDL_VERSION`, add v19 block)
@@ -517,54 +650,9 @@ Immediately after the existing `if (lastDdl < 18) { ... }` block (around line 78
   }
 ```
 
-- [ ] **Step 3: Rebuild and redeploy the app container so the migration actually runs**
+(Remaining original steps 3-6 omitted — same shape as the corrected Steps 3-6 above, just against the projection instead of the index. Not reproduced twice.)
 
-```bash
-mkdir -p /tmp/ch-migration-dockercfg && echo '{}' > /tmp/ch-migration-dockercfg/config.json
-DOCKER_CONFIG=/tmp/ch-migration-dockercfg docker compose build app
-DOCKER_CONFIG=/tmp/ch-migration-dockercfg docker compose up -d app
-```
-
-Expected: container recreated and healthy (`docker ps --filter name=ulpsuite_app`).
-
-- [ ] **Step 4: Verify the migration applied**
-
-```bash
-docker logs ulpsuite_app 2>&1 | grep "DDL v19"
-```
-
-Expected: `[ClickHouse migration] DDL v19 applied (added proj_domain_reversed projection — MATERIALIZE running in background)`.
-
-- [ ] **Step 5: Empirically verify the projection prunes the rewritten predicate — do not assume, measure**
-
-```bash
-docker exec ulpsuite_clickhouse clickhouse-client --query "
-EXPLAIN indexes=1
-SELECT DISTINCT domain FROM ulp.credentials
-WHERE (domain = 'trezor.io' OR startsWith(reverse(domain), 'oi.rozert.'))
-   OR (domain = 'ledger.com' OR startsWith(reverse(domain), 'moc.regdel.'))
-SETTINGS use_query_cache = 0
-"
-```
-
-Expected: the plan shows `proj_domain_reversed` selected and a granule-pruning ratio much better than the pre-fix `37350/37350` cited in `route.ts`'s doc comment. Also time the actual query:
-
-```bash
-docker exec ulpsuite_clickhouse clickhouse-client --time --query "
-SELECT DISTINCT domain FROM ulp.credentials
-WHERE (domain = 'trezor.io' OR startsWith(reverse(domain), 'oi.rozert.'))
-SETTINGS use_query_cache = 0
-"
-```
-
-Record the measured time in the Task 5 commit message or a follow-up doc note — Task 5's extraction depends on this actually being fast, not just theoretically prunable. If it is NOT meaningfully faster than the pre-fix 50.76s baseline, STOP and re-open the design (per systematic-debugging: this would mean the hypothesis was wrong, not that a second fix should be layered on blindly).
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add lib/clickhouse-migrations.ts
-git commit -m "perf(monitoring): add proj_domain_reversed ClickHouse projection (DDL v19)"
-```
+</details>
 
 ---
 
@@ -610,14 +698,14 @@ describe('resolveMonitorMatches', () => {
     expect(result).toEqual({ rows: [], limited: false })
   })
 
-  test('phase 1 domain-column scan uses the reversed-prefix predicate (Task 3)', async () => {
+  test('phase 1 domain-column scan uses the index-backed endsWith predicate (idx_ngram_domain, Task 4)', async () => {
     await resolveMonitorMatches('url', ['trezor.io'])
     const domainScanCall = mockExecuteQuery.mock.calls.find(
       ([sql]) => (sql as string).includes('SELECT DISTINCT domain')
     )
     expect(domainScanCall).toBeDefined()
     const [sql] = domainScanCall as [string]
-    expect(sql).toContain('startsWith(reverse(domain)')
+    expect(sql).toContain('endsWith(domain')
   })
 
   test('mode "url" only scans the domain column, not email_domain', async () => {

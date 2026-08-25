@@ -62,59 +62,87 @@ live on every panel open, with a manual escape hatch for "check right now."
 
 ## Architecture
 
-### 1. ClickHouse query fix: reversed-domain projection
+### 1. ClickHouse query fix: `idx_ngram_domain`
 
 Current predicate ([lib/domain-match.ts:163-177](../../../lib/domain-match.ts)) is
 `domain = {d} OR endsWith(domain, '.'+{d})`. Per the route's own `EXPLAIN
 indexes=1` finding ([route.ts:27-75](../../../app/api/monitoring/monitors/[id]/matches/route.ts)),
-the `endsWith` half defeats `idx_bf_domain`/`idx_bf_email_domain` entirely
-(37350→37350 granules; equality alone prunes to 38).
+the `endsWith` half defeats `idx_bf_domain` entirely (37350→37350 granules;
+equality alone prunes to 38) — because `idx_bf_domain` is a plain `bloom_filter`,
+which only accelerates equality.
 
-Add a projection ordered by the reversed column — same mechanism already used for
-`proj_imported_desc`
-([docker/clickhouse/init/01-ulp-tables.sql:296-301](../../../docker/clickhouse/init/01-ulp-tables.sql)):
+**The fix, in the end, is small:** `email_domain` already had this exact problem
+solved. It carries both a `bloom_filter` index (same limitation as `domain`'s) AND
+an `ngrambf_v1` skip index, and the ngram one is what actually prunes its
+`endsWith()` predicate — that's the documented reason `email_domain` measured fast
+(0.24s) while `domain` measured 50.76s for the identical predicate shape. Give
+`domain` the same second index type `email_domain` already has, same parameters:
 
 ```sql
 ALTER TABLE ulp.credentials
-ADD PROJECTION proj_domain_reversed (
-  SELECT url, email, password, domain, email_domain, imported_at
-  ORDER BY reverse(domain)
-);
-
-ALTER TABLE ulp.credentials MATERIALIZE PROJECTION proj_domain_reversed;
+  ADD INDEX IF NOT EXISTS idx_ngram_domain domain TYPE ngrambf_v1(4, 8192, 4, 0) GRANULARITY 1;
+ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_ngram_domain;
 ```
 
-Rewrite the match predicate to keep the cheap equality clause as-is and replace
-only the suffix half with a reversed-prefix check the projection can prune. The
-dot-boundary (`'.'+d`, not bare `d`) must be preserved on the reversed side too —
-without it, `startsWith(reverse(domain), reverse(d))` would wrongly match
-`eviltrezor.io` against monitored domain `trezor.io` (reversed, one is a literal
-string-prefix of the other with no boundary check):
+No predicate rewrite needed — the existing `domain = {d} OR endsWith(domain,
+{'.'+d})` shape is unchanged; only a second index type is added. Measured against
+the live 2.4B-row table with this index in place: `idx_ngram_domain` pruned
+37350→6710 granules for a 2-domain query (the `bloom_filter` index alone had
+already pruned 37350→36605 — i.e. essentially nothing), and the full query for the
+real "Dedicated / general hardware wallets" monitor's 17 domains completed in
+24.9s (down from the 50.76s baseline, and — the number that actually matters —
+back inside the route's 45s phase-1 budget with real margin, where before it was
+timing out).
 
-```sql
--- was: domain = {d} OR endsWith(domain, {'.'+d})
--- now: domain = {d} OR startsWith(reverse(domain), {reverse('.'+d)})
-```
+**Two other approaches were tried first and empirically disproven against this
+table on 2026-08-25** — kept here, in full, so nobody re-attempts either:
 
-(`startsWith(reverse(x), reverse(y))` is the standard ClickHouse idiom for "x ends
-with y" — a prefix match on the reversed string is exactly a suffix match on the
-original, and prefix matches are what a sorted projection can range-prune.)
+1. **A projection ordered by `reverse(domain)`.** Reasoned that a prefix match on
+   a reversed string is a suffix match on the original, and prefix matches are
+   what a sorted projection can range-prune. True in principle; ClickHouse's
+   planner nonetheless never selected this projection for a
+   `startsWith(reverse(domain), ...)` predicate — confirmed via `SETTINGS
+   force_optimize_projection = 1`, which raised `PROJECTION_NOT_USED` rather than
+   using it. A projection ordered by a bare function of a column, it turns out, is
+   not reliably recognized as satisfying a range condition over that function —
+   distinct from a projection's proven use in this schema for supplying a
+   pre-sorted read order (`proj_imported_desc`), which is a different access
+   pattern than WHERE-clause pruning.
+2. **A `domain_reversed` materialized column + `minmax` skip index on it.** Moving
+   the reversal into an actual stored column *did* get selected by the planner —
+   but `minmax` only prunes a granule when that granule's value range is narrow,
+   which requires the indexed expression to correlate with the table's physical
+   storage order. `ulp.credentials` is sorted by forward `domain`
+   (`ORDER BY (domain, email, imported_at)`); a *reversed* string has no such
+   correlation — two forward-adjacent domains (e.g. differing in the 2nd
+   character) can have wildly different reversed forms. Result: 24/25 granules
+   pruned on a small disposable test table (built by inserting one big block of
+   synthetic rows, then the real test domains — a favorable, non-representative
+   order), but only ~35% pruned on the real table (37350→24349) once tested there.
+   The lesson generalizes: **validate a `minmax` index's real effectiveness on
+   data whose physical order matches production, not a scratch table you built by
+   hand** — small-scale validation caught the projection approach's total failure
+   correctly, but was actively misleading for `minmax` specifically, because
+   `minmax`'s effectiveness is a property of row *order*, not just row *content*,
+   and a hand-built scratch table doesn't reproduce that.
 
 Whether this makes the existing two-phase candidate-resolution machinery in
-`lib/domain-match.ts` unnecessary (vs. just making both phases fast) will be
-measured with `EXPLAIN` during implementation, not assumed — if phase 1+2 collapse
-cleanly into one prunable query per monitor, simplify; if not, keep the two-phase
-structure with the new predicate slotted in.
+`lib/domain-match.ts` unnecessary (vs. just making both phases fast) was measured,
+not assumed: with the ngram index, phase 1's per-column scan is fast enough that
+the two-phase split's main remaining value is bounding phase 2's read to an exact
+IN-list rather than collapsing to one query — kept as-is; simplifying it further
+was not attempted, since it isn't broken and this section already spent its
+budget on the indexing question.
 
 Considered following the existing MV pattern from
 [2026-06-06-materialized-views-design.md](2026-06-06-materialized-views-design.md)
 (`SummingMergeTree`/`AggregatingMergeTree` fed by `CREATE MATERIALIZED VIEW ... TO`)
-instead of a projection. That pattern fits a fixed aggregation dimension (domain,
-password, url_host) computed once and shared by all readers. It doesn't fit here:
-each monitor has its own arbitrary, user-editable domain list, so there's no single
-fixed `GROUP BY` key to materialize against. A projection (re-sorting the same
-row-level data for a different access pattern) is the right tool for "make
-point/prefix lookups on an existing column fast," not aggregation.
+instead of any of the above. That pattern fits a fixed aggregation dimension
+(domain, password, url_host) computed once and shared by all readers. It doesn't
+fit here: each monitor has its own arbitrary, user-editable domain list, so
+there's no single fixed `GROUP BY` key to materialize against. An index that
+accelerates a `WHERE`-clause predicate on an existing column is the right tool for
+"look up rows matching one of N patterns," not aggregation.
 
 ### 2. New SQLite cache: `monitor_matches` + `monitor_rescan_status`
 
