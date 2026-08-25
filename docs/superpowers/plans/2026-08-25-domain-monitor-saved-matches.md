@@ -534,9 +534,10 @@ Immediately after the existing `if (lastDdl < 18) { ... }` block, add:
   // as the existing idx_ngram_email_domain. Makes the phase-1 candidate scan
   // in lib/domain-match.ts's buildCandidateColumnWhereClause prunable for the
   // `domain` column: endsWith(domain, '.x') is prunable by no index on this
-  // table today (idx_bf_domain, a plain bloom_filter, measured
-  // 37350->37350 granules for that predicate — bloom filters only help
-  // equality). `email_domain` already had this exact problem solved: it
+  // table today (idx_bf_domain, a plain bloom_filter, originally measured
+  // 37350->37350 granules for this predicate before this index existed —
+  // bloom filters only help equality). `email_domain` already had this exact
+  // problem solved: it
   // carries both a bloom_filter AND an ngrambf_v1 index, and the ngram one is
   // what actually prunes its endsWith() predicate (measured 0.24s). This
   // gives `domain` the same second index `email_domain` already had.
@@ -597,7 +598,7 @@ SETTINGS use_query_cache = 0
 "
 ```
 
-Expected: `idx_ngram_domain` appears in the `Skip` indexes list with a granule count well below `idx_bf_domain`'s (measured 2026-08-25: bloom_filter alone pruned 37350→36605; adding the ngram index pruned to 6710). Also time the actual query against the monitor's full real domain list (all 17 — a 2-domain query undersells how much pruning degrades as the OR list grows; measured 2.75s for 2 domains vs. 24.9s for the real 17-domain monitor, both comfortably under the 45s phase-1 budget, both down from the 50.76s baseline that motivated this task). If not meaningfully faster than baseline, STOP and re-open the design rather than layering on a third attempt blindly.
+Expected: `idx_ngram_domain` appears in the `Skip` indexes list with a granule count well below `idx_bf_domain`'s within that same combined plan (measured 2026-08-25 for this exact trezor.io+ledger.com query, with both indexes present: `idx_bf_domain` itself contributed 37350→36605, `idx_ngram_domain` narrowed the rest to 6710 — this 36605 is `idx_bf_domain`'s showing *within a plan that also has the ngram index*, not a from-scratch bloom-filter-only re-measurement, so don't be alarmed if it doesn't match the original, separately-measured "37350→37350, prunes nothing alone" finding cited elsewhere — that finding predates this index and used a different domain pair; see design doc §1 for the full disambiguation). Also time the actual query against the monitor's full real domain list (all 17 — a 2-domain query undersells how much pruning degrades as the OR list grows; measured 2.75s for 2 domains vs. 24.9s for the real 17-domain monitor, both comfortably under the 45s phase-1 budget, both down from the 50.76s baseline that motivated this task). If not meaningfully faster than baseline, STOP and re-open the design rather than layering on a third attempt blindly.
 
 - [ ] **Step 6: Commit**
 

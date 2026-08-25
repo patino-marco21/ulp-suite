@@ -86,10 +86,21 @@ ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_ngram_domain;
 
 No predicate rewrite needed — the existing `domain = {d} OR endsWith(domain,
 {'.'+d})` shape is unchanged; only a second index type is added. Measured against
-the live 2.4B-row table with this index in place: `idx_ngram_domain` pruned
-37350→6710 granules for a 2-domain query (the `bloom_filter` index alone had
-already pruned 37350→36605 — i.e. essentially nothing), and the full query for the
-real "Dedicated / general hardware wallets" monitor's 17 domains completed in
+the live 2.4B-row table for a 2-domain (`trezor.io`, `ledger.com`) query, with
+`idx_ngram_domain` already in place: the `EXPLAIN indexes=1` plan's `Skip` list
+showed `idx_bf_domain` (the pre-existing `bloom_filter`) itself contributing
+37350→36605 within that combined plan, and `idx_ngram_domain` narrowing the
+remainder to 6710. This 36605 figure is NOT the same thing as the `bloom_filter`
+alone with no other index present — that combination was not separately
+re-measured for this domain pair; the "prunes nothing on its own" characterization
+above (37350→37350) is `email_domain`/`domain`'s originally-documented finding
+(pre-dating this fix, no `ngrambf_v1` index existing yet — see
+[route.ts:27-75](../../../app/api/monitoring/monitors/[id]/matches/route.ts)),
+not a re-measurement for this specific pair. Both figures are real; they answer
+different questions ("does bloom_filter help at all, in isolation" vs. "what does
+the final combined plan's index list show"). The number that actually settles
+whether the fix works is the end-to-end query time: the full query for the real
+"Dedicated / general hardware wallets" monitor's 17 domains completed in
 24.9s (down from the 50.76s baseline, and — the number that actually matters —
 back inside the route's 45s phase-1 budget with real margin, where before it was
 timing out).

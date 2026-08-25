@@ -156,6 +156,13 @@ let migrationsDone = false
 //     in the background — the speedup lands once that mutation completes. This table
 //     has grown substantially since v12 (1.48B rows at time of writing) — expect this
 //     to take meaningfully longer; do not assume a duration.
+// v19: idx_ngram_domain — ngrambf_v1(4,8192,4,0) skip index on `domain`, same
+//     type/params idx_ngram_email_domain already has (per v17's resize). Makes
+//     the monitor-matches endsWith(domain, ...) predicate prunable; a
+//     bloom_filter-only index can't help a suffix condition, only equality.
+//     Two other approaches (a projection, then a materialized+minmax column)
+//     were tried and empirically disproven first — see the block below and
+//     docs/superpowers/specs/2026-08-24-domain-monitor-saved-matches-design.md §1.
 const DDL_VERSION = 19
 
 // Per-version persistence: stored in SQLite app_settings.
@@ -789,9 +796,10 @@ export async function runClickHouseMigrations(): Promise<void> {
   // as the existing idx_ngram_email_domain. Makes the phase-1 candidate scan
   // in lib/domain-match.ts's buildCandidateColumnWhereClause prunable for the
   // `domain` column: endsWith(domain, '.x') is prunable by no index on this
-  // table today (idx_bf_domain, a plain bloom_filter, measured
-  // 37350->37350 granules for that predicate — bloom filters only help
-  // equality). `email_domain` already had this exact problem solved: it
+  // table today (idx_bf_domain, a plain bloom_filter, originally measured
+  // 37350->37350 granules for this predicate before this index existed —
+  // bloom filters only help equality). `email_domain` already had this exact
+  // problem solved: it
   // carries both a bloom_filter AND an ngrambf_v1 index, and the ngram one is
   // what actually prunes its endsWith() predicate (measured 0.24s). This
   // gives `domain` the same second index `email_domain` already had.
