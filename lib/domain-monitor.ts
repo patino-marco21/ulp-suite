@@ -1,6 +1,6 @@
-import { dbQuery, dbGet, dbRun } from '@/lib/sqlite'
+import { dbQuery, dbGet, dbRun, dbTransaction } from '@/lib/sqlite'
 import { attemptDelivery, enqueueFailedDelivery } from '@/lib/webhook-outbox-worker'
-import { matchModeToMatchType, credentialFingerprint, type MatchedCredential } from '@/lib/domain-match'
+import { matchModeToMatchType, credentialFingerprint, type MatchedCredential, type MatchRow } from '@/lib/domain-match'
 import crypto from 'crypto'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -538,4 +538,79 @@ export async function markMatchesNewSinceLastView<
     ...row,
     is_new: !oldFingerprints.has(credentialFingerprint(row.email, row.password, row.domain)),
   }))
+}
+
+// ─── Match cache (saved, not live) ─────────────────────────────────────────
+
+export interface MonitorMatchesCacheEntry {
+  rows: Array<{ url: string; email: string; password: string; domain: string }>
+  status: 'never_scanned' | 'ok' | 'failed'
+  checkedAt: string | null
+  lastError: string | null
+}
+
+/**
+ * Replace a monitor's cached "current matches" snapshot and mark the rescan
+ * that produced it as successful. Delete-then-insert in one transaction so a
+ * reader never sees a partially-replaced set. Timestamps use SQL
+ * datetime('now'), not JS Date — lib/format-relative-time.ts parses the
+ * SQLite "YYYY-MM-DD HH:MM:SS" shape specifically.
+ */
+export async function writeMonitorMatchCache(monitorId: number, rows: MatchRow[]): Promise<void> {
+  dbTransaction(() => {
+    dbRun('DELETE FROM monitor_matches WHERE monitor_id = ?', [monitorId])
+    for (const row of rows) {
+      dbRun(
+        `INSERT INTO monitor_matches (monitor_id, url, email, password, domain, fetched_at)
+         VALUES (?, ?, ?, ?, ?, datetime('now'))`,
+        [monitorId, row.url, row.email, row.password, row.domain]
+      )
+    }
+    dbRun(
+      `INSERT INTO monitor_rescan_status (monitor_id, status, error, attempted_at, last_success_at)
+       VALUES (?, 'ok', NULL, datetime('now'), datetime('now'))
+       ON CONFLICT(monitor_id) DO UPDATE SET status = 'ok', error = NULL, attempted_at = datetime('now'), last_success_at = datetime('now')`,
+      [monitorId]
+    )
+  })
+}
+
+/**
+ * Record a failed rescan attempt without touching the previous good
+ * monitor_matches snapshot — a stale cache is more useful than an empty one.
+ * This is the fix for the bug where a timeout was only ever console.error'd:
+ * lib/monitor-rescan-cron.ts's runTick previously had no persisted trace of
+ * a monitor failing every single tick.
+ */
+export async function recordMonitorRescanFailure(monitorId: number, error: string): Promise<void> {
+  dbRun(
+    `INSERT INTO monitor_rescan_status (monitor_id, status, error, attempted_at, last_success_at)
+     VALUES (?, 'failed', ?, datetime('now'), NULL)
+     ON CONFLICT(monitor_id) DO UPDATE SET status = 'failed', error = ?, attempted_at = datetime('now')`,
+    [monitorId, error, error]
+  )
+}
+
+/** Read the current cached matches + rescan health for a monitor. */
+export async function getMonitorMatchesCache(monitorId: number): Promise<MonitorMatchesCacheEntry> {
+  const statusRow = dbGet(
+    `SELECT status, error, last_success_at FROM monitor_rescan_status WHERE monitor_id = ?`,
+    [monitorId]
+  ) as { status: 'ok' | 'failed'; error: string | null; last_success_at: string | null } | undefined
+
+  if (!statusRow) {
+    return { rows: [], status: 'never_scanned', checkedAt: null, lastError: null }
+  }
+
+  const rows = dbQuery(
+    `SELECT url, email, password, domain FROM monitor_matches WHERE monitor_id = ? ORDER BY domain, email`,
+    [monitorId]
+  ) as Array<{ url: string; email: string; password: string; domain: string }>
+
+  return {
+    rows,
+    status: statusRow.status,
+    checkedAt: statusRow.last_success_at,
+    lastError: statusRow.status === 'failed' ? statusRow.error : null,
+  }
 }
