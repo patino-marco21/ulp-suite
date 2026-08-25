@@ -274,7 +274,7 @@ describe('buildCandidateColumnWhereClause', () => {
     // The whole point of phase 1 is that ClickHouse reads ONE narrow column;
     // wrapping it would drag url/email/password into the scan.
     const { clause } = buildCandidateColumnWhereClause('domain', ['aave.com'])
-    expect(clause).toBe('((domain = {domainEq0:String} OR endsWith(domain, {domainSuffix0:String})))')
+    expect(clause).toBe('((domain = {domainEq0:String} OR startsWith(reverse(domain), {domainSuffixRev0:String})))')
   })
 
   test('keeps the domain-or-subdomain semantics of the shared matcher', () => {
@@ -286,11 +286,44 @@ describe('buildCandidateColumnWhereClause', () => {
   test('ORs every domain in the set, with per-domain parameter names', () => {
     const { clause, params } = buildCandidateColumnWhereClause('domain', ['a.com', 'b.com'])
     expect(clause).toContain(' OR ')
-    expect(Object.keys(params).sort()).toEqual(['domainEq0', 'domainEq1', 'domainSuffix0', 'domainSuffix1'])
+    expect(Object.keys(params).sort()).toEqual(['domainEq0', 'domainEq1', 'domainSuffixRev0', 'domainSuffixRev1'])
   })
 
   test('returns a never-true clause for an empty domain list', () => {
     expect(buildCandidateColumnWhereClause('domain', []).clause).toBe('0')
+  })
+})
+
+describe('buildCandidateColumnWhereClause — domain column uses reversed-prefix matching', () => {
+  test('domain column: emits startsWith(reverse(domain), ...) instead of endsWith(domain, ...)', () => {
+    const { clause, params } = buildCandidateColumnWhereClause('domain', ['trezor.io'])
+    expect(clause).toContain('startsWith(reverse(domain)')
+    expect(clause).not.toContain('endsWith(domain')
+    // reverse('.trezor.io') = 'oi.rozert.'
+    expect(Object.values(params)).toContain('oi.rozert.')
+  })
+
+  test('domain column: keeps the cheap exact-equality branch alongside the reversed suffix branch', () => {
+    const { clause, params } = buildCandidateColumnWhereClause('domain', ['trezor.io'])
+    expect(clause).toContain('domain = {domainEq0:String}')
+    expect(params.domainEq0).toBe('trezor.io')
+  })
+
+  test('email_domain column is unchanged (already fast via its ngram index — see design doc §1)', () => {
+    const { clause } = buildCandidateColumnWhereClause('email_domain', ['trezor.io'])
+    expect(clause).toContain('endsWith(email_domain')
+    expect(clause).not.toContain('reverse(')
+  })
+
+  test('regression: the reversed predicate must not false-match a domain that merely ends with the same letters', () => {
+    // eviltrezor.io must NOT be treated as a subdomain of trezor.io. Prove it
+    // the same way the SQL will be evaluated: build both sides' reversed
+    // strings and check the JS equivalent of startsWith(reverse(x), reverse(y)).
+    const { params } = buildCandidateColumnWhereClause('domain', ['trezor.io'])
+    const reversedSuffix = Object.values(params).find(v => typeof v === 'string' && v.startsWith('oi.'))
+    const reverseStr = (s: string) => s.split('').reverse().join('')
+    expect(reverseStr('eviltrezor.io').startsWith(reversedSuffix as string)).toBe(false)
+    expect(reverseStr('mail.trezor.io').startsWith(reversedSuffix as string)).toBe(true)
   })
 })
 

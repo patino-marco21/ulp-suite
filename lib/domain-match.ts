@@ -246,12 +246,27 @@ export function buildDomainSetWhereClause(
  */
 export type CandidateColumn = 'domain' | 'email_domain'
 
+function reverseString(s: string): string {
+  return s.split('').reverse().join('')
+}
+
 /**
  * Phase 1: which values of ONE raw stored column could belong to a row
  * matching this domain set. Same domain-or-subdomain semantics as
  * domainConditionSQL, but evaluated against a bare column rather than
  * NORM_DOMAIN_EXPR/NORM_EMAIL_EXPR, so ClickHouse reads only that one column
  * instead of the whole (url, email, password) row.
+ *
+ * The `domain` column additionally rewrites the suffix half as
+ * startsWith(reverse(domain), reverse(suffix)) instead of
+ * endsWith(domain, suffix) — semantically identical (a prefix match on the
+ * reversed string IS a suffix match on the original), but prunable by
+ * proj_domain_reversed (lib/clickhouse-migrations.ts DDL v19), where the
+ * forward endsWith() form is prunable by no index at all: EXPLAIN indexes=1
+ * showed 37350/37350 granules either way (see the design doc §1 and
+ * app/api/monitoring/monitors/[id]/matches/route.ts's doc comment for the
+ * measured numbers this replaces). email_domain is left as endsWith() —
+ * measured already fast (0.24s) via its existing ngram index.
  */
 export function buildCandidateColumnWhereClause(
   column: CandidateColumn,
@@ -261,6 +276,12 @@ export function buildCandidateColumnWhereClause(
   const parts = domains.map((domain, i) => {
     const d = domain.toLowerCase().trim()
     const eqParam = `${column}Eq${i}`
+    if (column === 'domain') {
+      const suffixParam = `${column}SuffixRev${i}`
+      params[eqParam] = d
+      params[suffixParam] = reverseString(`.${d}`)
+      return `(${column} = {${eqParam}:String} OR startsWith(reverse(${column}), {${suffixParam}:String}))`
+    }
     const suffixParam = `${column}Suffix${i}`
     params[eqParam] = d
     params[suffixParam] = `.${d}`
