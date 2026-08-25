@@ -1,21 +1,39 @@
 /**
- * Source-shape guards for the monitor-matches query plan.
+ * Source-shape guards for the monitor-matches query plan, plus (in the second
+ * describe block below) a behavioral test of the GET route's cache-read
+ * response shape.
  *
- * These are deliberately grep-style: they pin the SQL/plan decisions that only
- * show up against a 2.4-billion-row ClickHouse table and so cannot be exercised
- * from a unit test. The route's actual is_new behavior is covered for real, in
- * __tests__/monitor-is-new.test.ts, against a live database.
+ * The two-phase query plan guards are deliberately grep-style: they pin the
+ * SQL/plan decisions that only show up against a 2.4-billion-row ClickHouse
+ * table and so cannot be exercised from a unit test. The route's actual
+ * is_new behavior is covered for real, in __tests__/monitor-is-new.test.ts,
+ * against a live database.
  *
- * The two-phase query plan itself lives in lib/monitor-match-resolver.ts
- * (extracted from app/api/monitoring/monitors/[id]/matches/route.ts so the
- * rescan cron and a manual rescan endpoint can share it — see that file's doc
- * comment) — most guards below read resolverSource. What's left in the route
- * (auth, rate limiting, the timeout response shape, the is_new/viewed-cursor
- * ordering) is read from routeSource.
+ * The two-phase query plan itself still lives in lib/monitor-match-resolver.ts,
+ * unchanged by Task 9 since the rescan cron and the manual rescan endpoint
+ * (app/api/monitoring/monitors/[id]/matches/rescan/route.ts) still call it —
+ * so those guards below keep reading resolverSource. As of Task 9 the GET
+ * route itself no longer calls the resolver (or ClickHouse) at all: it only
+ * reads the SQLite cache those two writers populate. What's left of the
+ * route's own shape (auth, the is_new/viewed-cursor ordering) is read from
+ * routeSource; error-path behavior for the cache read lives in
+ * __tests__/monitor-matches-route-error-handling.test.ts.
  */
 
 import { readFileSync } from 'fs'
-import { describe, test, expect } from 'vitest'
+import { vi, describe, test, expect } from 'vitest'
+
+vi.mock('@/lib/auth', () => ({
+  validateRequest: vi.fn(),
+}))
+
+vi.mock('@/lib/domain-monitor', () => ({
+  getMonitor: vi.fn(),
+  getMonitorMatchesCache: vi.fn(),
+  markMatchesNewSinceLastView: vi.fn(async (_id: number, _uid: number, rows: unknown[]) =>
+    (rows as Record<string, unknown>[]).map(r => ({ ...r, is_new: false }))),
+  recordMonitorViewed: vi.fn().mockResolvedValue(undefined),
+}))
 
 describe('monitor matches route — two-phase query plan', () => {
   const routeSource = readFileSync(new URL('../app/api/monitoring/monitors/[id]/matches/route.ts', import.meta.url), 'utf8')
@@ -87,23 +105,16 @@ describe('monitor matches route — two-phase query plan', () => {
     expect(resolverSource).toContain(`timeout_overflow_mode = 'throw'`)
   })
 
-  test('the phases can never together outlast the route budget', () => {
-    // Phase 1 runs, THEN phase 2 or the fallback. If their caps can sum past
-    // maxDuration the platform kills the request first and the client gets a
-    // generic gateway error instead of the specific timeout response below —
-    // which would defeat timeout_overflow_mode = 'throw' and put the dialog
-    // back in the "failure indistinguishable from no matches" state this pass
-    // exists to fix.
-    const num = (src: string, name: string) => {
-      const m = src.match(new RegExp(`${name}\\s*=\\s*(\\d+)`))
-      expect(m, `${name} not found`).toBeTruthy()
-      return Number(m![1])
-    }
-    const budget = num(routeSource, 'maxDuration')
-    const phase1 = num(resolverSource, 'PHASE1_MAX_EXECUTION_TIME')
-    const worstSecondPhase = Math.max(num(resolverSource, 'PHASE2_MAX_EXECUTION_TIME'), num(resolverSource, 'FALLBACK_MAX_EXECUTION_TIME'))
-    expect(phase1 + worstSecondPhase).toBeLessThan(budget)
-  })
+  // A "phases can never together outlast the route budget" guard used to live
+  // here, checking routeSource's `maxDuration` against the resolver's phase
+  // timers. Task 9 removes maxDuration from this route along with the
+  // ClickHouse call it existed to budget for (GET no longer runs the
+  // resolver at all, so there is no request-duration risk left to guard).
+  // Note for whoever next touches the rescan route or cron, which still call
+  // the resolver directly: neither currently declares its own maxDuration
+  // either, but that budget config is a Vercel-only no-op on this project's
+  // self-hosted Docker deployment (next.config's `output: 'standalone'`)
+  // regardless, so its absence there isn't a regression from this task.
 
   test('phase 2 ANDs the exact match condition on top of every candidate branch', () => {
     // The IN-lists are pruning accelerators built from raw column values, so
@@ -170,44 +181,62 @@ describe('monitor matches route — two-phase query plan', () => {
     expect(resolverSource).toContain('candidateCache.delete(key)')
   })
 
-  test('the route delegates to the shared resolver rather than re-implementing the plan', () => {
-    // Task 5's extraction point: the rescan cron and a manual rescan endpoint
-    // need the exact same query strategy, so the route must call the shared
-    // function rather than keep its own copy.
-    expect(routeSource).toContain('resolveMonitorMatches')
+  test('GET makes zero ClickHouse calls — pure cache read via getMonitorMatchesCache', () => {
+    // Task 9: this route used to delegate to lib/monitor-match-resolver.ts (a
+    // live ClickHouse query, same as the rescan cron / manual rescan endpoint
+    // still do); now it only reads the SQLite cache those two writers
+    // already populated.
+    expect(routeSource).not.toContain('resolveMonitorMatches')
+    // Checks the actual import, not just any mention — the route's own doc
+    // comments legitimately reference lib/monitor-match-resolver.ts by name
+    // to explain what Task 9 removed.
+    expect(routeSource).not.toContain('from "@/lib/monitor-match-resolver"')
     expect(routeSource).not.toContain('candidateCache')
+    expect(routeSource).toContain('getMonitorMatchesCache')
   })
 
-  test('requires authentication but not admin, and rate limits', () => {
+  test('requires authentication but not admin', () => {
     expect(routeSource).toContain('validateRequest(request)')
     expect(routeSource).not.toContain('requireAdminRole')
-    expect(routeSource).toContain('checkLimit(matchesLimiter')
-    expect(routeSource).toContain('status: 429')
-  })
-
-  test('returns a specific timeout response instead of a bare failure', () => {
-    // A generic 500 makes the dialog render its empty state, which reads as an
-    // authoritative "nothing matches" — see app/monitoring/page.tsx.
-    expect(routeSource).toContain('TIMEOUT_EXCEEDED')
-    expect(routeSource).toContain('timed_out: true')
-    expect(routeSource).toContain('status: 408')
   })
 
   test('computes is_new against the per-admin cursor before advancing it', () => {
     // Reversing this order would make every match look new forever: the cursor
     // would already be current by the time is_new is computed.
-    const markIdx = routeSource.indexOf('markMatchesNewSinceLastView(monitorId, userId, rows)')
+    const markIdx = routeSource.indexOf('markMatchesNewSinceLastView(monitorId, userId, cache.rows)')
     const recordIdx = routeSource.indexOf('recordMonitorViewed(monitorId, userId)')
     expect(markIdx).toBeGreaterThan(-1)
     expect(recordIdx).toBeGreaterThan(markIdx)
   })
 
-  test('documents the last-viewed cursor limitation at the call site', () => {
-    // recordMonitorViewed advances the cursor for matches that were never
-    // shown (they fell outside MATCH_LIMIT). Accepted tradeoff; the fix is a
-    // row-level shown-ledger. Future readers must not mistake it for an
-    // oversight and must not "fix" it by moving the call.
+  test('documents that recordMonitorViewed is best-effort at the call site', () => {
+    // A failure here must not cost the admin the read they just made — see
+    // the route's comment. Future readers must not "fix" this by letting a
+    // recordMonitorViewed failure fail the whole request.
     const recordIdx = routeSource.indexOf('recordMonitorViewed(monitorId, userId)')
-    expect(routeSource.slice(Math.max(0, recordIdx - 800), recordIdx)).toContain('KNOWN LIMITATION')
+    expect(routeSource.slice(Math.max(0, recordIdx - 300), recordIdx)).toContain('Best-effort')
+  })
+})
+
+describe('GET .../matches — cache read response shape', () => {
+  test('response includes checked_at, never_scanned, and last_error from the cache', async () => {
+    const { validateRequest } = await import('@/lib/auth')
+    vi.mocked(validateRequest).mockResolvedValue({ userId: '1', role: 'admin' } as never)
+
+    const { getMonitor, getMonitorMatchesCache } = await import('@/lib/domain-monitor')
+    vi.mocked(getMonitor).mockResolvedValue({ id: 1, name: 'Wallets', domains: ['trezor.io'], match_mode: 'url' } as never)
+    vi.mocked(getMonitorMatchesCache).mockResolvedValue({
+      rows: [], status: 'never_scanned', checkedAt: null, lastError: null,
+    })
+
+    const { GET } = await import('@/app/api/monitoring/monitors/[id]/matches/route')
+    const res = await GET(
+      new (await import('next/server')).NextRequest('http://localhost/api/monitoring/monitors/1/matches'),
+      { params: Promise.resolve({ id: '1' }) }
+    )
+    const data = await res.json()
+
+    expect(data.never_scanned).toBe(true)
+    expect(data.checked_at).toBeNull()
   })
 })

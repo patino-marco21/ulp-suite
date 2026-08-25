@@ -1,13 +1,16 @@
 /**
  * Behavioral coverage for app/api/monitoring/monitors/[id]/matches/route.ts's
- * error handling around its two SQLite calls (getMonitor, recordMonitorViewed).
+ * error handling around its SQLite calls (getMonitor, getMonitorMatchesCache,
+ * recordMonitorViewed).
  *
- * __tests__/monitor-matches-route.test.ts pins the ClickHouse query plan via
- * source-text assertions, which is the right tool for SQL shape but proves
- * nothing about what happens when a dependency throws. This file instead mocks
- * every dependency and drives the actual GET handler, since that's the only way
- * to observe the difference between "caught, degraded gracefully" and "an
- * otherwise-good response turns into a 500".
+ * Task 9 removed this route's ClickHouse call entirely — it now only reads
+ * the SQLite cache the rescan cron / manual rescan endpoint already
+ * populated, via getMonitorMatchesCache. __tests__/monitor-matches-route.test.ts
+ * covers the query-plan source-text guards (for lib/monitor-match-resolver.ts,
+ * still used by those other two callers) and this route's own shape; this
+ * file mocks every dependency and drives the actual GET handler, since that's
+ * the only way to observe the difference between "caught, degraded
+ * gracefully" and "an otherwise-good response turns into a 500".
  */
 
 import { vi, describe, test, expect, beforeEach } from 'vitest'
@@ -19,24 +22,20 @@ vi.mock('@/lib/auth', () => ({
 
 vi.mock('@/lib/domain-monitor', () => ({
   getMonitor: vi.fn(),
+  getMonitorMatchesCache: vi.fn(),
   markMatchesNewSinceLastView: vi.fn(),
   recordMonitorViewed: vi.fn(),
 }))
 
-vi.mock('@/lib/clickhouse', () => ({
-  executeQuery: vi.fn(),
-}))
-
 import { validateRequest } from '@/lib/auth'
-import { getMonitor, markMatchesNewSinceLastView, recordMonitorViewed } from '@/lib/domain-monitor'
-import { executeQuery } from '@/lib/clickhouse'
+import { getMonitor, getMonitorMatchesCache, markMatchesNewSinceLastView, recordMonitorViewed } from '@/lib/domain-monitor'
 import { GET } from '@/app/api/monitoring/monitors/[id]/matches/route'
 
 const mockValidateRequest = vi.mocked(validateRequest)
 const mockGetMonitor = vi.mocked(getMonitor)
+const mockGetMonitorMatchesCache = vi.mocked(getMonitorMatchesCache)
 const mockMarkNew = vi.mocked(markMatchesNewSinceLastView)
 const mockRecordViewed = vi.mocked(recordMonitorViewed)
-const mockExecuteQuery = vi.mocked(executeQuery)
 
 const MONITOR = {
   id: 1,
@@ -55,14 +54,8 @@ const MONITOR = {
 
 const MATCH_ROW = { url: 'https://aave.com/login', email: 'a@b.com', password: 'p', domain: 'aave.com', is_new: true }
 
-// Each request gets its own IP so the route's per-IP rate limiter (a
-// module-level Map, shared across every test in this file) never trips.
-let ipCounter = 0
 function req() {
-  ipCounter++
-  return new NextRequest('http://localhost/api/monitoring/monitors/1/matches', {
-    headers: { 'x-forwarded-for': `10.0.0.${ipCounter}` },
-  })
+  return new NextRequest('http://localhost/api/monitoring/monitors/1/matches')
 }
 
 function params(id = '1') {
@@ -73,13 +66,12 @@ beforeEach(() => {
   vi.clearAllMocks()
   mockValidateRequest.mockResolvedValue({ userId: '7', role: 'user' } as any)
   mockGetMonitor.mockResolvedValue(MONITOR as any)
+  mockGetMonitorMatchesCache.mockResolvedValue({
+    rows: [{ url: 'https://aave.com/login', email: 'a@b.com', password: 'p', domain: 'aave.com' }],
+    status: 'ok', checkedAt: '2026-08-25 00:00:00', lastError: null,
+  })
   mockMarkNew.mockResolvedValue([MATCH_ROW] as any)
   mockRecordViewed.mockResolvedValue(undefined)
-  // Phase 1/2 ClickHouse plan is exercised for real (only its dependencies are
-  // mocked), but every branch resolves to an empty page — irrelevant here
-  // since markMatchesNewSinceLastView is mocked and returns MATCH_ROW
-  // regardless of what rows it's called with.
-  mockExecuteQuery.mockResolvedValue([])
 })
 
 describe('GET matches — recordMonitorViewed is best-effort', () => {
@@ -111,7 +103,7 @@ describe('GET matches — recordMonitorViewed is best-effort', () => {
   })
 })
 
-describe('GET matches — getMonitor errors are caught', () => {
+describe('GET matches — getMonitor / getMonitorMatchesCache errors are caught', () => {
   test('a getMonitor failure returns a structured 500 instead of throwing out of the handler', async () => {
     mockGetMonitor.mockRejectedValue(new Error('database is locked'))
 
@@ -131,16 +123,52 @@ describe('GET matches — getMonitor errors are caught', () => {
     expect(res.status).toBe(404)
     expect(json).toEqual({ success: false, error: 'Monitor not found' })
   })
+
+  // Task 9's replacement for the coverage that used to live in
+  // __tests__/monitor-matches-route.test.ts as a source-text guard on the
+  // ClickHouse-timeout-408 branch: that branch no longer exists (a SQLite
+  // cache read has no ClickHouse-shaped failure mode), so a thrown cache read
+  // now falls through to this route's one remaining error path — the same
+  // generic 500 a getMonitor failure produces above.
+  test('a getMonitorMatchesCache failure returns a structured 500 instead of throwing out of the handler', async () => {
+    mockGetMonitorMatchesCache.mockRejectedValue(new Error('database is locked'))
+
+    const res = await GET(req(), params())
+    const json = await res.json()
+
+    expect(res.status).toBe(500)
+    expect(json.success).toBe(false)
+  })
 })
 
-describe('GET matches — empty domain set', () => {
-  test('includes new_count alongside the other fields every other success path returns', async () => {
+describe('GET matches — the cache read no longer branches on domains', () => {
+  // The old live-query route short-circuited before ever calling ClickHouse
+  // when a monitor had no domains configured (an empty IN-list would have
+  // matched every domain-less row). The cache read has no such foot-gun —
+  // getMonitorMatchesCache is keyed by monitor_id, not by the domain list —
+  // so Task 9 dropped that branch entirely. This pins that the route now
+  // just reads whatever the cache holds, regardless of monitor.domains, and
+  // that an unscanned monitor reads as never_scanned rather than as an error
+  // or a bare empty list with no explanation.
+  test('a monitor with an empty domain list still reads the cache normally (no special-cased short-circuit)', async () => {
     mockGetMonitor.mockResolvedValue({ ...MONITOR, domains: [] } as any)
+    mockGetMonitorMatchesCache.mockResolvedValue({ rows: [], status: 'never_scanned', checkedAt: null, lastError: null })
+    mockMarkNew.mockResolvedValue([] as any)
 
     const res = await GET(req(), params())
     const json = await res.json()
 
     expect(res.status).toBe(200)
-    expect(json).toEqual({ success: true, results: [], total_shown: 0, new_count: 0, limited: false })
+    expect(json).toEqual({
+      success: true,
+      results: [],
+      total_shown: 0,
+      new_count: 0,
+      limited: false,
+      checked_at: null,
+      never_scanned: true,
+      last_error: null,
+    })
+    expect(mockGetMonitorMatchesCache).toHaveBeenCalledWith(1)
   })
 })
