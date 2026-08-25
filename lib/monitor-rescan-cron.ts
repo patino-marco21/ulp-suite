@@ -100,13 +100,21 @@ export async function runTick(): Promise<void> {
 
     let cacheWritten = false
     try {
-      // For digest mode, clear prior seen fingerprints so all matches re-fire
-      if (monitorRow.rescan_mode === 'digest') {
-        dbRun('DELETE FROM monitor_credential_seen WHERE monitor_id = ?', [monitorRow.id])
-      }
-
       let matchedRows: CredentialRow[]
       try {
+        // For digest mode, clear prior seen fingerprints so all matches
+        // re-fire. Deliberately INSIDE this try (not just inside the outer
+        // one): dbRun throws synchronously on SQLITE_READONLY/SQLITE_BUSY/
+        // SQLITE_FULL (see lib/sqlite.ts), a real failure mode here, and this
+        // try's `finally` below is the ONLY place that releases the rescan
+        // lock acquired above. A throw from this DELETE landing outside this
+        // try (as it used to) would skip that `finally` and leak the lock
+        // permanently — every future tick and manual "Rescan now" for this
+        // monitor would then see tryAcquireRescanLock return false forever.
+        if (monitorRow.rescan_mode === 'digest') {
+          dbRun('DELETE FROM monitor_credential_seen WHERE monitor_id = ?', [monitorRow.id])
+        }
+
         // MATCH_LIMIT (100, defined in lib/monitor-match-resolver.ts) is now
         // shared between two use cases that used to have separate limits.
         // Before this cache rewire, alerting queried ClickHouse once PER

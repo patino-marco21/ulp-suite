@@ -78,6 +78,17 @@ beforeEach(() => {
   mockDbQuery.mockReturnValue([])
   mockDbRun.mockReturnValue({ lastId: 1, changes: 1 })
   mockResolveMonitorMatches.mockResolvedValue({ rows: [], limited: false })
+  // inFlightRescans (lib/monitor-match-resolver.ts) is real module state now,
+  // not a mock — vi.clearAllMocks() above doesn't touch it (moved here from a
+  // private Set in the rescan route by final-review Fix 1). If any earlier
+  // test in this file fails after acquiring the lock but before releasing
+  // it, every later test would see a false "already in flight" skip, turning
+  // one real failure into a confusing cascade across the whole file.
+  // Releasing defensively here (a harmless no-op when nothing is held) makes
+  // the suite self-healing regardless of test order or prior failures. Every
+  // fixture in this file uses monitor id 1 (dueMonitorRow's default, never
+  // overridden) — release covers that.
+  releaseRescanLock(1)
 })
 
 describe('runTick — match_type persistence', () => {
@@ -248,6 +259,46 @@ describe('runTick — failure narrowing after a successful cache write (final-re
 
     await runTick()
 
+    expect(mockRecordMonitorRescanFailure).toHaveBeenCalledWith(1, 'SQLITE_READONLY: attempt to write a readonly database')
+  })
+})
+
+describe('runTick — digest-mode DELETE must not leak the rescan lock (re-review Critical fix)', () => {
+  // The rescan lock is acquired (tryAcquireRescanLock) before the per-monitor
+  // try block starts, but the only release site in this file is the `finally`
+  // on the INNER try that wraps resolveMonitorMatches/writeMonitorMatchCache.
+  // Before this fix, the digest-mode DELETE ran between the lock acquire and
+  // that inner try — outside its protection. dbRun throws synchronously on
+  // SQLITE_READONLY/SQLITE_BUSY/SQLITE_FULL (a real, documented failure mode
+  // — see lib/sqlite.ts), so a throw from that DELETE used to skip the
+  // `finally` entirely and leak the lock forever: every later tick's
+  // tryAcquireRescanLock(monitorId) would return false, permanently
+  // "skipping" a monitor that was never actually mid-scan, and every manual
+  // "Rescan now" click would 409 — until the process restarted.
+
+  test('a throw from the digest-mode DELETE still releases the lock, and still records a rescan failure', async () => {
+    mockDbQuery.mockReturnValueOnce([dueMonitorRow({ rescan_mode: 'digest' })])  // due monitors
+    // Dispatch by SQL text, not call order/count — only the digest-mode
+    // DELETE should throw; any other dbRun call in this tick must behave
+    // normally.
+    mockDbRun.mockImplementation((sql: unknown) => {
+      if ((sql as string).includes('DELETE FROM monitor_credential_seen')) {
+        throw Object.assign(new Error('SQLITE_READONLY: attempt to write a readonly database'), {})
+      }
+      return { lastId: 1, changes: 1 }
+    })
+
+    await runTick()
+
+    // Proves the fix: the lock was genuinely released, not leaked — a later
+    // tick (or a manual "Rescan now") can still acquire it.
+    expect(tryAcquireRescanLock(1)).toBe(true)
+    releaseRescanLock(1)  // defense in depth — don't leak this test's own acquire into later tests
+
+    // The DELETE threw before resolveMonitorMatches/writeMonitorMatchCache
+    // ever ran, so cacheWritten is still false — a genuine rescan failure,
+    // the same pre-existing behavior as any other pre-cache-write throw.
+    // This was already correct before this fix; only the lock leak was new.
     expect(mockRecordMonitorRescanFailure).toHaveBeenCalledWith(1, 'SQLITE_READONLY: attempt to write a readonly database')
   })
 })
