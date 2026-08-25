@@ -246,10 +246,6 @@ export function buildDomainSetWhereClause(
  */
 export type CandidateColumn = 'domain' | 'email_domain'
 
-function reverseString(s: string): string {
-  return s.split('').reverse().join('')
-}
-
 /**
  * Phase 1: which values of ONE raw stored column could belong to a row
  * matching this domain set. Same domain-or-subdomain semantics as
@@ -257,16 +253,27 @@ function reverseString(s: string): string {
  * NORM_DOMAIN_EXPR/NORM_EMAIL_EXPR, so ClickHouse reads only that one column
  * instead of the whole (url, email, password) row.
  *
- * The `domain` column additionally rewrites the suffix half as
- * startsWith(reverse(domain), reverse(suffix)) instead of
- * endsWith(domain, suffix) — semantically identical (a prefix match on the
- * reversed string IS a suffix match on the original), but prunable by
- * proj_domain_reversed (lib/clickhouse-migrations.ts DDL v19), where the
- * forward endsWith() form is prunable by no index at all: EXPLAIN indexes=1
- * showed 37350/37350 granules either way (see the design doc §1 and
- * app/api/monitoring/monitors/[id]/matches/route.ts's doc comment for the
- * measured numbers this replaces). email_domain is left as endsWith() —
- * measured already fast (0.24s) via its existing ngram index.
+ * Both columns are covered by an ngram skip index
+ * (lib/clickhouse-migrations.ts DDL v19 for `domain`; `email_domain` already
+ * had one), which is what actually makes endsWith() prunable here — NOT the
+ * bloom_filter index each column also carries, which only helps equality
+ * (`domain = 'x'` alone prunes 37350 granules to 38; adding `OR
+ * endsWith(...)` on top of the *bloom_filter* leaves 37350/37350, per
+ * app/api/monitoring/monitors/[id]/matches/route.ts's doc comment). Once the
+ * ngram index existed, granules pruned to 6710/37350 for the same predicate.
+ *
+ * An earlier version of this function rewrote the `domain` branch into a
+ * reversed-string prefix match (`startsWith(reverse(domain), ...)`) on the
+ * theory that ClickHouse could range-prune a prefix condition where it
+ * couldn't prune a suffix one. Empirically false for this table (2026-08-25):
+ * neither a projection nor a minmax index ordered by a materialized
+ * `reverse(domain)` column got selected by the planner for this predicate —
+ * minmax specifically needs the indexed value to correlate with the table's
+ * physical (forward-domain-sorted) storage order, which a reversed string
+ * does not. The ngram index below needs no such correlation (it hashes
+ * per-granule content, not order), which is why it works for both columns
+ * with the exact same predicate shape. See the design doc §1 for the full
+ * history — kept there instead of re-explained on every read of this file.
  */
 export function buildCandidateColumnWhereClause(
   column: CandidateColumn,
@@ -276,12 +283,6 @@ export function buildCandidateColumnWhereClause(
   const parts = domains.map((domain, i) => {
     const d = domain.toLowerCase().trim()
     const eqParam = `${column}Eq${i}`
-    if (column === 'domain') {
-      const suffixParam = `${column}SuffixRev${i}`
-      params[eqParam] = d
-      params[suffixParam] = reverseString(`.${d}`)
-      return `(${column} = {${eqParam}:String} OR startsWith(reverse(${column}), {${suffixParam}:String}))`
-    }
     const suffixParam = `${column}Suffix${i}`
     params[eqParam] = d
     params[suffixParam] = `.${d}`
