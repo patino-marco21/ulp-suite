@@ -1,17 +1,25 @@
 /**
- * Source-shape guards for app/api/monitoring/monitors/[id]/matches/route.ts.
+ * Source-shape guards for the monitor-matches query plan.
  *
  * These are deliberately grep-style: they pin the SQL/plan decisions that only
  * show up against a 2.4-billion-row ClickHouse table and so cannot be exercised
  * from a unit test. The route's actual is_new behavior is covered for real, in
  * __tests__/monitor-is-new.test.ts, against a live database.
+ *
+ * The two-phase query plan itself lives in lib/monitor-match-resolver.ts
+ * (extracted from app/api/monitoring/monitors/[id]/matches/route.ts so the
+ * rescan cron and a manual rescan endpoint can share it — see that file's doc
+ * comment) — most guards below read resolverSource. What's left in the route
+ * (auth, rate limiting, the timeout response shape, the is_new/viewed-cursor
+ * ordering) is read from routeSource.
  */
 
 import { readFileSync } from 'fs'
 import { describe, test, expect } from 'vitest'
 
 describe('monitor matches route — two-phase query plan', () => {
-  const source = readFileSync(new URL('../app/api/monitoring/monitors/[id]/matches/route.ts', import.meta.url), 'utf8')
+  const routeSource = readFileSync(new URL('../app/api/monitoring/monitors/[id]/matches/route.ts', import.meta.url), 'utf8')
+  const resolverSource = readFileSync(new URL('../lib/monitor-match-resolver.ts', import.meta.url), 'utf8')
 
   test('every plan sorts on exactly the primary-key prefix, no tiebreak', () => {
     // Adding a (url, password) tiebreak forces a sort inside every
@@ -20,14 +28,14 @@ describe('monitor matches route — two-phase query plan', () => {
     // resolves 181 email_domain values, so it takes the PRUNED path, where the
     // fuller key measured 14.88 s / 54.75 GiB against 1.25 s / 3.24 GiB for the
     // bare prefix. On a narrow monitor the two are indistinguishable.
-    expect(source).toContain(`const MATCH_ORDER_BY = 'domain, email'`)
+    expect(resolverSource).toContain(`const MATCH_ORDER_BY = 'domain, email'`)
     // Display order is still fully pinned — in-process, where sorting 100 rows
     // on all four fields is free — so dropping the SQL tiebreak costs no
     // determinism. Both plans re-sort: the fallback directly, the pruned plan
     // inside mergeMatchPages. The four-field tiebreak itself is covered
     // behaviorally in __tests__/domain-match.test.ts.
-    expect(source).toContain('page.sort(compareMatches)')
-    expect(source).toContain('mergeMatchPages(')
+    expect(resolverSource).toContain('page.sort(compareMatches)')
+    expect(resolverSource).toContain('mergeMatchPages(')
   })
 
   test('the only ORDER BY is the single primary-key-led constant', () => {
@@ -36,14 +44,14 @@ describe('monitor matches route — two-phase query plan', () => {
     // stop at LIMIT; anything else materializes and sorts the whole filtered
     // set first — the MEMORY_LIMIT_EXCEEDED production incident documented in
     // app/api/credentials/route.ts's SORT_MAX_MEMORY_BYTES.
-    const orderKeys = [...source.matchAll(/_ORDER_BY = '([^']+)'/g)].map(m => m[1])
+    const orderKeys = [...resolverSource.matchAll(/_ORDER_BY = '([^']+)'/g)].map(m => m[1])
     expect(orderKeys.length).toBeGreaterThan(0)
     for (const key of orderKeys) {
       expect(key).toMatch(/^domain\b/)
     }
     // One sort key, interpolated in one place — no per-call-site override that
     // could reintroduce an unaffordable sort.
-    const orderBys = source
+    const orderBys = resolverSource
       .split('\n')
       .map(line => line.trim())
       // SQL lines only — the surrounding prose explains why this rule exists.
@@ -56,7 +64,7 @@ describe('monitor matches route — two-phase query plan', () => {
     // LIMIT-sized result instead of every scanned row, AND a `(...) AS domain`
     // alias sitting next to a WHERE shadows the real `domain` column inside it,
     // silently converting `domain IN (...)` into an unprunable expression.
-    const [outer, inner] = source.split(/FROM \(\s*\n\s*SELECT url, email, password, domain/)
+    const [outer, inner] = resolverSource.split(/FROM \(\s*\n\s*SELECT url, email, password, domain/)
     expect(inner).toBeDefined()
     expect(outer).toContain('${NORM_DOMAIN_EXPR}) AS domain')
     expect(inner).not.toContain('NORM_DOMAIN_EXPR')
@@ -64,19 +72,19 @@ describe('monitor matches route — two-phase query plan', () => {
   })
 
   test('caps the query with a named LIMIT constant', () => {
-    expect(source).toMatch(/MATCH_LIMIT\s*=\s*100/)
-    expect(source).toContain('LIMIT {matchLimit:UInt32}')
+    expect(resolverSource).toMatch(/MATCH_LIMIT\s*=\s*100/)
+    expect(resolverSource).toContain('LIMIT {matchLimit:UInt32}')
   })
 
   test('gives each phase its own execution-time guard', () => {
     // Phase 1 is a full column scan and phase 2 reads a pruned candidate set;
     // one shared timeout cannot be right for both.
-    expect(source).toMatch(/PHASE1_MAX_EXECUTION_TIME\s*=\s*\d+/)
-    expect(source).toMatch(/PHASE2_MAX_EXECUTION_TIME\s*=\s*\d+/)
-    expect(source).toMatch(/FALLBACK_MAX_EXECUTION_TIME\s*=\s*\d+/)
-    expect(source).toContain('max_execution_time = ${PHASE1_MAX_EXECUTION_TIME}')
-    expect(source).toContain('max_execution_time = ${maxExecutionTime}')
-    expect(source).toContain(`timeout_overflow_mode = 'throw'`)
+    expect(resolverSource).toMatch(/PHASE1_MAX_EXECUTION_TIME\s*=\s*\d+/)
+    expect(resolverSource).toMatch(/PHASE2_MAX_EXECUTION_TIME\s*=\s*\d+/)
+    expect(resolverSource).toMatch(/FALLBACK_MAX_EXECUTION_TIME\s*=\s*\d+/)
+    expect(resolverSource).toContain('max_execution_time = ${PHASE1_MAX_EXECUTION_TIME}')
+    expect(resolverSource).toContain('max_execution_time = ${maxExecutionTime}')
+    expect(resolverSource).toContain(`timeout_overflow_mode = 'throw'`)
   })
 
   test('the phases can never together outlast the route budget', () => {
@@ -86,14 +94,14 @@ describe('monitor matches route — two-phase query plan', () => {
     // which would defeat timeout_overflow_mode = 'throw' and put the dialog
     // back in the "failure indistinguishable from no matches" state this pass
     // exists to fix.
-    const num = (name: string) => {
-      const m = source.match(new RegExp(`${name}\\s*=\\s*(\\d+)`))
+    const num = (src: string, name: string) => {
+      const m = src.match(new RegExp(`${name}\\s*=\\s*(\\d+)`))
       expect(m, `${name} not found`).toBeTruthy()
       return Number(m![1])
     }
-    const budget = num('maxDuration')
-    const phase1 = num('PHASE1_MAX_EXECUTION_TIME')
-    const worstSecondPhase = Math.max(num('PHASE2_MAX_EXECUTION_TIME'), num('FALLBACK_MAX_EXECUTION_TIME'))
+    const budget = num(routeSource, 'maxDuration')
+    const phase1 = num(resolverSource, 'PHASE1_MAX_EXECUTION_TIME')
+    const worstSecondPhase = Math.max(num(resolverSource, 'PHASE2_MAX_EXECUTION_TIME'), num(resolverSource, 'FALLBACK_MAX_EXECUTION_TIME'))
     expect(phase1 + worstSecondPhase).toBeLessThan(budget)
   })
 
@@ -101,16 +109,16 @@ describe('monitor matches route — two-phase query plan', () => {
     // The IN-lists are pruning accelerators built from raw column values, so
     // they may be over-inclusive; only the shared builder's condition decides
     // what actually matches.
-    expect(source).toContain('buildDomainSetWhereClause(domains, monitor.match_mode)')
-    expect(source).toContain('`${branch.clause} AND ${clause}`')
+    expect(resolverSource).toContain('buildDomainSetWhereClause(domains, mode)')
+    expect(resolverSource).toContain('`${branch.clause} AND ${clause}`')
   })
 
   test('runs one query per prunable column and merges, rather than ORing them', () => {
     // `domain IN (...) OR email_domain IN (...)` is prunable by neither the
     // primary key nor either bloom filter. Measured on a 'both'-mode monitor:
     // 5.65 s ORed vs 0.25 s split.
-    expect(source).toContain('buildCandidateValueBranches(candidates.columns, NORMALIZED_LEGACY_DOMAINS)')
-    expect(source).toContain('mergeMatchPages([...pages, candidates.legacyRows], MATCH_LIMIT)')
+    expect(resolverSource).toContain('buildCandidateValueBranches(candidates.columns, NORMALIZED_LEGACY_DOMAINS)')
+    expect(resolverSource).toContain('mergeMatchPages([...pages, candidates.legacyRows], MATCH_LIMIT)')
   })
 
   test('keeps the legacy-normalization bucket out of phase 2 entirely', () => {
@@ -128,60 +136,68 @@ describe('monitor matches route — two-phase query plan', () => {
     // returned 100 rows carrying 42 distinct ones, with every row the `domain`
     // branch found evicted by the duplicates. The merged-page behavior is
     // covered in __tests__/domain-match.test.ts.
-    expect(source).toContain('entry.values.filter(v => !NORMALIZED_LEGACY_DOMAINS.includes(v))')
-    expect(source).toContain('buildCandidateValueBranches(candidates.columns, NORMALIZED_LEGACY_DOMAINS)')
-    expect(source).toMatch(/legacyRows/)
+    expect(resolverSource).toContain('entry.values.filter(v => !NORMALIZED_LEGACY_DOMAINS.includes(v))')
+    expect(resolverSource).toContain('buildCandidateValueBranches(candidates.columns, NORMALIZED_LEGACY_DOMAINS)')
+    expect(resolverSource).toMatch(/legacyRows/)
   })
 
   test('resolves candidate values per match_mode, covering the email side too', () => {
     // match_mode 'credential'/'both' match on the email's domain, which lives
     // in a different column than 'url' matching — phase 1 has to scan whichever
     // column(s) the mode actually uses or those matches are silently lost.
-    expect(source).toContain(`if (mode === 'url' || mode === 'both') columns.push('domain')`)
-    expect(source).toContain(`if (mode === 'credential' || mode === 'both') columns.push('email_domain')`)
+    expect(resolverSource).toContain(`if (mode === 'url' || mode === 'both') columns.push('domain')`)
+    expect(resolverSource).toContain(`if (mode === 'credential' || mode === 'both') columns.push('email_domain')`)
   })
 
   test('falls back to the unpruned plan when the candidate set overflows', () => {
     // A monitor with more distinct matching domains than CANDIDATE_LIMIT
     // certainly has more than MATCH_LIMIT matching rows, so the plain LIMIT
     // short-circuits and the two-phase split would only add work.
-    expect(source).toMatch(/CANDIDATE_LIMIT\s*=\s*\d+/)
-    expect(source).toContain('LIMIT {candidateLimit:UInt32}')
-    expect(source).toContain('candidateLimit: CANDIDATE_LIMIT + 1')
-    expect(source).toContain('if (entry.values.length > CANDIDATE_LIMIT) overflowed = true')
-    expect(source).toContain('candidates.overflowed')
+    expect(resolverSource).toMatch(/CANDIDATE_LIMIT\s*=\s*\d+/)
+    expect(resolverSource).toContain('LIMIT {candidateLimit:UInt32}')
+    expect(resolverSource).toContain('candidateLimit: CANDIDATE_LIMIT + 1')
+    expect(resolverSource).toContain('if (entry.values.length > CANDIDATE_LIMIT) overflowed = true')
+    expect(resolverSource).toContain('candidates.overflowed')
   })
 
   test('caches phase 1 per (match_mode, domain set) rather than per request', () => {
-    expect(source).toMatch(/CANDIDATE_TTL_MS\s*=\s*\d+\s*\*\s*60_000/)
-    expect(source).toContain('getCandidates(monitor.match_mode, domains)')
-    expect(source).toContain('candidateCacheKey(mode, domains)')
+    expect(resolverSource).toMatch(/CANDIDATE_TTL_MS\s*=\s*\d+\s*\*\s*60_000/)
+    expect(resolverSource).toContain('getCandidates(mode, domains)')
+    expect(resolverSource).toContain('candidateCacheKey(mode, domains)')
     // The in-flight promise is cached so concurrent misses share one scan, and
     // a rejected scan must be evicted rather than served as an answer.
-    expect(source).toContain('resolution.catch(')
-    expect(source).toContain('candidateCache.delete(key)')
+    expect(resolverSource).toContain('resolution.catch(')
+    expect(resolverSource).toContain('candidateCache.delete(key)')
+  })
+
+  test('the route delegates to the shared resolver rather than re-implementing the plan', () => {
+    // Task 5's extraction point: the rescan cron and a manual rescan endpoint
+    // need the exact same query strategy, so the route must call the shared
+    // function rather than keep its own copy.
+    expect(routeSource).toContain('resolveMonitorMatches')
+    expect(routeSource).not.toContain('candidateCache')
   })
 
   test('requires authentication but not admin, and rate limits', () => {
-    expect(source).toContain('validateRequest(request)')
-    expect(source).not.toContain('requireAdminRole')
-    expect(source).toContain('checkLimit(matchesLimiter')
-    expect(source).toContain('status: 429')
+    expect(routeSource).toContain('validateRequest(request)')
+    expect(routeSource).not.toContain('requireAdminRole')
+    expect(routeSource).toContain('checkLimit(matchesLimiter')
+    expect(routeSource).toContain('status: 429')
   })
 
   test('returns a specific timeout response instead of a bare failure', () => {
     // A generic 500 makes the dialog render its empty state, which reads as an
     // authoritative "nothing matches" — see app/monitoring/page.tsx.
-    expect(source).toContain('TIMEOUT_EXCEEDED')
-    expect(source).toContain('timed_out: true')
-    expect(source).toContain('status: 408')
+    expect(routeSource).toContain('TIMEOUT_EXCEEDED')
+    expect(routeSource).toContain('timed_out: true')
+    expect(routeSource).toContain('status: 408')
   })
 
   test('computes is_new against the per-admin cursor before advancing it', () => {
     // Reversing this order would make every match look new forever: the cursor
     // would already be current by the time is_new is computed.
-    const markIdx = source.indexOf('markMatchesNewSinceLastView(monitorId, userId, rows)')
-    const recordIdx = source.indexOf('recordMonitorViewed(monitorId, userId)')
+    const markIdx = routeSource.indexOf('markMatchesNewSinceLastView(monitorId, userId, rows)')
+    const recordIdx = routeSource.indexOf('recordMonitorViewed(monitorId, userId)')
     expect(markIdx).toBeGreaterThan(-1)
     expect(recordIdx).toBeGreaterThan(markIdx)
   })
@@ -191,7 +207,7 @@ describe('monitor matches route — two-phase query plan', () => {
     // shown (they fell outside MATCH_LIMIT). Accepted tradeoff; the fix is a
     // row-level shown-ledger. Future readers must not mistake it for an
     // oversight and must not "fix" it by moving the call.
-    const recordIdx = source.indexOf('recordMonitorViewed(monitorId, userId)')
-    expect(source.slice(Math.max(0, recordIdx - 800), recordIdx)).toContain('KNOWN LIMITATION')
+    const recordIdx = routeSource.indexOf('recordMonitorViewed(monitorId, userId)')
+    expect(routeSource.slice(Math.max(0, recordIdx - 800), recordIdx)).toContain('KNOWN LIMITATION')
   })
 })

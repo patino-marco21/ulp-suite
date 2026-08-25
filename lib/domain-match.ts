@@ -259,8 +259,8 @@ export type CandidateColumn = 'domain' | 'email_domain'
  * bloom_filter index each column also carries, which only helps equality
  * (`domain = 'x'` alone prunes 37350 granules to 38; adding `OR
  * endsWith(...)` on top of the *bloom_filter* leaves 37350/37350, per
- * app/api/monitoring/monitors/[id]/matches/route.ts's doc comment). Once the
- * ngram index existed, granules pruned to 6710/37350 for the same predicate.
+ * lib/monitor-match-resolver.ts's doc comment). Once the ngram index existed,
+ * granules pruned to 6710/37350 for the same predicate.
  *
  * An earlier version of this function rewrote the `domain` branch into a
  * reversed-string prefix match (`startsWith(reverse(domain), ...)`) on the
