@@ -39,7 +39,7 @@ export async function GET(request: NextRequest) {
         `SELECT url, email, password, domain, source_file, imported_at
          FROM ulp.credentials WHERE domain = {domain:String}
          ORDER BY imported_at DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}
-         SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw'`,
+         SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1`,
         { domain, limit, offset }
       ),
     ])

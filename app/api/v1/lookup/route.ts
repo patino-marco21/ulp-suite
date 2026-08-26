@@ -19,6 +19,7 @@ export const dynamic = 'force-dynamic'
 // query_cache_nondeterministic_function_handling = throw prevents caching of
 // functions like now() (not applicable here but good hygiene).
 const SETTINGS = `SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw',
+                          http_wait_end_of_query = 1,
                           use_query_cache = 1, query_cache_ttl = 60`
 
 export async function GET(request: NextRequest) {

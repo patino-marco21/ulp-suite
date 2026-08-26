@@ -50,7 +50,8 @@ export async function GET(request: NextRequest) {
          FROM ulp.credentials WHERE ${clause}
          ORDER BY imported_at DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}
          SETTINGS max_execution_time = 300,
-                  timeout_overflow_mode = 'throw'`,
+                  timeout_overflow_mode = 'throw',
+                  http_wait_end_of_query = 1`,
         { ...params, limit, offset }
       ),
     ])

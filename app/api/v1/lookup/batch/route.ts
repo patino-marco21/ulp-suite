@@ -68,7 +68,7 @@ export async function POST(request: NextRequest) {
   const results: Record<string, BatchResult> = {}
 
   try {
-    const SETTINGS = `SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw'`
+    const SETTINGS = `SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1`
 
     // ── Email lookups ────────────────────────────────────────────────────────
     if (emails.length > 0) {

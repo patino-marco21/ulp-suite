@@ -257,6 +257,7 @@ export async function GET(request: NextRequest) {
          ) AS t
          SETTINGS max_execution_time = 300,
                   timeout_overflow_mode = 'throw',
+                  http_wait_end_of_query = 1,
                   max_bytes_before_external_sort = ${SORT_MAX_MEMORY_BYTES}`,
         allParams
       ),
