@@ -46,7 +46,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     env:
-      SQLITE_PATH: ${{ runner.temp }}/ci-test.db
+      SQLITE_PATH: /tmp/ci-test.db
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -127,6 +127,29 @@ a green check now exists for real, not just a workflow file that's never
 been exercised.
 
 ---
+
+## Implementation Note (real issue hit during execution)
+
+The first two pushes both failed instantly (0s, zero jobs/check-runs
+created — confirmed via `gh api .../check-suites` down to the specific
+`github-actions` check-suite, which showed `total_count: 0` check-runs).
+Root cause: `env: SQLITE_PATH: ${{ runner.temp }}/ci-test.db` at the
+job level — the `runner` context is only available at the *step* level in
+GitHub Actions, not in `jobs.<job_id>.env` expressions. This produces an
+"Unrecognized named-value: runner" validation error that rejects the whole
+workflow file before any job is ever scheduled, which is why it never
+showed up as a normal step failure. Confirmed against
+[actions/runner#2204](https://github.com/actions/runner/issues/2204).
+Fixed by using a fixed path (`/tmp/ci-test.db`) instead — no cross-run
+collision risk since every GitHub-hosted job runs on a fresh VM.
+
+Also discovered while diagnosing: this repo has five unrelated third-party
+GitHub App check-suites registered on every commit (`docker`, `cursor`,
+`vercel`, `railway-app`, `supabase`), all permanently stuck at `status:
+queued`. No local config files (`vercel.json`, `railway.toml`, etc.) or
+webhooks reference them — most likely account-wide app installations from
+other projects, not anything specific to this repo. Flagged to the user;
+not investigated further as it's outside this plan's scope.
 
 ## Self-Review Notes
 

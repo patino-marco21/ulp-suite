@@ -38,7 +38,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     env:
-      SQLITE_PATH: ${{ runner.temp }}/ci-test.db
+      SQLITE_PATH: /tmp/ci-test.db
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -55,7 +55,9 @@ jobs:
 
 `lib/sqlite.ts`'s `DB_PATH` falls back to `./data/ulp.db` whenever `SQLITE_PATH` is unset. A fresh CI checkout has no pre-existing `./data/ulp.db`, so without this env var, vitest's parallel workers would race to seed the first admin user — a real, previously-reproduced `UNIQUE constraint failed: users.email` flake (~1-in-2 to 1-in-3 runs), not a hypothetical one.
 
-Setting `SQLITE_PATH` to an ephemeral `${{ runner.temp }}` path is scoped as **CI workflow configuration only**. It does not change `lib/sqlite.ts`'s own default, and it is not a fix for the underlying test-isolation gap (a separate, already-identified finding that needs its own design decision — picking a permanent default of `:memory:` vs. a temp file is a real choice, not a one-line change). This workaround only prevents CI itself from being flaky; the application's default behavior is untouched.
+Setting `SQLITE_PATH` to a fixed ephemeral path (`/tmp/ci-test.db`) is scoped as **CI workflow configuration only**. It does not change `lib/sqlite.ts`'s own default, and it is not a fix for the underlying test-isolation gap (a separate, already-identified finding that needs its own design decision — picking a permanent default of `:memory:` vs. a temp file is a real choice, not a one-line change). This workaround only prevents CI itself from being flaky; the application's default behavior is untouched.
+
+**Correction made during implementation:** the original design used `${{ runner.temp }}/ci-test.db`. This fails workflow validation — `runner` context is not available in `jobs.<job_id>.env` expressions ("Unrecognized named-value: runner"; see [actions/runner#2204](https://github.com/actions/runner/issues/2204)), only at the step level. A fixed `/tmp/ci-test.db` avoids the `runner` context entirely and satisfies the same design intent — every GitHub-hosted runner is a fresh VM, so there's no cross-run collision risk from hardcoding the path.
 
 ## Testing
 

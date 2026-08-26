@@ -10,7 +10,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     env:
-      SQLITE_PATH: ${{ runner.temp }}/ci-test.db
+      SQLITE_PATH: /tmp/ci-test.db
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
