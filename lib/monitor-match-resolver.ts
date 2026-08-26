@@ -84,11 +84,36 @@ export const MATCH_LIMIT = 100
 const CANDIDATE_LIMIT = 1000
 
 /**
- * Phase 1's slowest branch is the legacy probe, measured 5.3–13.5 s; the column
- * scans run 0.14–6.5 s. 45 s leaves room for a colder cache without letting a
- * pathological domain set sit on a connection for a minute.
+ * Phase 1's slowest branch is the legacy probe, measured 5.3–13.5 s for a
+ * narrow (1–2 domain) monitor; the column scans run 0.14–6.5 s in that same
+ * regime. Neither number holds for a broader monitor.
+ *
+ * Measured 2026-08-25 against the real "Dedicated / general hardware
+ * wallets" monitor (17 domains, mode 'both'), which was 500ing with a
+ * garbled "Unexpected token 'C' ... is not valid JSON" error: isolated, the
+ * legacy probe took 46.2 s and the `email_domain` candidate scan took
+ * 42.7 s — both over or right at the old 45 s cap, and run concurrently via
+ * Promise.all in resolveCandidates so real contention only made it worse.
+ *
+ * Root cause of why `email_domain` is so much slower than `domain` here:
+ * its ngram (idx_ngram_email_domain) and bloom filter (idx_bf_email_domain)
+ * skip indexes exist and are materialized (verified via
+ * system.data_skipping_indices and system.mutations — both show
+ * is_done = 1) but measured ZERO pruning at this table's current
+ * 2.4-billion-row scale: `rows_read` was the full table for
+ * `email_domain = 'x'` alone, for `... OR endsWith(...)`, and for `... OR
+ * LIKE '%.x'` alike (all three tested directly against ClickHouse with
+ * EXPLAIN and real execution). `domain` doesn't have this problem only
+ * because it's the primary key's leading column, so it prunes on key order
+ * regardless of whether its own ngram index helps. `email_domain` has no
+ * such fallback. This is a real, unexplained gap in its own right — worth
+ * a dedicated investigation the way `domain`'s pruning got one (see the
+ * design doc referenced at the top of this file) — not something this
+ * timeout bump fixes. 90 s is a verified-sufficient budget for the monitor
+ * that surfaced this (2× the slower of the two measured costs), not a
+ * guarantee for an even broader one.
  */
-const PHASE1_MAX_EXECUTION_TIME = 45
+const PHASE1_MAX_EXECUTION_TIME = 90
 
 /**
  * Phase 2 reads a pruned candidate set: 0.22 s narrow, 1.25 s for the broadest
@@ -232,7 +257,7 @@ async function resolveCandidates(mode: MatchMode, domains: string[]): Promise<Ca
        FROM ulp.credentials
        WHERE ${clause}
        LIMIT {candidateLimit:UInt32}
-       SETTINGS max_execution_time = ${PHASE1_MAX_EXECUTION_TIME}, timeout_overflow_mode = 'throw'`,
+       SETTINGS max_execution_time = ${PHASE1_MAX_EXECUTION_TIME}, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1`,
       { ...params, candidateLimit: CANDIDATE_LIMIT + 1 }
     ) as { value: string }[]
     return { column, values: rows.map(r => r.value) }
@@ -300,6 +325,23 @@ function getCandidates(mode: MatchMode, domains: string[]): Promise<CandidateRes
  * instead of sorting the filtered set (the MEMORY_LIMIT_EXCEEDED failure mode
  * documented in app/api/credentials/route.ts's SORT_MAX_MEMORY_BYTES). Any
  * ORDER BY here must keep `domain` leading for that reason.
+ *
+ * `http_wait_end_of_query = 1` (like the candidate scan above) makes
+ * ClickHouse buffer this LIMIT-100 result server-side instead of streaming
+ * it — cheap at this size, and required for a `timeout_overflow_mode =
+ * 'throw'` exception hit mid-stream to come back as a normal HTTP error
+ * response. Without it, once ANY row has already been sent with the HTTP
+ * 200 already committed, ClickHouse can't switch status codes, so it
+ * appends the plain-text exception (e.g. "Code: 159. DB::Exception:
+ * Timeout exceeded...") straight onto the JSONEachRow body instead.
+ * @clickhouse/client's resultSet.json() then does a raw JSON.parse() on
+ * that trailing text and throws `SyntaxError: Unexpected token 'C', "Code:
+ * 159."... is not valid JSON` — a real, reproduced bug (2026-08-25): it's
+ * what a rescan failure actually shows the user instead of the real
+ * ClickHouse error, for ANY cause of a mid-stream throw, not just a
+ * timeout. Confirmed fixed by adding this setting: the identical forced
+ * timeout came back as a proper ClickHouseError (code 159,
+ * TIMEOUT_EXCEEDED, a readable message) instead of crashing the parser.
  */
 function selectMatches(
   where: string,
@@ -315,7 +357,7 @@ function selectMatches(
        ORDER BY ${MATCH_ORDER_BY}
        LIMIT {matchLimit:UInt32}
      ) AS t
-     SETTINGS max_execution_time = ${maxExecutionTime}, timeout_overflow_mode = 'throw'`,
+     SETTINGS max_execution_time = ${maxExecutionTime}, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1`,
     { ...params, matchLimit: MATCH_LIMIT }
   ) as Promise<MatchRow[]>
 }

@@ -571,13 +571,27 @@ export interface MonitorMatchesCacheEntry {
  * reader never sees a partially-replaced set. Timestamps use SQL
  * datetime('now'), not JS Date — lib/format-relative-time.ts parses the
  * SQLite "YYYY-MM-DD HH:MM:SS" shape specifically.
+ *
+ * INSERT OR IGNORE, not INSERT: monitor_matches' primary key is (monitor_id,
+ * url, email, password), and `rows` can legitimately contain two entries
+ * with that exact same triple — ulp.credentials is an aggregation of many
+ * breach dumps, and the same leaked credential republished across sources is
+ * expected data, not corruption (see lib/content-dedup.ts, which exists
+ * specifically to manage that). selectMatches (lib/monitor-match-resolver.ts)
+ * has no DISTINCT, so a duplicate raw row surfaces as a duplicate result row.
+ * Reproduced 2026-08-25: a plain INSERT threw `SqliteError: UNIQUE constraint
+ * failed` on the first monitor whose result set actually contained one, which
+ * — because this ran inside dbTransaction — rolled back the whole write and
+ * left the rescan permanently unable to succeed. OR IGNORE keeps whichever
+ * duplicate sorted first (mergeMatchPages' compareMatches order) and drops
+ * the rest; dropping a byte-identical row loses nothing a reader would see.
  */
 export async function writeMonitorMatchCache(monitorId: number, rows: MatchRow[]): Promise<void> {
   dbTransaction(() => {
     dbRun('DELETE FROM monitor_matches WHERE monitor_id = ?', [monitorId])
     for (const row of rows) {
       dbRun(
-        `INSERT INTO monitor_matches (monitor_id, url, email, password, domain, fetched_at)
+        `INSERT OR IGNORE INTO monitor_matches (monitor_id, url, email, password, domain, fetched_at)
          VALUES (?, ?, ?, ?, ?, datetime('now'))`,
         [monitorId, row.url, row.email, row.password, row.domain]
       )
