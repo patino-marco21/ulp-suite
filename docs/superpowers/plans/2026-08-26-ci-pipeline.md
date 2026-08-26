@@ -29,7 +29,7 @@
 - Consumes: existing `package.json` scripts `typecheck`, `test`, `lint` (all already exist and pass locally — confirmed 2026-08-26: `tsc --noEmit` clean, 73/73 test files / 1106/1106 tests passing).
 - Produces: nothing consumed by other tasks — this plan has only one task.
 
-- [ ] **Step 1: Create the workflow file**
+- [x] **Step 1: Create the workflow file**
 
 Create `.github/workflows/ci.yml` with exactly this content:
 
@@ -59,7 +59,7 @@ jobs:
       - run: npm run lint
 ```
 
-- [ ] **Step 2: Validate YAML syntax locally**
+- [x] **Step 2: Validate YAML syntax locally**
 
 Run:
 
@@ -71,7 +71,7 @@ Expected output: `valid yaml`
 
 This only catches malformed YAML (bad indentation, stray characters) — it does not validate GitHub Actions' own schema (job/step keys, action names). That's what Step 5's real run confirms.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add .github/workflows/ci.yml
@@ -88,13 +88,13 @@ EOF
 )"
 ```
 
-- [ ] **Step 4: Push to main**
+- [x] **Step 4: Push to main**
 
 ```bash
 git push origin main
 ```
 
-- [ ] **Step 5: Watch the run and confirm it passes**
+- [x] **Step 5: Watch the run and confirm it passes**
 
 ```bash
 gh run list --branch main --limit 1
@@ -116,7 +116,7 @@ three scripts already pass locally, so a CI-only failure most likely
 means an environment difference, e.g. a case-sensitive filesystem issue
 or a missing env var), and repeat from Step 3 with a new commit.
 
-- [ ] **Step 6: Confirm the badge-worthy state**
+- [x] **Step 6: Confirm the badge-worthy state**
 
 ```bash
 gh run list --workflow=ci.yml --limit 3
