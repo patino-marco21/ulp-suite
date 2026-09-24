@@ -87,6 +87,10 @@ Building this tooling is a distinct step from running it destructively. The plan
 - **No UI changes** — the Credentials Browser is untouched this pass.
 - **No automatic destructive execution** — the real `APPLY=1` delete requires a separate, explicit go-ahead after the dry-run is reviewed, even once all tooling is built and verified.
 
+## Validated finding (sample-scale, 2026-09-24)
+
+The `(content_key_hash, imported_at, url, email, password)` match tuple is *safe* but not perfectly *complete*: on a ~1% sample, 30,581 of ~14M groups (0.22%) had more than one physical row tying on the full tuple — because `imported_at` is batch-level granularity, not per-row-unique, so two genuinely distinct rows (e.g. from different source files uploaded in the same batch) can share every column the tuple checks. This is not a correctness risk — `url`/`email`/`password` are themselves part of the tying tuple, so any rows that tie are guaranteed to share identical content, meaning the companion table's canonical values are always valid and never "frankenstein" combinations from mismatched ties. It just means a small number of true duplicate-tuple rows survive together instead of collapsing to exactly one. Adding `source_file` to the tuple was tested and barely helps (+377 of the gap on the sample) — the ties are inherent to shared `imported_at`, not a missing column. Accepted as a known, harmless limitation rather than engineering a perfect tiebreak (e.g. `_part_offset`, which was already rejected for the staleness risk under live ingest).
+
 ## Testing
 
 - Sample-scale prototype (Architecture step 1) is the primary correctness check: verify by hand that a handful of known-duplicated sample rows collapse to the expected single canonical row with the expected `source_count`/`sources` array.
