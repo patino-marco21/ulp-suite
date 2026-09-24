@@ -1,14 +1,22 @@
 /**
  * Search API v1 - ULP Credentials Search
  * GET /api/v1/search/credentials?q=<query>&page=1&limit=100
+ * GET /api/v1/search/credentials?q=<query>&cursor=<token>&limit=100  (keyset pagination — recommended for deep paging; see next_cursor in the response)
  */
 
 import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
 import { executeQuery } from "@/lib/clickhouse"
 import { parseULPQuery, buildULPWhere } from "@/lib/ulp-search"
+import { decodeCursor, buildCursorWhere, encodeCursor } from "@/lib/cursor-pagination"
 
 export const dynamic = 'force-dynamic'
+
+// This endpoint has never offered a sort choice — it has always been a
+// fixed ORDER BY imported_at DESC. Kept as a named constant so the cursor
+// encode/decode calls below read the same as the internal browse route's,
+// which does support multiple sorts.
+const SORT_KEY = 'imported_desc' as const
 
 export async function GET(request: NextRequest) {
   const authResult = await withApiKeyAuth(request, ['admin', 'analyst'])
@@ -23,47 +31,75 @@ export async function GET(request: NextRequest) {
   const page = Math.max(1, parseInt(searchParams.get('page') || '1'))
   const limit = Math.min(1000, Math.max(1, parseInt(searchParams.get('limit') || '100')))
   const offset = (page - 1) * limit
+  const cursorToken = searchParams.get('cursor') || ''
 
   if (!q.trim()) {
-    const response = NextResponse.json({ success: true, results: [], total: 0, page: 1, pages: 0 })
+    const response = NextResponse.json({ success: true, results: [], total: 0, page: 1, pages: 0, next_cursor: null })
     return addRateLimitHeaders(response, authResult.rateLimit)
   }
 
   try {
     const { clause, params } = buildULPWhere(parseULPQuery(q))
 
+    // Keyset pagination: reuses the same tested primitive the internal
+    // Credentials Browser already uses (lib/cursor-pagination.ts). An
+    // invalid or foreign-sort cursor is treated the same as no cursor —
+    // falls back to offset mode — matching that route's own convention.
+    let cursorClause = ''
+    let cursorParams: Record<string, unknown> = {}
+    if (cursorToken) {
+      const cursor = decodeCursor(cursorToken)
+      if (cursor && cursor.sort === SORT_KEY) {
+        const { clause: cc, params: cp } = buildCursorWhere(SORT_KEY, cursor)
+        cursorClause = ` AND ${cc}`
+        cursorParams = cp
+      }
+    }
+    const usingCursor = cursorClause !== ''
+
     const [countResult, rows] = await Promise.all([
-      // Count: break mode returns a partial count rather than throwing on timeout.
-      executeQuery(
-        `SELECT count() as total FROM ulp.credentials WHERE ${clause}
-         SETTINGS optimize_trivial_count_query = 1,
-                  max_execution_time = 300,
-                  timeout_overflow_mode = 'break',
-                  use_query_cache = 0`,
-        params
-      ),
+      // Count: break mode returns a partial count rather than throwing on
+      // timeout. Skipped entirely on cursor pages — the matched set doesn't
+      // change as you page through it, so re-counting on every page is pure
+      // waste at this table's scale; the client keeps the first page's total.
+      usingCursor
+        ? Promise.resolve(null)
+        : executeQuery(
+            `SELECT count() as total FROM ulp.credentials WHERE ${clause}
+             SETTINGS optimize_trivial_count_query = 1,
+                      max_execution_time = 300,
+                      timeout_overflow_mode = 'break',
+                      use_query_cache = 0`,
+            params
+          ),
       // Data: throw mode on timeout so we return a 408 instead of silent 0 rows
       // (timeout_overflow_mode=break with ORDER BY does not flush sort buffer —
       // ClickHouse issue #52234).
       executeQuery(
         `SELECT url, email, password, domain, source_file, imported_at
-         FROM ulp.credentials WHERE ${clause}
-         ORDER BY imported_at DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}
+         FROM ulp.credentials WHERE ${clause}${cursorClause}
+         ORDER BY imported_at DESC LIMIT {limit:UInt32}${usingCursor ? '' : ' OFFSET {offset:UInt32}'}
          SETTINGS max_execution_time = 300,
                   timeout_overflow_mode = 'throw',
                   http_wait_end_of_query = 1`,
-        { ...params, limit, offset }
+        { ...params, ...cursorParams, limit, ...(usingCursor ? {} : { offset }) }
       ),
     ])
 
-    const total = Number(countResult[0]?.total || 0)
+    const rowsArr = rows as Record<string, unknown>[]
+    const nextCursor = rowsArr.length === limit
+      ? encodeCursor(SORT_KEY, rowsArr[rowsArr.length - 1])
+      : null
+
+    const total = countResult ? Number((countResult as Array<{ total?: unknown }>)[0]?.total || 0) : null
     const response = NextResponse.json({
       success: true,
       results: rows,
       total,
-      page,
-      pages: Math.ceil(total / limit),
-      query:  q,
+      page: usingCursor ? null : page,
+      pages: usingCursor ? null : Math.ceil((total ?? 0) / limit),
+      next_cursor: nextCursor,
+      query: q,
     })
     return addRateLimitHeaders(response, authResult.rateLimit)
   } catch (error) {
