@@ -163,7 +163,12 @@ let migrationsDone = false
 //     Two other approaches (a projection, then a materialized+minmax column)
 //     were tried and empirically disproven first — see the block below and
 //     docs/superpowers/specs/2026-08-24-domain-monitor-saved-matches-design.md §1.
-const DDL_VERSION = 19
+// v20: credential_dedup_meta companion table — captures cross-source
+//      duplicate lineage (source_count, sources, first/last seen, canonical
+//      row) for the dedup backfill. Empty until the backfill script (see
+//      docs/superpowers/specs/2026-09-24-credential-dedup-backfill-design.md)
+//      populates it; creating the table here is schema-only.
+const DDL_VERSION = 20
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -829,6 +834,29 @@ export async function runClickHouseMigrations(): Promise<void> {
       `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_ngram_domain`
     )
     console.warn('[ClickHouse migration] DDL v19 applied (added idx_ngram_domain — MATERIALIZE running in background)')
+  }
+
+  // v20 — credential_dedup_meta companion table (see DDL_VERSION comment
+  // above). Plain CREATE TABLE, no MATERIALIZE step needed — it starts empty;
+  // the backfill script populates it separately and explicitly.
+  if (lastDdl < 20) {
+    await runMigration(
+      `CREATE TABLE IF NOT EXISTS ulp.credential_dedup_meta
+       (
+           content_key_hash    UInt64,
+           source_count         UInt32,
+           sources               Array(String),
+           first_seen            DateTime,
+           last_seen             DateTime,
+           canonical_url         String,
+           canonical_email       String,
+           canonical_password    String,
+           canonical_source_file String
+       )
+       ENGINE = MergeTree()
+       ORDER BY content_key_hash`
+    )
+    console.warn('[ClickHouse migration] DDL v20 applied (created credential_dedup_meta companion table)')
   }
 
   if (lastDdl < DDL_VERSION) {

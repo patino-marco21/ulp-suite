@@ -321,6 +321,25 @@ SETTINGS
     -- Allow async deduplication cleanup without blocking inserts
     merge_with_ttl_timeout = 86400;
 
+-- credential_dedup_meta: companion table for the dedup backfill (see
+-- lib/clickhouse-migrations.ts DDL v20 and
+-- docs/superpowers/specs/2026-09-24-credential-dedup-backfill-design.md).
+-- Starts empty; populated by scripts/backfill-credential-dedup.sh.
+CREATE TABLE IF NOT EXISTS ulp.credential_dedup_meta
+(
+    content_key_hash    UInt64,
+    source_count         UInt32,
+    sources               Array(String),
+    first_seen            DateTime,
+    last_seen             DateTime,
+    canonical_url         String,
+    canonical_email       String,
+    canonical_password    String,
+    canonical_source_file String
+)
+ENGINE = MergeTree()
+ORDER BY content_key_hash;
+
 -- ── Import source / upload history ───────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS ulp.sources
 (
