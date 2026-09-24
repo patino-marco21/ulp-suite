@@ -43,7 +43,9 @@ const SELECT = `${NORM_COLS},
   url_scheme, is_corporate_email, email_domain,
   url_host, password_entropy_band, imported_at`
 
-// Confirmed live against ulp.credentials (91M rows): with dedupe=1, any sort
+// Confirmed live against ulp.credentials (2.4B+ rows, measured 2026-08-23/26 —
+// see docs/superpowers/specs/2026-09-24-scale-audit-followups-design.md):
+// with dedupe=1, any sort
 // whose leading column isn't `domain` (the table's actual primary-key leading
 // column — see ORDER BY (domain, email, imported_at)) hits MEMORY_LIMIT_EXCEEDED
 // (code 241). ClickHouse's `ORDER BY ... LIMIT 1 BY <key> ... LIMIT n` can't
