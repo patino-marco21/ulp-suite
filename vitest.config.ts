@@ -17,6 +17,12 @@ export default defineConfig({
     // __tests__/) inside this repo; their copies otherwise surface as duplicate
     // runs / false failures in the main suite.
     exclude: [...configDefaults.exclude, '**/.worktrees/**', '**/.claude/worktrees/**'],
+    // Isolated per-worker SQLite DB — see docs/superpowers/specs/2026-09-24-scale-audit-followups-design.md.
+    // Without this, tests fall back to ./data/ulp.db: unwritable in the main
+    // checkout (SQLITE_READONLY), and racy on first-admin-seed in a fresh
+    // writable checkout.
+    globalSetup: ['./__tests__/setup/sqlite-global-setup.ts'],
+    setupFiles: ['./__tests__/setup/sqlite-worker-setup.ts'],
     // Coverage (run with --coverage)
     coverage: {
       provider: 'v8',
