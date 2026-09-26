@@ -6,6 +6,17 @@
 #   ACCEPT_PERMANENT_DATA_LOSS=1 APPLY=1 bash scripts/backfill-credential-dedup.sh
 #
 # See docs/superpowers/specs/2026-09-24-credential-dedup-backfill-design.md
+#
+# Architecture: a single GROUP BY content_key_hash over the full table needs
+# more memory than the server allows. content_key_hash is a hash of a
+# superset of (email, password), so bucketing on cityHash64(email, password)
+# % 100 is disjoint in content_key_hash space -- each bucket's aggregate is
+# already final and can be written straight into ulp.credential_dedup_meta,
+# no cross-bucket merge required. If a bucket's plain aggregate still doesn't
+# fit, it falls back to 8 further sub-slices (on cityHash64(source_file, url),
+# uncorrelated with content_key_hash) merged via -State/-Merge combinators
+# through the scratch table ulp.credential_dedup_partial before being written
+# to the same target, then the scratch table is truncated back to empty.
 
 set -euo pipefail
 
@@ -41,26 +52,120 @@ echo "ULP Suite - credential dedup backfill"
 echo "APPLY=$APPLY (0 = dry-run)"
 echo
 
-echo "Building ulp.credential_dedup_meta (this reads the full credentials table once)..."
-ch "TRUNCATE TABLE ulp.credential_dedup_meta"
+echo "Ensuring scratch table exists (ad-hoc fallback buffer, not schema-tracked)..."
 ch "
-INSERT INTO ulp.credential_dedup_meta
-SELECT
-    content_key_hash,
-    count() AS source_count,
-    groupUniqArray(50)(source_file) AS sources,
-    min(imported_at) AS first_seen,
-    max(imported_at) AS last_seen,
-    argMin(url, (imported_at, url, email, password)) AS canonical_url,
-    argMin(email, (imported_at, url, email, password)) AS canonical_email,
-    argMin(password, (imported_at, url, email, password)) AS canonical_password,
-    argMin(source_file, (imported_at, url, email, password)) AS canonical_source_file
-FROM ulp.credentials
-GROUP BY content_key_hash
-SETTINGS max_bytes_before_external_group_by = 10000000000,
-         max_execution_time = 0,
-         max_threads = 4
+CREATE TABLE IF NOT EXISTS ulp.credential_dedup_partial
+(
+    content_key_hash            UInt64,
+    partial_count                UInt64,
+    sources_state                 AggregateFunction(groupUniqArray(50), String),
+    partial_first_seen             DateTime,
+    partial_last_seen              DateTime,
+    canonical_url_state            AggregateFunction(argMin, String, Tuple(DateTime, String, String, String)),
+    canonical_email_state          AggregateFunction(argMin, String, Tuple(DateTime, String, String, String)),
+    canonical_password_state       AggregateFunction(argMin, String, Tuple(DateTime, String, String, String)),
+    canonical_source_file_state    AggregateFunction(argMin, String, Tuple(DateTime, String, String, String))
+)
+ENGINE = MergeTree()
+ORDER BY content_key_hash
 "
+
+echo "Clearing state from any previous attempt..."
+ch "TRUNCATE TABLE ulp.credential_dedup_meta"
+ch "TRUNCATE TABLE ulp.credential_dedup_partial SETTINGS max_table_size_to_drop = 0"
+
+insert_bucket_plain() {
+  local k="$1"
+  "$DOCKER_BIN" exec "$CONTAINER" clickhouse-client --query "
+  INSERT INTO ulp.credential_dedup_meta
+  SELECT
+      content_key_hash,
+      count() AS source_count,
+      groupUniqArray(50)(source_file) AS sources,
+      min(imported_at) AS first_seen,
+      max(imported_at) AS last_seen,
+      argMin(url, (imported_at, url, email, password)) AS canonical_url,
+      argMin(email, (imported_at, url, email, password)) AS canonical_email,
+      argMin(password, (imported_at, url, email, password)) AS canonical_password,
+      argMin(source_file, (imported_at, url, email, password)) AS canonical_source_file
+  FROM ulp.credentials
+  WHERE cityHash64(email, password) % 100 = $k
+  GROUP BY content_key_hash
+  SETTINGS max_execution_time = 0
+  "
+}
+
+insert_bucket_subsliced() {
+  local k="$1"
+  "$DOCKER_BIN" exec "$CONTAINER" clickhouse-client --query "TRUNCATE TABLE ulp.credential_dedup_partial SETTINGS max_table_size_to_drop = 0" || return 1
+  for s in 0 1 2 3 4 5 6 7; do
+    "$DOCKER_BIN" exec "$CONTAINER" clickhouse-client --query "
+    INSERT INTO ulp.credential_dedup_partial
+    SELECT
+        content_key_hash,
+        count() AS partial_count,
+        groupUniqArrayState(50)(source_file) AS sources_state,
+        min(imported_at) AS partial_first_seen,
+        max(imported_at) AS partial_last_seen,
+        argMinState(url, (imported_at, url, email, password)) AS canonical_url_state,
+        argMinState(email, (imported_at, url, email, password)) AS canonical_email_state,
+        argMinState(password, (imported_at, url, email, password)) AS canonical_password_state,
+        argMinState(source_file, (imported_at, url, email, password)) AS canonical_source_file_state
+    FROM ulp.credentials
+    WHERE cityHash64(email, password) % 100 = $k AND cityHash64(source_file, url) % 8 = $s
+    GROUP BY content_key_hash
+    SETTINGS max_execution_time = 0
+    " || return 1
+  done
+  "$DOCKER_BIN" exec "$CONTAINER" clickhouse-client --query "
+  INSERT INTO ulp.credential_dedup_meta
+  SELECT
+      content_key_hash,
+      sum(partial_count) AS source_count,
+      groupUniqArrayMerge(50)(sources_state) AS sources,
+      min(partial_first_seen) AS first_seen,
+      max(partial_last_seen) AS last_seen,
+      argMinMerge(canonical_url_state) AS canonical_url,
+      argMinMerge(canonical_email_state) AS canonical_email,
+      argMinMerge(canonical_password_state) AS canonical_password,
+      argMinMerge(canonical_source_file_state) AS canonical_source_file
+  FROM ulp.credential_dedup_partial
+  GROUP BY content_key_hash
+  SETTINGS optimize_aggregation_in_order = 1
+  " || return 1
+  "$DOCKER_BIN" exec "$CONTAINER" clickhouse-client --query "TRUNCATE TABLE ulp.credential_dedup_partial SETTINGS max_table_size_to_drop = 0"
+}
+
+echo "Building ulp.credential_dedup_meta, 100 disjoint buckets on cityHash64(email, password)..."
+failed_buckets=()
+for k in $(seq 0 99); do
+  if insert_bucket_plain "$k" >/tmp/dedup-bucket-$k.log 2>&1; then
+    echo "$(date '+%H:%M:%S') bucket $k: OK (direct)"
+    continue
+  fi
+  echo "$(date '+%H:%M:%S') bucket $k: direct attempt didn't fit, retrying with 8-way sub-slicing..."
+  if insert_bucket_subsliced "$k" >/tmp/dedup-bucket-$k.log 2>&1; then
+    echo "$(date '+%H:%M:%S') bucket $k: OK (sub-sliced)"
+    continue
+  fi
+  echo "$(date '+%H:%M:%S') bucket $k: sub-sliced attempt also failed, restarting container and retrying once..."
+  "$DOCKER_BIN" restart "$CONTAINER" >/dev/null
+  until "$DOCKER_BIN" exec "$CONTAINER" clickhouse-client --query "SELECT 1" >/dev/null 2>&1; do sleep 2; done
+  if insert_bucket_subsliced "$k" >/tmp/dedup-bucket-$k.log 2>&1; then
+    echo "$(date '+%H:%M:%S') bucket $k: OK (sub-sliced, after restart)"
+    continue
+  fi
+  echo "$(date '+%H:%M:%S') bucket $k: FAILED after restart -- see /tmp/dedup-bucket-$k.log"
+  failed_buckets+=("$k")
+done
+
+echo
+if [[ ${#failed_buckets[@]} -gt 0 ]]; then
+  echo "WARNING: ${#failed_buckets[@]} bucket(s) never succeeded: ${failed_buckets[*]}"
+  echo "The integrity check below will fail if this made the companion table incomplete."
+else
+  echo "All 100 buckets populated ulp.credential_dedup_meta successfully."
+fi
 
 echo
 echo "Integrity check: sum(source_count) must equal ulp.credentials' total row count."
