@@ -418,7 +418,7 @@ export function startInboxWatcher(): void {
   // files will still be processed within RECONCILE_INTERVAL_MS.
   setInterval(reconcile, RECONCILE_INTERVAL_MS)
 
-  console.log(`[inbox-watcher] started — watching ${INBOX} (polling every 2 s, reconcile every 30 s)`)
+  console.warn(`[inbox-watcher] started — watching ${INBOX} (polling every 2 s, reconcile every 30 s)`)
 
   // Dynamic import keeps chokidar out of the client bundle (tree-shaking safe)
   import('chokidar')

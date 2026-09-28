@@ -36,7 +36,7 @@ export function startDedupCron(): void {
   const ms = hours * 60 * 60 * 1000
   const hourUtc = dedupCronHourUtc()
   const initialDelay = msUntilNextRun(hourUtc, new Date())
-  console.log(
+  console.warn(
     `[content-dedup] cron started — first tick in ${Math.round(initialDelay / 60_000)}m ` +
       `(anchored to ${String(hourUtc).padStart(2, '0')}:00 UTC), then every ${hours}h`,
   )

@@ -23,7 +23,7 @@ export function startProjectionScopeCron(): void {
   started = true
   const ms = hours * 60 * 60 * 1000
   const initialDelay = msUntilNextRun(5, new Date())
-  console.log(
+  console.warn(
     `[projection-scope] cron started — first tick in ${Math.round(initialDelay / 60_000)}m ` +
       `(anchored to 05:00 UTC), then every ${hours}h`,
   )

@@ -68,7 +68,7 @@ export async function runProjectionScopeTick(
       await client.exec({ query: buildClearProjectionSql(partition) })
       cleared.push(partition)
     }
-    console.log(
+    console.warn(
       `[projection-scope] ${trigger}: cutoff=${cutoff} cleared=[${cleared.join(', ') || 'none'}]`,
     )
     return { cutoff, cleared }

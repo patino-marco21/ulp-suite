@@ -477,7 +477,7 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
     const applyOn = contentDedupApplyEnabled()
     const willApply = applyOn && excess >= minExcessToApply()
 
-    console.log(
+    console.warn(
       `[content-dedup] ${trigger}: total=${total} excess=${excess} willApply=${willApply}` +
         (applyOn ? '' : ' (report-only — set CONTENT_DEDUP_APPLY=true to enable cleanup)'),
     )

@@ -24,7 +24,7 @@ let started = false
 export function startMonitorRescanCron(): void {
   if (started) return
   started = true
-  console.log('[monitor-rescan] cron started — tick every 15 minutes')
+  console.warn('[monitor-rescan] cron started — tick every 15 minutes')
   // First tick after 30s (let server warm up)
   setTimeout(() => { runTick().catch(console.error) }, 30_000)
   setInterval(() => { runTick().catch(console.error) }, TICK_MS)
@@ -70,7 +70,7 @@ export async function runTick(): Promise<void> {
   `) as DueMonitorRow[]
 
   if (dueMonitors.length === 0) {
-    console.log('[monitor-rescan] tick: due=0 fired=0')
+    console.warn('[monitor-rescan] tick: due=0 fired=0')
     await runWebhookOutboxTick()
     return
   }
@@ -269,7 +269,7 @@ export async function runTick(): Promise<void> {
     }
   }
 
-  console.log(`[monitor-rescan] tick: due=${dueMonitors.length} fired=${fired}`)
+  console.warn(`[monitor-rescan] tick: due=${dueMonitors.length} fired=${fired}`)
 
   // Process any pending outbox retries from previous failed deliveries
   await runWebhookOutboxTick()
