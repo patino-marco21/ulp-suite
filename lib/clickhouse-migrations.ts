@@ -168,7 +168,18 @@ let migrationsDone = false
 //      row) for the dedup backfill. Empty until the backfill script (see
 //      docs/superpowers/specs/2026-09-24-credential-dedup-backfill-design.md)
 //      populates it; creating the table here is schema-only.
-const DDL_VERSION = 20
+// v21: was_duplicated flag on ulp.credentials. Boolean, not a count:
+//      file-level repackaging in this dataset (the same underlying
+//      collection gets rechunked and re-released under new filenames)
+//      means any precise "seen N times" number would mostly measure
+//      redistribution churn, not genuine independent sightings --
+//      confirmed empirically, see
+//      docs/superpowers/specs/2026-09-28-dedup-reconciliation-design.md.
+//      Plain DEFAULT column, not MATERIALIZED -- no MATERIALIZE backfill
+//      needed: this column's real values get written by content-dedup's
+//      own rewrite+swap populate step, not by a mutation over existing
+//      parts.
+const DDL_VERSION = 21
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -857,6 +868,12 @@ export async function runClickHouseMigrations(): Promise<void> {
        ORDER BY content_key_hash`
     )
     console.warn('[ClickHouse migration] DDL v20 applied (created credential_dedup_meta companion table)')
+  }
+
+  // v21 — was_duplicated flag (see DDL_VERSION comment above).
+  if (lastDdl < 21) {
+    await runMigration(`ALTER TABLE ulp.credentials ADD COLUMN IF NOT EXISTS was_duplicated UInt8 DEFAULT 0`)
+    console.warn('[ClickHouse migration] DDL v21 applied (added was_duplicated column)')
   }
 
   if (lastDdl < DDL_VERSION) {

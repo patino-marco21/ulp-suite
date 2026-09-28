@@ -312,10 +312,19 @@ export function contentDedupBucketCount(env: NodeJS.ProcessEnv = process.env): n
  * itself now bounds the operation's scale, and a small block size risks a
  * "too many parts" problem at bucket scale that it didn't at full-table
  * scale.
+ *
+ * was_duplicated (UInt8 DEFAULT 0, added in migration v21): true if this
+ * content key ever had more than one row, this cycle or any prior one.
+ * greatest(was_duplicated, ...) makes it cumulative and cycle-agnostic --
+ * once true, always true, even on a later cycle where this group sees no
+ * new duplicate. Deliberately a boolean, not a count: file-level
+ * repackaging in this dataset means a precise "seen N times" number would
+ * mostly measure redistribution churn, not genuine independent sightings --
+ * see docs/superpowers/specs/2026-09-28-dedup-reconciliation-design.md.
  */
 export function buildPopulateDedupedTableSqlForBucket(bucketIndex: number, bucketCount: number): string {
   return `INSERT INTO ${AUTO_DEDUP_TABLE}
-  SELECT * FROM ulp.credentials
+  SELECT * REPLACE (greatest(was_duplicated, if(count() OVER (PARTITION BY ${CONTENT_KEY}) > 1, 1, 0)) AS was_duplicated) FROM ulp.credentials
   WHERE cityHash64(${CONTENT_KEY}) % ${bucketCount} = ${bucketIndex}
   ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}
   LIMIT 1 BY ${CONTENT_KEY}
@@ -383,7 +392,7 @@ export function buildRenameSwapSql(): string {
  */
 export function buildCatchupInsertSql(cutoff: string): string {
   return `INSERT INTO ulp.credentials
-  SELECT * FROM ${AUTO_PREDUP_TABLE}
+  SELECT * REPLACE (greatest(was_duplicated, if(count() OVER (PARTITION BY ${CONTENT_KEY}) > 1, 1, 0)) AS was_duplicated) FROM ${AUTO_PREDUP_TABLE}
   WHERE imported_at > '${cutoff}'
     AND cityHash64(${CONTENT_KEY}) NOT IN (SELECT cityHash64(${CONTENT_KEY}) FROM ulp.credentials)
   ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}

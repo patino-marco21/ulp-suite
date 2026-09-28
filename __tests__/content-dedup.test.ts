@@ -172,7 +172,7 @@ ORDER BY url`
     test('inserts a deduped copy of one bucket, keeping the earliest imported_at per content key, with disk-spill, bounded threads, and a raised timeout', () => {
       const sql = buildPopulateDedupedTableSqlForBucket(5, 32)
       expect(sql).toContain(`INSERT INTO ${AUTO_DEDUP_TABLE}`)
-      expect(sql).toContain('SELECT * FROM ulp.credentials')
+      expect(sql).toContain(`SELECT * REPLACE (greatest(was_duplicated, if(count() OVER (PARTITION BY ${CONTENT_KEY}) > 1, 1, 0)) AS was_duplicated) FROM ulp.credentials`)
       expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 5`)
       expect(sql).toContain(`ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}`)
       expect(sql).toContain(`LIMIT 1 BY ${CONTENT_KEY}`)
@@ -187,6 +187,11 @@ ORDER BY url`
     test('a different bucket index changes only the bucket filter', () => {
       const sql = buildPopulateDedupedTableSqlForBucket(0, 32)
       expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 0`)
+    })
+
+    test('was_duplicated is cumulative: greatest() preserves an already-true flag from a prior cycle even when this cycle sees no new duplicate for that group', () => {
+      const sql = buildPopulateDedupedTableSqlForBucket(5, 32)
+      expect(sql).toContain('greatest(was_duplicated,')
     })
   })
 
@@ -282,7 +287,7 @@ ORDER BY url`
     test('copies rows imported after cutoff, excluding content keys already present, deduplicated against itself, with disk-spill, bounded threads, and a raised timeout', () => {
       const sql = buildCatchupInsertSql('2026-07-07 15:07:51')
       expect(sql).toContain('INSERT INTO ulp.credentials')
-      expect(sql).toContain(`FROM ${AUTO_PREDUP_TABLE}`)
+      expect(sql).toContain(`SELECT * REPLACE (greatest(was_duplicated, if(count() OVER (PARTITION BY ${CONTENT_KEY}) > 1, 1, 0)) AS was_duplicated) FROM ${AUTO_PREDUP_TABLE}`)
       expect(sql).toContain("WHERE imported_at > '2026-07-07 15:07:51'")
       expect(sql).toContain(`cityHash64(${CONTENT_KEY}) NOT IN (SELECT cityHash64(${CONTENT_KEY}) FROM ulp.credentials)`)
       expect(sql).toContain(`ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}`)
