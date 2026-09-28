@@ -43,6 +43,7 @@ tmp/
 docs/generated
 docs/api
 .worktrees/
+.claude/worktrees/
 # curl cookie jars — contain live session tokens, never commit
 cookies.txt
 *.cookie
