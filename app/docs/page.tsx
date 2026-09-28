@@ -114,8 +114,8 @@ export default function DocsPage() {
   )
 
   const sections = [
-    { id: "search-credentials", label: "Search Credentials", icon: Search, method: "POST" },
-    { id: "search-domain", label: "Search Domain", icon: Search, method: "POST" },
+    { id: "search-credentials", label: "Search Credentials", icon: Search, method: "GET" },
+    { id: "search-domain", label: "Search Domain", icon: Search, method: "GET" },
     { id: "lookup", label: "Lookup", icon: Database, method: "GET" },
     { id: "batch-lookup", label: "Batch Lookup", icon: Database, method: "POST" },
     { id: "summary", label: "Summary", icon: BarChart3, method: "GET" },
@@ -299,7 +299,7 @@ export default function DocsPage() {
             <Card className="glass-card border-border/50">
               <CardHeader>
                 <div className="flex items-center gap-3">
-                  <Badge className="bg-blue-500/10 text-blue-400 border-blue-500/30 font-mono">POST</Badge>
+                  <Badge className="bg-blue-500/10 text-blue-400 border-blue-500/30 font-mono">GET</Badge>
                   <code className="text-lg font-mono text-foreground">/api/v1/search/credentials</code>
                 </div>
                 <CardDescription className="text-muted-foreground mt-2">
@@ -310,24 +310,24 @@ export default function DocsPage() {
                 {/* Parameters */}
                 <div>
                   <h4 className="font-semibold mb-3 text-foreground flex items-center gap-2">
-                    Request Body Parameters
+                    Query Parameters
                   </h4>
                   <ParameterTable params={[
-                    { name: "query", type: "string", required: true, description: "The search query (email, username, or password)" },
-                    { name: "type", type: "string", required: false, description: "Search type: email, username, password, or any", default: "any" },
+                    { name: "q", type: "string", required: true, description: "The search query (email, username, or password)" },
                     { name: "page", type: "number", required: false, description: "Page number for pagination", default: "1" },
-                    { name: "limit", type: "number", required: false, description: "Number of results per page (max 100)", default: "50" },
-                    { name: "includePasswords", type: "boolean", required: false, description: "Include full passwords in response (admin only)", default: "false" },
+                    { name: "limit", type: "number", required: false, description: "Number of results per page (max 1000)", default: "100" },
+                    { name: "cursor", type: "string", required: false, description: "Keyset pagination token from a previous response's next_cursor (recommended for deep paging)" },
                   ]} />
                 </div>
 
                 {/* Example Request */}
                 <div>
                   <h4 className="font-semibold mb-3 text-foreground">Example Request</h4>
-                  <CodeBlock code={`curl -X POST "${baseUrl}/api/v1/search/credentials" \\
+                  <CodeBlock code={`curl -G "${baseUrl}/api/v1/search/credentials" \\
   -H "X-API-Key: bv_your_api_key" \\
-  -H "Content-Type: application/json" \\
-  -d '{"query": "john@example.com", "type": "email", "page": 1, "limit": 50}'`} />
+  --data-urlencode "q=john@example.com" \\
+  --data-urlencode "page=1" \\
+  --data-urlencode "limit=50"`} />
                 </div>
 
                 {/* Response */}
@@ -411,7 +411,7 @@ export default function DocsPage() {
             <Card className="glass-card border-border/50">
               <CardHeader>
                 <div className="flex items-center gap-3">
-                  <Badge className="bg-blue-500/10 text-blue-400 border-blue-500/30 font-mono">POST</Badge>
+                  <Badge className="bg-blue-500/10 text-blue-400 border-blue-500/30 font-mono">GET</Badge>
                   <code className="text-lg font-mono text-foreground">/api/v1/search/domain</code>
                 </div>
                 <CardDescription className="text-muted-foreground mt-2">
@@ -421,22 +421,22 @@ export default function DocsPage() {
               <CardContent className="space-y-6">
                 {/* Parameters */}
                 <div>
-                  <h4 className="font-semibold mb-3 text-foreground">Request Body Parameters</h4>
+                  <h4 className="font-semibold mb-3 text-foreground">Query Parameters</h4>
                   <ParameterTable params={[
                     { name: "domain", type: "string", required: true, description: "The domain to search for (e.g., example.com)" },
-                    { name: "includeSubdomains", type: "boolean", required: false, description: "Include subdomains in search results", default: "false" },
                     { name: "page", type: "number", required: false, description: "Page number for pagination", default: "1" },
-                    { name: "limit", type: "number", required: false, description: "Number of results per page (max 100)", default: "50" },
+                    { name: "limit", type: "number", required: false, description: "Number of results per page (max 1000)", default: "100" },
                   ]} />
                 </div>
 
                 {/* Example Request */}
                 <div>
                   <h4 className="font-semibold mb-3 text-foreground">Example Request</h4>
-                  <CodeBlock code={`curl -X POST "${baseUrl}/api/v1/search/domain" \\
+                  <CodeBlock code={`curl -G "${baseUrl}/api/v1/search/domain" \\
   -H "X-API-Key: bv_your_api_key" \\
-  -H "Content-Type: application/json" \\
-  -d '{"domain": "example.com", "includeSubdomains": true, "page": 1, "limit": 50}'`} />
+  --data-urlencode "domain=example.com" \\
+  --data-urlencode "page=1" \\
+  --data-urlencode "limit=50"`} />
                 </div>
 
                 {/* Response */}
