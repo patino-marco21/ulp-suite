@@ -140,6 +140,7 @@ import type { ClickHouseClient } from '@clickhouse/client'
 import { getClient } from '@/lib/clickhouse'
 import { URL_CONTENT_KEY } from '@/lib/url-content-key'
 import { SEARCH_INDEX_DEFINITIONS } from '@/lib/search-index-definitions'
+import { createDiskGuard, DiskHeadroomError, type DiskGuard } from '@/lib/clickhouse-disk-guard'
 
 /** Content identity: same destination + same credential (scheme/trailing-slash-insensitive on the URL). */
 export const CONTENT_KEY = `${URL_CONTENT_KEY}, email, password`
@@ -390,6 +391,34 @@ export function buildCatchupInsertSql(cutoff: string): string {
   SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
 }
 
+/**
+ * Populates AUTO_DEDUP_TABLE one bucket at a time, guarded by a disk-headroom
+ * check before each bucket. On a trip, drops the partial AUTO_DEDUP_TABLE
+ * immediately -- rather than leaving it for the next day's tick (step 2/3's
+ * own cleanup, 24h away) to find -- before re-throwing. Takes client and guard
+ * as parameters (not module-scope state) so it's independently testable with
+ * plain fake objects, no ClickHouse-module mocking required.
+ * See docs/superpowers/specs/2026-09-28-clickhouse-disk-headroom-guard-design.md.
+ */
+export async function populateDedupedTableWithGuard(
+  client: ClickHouseClient,
+  bucketCount: number,
+  guard: DiskGuard,
+): Promise<void> {
+  await guard.preflight()
+  for (let bucket = 0; bucket < bucketCount; bucket++) {
+    try {
+      await guard.checkBeforeIteration(undefined, { index: bucket, total: bucketCount })
+    } catch (err) {
+      if (err instanceof DiskHeadroomError) {
+        await client.exec({ query: `DROP TABLE IF EXISTS ${AUTO_DEDUP_TABLE} SYNC` })
+      }
+      throw err
+    }
+    await client.exec({ query: buildPopulateDedupedTableSqlForBucket(bucket, bucketCount) })
+  }
+}
+
 // ── env knobs (pure, testable) ──────────────────────────────────────────────────
 
 /** Cron interval in hours; 0 (or invalid) disables the scheduled job. Default 24. */
@@ -539,9 +568,7 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
     // bucketCount was already captured in step 0 above (shared with the
     // stats/cutoff distinct-count buckets -- see DISTINCT-COUNT SCALE).
     console.log(`[content-dedup] ${trigger}: building deduped table across ${bucketCount} buckets (~${excess} duplicate rows to remove)`)
-    for (let bucket = 0; bucket < bucketCount; bucket++) {
-      await client.exec({ query: buildPopulateDedupedTableSqlForBucket(bucket, bucketCount) })
-    }
+    await populateDedupedTableWithGuard(client, bucketCount, createDiskGuard())
 
     // 6. Verify before swapping, one bucket at a time -- see the file's
     // DISTINCT-COUNT SCALE comment for why AUTO_DEDUP_TABLE needs the same

@@ -1,5 +1,6 @@
 import { readFileSync } from 'fs'
-import { describe, test, expect } from 'vitest'
+import { describe, test, expect, vi } from 'vitest'
+import { DiskHeadroomError, type DiskGuard } from '@/lib/clickhouse-disk-guard'
 import {
   CONTENT_KEY,
   AUTO_DEDUP_TABLE,
@@ -16,6 +17,7 @@ import {
   buildVerifyDedupedTableSqlForBucket,
   buildRenameSwapSql,
   buildCatchupInsertSql,
+  populateDedupedTableWithGuard,
   dedupCronHours,
   dedupCronHourUtc,
   contentDedupApplyEnabled,
@@ -338,6 +340,62 @@ ORDER BY url`
       expect(dedupCronHourUtc({ DEDUP_CRON_HOUR_UTC: '24' })).toBe(4)
       expect(dedupCronHourUtc({ DEDUP_CRON_HOUR_UTC: '-1' })).toBe(4)
       expect(dedupCronHourUtc({ DEDUP_CRON_HOUR_UTC: 'nope' })).toBe(4)
+    })
+  })
+
+  describe('populateDedupedTableWithGuard', () => {
+    function fakeClient() {
+      return { exec: vi.fn().mockResolvedValue(undefined) } as unknown as { exec: ReturnType<typeof vi.fn> }
+    }
+
+    function fakeGuard(overrides: Partial<DiskGuard> = {}): DiskGuard {
+      return {
+        preflight: vi.fn().mockResolvedValue(undefined),
+        checkBeforeIteration: vi.fn().mockResolvedValue(undefined),
+        ...overrides,
+      }
+    }
+
+    test('calls preflight once, then checkBeforeIteration + populate once per bucket, in order', async () => {
+      const client = fakeClient()
+      const guard = fakeGuard()
+
+      await populateDedupedTableWithGuard(client as any, 3, guard)
+
+      expect(guard.preflight).toHaveBeenCalledTimes(1)
+      expect(guard.checkBeforeIteration).toHaveBeenCalledTimes(3)
+      expect(guard.checkBeforeIteration).toHaveBeenNthCalledWith(1, undefined, { index: 0, total: 3 })
+      expect(guard.checkBeforeIteration).toHaveBeenNthCalledWith(2, undefined, { index: 1, total: 3 })
+      expect(guard.checkBeforeIteration).toHaveBeenNthCalledWith(3, undefined, { index: 2, total: 3 })
+      expect(client.exec).toHaveBeenCalledTimes(3)
+    })
+
+    test('drops AUTO_DEDUP_TABLE and re-throws when the guard trips with a DiskHeadroomError', async () => {
+      const client = fakeClient()
+      const tripError = new DiskHeadroomError('floor-breached', 'nope', null, null)
+      const guard = fakeGuard({
+        checkBeforeIteration: vi.fn()
+          .mockResolvedValueOnce(undefined) // bucket 0: fine
+          .mockRejectedValueOnce(tripError), // bucket 1: trips
+      })
+
+      await expect(populateDedupedTableWithGuard(client as any, 5, guard)).rejects.toBe(tripError)
+
+      // Only bucket 0's populate ran -- bucket 1's guard check threw before its populate call.
+      expect(client.exec).toHaveBeenCalledTimes(2) // 1 populate (bucket 0) + 1 DROP TABLE cleanup
+      expect(client.exec).toHaveBeenLastCalledWith({ query: expect.stringContaining(`DROP TABLE IF EXISTS ${AUTO_DEDUP_TABLE} SYNC`) })
+    })
+
+    test('re-throws without a DROP TABLE cleanup when the guard throws something other than DiskHeadroomError', async () => {
+      const client = fakeClient()
+      const otherError = new Error('unrelated failure')
+      const guard = fakeGuard({
+        checkBeforeIteration: vi.fn().mockRejectedValueOnce(otherError),
+      })
+
+      await expect(populateDedupedTableWithGuard(client as any, 5, guard)).rejects.toBe(otherError)
+
+      expect(client.exec).not.toHaveBeenCalled() // no populate (failed before it), and no DROP TABLE (not a DiskHeadroomError)
     })
   })
 })
