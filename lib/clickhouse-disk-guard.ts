@@ -110,3 +110,83 @@ export function checkProjection(params: {
 
   return { trip: false }
 }
+
+/** One live snapshot: queries system.disks fresh, every call. No caching. */
+export async function checkDiskHeadroom(signal?: AbortSignal): Promise<DiskHeadroom> {
+  const res = await getClient().query({
+    query: `SELECT unreserved_space, total_space FROM system.disks WHERE name = 'default'`,
+    format: 'JSONEachRow',
+    abort_signal: signal,
+    clickhouse_settings: { use_query_cache: 0 },
+  })
+  const rows = await res.json() as Array<{ unreserved_space: string | number; total_space: string | number }>
+  const freeBytes = Number(rows[0]?.unreserved_space ?? NaN)
+  const totalBytes = Number(rows[0]?.total_space ?? NaN)
+  if (!Number.isFinite(freeBytes) || !Number.isFinite(totalBytes) || totalBytes <= 0) {
+    throw new Error('[clickhouse-disk-guard] system.disks returned no usable row for disk "default"')
+  }
+  return { freeBytes, totalBytes, ratio: freeBytes / totalBytes }
+}
+
+export interface DiskGuard {
+  preflight(signal?: AbortSignal): Promise<void>
+  checkBeforeIteration(signal: AbortSignal | undefined, ctx: IterationContext): Promise<void>
+}
+
+export function createDiskGuard(opts: DiskGuardOptions = {}): DiskGuard {
+  const resolved = resolveDiskGuardOptions(opts)
+  let startFreeBytes: number | null = null
+
+  async function safeCheck(signal?: AbortSignal): Promise<DiskHeadroom> {
+    try {
+      return await checkDiskHeadroom(signal)
+    } catch (err) {
+      throw new DiskHeadroomError(
+        'check-failed',
+        `[clickhouse-disk-guard] headroom check failed, treating as a trip: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
+  return {
+    async preflight(signal?: AbortSignal): Promise<void> {
+      const headroom = await safeCheck(signal)
+      startFreeBytes = headroom.freeBytes
+      const effectiveFloorBytes = computeEffectiveFloorBytes(resolved, headroom.totalBytes)
+      if (headroom.freeBytes < effectiveFloorBytes) {
+        throw new DiskHeadroomError(
+          'floor-breached',
+          `[clickhouse-disk-guard] preflight: ${formatBytes(headroom.freeBytes)} free < ${formatBytes(effectiveFloorBytes)} floor -- refusing to start`,
+          headroom,
+          effectiveFloorBytes,
+        )
+      }
+    },
+
+    async checkBeforeIteration(signal: AbortSignal | undefined, ctx: IterationContext): Promise<void> {
+      if (startFreeBytes === null) {
+        throw new Error('[clickhouse-disk-guard] checkBeforeIteration called before preflight')
+      }
+      const headroom = await safeCheck(signal)
+      const effectiveFloorBytes = computeEffectiveFloorBytes(resolved, headroom.totalBytes)
+      const result = checkProjection({
+        startFreeBytes,
+        currentFreeBytes: headroom.freeBytes,
+        effectiveFloorBytes,
+        index: ctx.index,
+        total: ctx.total,
+      })
+      if (result.trip) {
+        const detail = result.reason === 'floor-breached'
+          ? `${formatBytes(headroom.freeBytes)} free < ${formatBytes(effectiveFloorBytes)} floor`
+          : `projected to breach ${formatBytes(effectiveFloorBytes)} floor before iteration ${ctx.total} of ${ctx.total} completes (currently ${formatBytes(headroom.freeBytes)} free at iteration ${ctx.index} of ${ctx.total})`
+        throw new DiskHeadroomError(
+          result.reason,
+          `[clickhouse-disk-guard] checkBeforeIteration: ${detail}`,
+          headroom,
+          effectiveFloorBytes,
+        )
+      }
+    },
+  }
+}

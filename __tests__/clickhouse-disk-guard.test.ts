@@ -1,10 +1,23 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   formatBytes,
   resolveDiskGuardOptions,
   computeEffectiveFloorBytes,
   checkProjection,
+  checkDiskHeadroom,
+  createDiskGuard,
+  DiskHeadroomError,
 } from '@/lib/clickhouse-disk-guard'
+
+const h = vi.hoisted(() => ({ query: vi.fn() }))
+vi.mock('@/lib/clickhouse', () => ({ getClient: () => ({ query: h.query }) }))
+
+const diskResult = (unreserved: number, total: number) =>
+  h.query.mockResolvedValue({ json: async () => [{ unreserved_space: String(unreserved), total_space: String(total) }] })
+
+beforeEach(() => {
+  h.query.mockReset()
+})
 
 describe('formatBytes', () => {
   it('renders GiB to two decimal places', () => {
@@ -91,5 +104,83 @@ describe('checkProjection', () => {
     const result = checkProjection({ startFreeBytes: 500, currentFreeBytes: 600, effectiveFloorBytes: floor, index: 1, total: 10 })
     // currentFreeBytes > startFreeBytes -- consumedSoFar clamped to 0 -> avgPerIteration 0 -> projectedFree = 600, above floor=100
     expect(result).toEqual({ trip: false })
+  })
+})
+
+describe('checkDiskHeadroom', () => {
+  it('reads unreserved_space and total_space for the default disk', async () => {
+    diskResult(300 * 1024 ** 3, 1000 * 1024 ** 3)
+
+    const result = await checkDiskHeadroom()
+
+    expect(result).toEqual({ freeBytes: 300 * 1024 ** 3, totalBytes: 1000 * 1024 ** 3, ratio: 0.3 })
+    expect(h.query).toHaveBeenCalledWith(expect.objectContaining({
+      query: expect.stringContaining(`WHERE name = 'default'`),
+    }))
+  })
+
+  it('passes the abort signal through when one is given', async () => {
+    diskResult(1, 2)
+    const controller = new AbortController()
+
+    await checkDiskHeadroom(controller.signal)
+
+    expect(h.query).toHaveBeenCalledWith(expect.objectContaining({ abort_signal: controller.signal }))
+  })
+
+  it('works with no signal at all (the real call site has none)', async () => {
+    diskResult(1, 2)
+    await expect(checkDiskHeadroom()).resolves.toBeDefined()
+  })
+
+  it('throws if system.disks returns no row for "default"', async () => {
+    h.query.mockResolvedValue({ json: async () => [] })
+    await expect(checkDiskHeadroom()).rejects.toThrow('no usable row')
+  })
+})
+
+describe('createDiskGuard', () => {
+  it('preflight passes when headroom is above the floor', async () => {
+    diskResult(300 * 1024 ** 3, 1000 * 1024 ** 3) // 30% free, well above 15%/50GiB defaults
+    const guard = createDiskGuard()
+    await expect(guard.preflight()).resolves.toBeUndefined()
+  })
+
+  it('preflight throws DiskHeadroomError(floor-breached) when already below the floor', async () => {
+    diskResult(1 * 1024 ** 3, 1000 * 1024 ** 3) // 0.1% free, way under both floors
+    const guard = createDiskGuard()
+    await expect(guard.preflight()).rejects.toThrow(DiskHeadroomError)
+    await expect(guard.preflight()).rejects.toMatchObject({ reason: 'floor-breached' })
+  })
+
+  it('preflight throws DiskHeadroomError(check-failed) when the query itself fails', async () => {
+    h.query.mockRejectedValue(new Error('connection refused'))
+    const guard = createDiskGuard()
+    await expect(guard.preflight()).rejects.toMatchObject({ reason: 'check-failed' })
+  })
+
+  it('checkBeforeIteration throws if called before preflight', async () => {
+    const guard = createDiskGuard()
+    await expect(guard.checkBeforeIteration(undefined, { index: 0, total: 10 })).rejects.toThrow('before preflight')
+  })
+
+  it('checkBeforeIteration trips projected-breach using the reading captured at preflight as the baseline', async () => {
+    diskResult(1000 * 1024 ** 3, 2000 * 1024 ** 3) // preflight baseline: 1000 GiB free, floor = max(50, 300) = 300 GiB
+    const guard = createDiskGuard()
+    await guard.preflight()
+
+    diskResult(500 * 1024 ** 3, 2000 * 1024 ** 3) // after bucket 0: 500 GiB free (consumed 500 in 1 iteration)
+    await expect(guard.checkBeforeIteration(undefined, { index: 1, total: 3 }))
+      .rejects.toMatchObject({ reason: 'projected-breach' }) // 2 remain -> projects 500 - 1000 = -500, under the 300 GiB floor
+  })
+
+  it('checkBeforeIteration does not trip when headroom stays comfortably above the floor', async () => {
+    diskResult(1000 * 1024 ** 3, 2000 * 1024 ** 3) // preflight baseline: 1000 GiB free, floor 300 GiB
+    const guard = createDiskGuard()
+    await guard.preflight()
+
+    diskResult(950 * 1024 ** 3, 2000 * 1024 ** 3) // after bucket 0: consumed only 50 GiB
+    await expect(guard.checkBeforeIteration(undefined, { index: 1, total: 3 }))
+      .resolves.toBeUndefined() // 2 remain -> projects 950 - 100 = 850, well above 300 GiB floor
   })
 })
