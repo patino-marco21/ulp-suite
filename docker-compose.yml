@@ -133,6 +133,7 @@ services:
       DEDUP_CRON_HOURS: ${DEDUP_CRON_HOURS:-24}
       DEDUP_CRON_HOUR_UTC: ${DEDUP_CRON_HOUR_UTC:-4}
       DEDUP_MIN_EXCESS: ${DEDUP_MIN_EXCESS:-1000}
+      CONTENT_DEDUP_BUCKET_COUNT: ${CONTENT_DEDUP_BUCKET_COUNT:-32}
     volumes:
       - ./uploads:/app/uploads
       - ./data:/app/data
