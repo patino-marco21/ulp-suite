@@ -624,7 +624,7 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
     // path -- unlike the read-only stats/verify queries above and below,
     // still needs bucketing; see DISTINCT-COUNT SCALE's SUPERSEDED note).
     console.log(`[content-dedup] ${trigger}: building deduped table across ${bucketCount} buckets (~${excess} duplicate rows to remove)`)
-    await populateDedupedTableWithGuard(client, bucketCount, createDiskGuard())
+    await populateDedupedTableWithGuard(client, bucketCount, createDiskGuard(AUTO_DEDUP_TABLE))
 
     // 6. Verify before swapping -- single-pass, see DISTINCT-COUNT SCALE's
     // SUPERSEDED note for why AUTO_DEDUP_TABLE no longer needs the bucketing
