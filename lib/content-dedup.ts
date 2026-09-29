@@ -248,6 +248,13 @@ export function buildCutoffTimestampSql(): string {
  * bucket_distinct) and the cutoff path (uses bucket_distinct only) in
  * runContentDedupTick -- identical query, two call sites. Full design:
  * docs/superpowers/specs/2026-07-19-content-dedup-cutoff-stats-bucketing-design.md
+ *
+ * max_execution_time raised 300 -> 900 on 2026-09-29: at 2.78B rows (200
+ * buckets, ~13.9M rows/bucket average, uneven across buckets), two
+ * consecutive live attempts both hit TIMEOUT_EXCEEDED at exactly the 300s
+ * ceiling on some bucket -- not the memory-bounded failure mode this
+ * function's bucketing exists to avoid (this is a raised time limit on an
+ * unbounded-memory-safe query shape, not a reach for more memory headroom).
  */
 export function buildContentKeyStatsSqlForBucket(bucketIndex: number, bucketCount: number): string {
   return `SELECT
@@ -255,7 +262,7 @@ export function buildContentKeyStatsSqlForBucket(bucketIndex: number, bucketCoun
     uniqExact(cityHash64(${CONTENT_KEY})) AS bucket_distinct
   FROM ulp.credentials
   WHERE cityHash64(${CONTENT_KEY}) % ${bucketCount} = ${bucketIndex}
-  SETTINGS max_execution_time = 300`
+  SETTINGS max_execution_time = 900`
 }
 
 /**

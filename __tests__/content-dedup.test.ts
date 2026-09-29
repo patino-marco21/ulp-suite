@@ -233,7 +233,7 @@ ORDER BY url`
       expect(sql).toContain(`uniqExact(cityHash64(${CONTENT_KEY})) AS bucket_distinct`)
       expect(sql).toContain('FROM ulp.credentials')
       expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 5`)
-      expect(sql).toContain('max_execution_time = 300')
+      expect(sql).toContain('max_execution_time = 900')
       expect(sql).not.toContain('max_threads')
       expect(sql).not.toContain('max_bytes_before_external_group_by')
     })
