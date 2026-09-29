@@ -8,13 +8,13 @@ import {
   CONTENT_DEDUP_SURVIVOR_ORDER,
   rewriteCreateTableDdl,
   buildCutoffTimestampSql,
-  buildContentKeyStatsSqlForBucket,
+  buildContentKeyStatsSql,
   CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES,
   CONTENT_DEDUP_MAX_THREADS,
   contentDedupBucketCount,
   buildPopulateDedupedTableSqlForBucket,
   buildEnsureSearchIndexesSql,
-  buildVerifyDedupedTableSqlForBucket,
+  buildVerifyDedupedTableStatsSql,
   buildRenameSwapSql,
   buildCatchupInsertSql,
   populateDedupedTableWithGuard,
@@ -226,53 +226,49 @@ ORDER BY url`
     })
   })
 
-  describe('buildContentKeyStatsSqlForBucket', () => {
-    test('counts one bucket\'s row total and distinct content keys together, bounded by max_execution_time only', () => {
-      const sql = buildContentKeyStatsSqlForBucket(5, 32)
-      expect(sql).toContain('count() AS bucket_total')
-      expect(sql).toContain(`uniqExact(cityHash64(${CONTENT_KEY})) AS bucket_distinct`)
+  describe('buildContentKeyStatsSql', () => {
+    test('counts the whole table\'s row total and distinct content keys in one pass via GROUP BY content_key_hash, disk-spilling, no bucket params', () => {
+      const sql = buildContentKeyStatsSql()
+      expect(sql).toContain('sum(c) AS total')
+      expect(sql).toContain('count() AS distinctCreds')
+      expect(sql).toContain('SELECT content_key_hash, count() AS c')
       expect(sql).toContain('FROM ulp.credentials')
-      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 5`)
+      expect(sql).toContain('GROUP BY content_key_hash')
+      expect(sql).toContain(`max_bytes_before_external_group_by = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}`)
       expect(sql).toContain('max_execution_time = 900')
-      expect(sql).not.toContain('max_threads')
-      expect(sql).not.toContain('max_bytes_before_external_group_by')
-    })
-
-    test('a different bucket index changes only the bucket filter', () => {
-      const sql = buildContentKeyStatsSqlForBucket(0, 32)
-      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 0`)
+      expect(sql).not.toContain('cityHash64')
+      expect(sql).not.toContain('WHERE')
     })
   })
 
-  describe('buildVerifyDedupedTableSqlForBucket', () => {
-    test('counts one bucket\'s row total and distinct content keys together, against AUTO_DEDUP_TABLE only', () => {
-      const sql = buildVerifyDedupedTableSqlForBucket(5, 32)
-      expect(sql).toContain('count() AS bucket_total')
-      expect(sql).toContain(`uniqExact(cityHash64(${CONTENT_KEY})) AS bucket_distinct`)
+  describe('buildVerifyDedupedTableStatsSql', () => {
+    test('counts AUTO_DEDUP_TABLE\'s row total and distinct content keys in one pass, same shape as buildContentKeyStatsSql', () => {
+      const sql = buildVerifyDedupedTableStatsSql()
+      expect(sql).toContain('sum(c) AS total')
+      expect(sql).toContain('count() AS distinctCreds')
       expect(sql).toContain(`FROM ${AUTO_DEDUP_TABLE}`)
-      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 5`)
-      expect(sql).toContain('max_execution_time = 300')
-      // Exactly one data source (AUTO_DEDUP_TABLE) -- the old design queried
-      // the original ulp.credentials too, which is what caused the
-      // moving-target verification bug this shape fixes.
-      expect(sql.match(/FROM/g)?.length).toBe(1)
+      expect(sql).toContain('GROUP BY content_key_hash')
+      expect(sql).toContain(`max_bytes_before_external_group_by = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}`)
+      // Exactly one physical data source (AUTO_DEDUP_TABLE) -- the outer
+      // aggregation's FROM is a subquery wrapper, not a second table. An
+      // earlier design queried the original ulp.credentials too, which is
+      // what caused the moving-target verification bug this shape fixes.
+      // AUTO_DEDUP_TABLE itself starts with "ulp.credentials", so check for
+      // the bare table name specifically (never followed by "_cdedup_auto").
+      expect(sql.match(new RegExp(AUTO_DEDUP_TABLE.replace('.', '\\.'), 'g'))?.length).toBe(1)
+      expect(sql).not.toMatch(/ulp\.credentials(?!_cdedup_auto)\b/)
       expect(sql).not.toContain('expected_rows')
     })
-
-    test('a different bucket index changes only the bucket filter', () => {
-      const sql = buildVerifyDedupedTableSqlForBucket(0, 32)
-      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 0`)
-    })
   })
 
-  describe('bucket_total/bucket_distinct alias consistency', () => {
-    test('buildContentKeyStatsSqlForBucket and buildVerifyDedupedTableSqlForBucket use the same field aliases -- sumBucketedTotalAndDistinct depends on this to stay generic across both', () => {
-      const statsSql = buildContentKeyStatsSqlForBucket(0, 8)
-      const verifySql = buildVerifyDedupedTableSqlForBucket(0, 8)
-      expect(statsSql).toContain('AS bucket_total')
-      expect(statsSql).toContain('AS bucket_distinct')
-      expect(verifySql).toContain('AS bucket_total')
-      expect(verifySql).toContain('AS bucket_distinct')
+  describe('total/distinctCreds alias consistency', () => {
+    test('buildContentKeyStatsSql and buildVerifyDedupedTableStatsSql use the same field aliases -- queryContentKeyStats depends on this to stay generic across both', () => {
+      const statsSql = buildContentKeyStatsSql()
+      const verifySql = buildVerifyDedupedTableStatsSql()
+      expect(statsSql).toContain('AS total')
+      expect(statsSql).toContain('AS distinctCreds')
+      expect(verifySql).toContain('AS total')
+      expect(verifySql).toContain('AS distinctCreds')
     })
   })
 
