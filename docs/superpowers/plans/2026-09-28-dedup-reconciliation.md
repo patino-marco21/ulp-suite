@@ -219,7 +219,7 @@ EOF
 
 **Interfaces:**
 - Consumes: `runContentDedupTick(opts: { trigger?: string }): Promise<DedupTickResult>` from `lib/content-dedup.ts:497` (unchanged signature), `getClient()` from `lib/clickhouse.ts`.
-- Produces: a CLI entry point Task 3 invokes directly (`npx tsx scripts/run-content-dedup-once.ts`).
+- Produces: a CLI entry point Task 3 invokes. **Discovered during Task 2 execution:** ClickHouse's port isn't exposed to the host and this script isn't in the production app image, so it must run from a throwaway container on the `ulpsuite_network` Docker network (see the script's own header comment for the exact command), not as a bare `npx tsx` from the host.
 
 - [ ] **Step 1: Write the script**
 
@@ -232,11 +232,21 @@ EOF
  * arming CONTENT_DEDUP_APPLY for the unattended cron. See
  * docs/superpowers/specs/2026-09-28-dedup-reconciliation-design.md.
  *
- * Requires the CLICKHOUSE_* variables in your shell (plain tsx does not
- * auto-load .env.local -- same requirement as scripts/benchmark-import.ts).
+ * ClickHouse's port is deliberately NOT exposed to the host (see
+ * docker-compose.yml's clickhouse service comment), and this script isn't
+ * copied into the production app image (Next.js standalone output only) --
+ * so this can't run as a bare `npx tsx` from the host or via `docker exec`
+ * into ulpsuite_app the way scripts/benchmark-import.ts can. Run it from a
+ * throwaway container attached to the same Docker network instead, with
+ * the real project directory mounted in and CLICKHOUSE_HOST overridden to
+ * the internal URL (matches docker-compose.yml's app service exactly --
+ * .env's own CLICKHOUSE_HOST is just the bare hostname, no scheme/port):
  *
- *   npx tsx scripts/run-content-dedup-once.ts                          # dry-run (report-only)
- *   CONTENT_DEDUP_APPLY=true npx tsx scripts/run-content-dedup-once.ts # apply for real
+ *   docker run --rm --network ulpsuite_network -v "$(pwd)":/app -w /app \
+ *     --env-file .env -e CLICKHOUSE_HOST="http://clickhouse:8123" \
+ *     node:24-bookworm-slim npx tsx scripts/run-content-dedup-once.ts
+ *
+ *   # add -e CONTENT_DEDUP_APPLY=true to the same command to apply for real
  */
 import { pathToFileURL } from 'node:url'
 import { getClient } from '@/lib/clickhouse'
@@ -268,10 +278,12 @@ Expected: no type errors.
 - [ ] **Step 3: Dry-run against the real container**
 
 ```bash
-npx tsx scripts/run-content-dedup-once.ts
+docker run --rm --network ulpsuite_network -v "$(pwd)":/app -w /app \
+  --env-file .env -e CLICKHOUSE_HOST="http://clickhouse:8123" \
+  node:24-bookworm-slim npx tsx scripts/run-content-dedup-once.ts
 ```
 
-Expected: exits 0, logs `[content-dedup] manual: total=<N> excess=<M> willApply=false (report-only — set CONTENT_DEDUP_APPLY=true to enable cleanup)` followed by `[run-content-dedup-once] result: { total: <N>, excess: <M>, applied: false }`.
+Expected: exits 0, logs `[content-dedup] manual: total=<N> excess=<M> willApply=false (report-only — set CONTENT_DEDUP_APPLY=true to enable cleanup)` followed by `[run-content-dedup-once] result: { total: <N>, excess: <M>, applied: false }`. This is a sequential 200-bucket stats scan against a 2.4B-row table (`CONTENT_DEDUP_BUCKET_COUNT=200` in `.env`) — expect several minutes to complete, not seconds. Run in the background rather than blocking on it.
 
 - [ ] **Step 4: Commit**
 
@@ -295,10 +307,12 @@ This task is a live, watched operational procedure against the real 2.4B-row tab
 - [ ] **Step 1: Dry-run and capture the numbers**
 
 ```bash
-npx tsx scripts/run-content-dedup-once.ts 2>&1 | tee /tmp/dedup-dryrun.log
+docker run --rm --network ulpsuite_network -v "$(pwd)":/app -w /app \
+  --env-file .env -e CLICKHOUSE_HOST="http://clickhouse:8123" \
+  node:24-bookworm-slim npx tsx scripts/run-content-dedup-once.ts 2>&1 | tee /tmp/dedup-dryrun.log
 ```
 
-Extract `total` and `excess` from the result line.
+A sequential 200-bucket scan against 2.4B rows — run in the background, not blocking, and expect several minutes. Extract `total` and `excess` from the result line once it completes.
 
 - [ ] **Step 2: Sanity gates**
 
@@ -333,7 +347,9 @@ Show: total row count, excess count, excess percentage, and the domain-variance 
 - [ ] **Step 4: Apply for real**
 
 ```bash
-CONTENT_DEDUP_APPLY=true npx tsx scripts/run-content-dedup-once.ts 2>&1 | tee /tmp/dedup-apply.log
+docker run --rm --network ulpsuite_network -v "$(pwd)":/app -w /app \
+  --env-file .env -e CLICKHOUSE_HOST="http://clickhouse:8123" -e CONTENT_DEDUP_APPLY=true \
+  node:24-bookworm-slim npx tsx scripts/run-content-dedup-once.ts 2>&1 | tee /tmp/dedup-apply.log
 ```
 
 Expected: `applied: true` in the result line. This is the real, watched, first-ever destructive run.
