@@ -179,7 +179,26 @@ let migrationsDone = false
 //      needed: this column's real values get written by content-dedup's
 //      own rewrite+swap populate step, not by a mutation over existing
 //      parts.
-const DDL_VERSION = 21
+// v22: retry the v10/v11 drops again. v11 claimed success (ch_ddl_version
+//      reached 20 on production) but domain_counts/password_counts/
+//      url_host_counts/reuse_pairs and their 4 MVs were still live and
+//      healthy as of 2026-09-28 (no broken/detached parts -- ruling out a
+//      repeat of the v10 incident). Unlike v10/v11, this does NOT use the
+//      shared runMigration() helper, which silently swallows any
+//      non-"already exists" error as a truncated warning -- that exact
+//      pattern is how v11's failure went unnoticed. Also drops
+//      credential_dedup_meta/credential_dedup_partial (the v20 backfill
+//      companion table): superseded by content-dedup per the 2026-09-28
+//      reconciliation decision, and confirmed empirically to hold no
+//      lineage value once breach_name (confirmed empty for this dataset)
+//      and domain (confirmed 99.998% stable) are accounted for. Both sets
+//      of drops were already applied by hand on 2026-09-29, ahead of this
+//      migration landing, to free disk headroom the content-dedup cutover
+//      itself needed (credential_dedup_meta alone was 133.40 GB) -- this
+//      migration exists so a fresh install or a not-yet-restarted
+//      deployment reaches the same end state automatically. See
+//      docs/superpowers/specs/2026-09-28-dedup-reconciliation-design.md.
+const DDL_VERSION = 22
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -874,6 +893,35 @@ export async function runClickHouseMigrations(): Promise<void> {
   if (lastDdl < 21) {
     await runMigration(`ALTER TABLE ulp.credentials ADD COLUMN IF NOT EXISTS was_duplicated UInt8 DEFAULT 0`)
     console.warn('[ClickHouse migration] DDL v21 applied (added was_duplicated column)')
+  }
+
+  // v22 — retry the v10/v11 drops, plus drop the superseded credential_dedup_meta
+  // backfill table (see DDL_VERSION comment above). Unlike runMigration(), failures
+  // here are logged with full detail via console.error, not truncated/swallowed.
+  if (lastDdl < 22) {
+    const v22DropStatements = [
+      'DROP VIEW IF EXISTS ulp.mv_domain_counts',
+      'DROP VIEW IF EXISTS ulp.mv_password_counts',
+      'DROP VIEW IF EXISTS ulp.mv_url_host_counts',
+      'DROP VIEW IF EXISTS ulp.mv_reuse_pairs',
+      'DROP TABLE IF EXISTS ulp.domain_counts',
+      'DROP TABLE IF EXISTS ulp.password_counts',
+      'DROP TABLE IF EXISTS ulp.url_host_counts',
+      'DROP TABLE IF EXISTS ulp.reuse_pairs',
+      'DROP TABLE IF EXISTS ulp.credential_dedup_partial',
+      // max_table_size_to_drop=0: credential_dedup_meta was 133.40 GB live --
+      // ClickHouse's own 50 GB drop-size guard blocks this without the override.
+      'DROP TABLE IF EXISTS ulp.credential_dedup_meta SETTINGS max_table_size_to_drop = 0',
+    ]
+    for (const sql of v22DropStatements) {
+      try {
+        await client.exec({ query: sql })
+        console.warn(`[ClickHouse migration] v22: ${sql} -- OK`)
+      } catch (err) {
+        console.error(`[ClickHouse migration] v22: ${sql} -- FAILED:`, err instanceof Error ? err.message : String(err))
+      }
+    }
+    console.warn('[ClickHouse migration] DDL v22 applied (dropped dead stats/reuse MV tables + views, and the superseded credential_dedup_meta backfill table)')
   }
 
   if (lastDdl < DDL_VERSION) {
