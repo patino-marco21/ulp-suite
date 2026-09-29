@@ -287,26 +287,34 @@ export function buildContentKeyStatsSql(): string {
 export const CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES = 4_294_967_296 // 4 GiB
 
 /**
- * Bounds concurrent sort/insert parallelism against this table (mirrors
- * scripts/purge-existing-t3.sh's and the prior bucketed design's
- * max_threads=2 for the same table). Confirmed live 2026-07-08: even with
- * disk-spill sort enabled, the populate query hit a SECOND, later
- * MEMORY_LIMIT_EXCEEDED (a large single allocation, well past the sort
- * phase) -- consistent with this table's ~9 complex MATERIALIZED columns
- * being recomputed per row on the INSERT side across multiple concurrent
- * threads; fewer threads means fewer of those computations happening at
- * once, bounding peak memory at the cost of wall-clock time (acceptable
- * given this runs at most weekly, not on a latency budget).
+ * Bounds concurrent sort/insert parallelism against this table (also used
+ * by buildCatchupInsertSql's small, still-sort-based catch-up query).
+ * Raised 2 -> 6 on 2026-09-29 alongside the argMin rewrite below --
+ * confirmed live at 6 threads / 16 buckets: 284.6s/bucket, 9.13 GiB peak
+ * (51% of the 18 GiB ceiling, real margin remaining) vs 732.8s/bucket at
+ * the old value of 2. The original 2026-07-08 constraint (this table's ~9
+ * MATERIALIZED columns being recomputed per row on the INSERT side across
+ * concurrent threads) still applies in principle, but the argMin rewrite's
+ * smaller aggregation-side footprint leaves enough headroom for more
+ * threads than the old sort-based shape could safely afford.
  */
-export const CONTENT_DEDUP_MAX_THREADS = 2
+export const CONTENT_DEDUP_MAX_THREADS = 6
 
 /**
- * Number of hash buckets the populate step is chunked into. Default 32:
- * comfortable safety margin under the ~64M-row point where an unchunked
- * populate reliably hit MEMORY_LIMIT_EXCEEDED (~11M rows/bucket at this
- * table's real scale, ~5.8x margin), while keeping the number of full
- * source-table re-scans modest -- every bucket's hash filter is unprunable,
- * so each bucket costs one full table scan regardless of bucket count.
+ * Number of hash buckets the populate step is chunked into. Lowered
+ * 200 -> 16 on 2026-09-29 alongside the argMin rewrite below: the old
+ * sort-based query needed 200 buckets to bound sort memory at this
+ * table's 2.78B-row scale; argMin's per-group state is smaller, and at
+ * 16 buckets (1.39B/16 ~= 87M groups/bucket) live-confirmed 2026-09-29 to
+ * use only 4.05 GiB for the read-only aggregation (22% of the 18 GiB
+ * ceiling) and 9.13 GiB for the real INSERT at max_threads=6 (51%) --
+ * comfortable margin at both. Every bucket's hash filter is still
+ * unprunable (content_key_hash has zero correlation with the table's
+ * physical (domain, email, imported_at) order), so each bucket still
+ * costs one full table scan -- fewer buckets directly means fewer
+ * re-scans. `.env`'s CONTENT_DEDUP_BUCKET_COUNT=16 overrides this
+ * function's fallback default (32, untouched -- not re-validated at
+ * smaller table sizes, kept as a conservative default for fresh installs).
  */
 export function contentDedupBucketCount(env: NodeJS.ProcessEnv = process.env): number {
   const n = parseInt(env.CONTENT_DEDUP_BUCKET_COUNT ?? '32', 10)
@@ -316,33 +324,64 @@ export function contentDedupBucketCount(env: NodeJS.ProcessEnv = process.env): n
 /**
  * Builds AUTO_DEDUP_TABLE's share for one bucket: one row per content key
  * whose hash falls in this bucket, keeping the earliest imported_at. A
- * content-duplicate group's rows always share the same CONTENT_KEY, so they
- * always hash to the same bucket and can never split across two --
- * chunking cannot affect correctness. `max_execution_time = 1800,
- * timeout_overflow_mode = 'throw'` mirrors scripts/dedup-credentials-content.sh's
- * own equivalent INSERT step exactly -- the client's default
- * max_execution_time (60s, lib/clickhouse.ts) is far too short at this
- * scale. No max_block_size override (see POPULATE SCALE above): bucketing
- * itself now bounds the operation's scale, and a small block size risks a
- * "too many parts" problem at bucket scale that it didn't at full-table
- * scale.
+ * content-duplicate group's rows always share the same content_key_hash,
+ * so they always hash to the same bucket and can never split across two --
+ * chunking cannot affect correctness.
+ *
+ * REWRITTEN 2026-09-29 (was `ORDER BY ... LIMIT 1 BY` -- see git history):
+ * that shape needed a full sort of the bucket's rows by
+ * CONTENT_DEDUP_SURVIVOR_ORDER before LIMIT 1 BY could pick a survivor --
+ * confirmed live 2026-09-29 that even a single-pass (unbucketed) attempt
+ * at this hits MEMORY_LIMIT_EXCEEDED for real ("would use 18.18 GiB...
+ * maximum: 18.00 GiB"), unlike the stats query's zero-key uniqExact (see
+ * buildContentKeyStatsSql's comment) -- sorting is a genuinely heavier
+ * operation than hash-grouping at this scale, so bucketing is still
+ * required here, just no longer via a sort. `argMin(col, imported_at)` per
+ * column picks that column's value from whichever row has the minimum
+ * imported_at within its content_key_hash group -- the same "earliest
+ * wins" survivor semantic as before, computed via GROUP BY (which can
+ * spill to disk, per buildContentKeyStatsSql's finding) instead of a full
+ * sort (which, confirmed live, still can't). email and password are
+ * argMin'd the same way as every other column even though, as exact-match
+ * content-key components, they're already byte-identical within one
+ * content_key_hash group -- argMin still returns the correct (only
+ * possible) value for them, and using the same aggregate uniformly across
+ * every output column is simpler than special-casing the two that happen
+ * to be constant.
  *
  * was_duplicated (UInt8 DEFAULT 0, added in migration v21): true if this
  * content key ever had more than one row, this cycle or any prior one.
- * greatest(was_duplicated, ...) makes it cumulative and cycle-agnostic --
- * once true, always true, even on a later cycle where this group sees no
- * new duplicate. Deliberately a boolean, not a count: file-level
- * repackaging in this dataset means a precise "seen N times" number would
- * mostly measure redistribution churn, not genuine independent sightings --
- * see docs/superpowers/specs/2026-09-28-dedup-reconciliation-design.md.
+ * `greatest(max(was_duplicated), if(count() > 1, 1, 0))` is the GROUP BY
+ * equivalent of the old window-function version's
+ * `greatest(was_duplicated, if(count() OVER (...) > 1, 1, 0))` --
+ * max(was_duplicated) across the group catches "some row was already
+ * flagged from a prior cycle" the same way the old per-row greatest() did,
+ * and count() > 1 catches new duplication in this cycle. Deliberately a
+ * boolean, not a count: file-level repackaging in this dataset means a
+ * precise "seen N times" number would mostly measure redistribution
+ * churn, not genuine independent sightings -- see
+ * docs/superpowers/specs/2026-09-28-dedup-reconciliation-design.md.
+ *
+ * Explicit INSERT column list (not `SELECT *`): GROUP BY's aggregate
+ * projection can't produce the table's MATERIALIZED columns the way a
+ * plain row-selecting SELECT * could -- ClickHouse computes those
+ * automatically for the listed real columns on the INSERT side regardless.
  */
 export function buildPopulateDedupedTableSqlForBucket(bucketIndex: number, bucketCount: number): string {
-  return `INSERT INTO ${AUTO_DEDUP_TABLE}
-  SELECT * REPLACE (greatest(was_duplicated, if(count() OVER (PARTITION BY ${CONTENT_KEY}) > 1, 1, 0)) AS was_duplicated) FROM ulp.credentials
-  WHERE cityHash64(${CONTENT_KEY}) % ${bucketCount} = ${bucketIndex}
-  ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}
-  LIMIT 1 BY ${CONTENT_KEY}
-  SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
+  return `INSERT INTO ${AUTO_DEDUP_TABLE} (url, email, password, domain, source_file, breach_name, imported_at, was_duplicated)
+  SELECT
+    argMin(url, imported_at),
+    argMin(email, imported_at),
+    argMin(password, imported_at),
+    argMin(domain, imported_at),
+    argMin(source_file, imported_at),
+    argMin(breach_name, imported_at),
+    min(imported_at),
+    greatest(max(was_duplicated), if(count() > 1, 1, 0))
+  FROM ulp.credentials
+  WHERE content_key_hash % ${bucketCount} = ${bucketIndex}
+  GROUP BY content_key_hash
+  SETTINGS max_bytes_before_external_group_by = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
 }
 
 /**

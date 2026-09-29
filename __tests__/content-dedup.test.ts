@@ -150,8 +150,8 @@ ORDER BY url`
   })
 
   describe('CONTENT_DEDUP_MAX_THREADS', () => {
-    test('is 2', () => {
-      expect(CONTENT_DEDUP_MAX_THREADS).toBe(2)
+    test('is 6', () => {
+      expect(CONTENT_DEDUP_MAX_THREADS).toBe(6)
     })
   })
 
@@ -169,29 +169,37 @@ ORDER BY url`
   })
 
   describe('buildPopulateDedupedTableSqlForBucket', () => {
-    test('inserts a deduped copy of one bucket, keeping the earliest imported_at per content key, with disk-spill, bounded threads, and a raised timeout', () => {
-      const sql = buildPopulateDedupedTableSqlForBucket(5, 32)
-      expect(sql).toContain(`INSERT INTO ${AUTO_DEDUP_TABLE}`)
-      expect(sql).toContain(`SELECT * REPLACE (greatest(was_duplicated, if(count() OVER (PARTITION BY ${CONTENT_KEY}) > 1, 1, 0)) AS was_duplicated) FROM ulp.credentials`)
-      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 5`)
-      expect(sql).toContain(`ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}`)
-      expect(sql).toContain(`LIMIT 1 BY ${CONTENT_KEY}`)
-      expect(sql).toContain(`max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}`)
+    test('inserts one argMin-selected survivor row per content key in this bucket, via GROUP BY not a sort, with disk-spill, bounded threads, and a raised timeout', () => {
+      const sql = buildPopulateDedupedTableSqlForBucket(5, 16)
+      expect(sql).toContain(`INSERT INTO ${AUTO_DEDUP_TABLE} (url, email, password, domain, source_file, breach_name, imported_at, was_duplicated)`)
+      expect(sql).toContain('argMin(url, imported_at)')
+      expect(sql).toContain('argMin(email, imported_at)')
+      expect(sql).toContain('argMin(password, imported_at)')
+      expect(sql).toContain('argMin(domain, imported_at)')
+      expect(sql).toContain('argMin(source_file, imported_at)')
+      expect(sql).toContain('argMin(breach_name, imported_at)')
+      expect(sql).toContain('min(imported_at)')
+      expect(sql).toContain('FROM ulp.credentials')
+      expect(sql).toContain('WHERE content_key_hash % 16 = 5')
+      expect(sql).toContain('GROUP BY content_key_hash')
+      expect(sql).toContain(`max_bytes_before_external_group_by = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}`)
       expect(sql).toContain(`max_threads = ${CONTENT_DEDUP_MAX_THREADS}`)
       expect(sql).toContain(`max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}`)
       expect(sql).toContain('max_execution_time = 1800')
       expect(sql).toContain("timeout_overflow_mode = 'throw'")
-      expect(sql).not.toContain('max_block_size')
+      expect(sql).not.toContain('ORDER BY')
+      expect(sql).not.toContain('LIMIT 1 BY')
+      expect(sql).not.toContain('max_bytes_before_external_sort')
     })
 
     test('a different bucket index changes only the bucket filter', () => {
-      const sql = buildPopulateDedupedTableSqlForBucket(0, 32)
-      expect(sql).toContain(`WHERE cityHash64(${CONTENT_KEY}) % 32 = 0`)
+      const sql = buildPopulateDedupedTableSqlForBucket(0, 16)
+      expect(sql).toContain('WHERE content_key_hash % 16 = 0')
     })
 
-    test('was_duplicated is cumulative: greatest() preserves an already-true flag from a prior cycle even when this cycle sees no new duplicate for that group', () => {
-      const sql = buildPopulateDedupedTableSqlForBucket(5, 32)
-      expect(sql).toContain('greatest(was_duplicated,')
+    test('was_duplicated is cumulative: max() across the group preserves an already-true flag from a prior cycle even when this cycle sees no new duplicate for that group', () => {
+      const sql = buildPopulateDedupedTableSqlForBucket(5, 16)
+      expect(sql).toContain('greatest(max(was_duplicated), if(count() > 1, 1, 0))')
     })
   })
 
