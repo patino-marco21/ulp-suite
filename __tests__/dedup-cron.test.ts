@@ -28,3 +28,20 @@ describe('dedup-cron source contract', () => {
     expect(source).not.toContain('}, 60_000)')
   })
 })
+
+describe('dedup-cron idle short-circuit contract', () => {
+  const source = readFileSync(new URL('../lib/dedup-cron.ts', import.meta.url), 'utf8')
+
+  test('both cron call sites opt into the idle short-circuit', () => {
+    const calls = source.match(/runContentDedupTick\(\{[^}]*\}\)/g) ?? []
+    expect(calls).toHaveLength(2)
+    for (const call of calls) expect(call).toContain('skipIfUnchanged: true')
+  })
+})
+
+describe('run-content-dedup-once source contract', () => {
+  test('a manual run never opts into the idle short-circuit -- a human asking for a run wants the full pass', () => {
+    const script = readFileSync(new URL('../scripts/run-content-dedup-once.ts', import.meta.url), 'utf8')
+    expect(script).not.toContain('skipIfUnchanged')
+  })
+})

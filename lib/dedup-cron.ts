@@ -10,7 +10,9 @@
  * 04:00) rather than firing 60s after container start — a startup-relative
  * timer lands its daily recurrence at whatever wall-clock time the container
  * last happened to (re)start, which on 2026-06-27 put it in the middle of a
- * heavy-query window. SETTINGS still bound the stats query itself.
+ * heavy-query window. SETTINGS still bound the stats query itself. Cron ticks pass
+ * skipIfUnchanged: the tick skips its heavy stats scan while the table's row count is
+ * unchanged since the last pass (see runContentDedupTick).
  */
 import { dedupCronHours, dedupCronHourUtc, runContentDedupTick } from '@/lib/content-dedup'
 
@@ -40,6 +42,6 @@ export function startDedupCron(): void {
     `[content-dedup] cron started — first tick in ${Math.round(initialDelay / 60_000)}m ` +
       `(anchored to ${String(hourUtc).padStart(2, '0')}:00 UTC), then every ${hours}h`,
   )
-  setTimeout(() => { runContentDedupTick({ trigger: 'cron' }).catch(console.error) }, initialDelay)
-  setInterval(() => { runContentDedupTick({ trigger: 'cron' }).catch(console.error) }, ms)
+  setTimeout(() => { runContentDedupTick({ trigger: 'cron', skipIfUnchanged: true }).catch(console.error) }, initialDelay)
+  setInterval(() => { runContentDedupTick({ trigger: 'cron', skipIfUnchanged: true }).catch(console.error) }, ms)
 }

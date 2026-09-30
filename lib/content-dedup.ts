@@ -585,12 +585,63 @@ export function dedupCronHourUtc(env: NodeJS.ProcessEnv = process.env): number {
 
 let tickInFlight = false
 
+/**
+ * What the most recent completed, non-applying stats pass saw. In-process, like the
+ * project's other single-node caches: a restart costs one full pass, exactly today's
+ * cost. Reset to null whenever a tick goes on to rebuild the table.
+ */
+interface LastStatsPass { rows: number; total: number; excess: number; at: number }
+let lastStatsPass: LastStatsPass | null = null
+
 export interface DedupTickResult {
   total: number
   excess: number
   applied: boolean
-  /** Only set when applied: whether proj_imported_desc was restored after the swap (see tick step 9). */
+  /** Only set when applied: whether the deferred projections were restored after the swap (see tick step 9). */
   projectionsRestored?: boolean
+  /** Only set on a cron tick that found the table unchanged and skipped the stats scan. */
+  skipped?: boolean
+}
+
+/** A cron tick runs the full stats pass at least this often, even when the row count never changes. */
+export const STATS_FORCE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000
+
+/** Metadata-only (no table scan): rows across the active parts of ulp.credentials. */
+export function buildTableRowCountSql(): string {
+  return `SELECT sum(rows) AS rows
+  FROM system.parts
+  WHERE database = 'ulp' AND table = 'credentials' AND active`
+}
+
+/**
+ * Whether a cron tick may skip the heavy stats scan. Duplicates (excess) can only grow
+ * through inserts, and every insert changes the row count; deletes cannot create
+ * duplicates. The one blind spot -- an in-place mutation that rewrites key columns
+ * without changing the count -- is covered by the forced full pass every
+ * STATS_FORCE_INTERVAL_MS. Fails open: an unreadable count (null) or no previous pass
+ * never skips.
+ */
+export function shouldSkipStatsPass(params: {
+  rows: number | null
+  last: { rows: number; at: number } | null
+  now: number
+  maxAgeMs?: number
+}): boolean {
+  const { rows, last, now, maxAgeMs = STATS_FORCE_INTERVAL_MS } = params
+  if (rows === null || last === null) return false
+  return rows === last.rows && now - last.at < maxAgeMs
+}
+
+/** null = could not be read; callers then fall through to the full pass (fail open). */
+async function queryTableRowCount(client: ClickHouseClient): Promise<number | null> {
+  try {
+    const res = await client.query({ query: buildTableRowCountSql(), format: 'JSONEachRow' })
+    const [row] = (await res.json()) as Array<{ rows: string }>
+    const n = Number(row?.rows)
+    return Number.isFinite(n) ? n : null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -617,13 +668,32 @@ async function queryContentKeyStats(
  * Read duplicate stats, log them, and — only when CONTENT_DEDUP_APPLY is on and
  * excess clears the threshold — run the rewrite+swap cycle. Never throws.
  */
-export async function runContentDedupTick(opts: { trigger?: string } = {}): Promise<DedupTickResult> {
+export async function runContentDedupTick(
+  opts: { trigger?: string; skipIfUnchanged?: boolean } = {},
+): Promise<DedupTickResult> {
   const trigger = opts.trigger ?? 'tick'
   if (tickInFlight) return { total: 0, excess: 0, applied: false }
   tickInFlight = true
   try {
     const client = getClient()
     const bucketCount = contentDedupBucketCount()
+
+    // Idle short-circuit (cron ticks only). The stats pass below is a full GROUP BY over
+    // every content key -- measured 2026-09-30 at 1.39B rows: 71 s, 9.3 GiB peak RAM and
+    // 10.4 GiB spilled to temp disk -- and duplicates can only appear through inserts,
+    // which change the row count. The count is read BEFORE the pass so rows imported while
+    // it runs make the next tick measure again. See
+    // docs/superpowers/specs/2026-09-30-query-perf-wins-design.md.
+    const rowsBefore = opts.skipIfUnchanged ? await queryTableRowCount(client) : null
+    const prior = lastStatsPass
+    if (prior !== null && shouldSkipStatsPass({ rows: rowsBefore, last: prior, now: Date.now() })) {
+      console.warn(
+        `[content-dedup] ${trigger}: rows unchanged since the last stats pass (rows=${prior.rows}, ` +
+          `${Math.round((Date.now() - prior.at) / 3_600_000)}h ago) -- skipping the stats scan`,
+      )
+      return { total: prior.total, excess: prior.excess, applied: false, skipped: true }
+    }
+
     const { total, distinctCreds } = await queryContentKeyStats(client, buildContentKeyStatsSql())
     const excess = total - distinctCreds
     const applyOn = contentDedupApplyEnabled()
@@ -633,7 +703,14 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
       `[content-dedup] ${trigger}: total=${total} excess=${excess} willApply=${willApply}` +
         (applyOn ? '' : ' (report-only — set CONTENT_DEDUP_APPLY=true to enable cleanup)'),
     )
-    if (!willApply) return { total, excess, applied: false }
+    if (!willApply) {
+      if (rowsBefore !== null) lastStatsPass = { rows: rowsBefore, total, excess, at: Date.now() }
+      return { total, excess, applied: false }
+    }
+
+    // Applying: forget what the last pass saw. The table is about to be rebuilt, so the
+    // next tick must measure again (re-verifying excess = 0) rather than skip.
+    lastStatsPass = null
 
     // 1. Capture cutoff BEFORE the populate step's bucket scan starts (step
     // 5 below), for CATCH-UP's own correctness (unchanged -- see the file's
