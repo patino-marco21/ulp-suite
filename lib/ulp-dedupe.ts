@@ -21,7 +21,8 @@
  * in the active sort order) + `uniq(<hash>)` for the count (HyperLogLog —
  * cheap/low-memory at any scale; ~0.5% error is fine for a result tally,
  * unchanged from before — this is the same hash uniq() already computed
- * internally, just relocated from query-time to insert-time).
+ * internally, just relocated from query-time to insert-time). With no filter
+ * narrowing the view the count is a plain count() instead — see dedupeCountExpr.
  *
  * Semantics: with keyset cursor pagination the LIMIT BY collapses dupes within
  * each page window. After the storage dedup that's effectively all of them; a
@@ -36,9 +37,23 @@ export function dedupeLimitBy(dedupe: boolean): string {
 }
 
 /**
- * Count expression for the result tally: distinct credentials when deduping
- * (`uniq` — approximate but fast/low-memory), else plain `count()`.
+ * Count expression for the result tally.
+ *
+ * - Not deduping: plain `count()`.
+ * - Deduping a FILTERED search (`hasUserFilter`, the default when unspecified):
+ *   distinct credentials via `uniq` (HyperLogLog). Filtered sets are pruned by
+ *   indexes, and a not-yet-deduped duplicate inside one must not show up as an
+ *   extra result ("2 results" for one displayed row).
+ * - Deduping with NO user filter (the default Declutter + Unique browse view):
+ *   plain `count()`. `ulp.credentials` is deduped at rest by lib/content-dedup.ts,
+ *   so the row count already equals the distinct-credential count (measured
+ *   2026-09-30: 1,393,449,551 rows and 1,393,449,551 distinct). Reading only the
+ *   filter column instead of the 10.4 GiB hash column took this tally from 5.57 s
+ *   to 0.19 s at 1.39B rows. The figure can exceed the true distinct count only by
+ *   rows imported since the last rebuild, which the nightly tick bounds at
+ *   DEDUP_MIN_EXCESS (~1%) — the same order as uniq's own error (measured
+ *   -0.79% .. +0.32%).
  */
-export function dedupeCountExpr(dedupe: boolean): string {
-  return dedupe ? `uniq(${DEDUPE_BY})` : 'count()'
+export function dedupeCountExpr(dedupe: boolean, hasUserFilter = true): string {
+  return dedupe && hasUserFilter ? `uniq(${DEDUPE_BY})` : 'count()'
 }

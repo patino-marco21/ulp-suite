@@ -174,6 +174,10 @@ export async function GET(request: NextRequest) {
   const where    = conditions.join(' AND ') + tierExtra + loginTypeExtra
   const whereRaw = conditionsRaw.join(' AND ') + tierExtra + loginTypeExtra
 
+  // Anything that narrows the result set. Declutter/Unique/sort/limit/cursor do not.
+  // With no filter the Unique tally is a plain count() — see dedupeCountExpr.
+  const hasUserFilter = conditionsRaw.length > 1 || tierExtra !== '' || loginTypeExtra !== ''
+
   // Cursor values are captured from result rows (which are normalized via NORM_COLS)
   // and compared against raw storage columns in buildCursorWhere. This is safe because
   // all data-repair mutations are done — raw columns match normalized values for all rows.
@@ -211,8 +215,10 @@ export async function GET(request: NextRequest) {
       // (active from the user profile) is combined with timeout_overflow_mode='break'.
       // Partial/timed-out counts must not be cached anyway — they are not the real count.
       : executeQuery(
-          // When deduping, total = distinct credentials via uniq() (HLL, cheap).
-          `SELECT ${dedupeCountExpr(dedupe)} AS total FROM ulp.credentials WHERE ${where}
+          // When deduping a filtered search, total = distinct credentials via uniq()
+          // (HLL); with no filter it is a plain count() — storage is deduped at rest
+          // (see dedupeCountExpr for the measured cost and error bound).
+          `SELECT ${dedupeCountExpr(dedupe, hasUserFilter)} AS total FROM ulp.credentials WHERE ${where}
            SETTINGS optimize_trivial_count_query = 1,
                     max_execution_time = 300,
                     timeout_overflow_mode = 'break',
