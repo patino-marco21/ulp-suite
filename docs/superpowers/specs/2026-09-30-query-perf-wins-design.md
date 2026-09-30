@@ -1,7 +1,7 @@
 # Query performance wins — design
 
 **Date:** 2026-09-30
-**Status:** Approved 2026-09-30 (design presented and approved in chat); implementation in progress on branch `perf/query-perf-wins`
+**Status:** Implemented 2026-09-30 and merged to `main` by fast-forward (A `b329b58`, B `ec867c1`, C `82c6904`..`125cfb2`; deployed to the local stack 22:36 UTC). Live on the running table: `proj_email_domain_rev` on all 8 parts. See "Results" at the end.
 
 ## Why
 
@@ -253,3 +253,20 @@ in a quiet gap instead of under interactive load. The merge and deploy were stil
 | `domain` scan (projections off) | unchanged by construction (`optimize_use_projections = 0` disables every projection) |
 
 Stop conditions never tripped. Decision: go.
+
+## Results (2026-09-30)
+
+| | Before | After | Evidence |
+|---|---|---|---|
+| **A** Unique total, default view | 5.57 s, 11 GiB read (`uniq`) | 0.19 s, 670 MiB (`count()`) | direct measurement on the live table; unit + route-contract tests. **Not yet seen in production traffic** (no default-view request reached the deployed app before the merge) |
+| **B** idle nightly stats pass | 71 s, 9.3 GiB peak RAM, 10.4 GiB temp-disk writes per night | one `system.parts` metadata query when rows are unchanged (first tick after a restart and a forced pass every 7 days still run it) | orchestration tests with a mocked client; the row-count SQL returns 1,393,449,551 live, equal to the stats pass total. **Not exercised live as written:** tonight's 04:00 UTC tick records state, tomorrow's should log `skipping the stats scan` |
+| **C** monitor `email_domain` scan | 8.7 s cold (22 s / 41–76 s earlier under other conditions), 474M rows read, 21,469/21,469 marks | 0.20 s, 6.97M rows, 109 marks; 344 ms through the real resolver | gate C0 and gate C-final; result sets identical (real builders, parameterized SQL, all 17 domains: `blockstream.com`, `ellipal.com`, `ledger.com`, `trezor.io`) |
+| C side effect: UI exact `email_domain = 'x'` filter | ~4.8 s | 31 ms | measured live, no query change |
+
+Gate C-final: the resolver takes the new path (`used_rev_form = 1`, `preferred_optimize_projection_name` present); the restore helper is a no-op on the live table ("none missing", no mutation); `stripProjectionsFromCreateTableDdl` accepts the real `SHOW CREATE TABLE` (2 projections stripped, none left); ClickHouse was never restarted (0 restarts, no OOM) and the app came back healthy in 9 s.
+
+**Deviations.** C0 ran after the C code was committed (the UI was in active use); the merge and deploy stayed gated on it. The "wait for total idle" precondition became "start in a quiet gap and watch memory and disk". Baseline timing for the equality filter used the earlier same-day measurement rather than a fresh run under load.
+
+### Finding while verifying: the monitor's `domain` scan depends on ClickHouse's query condition cache
+
+The 17-domain `domain` candidate scan read **8.55M rows in ~0.8 s** every 15 minutes before the cutover, and **666M rows in 42.7 s** when the deployed app ran it after my `MATERIALIZE` had replaced the parts. Replayed verbatim at idle it read 8.59M rows in 364 ms. The profile events explain it: the slow run had `QueryConditionCacheMisses = 8` and `SelectedMarks = 21,469 of 21,469` after 0.92 s of skip-index analysis, i.e. **`idx_ngram_domain` prunes nothing for this predicate**; the fast runs had `QueryConditionCacheHits = 8` (ClickHouse's per-granule condition cache, keyed by part, invalidated by merges and mutations). So the `domain` scan is fast only while that cache is warm; cold it costs ~40 s. The interactive domain searches seen the same evening (`domain = 'x' OR domain LIKE '%.x'`, 19–48 s per count query over 600M–1.39B rows) share the shape. The same reversed-key partial projection, this time on `domain`, is the natural fix; it is a separate design (the main search predicate builder in `lib/ulp-search.ts` would have to change) and is **not** part of this work. Practical lesson for benchmarking on this table: a repeated identical `WHERE` is served by the condition cache, so compare cold runs (or `SYSTEM DROP QUERY CONDITION CACHE`) before trusting a speedup.

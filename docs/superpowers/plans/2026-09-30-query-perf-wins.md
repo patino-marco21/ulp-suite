@@ -1,5 +1,7 @@
 # Query Performance Wins Implementation Plan
 
+**Status:** Completed 2026-09-30 and merged to `main`, with two live gates not exercised as written (Task 7 Steps 5 and 6 — see their notes). Deviations from the plan as written: gate C0 (Task 3) ran after Tasks 4–6 because the UI was in active use when it was due (the merge and deploy stayed gated on it); Task 3's "wait for total idle" precondition was relaxed to "start in a quiet gap, watch memory and disk".
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. (This project's standing preference is lean inline execution via executing-plans — no subagents.)
 
 **Goal:** Cut three measured costs on the 1.39B-row `ulp.credentials`: the Credentials Browser's "Unique" total (5.57 s → 0.19 s), the nightly idle dedup stats scan (71 s / 9.3 GiB RAM / 10.4 GiB temp-disk writes → ~0), and the domain monitor's `email_domain` candidate scan (22 s / 9 s → sub-second, projected).
@@ -53,7 +55,7 @@
 **Interfaces:**
 - Produces: `dedupeCountExpr(dedupe: boolean, hasUserFilter = true): string` — `uniq(content_key_hash)` only when `dedupe && hasUserFilter`, else `count()`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `__tests__/ulp-dedupe.test.ts`, replace this block:
 
@@ -109,12 +111,12 @@ describe('credentials route — Unique total skips the hash scan when nothing is
 EOF
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/ulp-dedupe.test.ts __tests__/credentials-route.test.ts`
 Expected: 3 FAIL — `dedupeCountExpr(true, false)` returns `uniq(...)` instead of `count()`, and the two new route contract tests. Everything else passes.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `lib/ulp-dedupe.ts`, replace:
 
@@ -199,12 +201,12 @@ with:
           `SELECT ${dedupeCountExpr(dedupe, hasUserFilter)} AS total FROM ulp.credentials WHERE ${where}
 ```
 
-- [ ] **Step 4: Run tests and typecheck**
+- [x] **Step 4: Run tests and typecheck**
 
 Run: `npx vitest run __tests__/ulp-dedupe.test.ts __tests__/credentials-route.test.ts && npm run typecheck`
 Expected: all PASS, typecheck exits 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/ulp-dedupe.ts app/api/credentials/route.ts __tests__/ulp-dedupe.test.ts __tests__/credentials-route.test.ts
@@ -233,7 +235,7 @@ EOF
 **Interfaces:**
 - Produces (`lib/content-dedup.ts`): `STATS_FORCE_INTERVAL_MS: number`; `buildTableRowCountSql(): string`; `shouldSkipStatsPass(params: { rows: number | null; last: { rows: number; at: number } | null; now: number; maxAgeMs?: number }): boolean`; `DedupTickResult.skipped?: boolean`; `runContentDedupTick(opts: { trigger?: string; skipIfUnchanged?: boolean })`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/content-dedup-stats-skip.test.ts`:
 
@@ -429,12 +431,12 @@ describe('run-content-dedup-once source contract', () => {
 EOF
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/content-dedup-stats-skip.test.ts __tests__/dedup-cron.test.ts`
 Expected: FAIL — `shouldSkipStatsPass`/`buildTableRowCountSql` are not exported (`is not a function`), orchestration tests fail, and the cron call-site contract fails (no `skipIfUnchanged` yet). The manual-script contract already passes.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `lib/content-dedup.ts`, replace:
 
@@ -593,12 +595,12 @@ with:
  * unchanged since the last pass (see runContentDedupTick).
 ```
 
-- [ ] **Step 4: Run tests and typecheck**
+- [x] **Step 4: Run tests and typecheck**
 
 Run: `npx vitest run __tests__/content-dedup-stats-skip.test.ts __tests__/dedup-cron.test.ts __tests__/content-dedup.test.ts && npm run typecheck`
 Expected: all PASS (the existing content-dedup tests are the regression net), typecheck exits 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/content-dedup.ts lib/dedup-cron.ts __tests__/content-dedup-stats-skip.test.ts __tests__/dedup-cron.test.ts
@@ -632,7 +634,7 @@ CH="docker exec -i ulpsuite_clickhouse clickhouse-client"
 cd /home/cole/ulp-suite
 ```
 
-- [ ] **Step 1: Preconditions — the server is idle and has headroom**
+- [x] **Step 1: Preconditions — the server is idle and has headroom**
 
 ```bash
 $CH --query "SYSTEM FLUSH LOGS"
@@ -644,7 +646,7 @@ $CH --query "SELECT formatReadableSize(unreserved_space) FROM system.disks FORMA
 
 Expected: `0`, `0`, `0	0`, and at least ~150 GiB free. If the second number is non-zero, someone is using the UI: wait and re-check — do not start the mutation under interactive load.
 
-- [ ] **Step 2: Capture the "before" baselines**
+- [x] **Step 2: Capture the "before" baselines**
 
 ```bash
 # (a) browse-shape plan (must be unchanged afterwards)
@@ -664,7 +666,7 @@ $CH --time --multiquery < /tmp/c0-before.sql 2>&1
 
 Expected: (c) prints `C0_orig	<n>	<hash>` and takes roughly 9–22 s. Write down `n` and `hash`.
 
-- [ ] **Step 3: Add the projection (metadata-only) and confirm it exists**
+- [x] **Step 3: Add the projection (metadata-only) and confirm it exists**
 
 ```bash
 $CH --query "ALTER TABLE ulp.credentials ADD PROJECTION IF NOT EXISTS proj_email_domain_rev (SELECT _part_offset ORDER BY reverse(email_domain))"
@@ -673,7 +675,7 @@ $CH --query "SHOW CREATE TABLE ulp.credentials FORMAT TSVRaw" | grep -A4 'PROJEC
 
 Expected: the four-line `PROJECTION proj_email_domain_rev ( SELECT _part_offset ORDER BY reverse(email_domain) )` block.
 
-- [ ] **Step 4: Materialize one partition at a time (newest, smaller, first) under observation**
+- [x] **Step 4: Materialize one partition at a time (newest, smaller, first) under observation**
 
 Run each as a background command (`run_in_background`) so it can be watched; `mutations_sync = 1` makes it block until done.
 
@@ -695,7 +697,7 @@ $CH --query "SELECT formatReadableSize(unreserved_space) FROM system.disks FORMA
 
 Expected: partition `202608` (1 part, 495.8M rows) finishes in minutes. Then the same command with `'202607'` (7 parts, 897.6M rows), observed the same way.
 
-- [ ] **Step 5: Confirm every active part now carries it**
+- [x] **Step 5: Confirm every active part now carries it**
 
 ```bash
 $CH --query "SELECT (SELECT count() FROM system.parts WHERE database='ulp' AND table='credentials' AND active) AS parts, (SELECT count() FROM system.projection_parts WHERE database='ulp' AND table='credentials' AND name='proj_email_domain_rev' AND active) AS with_projection, (SELECT formatReadableSize(sum(bytes_on_disk)) FROM system.projection_parts WHERE database='ulp' AND table='credentials' AND name='proj_email_domain_rev' AND active) AS proj_size FORMAT PrettyCompactMonoBlock"
@@ -703,7 +705,7 @@ $CH --query "SELECT (SELECT count() FROM system.parts WHERE database='ulp' AND t
 
 Expected: `parts == with_projection` (8 and 8) and `proj_size` near 5.9 GiB (probe extrapolation).
 
-- [ ] **Step 6: Verify equality, plan and timing with the real predicate**
+- [x] **Step 6: Verify equality, plan and timing with the real predicate**
 
 ```bash
 node - > /tmp/c0-after.sql <<'EOF'
@@ -721,7 +723,7 @@ $CH --query "SELECT log_comment, query_duration_ms AS ms, formatReadableQuantity
 
 **Pass criteria (all):** `C0_rev` prints the identical `n` and `hash` as `C0_orig`; the EXPLAIN shows `ReadFromMergeTree (proj_email_domain_rev)` with `reverse(email_domain)` prefix ranges (e.g. `['oi.rozert.', 'oi.rozert/')`) and a small `Granules: N/M`; `C0_rev` is clearly faster than `C0_orig` (target: under ~3 s against 9–22 s; `rows_read` far below 545M).
 
-- [ ] **Step 7: Parameterized smoke test (the app passes `{param:String}`, not literals)**
+- [x] **Step 7: Parameterized smoke test (the app passes `{param:String}`, not literals)**
 
 ```bash
 $CH --param_eq0=ledger.com --param_sx0=.ledger.com --param_eq1=trezor.io --param_sx1=.trezor.io --query "EXPLAIN indexes = 1 SELECT DISTINCT email_domain AS value FROM ulp.credentials WHERE ((reverse(email_domain) = reverse({eq0:String}) OR startsWith(reverse(email_domain), reverse({sx0:String}))) OR (reverse(email_domain) = reverse({eq1:String}) OR startsWith(reverse(email_domain), reverse({sx1:String})))) LIMIT 1001 SETTINGS preferred_optimize_projection_name = 'proj_email_domain_rev' FORMAT TSVRaw" | cut -c1-200 | head -20
@@ -729,7 +731,7 @@ $CH --param_eq0=ledger.com --param_sx0=.ledger.com --param_eq1=trezor.io --param
 
 Expected: the same kind of plan — `Condition` lines with reversed prefix ranges and a small granule count. (If the parameterized form does not constant-fold `reverse({p})`, the plan will show a full granule count: then Task 5's builder must pass pre-reversed literals instead — report before continuing.)
 
-- [ ] **Step 8: Regression spot-checks**
+- [x] **Step 8: Regression spot-checks**
 
 ```bash
 # (a) browse plan unchanged
@@ -743,7 +745,7 @@ $CH --time --query "SELECT count() FROM (SELECT DISTINCT domain AS value FROM ul
 
 Expected: `browse plan UNCHANGED` (a diff here means the new projection changed the default-view plan — STOP and report); (b) faster than before; (c) about 1 s as before.
 
-- [ ] **Step 9: Decide — go or roll back**
+- [x] **Step 9: Decide — go or roll back**
 
 If every pass criterion and stop condition is clean: proceed to Task 4. Otherwise roll back and stop C (A and B stand on their own):
 
@@ -751,7 +753,7 @@ If every pass criterion and stop condition is clean: proceed to Task 4. Otherwis
 $CH --query "ALTER TABLE ulp.credentials DROP PROJECTION IF EXISTS proj_email_domain_rev"
 ```
 
-- [ ] **Step 10: Record the results in the spec and commit**
+- [x] **Step 10: Record the results in the spec and commit**
 
 Append a `## Gate C0 results (2026-09-30)` section to `docs/superpowers/specs/2026-09-30-query-perf-wins-design.md` containing the measured numbers from Steps 2, 5, 6, 7 and 8 (before/after wall time, `rows_read`, marks, projection size, materialize duration per partition, peak container memory, equality-filter before/after, browse-plan diff result), then:
 
@@ -777,7 +779,7 @@ EOF
 - Produces (`lib/credentials-projections.ts`): `EMAIL_DOMAIN_REV_PROJECTION_NAME = 'proj_email_domain_rev'`; `EMAIL_DOMAIN_REV_PROJECTION_BODY: string`; `buildAddEmailDomainRevProjectionSql(): string`; `buildPartitionsMissingEmailDomainRevSql(): string`; `buildMaterializeEmailDomainRevProjectionSql(partition: string): string`; `buildEmailDomainRevProjectionReadySql(): string`; `emailDomainRevProjectionReady(counts: { parts: number; withProjection: number }): boolean`; `isEmailDomainRevProjectionReady(run: (sql: string) => Promise<Array<{ parts?: unknown; with_projection?: unknown }>>): Promise<boolean>`; `restoreEmailDomainRevProjection(client: ClickHouseClient, guard: DiskGuard): Promise<{ partitions: string[] }>`.
 - `restoreImportedDescProjection` keeps its exact behavior (existing tests in `__tests__/credentials-projections.test.ts` are the regression net).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/credentials-projections-email-domain.test.ts` (the fixture is **verbatim** `SHOW CREATE TABLE` output captured from the live ClickHouse 26.3 server on 2026-09-30 for a scratch table carrying a normal projection and the partial one):
 
@@ -1007,12 +1009,12 @@ describe('credentials-projections — proj_email_domain_rev', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/credentials-projections-email-domain.test.ts`
 Expected: FAIL — the new names are not exported (`... is not a function` / undefined).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `lib/credentials-projections.ts`, replace this header tail:
 
@@ -1207,12 +1209,12 @@ export async function restoreEmailDomainRevProjection(
 }
 ```
 
-- [ ] **Step 4: Run tests (new and existing) and typecheck**
+- [x] **Step 4: Run tests (new and existing) and typecheck**
 
 Run: `npx vitest run __tests__/credentials-projections-email-domain.test.ts __tests__/credentials-projections.test.ts __tests__/projection-scope.test.ts && npm run typecheck`
 Expected: all PASS — the pre-existing `credentials-projections.test.ts` proves the `materializeEachPartition` refactor kept `restoreImportedDescProjection`'s behavior.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/credentials-projections.ts __tests__/credentials-projections-email-domain.test.ts
@@ -1239,7 +1241,7 @@ EOF
 - Consumes (Task 4): `EMAIL_DOMAIN_REV_PROJECTION_NAME`, `isEmailDomainRevProjectionReady(run)`.
 - Produces: `buildEmailDomainRevCandidateWhereClause(domains: string[]): { clause: string; params: Record<string, string> }` — same param names/values as `buildCandidateColumnWhereClause('email_domain', domains)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/domain-match-email-rev.test.ts`:
 
@@ -1386,12 +1388,12 @@ describe('resolveMonitorMatches — email_domain candidate scan plan', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/domain-match-email-rev.test.ts __tests__/monitor-match-resolver-email-rev.test.ts`
 Expected: FAIL — `buildEmailDomainRevCandidateWhereClause is not a function`; the resolver tests fail on the `reverse(` / `preferred_optimize_projection_name` assertions (the fallback-case tests already pass).
 
-- [ ] **Step 3: Implement the clause builder**
+- [x] **Step 3: Implement the clause builder**
 
 In `lib/domain-match.ts`, replace:
 
@@ -1487,7 +1489,7 @@ function candidateParams(
 }
 ```
 
-- [ ] **Step 4: Implement the resolver change**
+- [x] **Step 4: Implement the resolver change**
 
 In `lib/monitor-match-resolver.ts`, replace the import block:
 
@@ -1599,12 +1601,12 @@ with:
   })
 ```
 
-- [ ] **Step 5: Run the new and existing tests and typecheck**
+- [x] **Step 5: Run the new and existing tests and typecheck**
 
 Run: `npx vitest run __tests__/domain-match-email-rev.test.ts __tests__/monitor-match-resolver-email-rev.test.ts __tests__/domain-match.test.ts __tests__/monitor-match-resolver.test.ts && npm run typecheck`
 Expected: all PASS — the existing `domain-match.test.ts` and `monitor-match-resolver.test.ts` (including "phase 1 candidate scans disable projection use", which still holds because the default mock returns `[]` for the readiness query → fallback) are the regression net.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/domain-match.ts lib/monitor-match-resolver.ts __tests__/domain-match-email-rev.test.ts __tests__/monitor-match-resolver-email-rev.test.ts
@@ -1633,7 +1635,7 @@ EOF
 - Consumes (Task 4): `buildAddEmailDomainRevProjectionSql`, `restoreEmailDomainRevProjection`, `EMAIL_DOMAIN_REV_PROJECTION_NAME`.
 - Produces (`lib/content-dedup.ts`): `restoreDeferredProjections(trigger: string, restorers: Array<{ name: string; run: () => Promise<unknown> }>): Promise<boolean>` — runs each restorer in its own try/catch; true only if all succeed.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/content-dedup-projection-restore.test.ts`:
 
@@ -1723,12 +1725,12 @@ EOF
 sed -i "1i import { readFileSync } from 'fs'" __tests__/credentials-projections-email-domain.test.ts
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/content-dedup-projection-restore.test.ts __tests__/credentials-projections-email-domain.test.ts`
 Expected: FAIL — `restoreDeferredProjections is not a function`; the four plumbing tests fail (no v23, no init mirror, tick/script not updated). The Task 4 tests in that file still pass.
 
-- [ ] **Step 3: Implement DDL v23 and the init SQL mirror**
+- [x] **Step 3: Implement DDL v23 and the init SQL mirror**
 
 In `lib/clickhouse-migrations.ts`, replace:
 
@@ -1820,7 +1822,7 @@ with:
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/ulp/credentials', '{replica}')
 ```
 
-- [ ] **Step 4: Implement the dedup restore wiring**
+- [x] **Step 4: Implement the dedup restore wiring**
 
 In `lib/content-dedup.ts`, replace the import:
 
@@ -1921,7 +1923,7 @@ with:
     ])
 ```
 
-- [ ] **Step 5: Implement the script flags**
+- [x] **Step 5: Implement the script flags**
 
 In `scripts/run-content-dedup-once.ts`, replace the header sentences:
 
@@ -1994,12 +1996,12 @@ with:
       '[run-content-dedup-once] the swap succeeded but restoring a projection failed -- ' +
 ```
 
-- [ ] **Step 6: Run the tests (new and affected existing) and typecheck**
+- [x] **Step 6: Run the tests (new and affected existing) and typecheck**
 
 Run: `npx vitest run __tests__/content-dedup-projection-restore.test.ts __tests__/credentials-projections-email-domain.test.ts __tests__/content-dedup.test.ts __tests__/content-dedup-stats-skip.test.ts __tests__/dedup-cron.test.ts && npm run typecheck`
 Expected: all PASS. (`dedup-cron.test.ts`'s script contract still passes: the script never mentions `skipIfUnchanged`.)
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add lib/clickhouse-migrations.ts docker/clickhouse/init/01-ulp-tables.sql lib/content-dedup.ts scripts/run-content-dedup-once.ts __tests__/content-dedup-projection-restore.test.ts __tests__/credentials-projections-email-domain.test.ts
@@ -2023,12 +2025,12 @@ EOF
 - Modify: `docs/superpowers/specs/2026-09-30-query-perf-wins-design.md` (status + results), `docs/superpowers/plans/2026-09-30-query-perf-wins.md` (tick boxes, status)
 - Temporary (never committed): `scripts/tmp-tick-twice.ts`, `scripts/tmp-resolve-monitor.ts`
 
-- [ ] **Step 1: Run everything CI runs**
+- [x] **Step 1: Run everything CI runs**
 
 Run: `npm run typecheck && npm test && npm run lint`
 Expected: all exit 0; `npm test` reports every file passing (baseline before this work: 73+ files / 1106+ tests; the count grows with the new files). Any failure: fix before continuing.
 
-- [ ] **Step 2: Build and deploy the app locally (ClickHouse is not touched)**
+- [x] **Step 2: Build and deploy the app locally (ClickHouse is not touched)**
 
 Wait for a lull first (no UI queries in the last ~5 min: `SELECT count() FROM system.query_log WHERE event_time > now() - INTERVAL 5 MINUTE AND http_user_agent LIKE '%clickhouse-js%' AND query_duration_ms > 1000`), because the restart drops in-flight requests.
 
@@ -2042,7 +2044,7 @@ docker logs --tail 40 ulpsuite_app 2>&1 | grep -E 'DDL|content-dedup|monitor-res
 
 Expected: `ulpsuite_app` healthy; logs show `DDL v23 applied` (or `DDL v23 already applied` if gate C0 already added the projection — the ADD is `IF NOT EXISTS`), the content-dedup cron line, `Ready`.
 
-- [ ] **Step 3: Gate C-final 1 — the monitor resolves through the new path, end to end**
+- [x] **Step 3: Gate C-final 1 — the monitor resolves through the new path, end to end**
 
 Create `scripts/tmp-resolve-monitor.ts` (temporary):
 
@@ -2082,7 +2084,7 @@ $CH --query "SELECT query_duration_ms AS ms, formatReadableQuantity(read_rows) A
 
 Expected: `used_rev_form = 1`, `rows_read` in the low millions at most, duration under ~3 s.
 
-- [ ] **Step 4: Gate C-final 2 — fallback, restore helper and strip against the real DDL**
+- [x] **Step 4: Gate C-final 2 — fallback, restore helper and strip against the real DDL**
 
 ```bash
 # (a) the restore helper is a no-op on the live table (everything already materialized)
@@ -2113,7 +2115,7 @@ Expected: `strip OK: no PROJECTION left`.
 # tests (readiness false -> original plan). Do NOT drop the live projection just to demo it.
 ```
 
-- [ ] **Step 5: Gate — B on the live server (two ticks in one process, report-only)**
+- [ ] **Step 5: Gate — B on the live server (two ticks in one process, report-only)** — **NOT RUN as written (2026-09-30):** the first tick is the full 71 s / 9.3 GiB-RAM / 10.4 GiB-spill stats scan, too heavy to run while the UI was being used. Covered instead by the orchestration tests (mocked client), the live check that the row-count SQL returns 1,393,449,551 (= the stats pass total), and the cron itself: tonight's 04:00 UTC tick (first after the restart) runs the full pass and records state; tomorrow's should log `skipping the stats scan` — check with `docker logs ulpsuite_app 2>&1 | grep content-dedup`.
 
 Create `scripts/tmp-tick-twice.ts` (temporary):
 
@@ -2148,7 +2150,7 @@ git status --short
 
 Expected: only the user's `package.json` and `.claude/` remain dirty.
 
-- [ ] **Step 6: Gate — A in production traffic**
+- [ ] **Step 6: Gate — A in production traffic** — **NOT EXERCISED (2026-09-30):** no default-view request reached the deployed app before the merge (the user was not on the Credentials page after the 22:36 UTC restart). A rests on the unit and route-contract tests plus the direct measurement (`uniq` 5.57 s / 11 GiB vs `count()` 0.19 s / 670 MiB on the live 1.39B-row table).
 
 After the deploy, the next default-view load should issue `SELECT count() AS total ...` rather than `uniq(content_key_hash)`:
 
@@ -2159,7 +2161,7 @@ $CH --query "SELECT event_time, query_duration_ms AS ms, substring(replaceRegexp
 
 If no default-view request has arrived yet, the route's behavior rests on the unit/contract tests plus the direct measurement (5.57 s → 0.19 s); note that in the report rather than forcing traffic.
 
-- [ ] **Step 7: Close out the docs**
+- [x] **Step 7: Close out the docs**
 
 In `docs/superpowers/specs/2026-09-30-query-perf-wins-design.md` change the Status line to `Implemented <date> on branch perf/query-perf-wins (merged <sha>)`, and add a `## Results` section with the measured before/after numbers from Steps 3–6 and gate C0. Tick the plan's checkboxes and mark it complete:
 
@@ -2179,7 +2181,7 @@ EOF
 )"
 ```
 
-- [ ] **Step 8: Merge to main and push (standing permission, verification above is the gate)**
+- [x] **Step 8: Merge to main and push (standing permission, verification above is the gate)**
 
 ```bash
 git switch main
@@ -2190,7 +2192,7 @@ git log --oneline -8
 
 Expected: fast-forward merge; push succeeds; `git status` still shows only the user's two pre-existing changes. CI (typecheck, test, lint) runs on the push — look at it once at the end of the session (`gh run list --limit 3`), do not poll.
 
-- [ ] **Step 9: Update memory**
+- [x] **Step 9: Update memory**
 
 Update `project_open_items_2026_09_30.md` (items 5–7 done, with the measured results), `project_email_domain_no_index_pruning.md` (live gate results), and add the newly observed open item: interactive domain searches (`domain = 'x' OR domain LIKE '%.x'`, e.g. cryptio.co / anchorage.com / ledger.com) cost 20–48 s per count query (`uniq` 19–23 s over ~600M rows; `count() raw_total` 46–48 s over 1.39B rows) — the same suffix-match shape as the monitor scan, on the main search path, a candidate for a reversed-`domain` partial projection.
 
