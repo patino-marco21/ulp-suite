@@ -59,8 +59,13 @@
 import { executeQuery } from '@/lib/clickhouse'
 import { NORM_DOMAIN_EXPR } from '@/lib/ulp-normalize'
 import {
+  EMAIL_DOMAIN_REV_PROJECTION_NAME,
+  isEmailDomainRevProjectionReady,
+} from '@/lib/credentials-projections'
+import {
   buildDomainSetWhereClause,
   buildCandidateColumnWhereClause,
+  buildEmailDomainRevCandidateWhereClause,
   buildCandidateValueBranches,
   compareMatches,
   mergeMatchPages,
@@ -112,6 +117,14 @@ const CANDIDATE_LIMIT = 1000
  * timeout bump fixes. 90 s is a verified-sufficient budget for the monitor
  * that surfaced this (2× the slower of the two measured costs), not a
  * guarantee for an even broader one.
+ *
+ * 2026-09-30: explained and fixed — email_domain is uncorrelated with the
+ * table's ORDER BY, and a suffix match cannot prune on a plain ordered index.
+ * proj_email_domain_rev (ORDER BY reverse(email_domain)) plus the rewritten
+ * predicate in buildEmailDomainRevCandidateWhereClause turns each domain into
+ * prefix ranges; resolveCandidates uses it whenever the projection is fully
+ * materialized and this skip-index plan otherwise. See
+ * docs/superpowers/specs/2026-09-30-query-perf-wins-design.md.
  */
 const PHASE1_MAX_EXECUTION_TIME = 90
 
@@ -250,19 +263,34 @@ async function resolveCandidates(mode: MatchMode, domains: string[]): Promise<Ca
   if (mode === 'url' || mode === 'both') columns.push('domain')
   if (mode === 'credential' || mode === 'both') columns.push('email_domain')
 
+  // One metadata query (system.parts vs system.projection_parts) decides how the email_domain
+  // scan runs: through proj_email_domain_rev only when EVERY active part carries it, otherwise
+  // today's skip-index plan verbatim. Fails closed -- see isEmailDomainRevProjectionReady.
+  const viaRevProjection =
+    columns.includes('email_domain') && (await isEmailDomainRevProjectionReady(sql => executeQuery(sql)))
+
   const scans = columns.map(async column => {
-    const { clause, params } = buildCandidateColumnWhereClause(column, domains)
-    // optimize_use_projections = 0: for this scan's shape the planner prefers any
-    // narrow covering projection (proj_imported_desc includes email_domain) over the
-    // base table's ngram skip indexes and then reads every row -- measured live
-    // 2026-09-30: 22s / 1.39B rows with it vs 9s / 545M rows without, identical
-    // results. Skip indexes are what actually prune this predicate.
+    const useRev = column === 'email_domain' && viaRevProjection
+    const { clause, params } = useRev
+      ? buildEmailDomainRevCandidateWhereClause(domains)
+      : buildCandidateColumnWhereClause(column, domains)
+    // Plan settings differ per path:
+    //  - reversed-key projection index: projections stay ON and the named projection is
+    //    preferred. `reverse(email_domain)` turns each `= 'x' OR endsWith(.., '.x')` pair into
+    //    prefix ranges, so the scan reads ~(domains x one granule) instead of the table.
+    //  - skip-index plan: optimize_use_projections = 0. For this predicate shape the planner
+    //    prefers any narrow covering projection (proj_imported_desc includes email_domain) over
+    //    the base table's ngram skip indexes and then reads every row -- measured live
+    //    2026-09-30: 22s / 1.39B rows with it vs 9s / 545M rows without, identical results.
+    const planSettings = useRev
+      ? `preferred_optimize_projection_name = '${EMAIL_DOMAIN_REV_PROJECTION_NAME}'`
+      : 'optimize_use_projections = 0'
     const rows = await executeQuery(
       `SELECT DISTINCT ${column} AS value
        FROM ulp.credentials
        WHERE ${clause}
        LIMIT {candidateLimit:UInt32}
-       SETTINGS max_execution_time = ${PHASE1_MAX_EXECUTION_TIME}, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1, optimize_use_projections = 0`,
+       SETTINGS max_execution_time = ${PHASE1_MAX_EXECUTION_TIME}, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1, ${planSettings}`,
       { ...params, candidateLimit: CANDIDATE_LIMIT + 1 }
     ) as { value: string }[]
     return { column, values: rows.map(r => r.value) }

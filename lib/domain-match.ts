@@ -284,21 +284,65 @@ export type CandidateColumn = 'domain' | 'email_domain'
  * per-granule content, not order), which is why it works for both columns
  * with the exact same predicate shape. See the design doc §1 for the full
  * history — kept there instead of re-explained on every read of this file.
+ *
+ * 2026-09-30 addendum: that attempt used a normal covering projection and a minmax
+ * index. A PARTIAL projection (`SELECT _part_offset ORDER BY reverse(email_domain)`,
+ * ClickHouse 26.3 projection-index filtering) IS selected by the planner and does
+ * range-prune the reversed predicate — measured on a sandbox and then on the live table;
+ * see buildEmailDomainRevCandidateWhereClause below and
+ * docs/superpowers/specs/2026-09-30-query-perf-wins-design.md. This builder remains the
+ * fallback whenever that projection is not fully materialized.
  */
 export function buildCandidateColumnWhereClause(
   column: CandidateColumn,
   domains: string[],
 ): { clause: string; params: Record<string, string> } {
+  const { params, names } = candidateParams(column, domains)
+  const parts = names.map(
+    ({ eqParam, suffixParam }) =>
+      `(${column} = {${eqParam}:String} OR endsWith(${column}, {${suffixParam}:String}))`,
+  )
+  return { clause: parts.length ? `(${parts.join(' OR ')})` : '0', params }
+}
+
+/**
+ * The same domain-or-subdomain semantics as buildCandidateColumnWhereClause('email_domain', ...),
+ * rewritten against the reversed value so ClickHouse can range-prune it through
+ * proj_email_domain_rev (`ORDER BY reverse(email_domain)`): `= 'x'` becomes an equality on the
+ * reversed key and `endsWith(v, '.x')` becomes `startsWith(reverse(v), reverse('.x'))`, a
+ * prefix range. `reverse` is byte-wise on both sides, so the two forms match exactly the
+ * same rows. Same parameter names and values as the original builder.
+ *
+ * ONLY valid to run when that projection exists on every part: without it this form is a
+ * full read, worse than the original (measured) — callers gate on
+ * isEmailDomainRevProjectionReady (lib/credentials-projections.ts).
+ */
+export function buildEmailDomainRevCandidateWhereClause(
+  domains: string[],
+): { clause: string; params: Record<string, string> } {
+  const { params, names } = candidateParams('email_domain', domains)
+  const parts = names.map(
+    ({ eqParam, suffixParam }) =>
+      `(reverse(email_domain) = reverse({${eqParam}:String}) OR startsWith(reverse(email_domain), reverse({${suffixParam}:String})))`,
+  )
+  return { clause: parts.length ? `(${parts.join(' OR ')})` : '0', params }
+}
+
+/** Parameter names/values shared by both candidate builders: per domain, the bare value and its dot-prefixed suffix. */
+function candidateParams(
+  column: CandidateColumn,
+  domains: string[],
+): { params: Record<string, string>; names: Array<{ eqParam: string; suffixParam: string }> } {
   const params: Record<string, string> = {}
-  const parts = domains.map((domain, i) => {
+  const names = domains.map((domain, i) => {
     const d = domain.toLowerCase().trim()
     const eqParam = `${column}Eq${i}`
     const suffixParam = `${column}Suffix${i}`
     params[eqParam] = d
     params[suffixParam] = `.${d}`
-    return `(${column} = {${eqParam}:String} OR endsWith(${column}, {${suffixParam}:String}))`
+    return { eqParam, suffixParam }
   })
-  return { clause: parts.length ? `(${parts.join(' OR ')})` : '0', params }
+  return { params, names }
 }
 
 /** One index-prunable phase-2 read, restricted to one column's resolved values. */
