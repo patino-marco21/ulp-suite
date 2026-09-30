@@ -26,6 +26,8 @@ Task 3's attempts against the real 2.78B-row table surfaced problems that were i
 4. **Cleanup pulled forward.** Task 5's dead-table drops and `credential_dedup_meta` (124 GiB) were applied by hand on 2026-09-29 to free cutover headroom, and codified in migration v22 (`28f58e4`). Task 4's "drop the legacy table" step (Step 7) is therefore already done.
 5. **Deferred projections.** Projections are 64% of `ulp.credentials`' 381 GiB (`proj_imported_desc` 157.55 GiB, `proj_domain_reversed` 85.21 GiB, column data 82.33 GiB, skip indexes 56.10 GiB). Building the deduped copy with them cost ~18 GiB per populate bucket (~288 GiB) against ~252 GiB of usable headroom, so the guard tripped on every attempt. The clone is now created **without** projections (measured on a real bucket: 7.10 GiB, ~114 GiB total) and `proj_imported_desc` is restored on the live table after the swap and catch-up, newest partition first, within `lib/projection-scope.ts`'s recency window, behind the disk guard (`lib/credentials-projections.ts`). Measured on a 1/16 sample: ADD PROJECTION 0.2 s, MATERIALIZE ~5 min, planner selects it (`force_optimize_projection = 1`). A failed restore never drops the live table and never flips the result to `applied: false`; `scripts/run-content-dedup-once.ts --restore-projections` retries it.
 6. **`proj_domain_reversed` is retired, not restored.** No migration defines it (v19 replaced the `reverse(domain)` projection with `idx_ngram_domain`, so a fresh install never has it — only this instance does, from an abandoned 2026-08-25 experiment), and it is counterproductive: the domain monitor's `SELECT DISTINCT email_domain … LIMIT 1001` (`max_execution_time = 90`) makes the planner pick it as a thin covering copy and scan all 2.78B rows — 41 s / 21.12 GiB (75 s in the app's own runs) — where the base table's ngram skip index prunes to 404M rows: 7 s / 3.39 GiB with an identical result set (same count and value hash). **Task 3 Step 5's projection check therefore expects 1, not 2.** To bring it back: `ADD PROJECTION proj_domain_reversed (SELECT url, email, password, domain, email_domain, imported_at ORDER BY reverse(domain))`, then `MATERIALIZE PROJECTION`.
+
+   **Measured after the cutover (2026-09-30):** on the new table the same query takes 22 s — the planner now picks `proj_imported_desc` as the thin covering copy and scans all 1.39B rows (10.6 GiB) — versus 9 s / 545M rows with `optimize_use_projections = 0` for that query alone. So the quirk is not specific to the retired projection: for this query shape the planner prefers *any* narrow covering projection over the base table's skip indexes. Recommended follow-up (not done here — outside the dedup scope): add `optimize_use_projections = 0` to the `SETTINGS` of the candidate scan in `lib/monitor-match-resolver.ts` (~line 259).
 7. **Catch-up rewrite.** `buildCatchupInsertSql`'s `NOT IN (SELECT cityHash64(…) FROM ulp.credentials)` builds an in-memory hash set of every distinct key. At 1.39B keys it failed live with MEMORY_LIMIT_EXCEEDED ("would use 28.73 GiB", limit 18 GiB) — and it runs *after* the swap, so it would have failed at the end of a ~2 h cutover. It now probes the live table with the (tiny) set of candidate keys: 77 s / 628 MiB on the same probe, inserting identical rows to the old form on tables built from the real schema.
 8. **The deployed app image predates all of the above** (built 2026-09-28): its report-only cron still ran the 200-bucket stats loop and hit the old 300 s timeout. Step 6's rebuild is what ships the fixes.
 
@@ -391,7 +393,7 @@ Expected: `1` (`proj_imported_desc`). Also confirm it is materialized for every 
 
 Spot-check the app itself: open the Credentials Browser, confirm results look sane and row counts in the UI match the new total.
 
-- [ ] **Step 6: Arm the cron**
+- [x] **Step 6: Arm the cron**
 
 Add or update `CONTENT_DEDUP_APPLY=true` in `.env`, then:
 
@@ -401,6 +403,8 @@ docker compose logs app | grep "content-dedup] cron started"
 ```
 
 Expected: log line confirming the cron is armed with the next tick time. (This rebuild is also what ships the stats/populate/guard/catch-up fixes to the running app — see "Amendments" #8.)
+
+*Done 2026-09-30: `CONTENT_DEDUP_APPLY=true` armed in `.env`, app rebuilt and restarted; log shows `[content-dedup] cron started — first tick in 418m (anchored to 04:00 UTC), then every 24h`, and `printenv` in the container confirms the flag. The default `DEDUP_MIN_EXCESS=1000` was left as-is — worth raising: a rebuild is a full ~2.5 h rewrite.*
 
 ---
 
@@ -682,7 +686,7 @@ Insert a new block immediately after the `if (lastDdl < 21) { ... }` block from 
 Run: `npx tsc --noEmit`
 Expected: no type errors.
 
-- [ ] **Step 3: Deploy and verify**
+- [x] **Step 3: Deploy and verify**
 
 ```bash
 cd ~/ulp-suite
@@ -691,6 +695,8 @@ docker compose logs app | grep "ClickHouse migration] v22"
 ```
 
 Expected: 8 `-- OK` lines (or, if any genuinely fail this time, 8 `-- FAILED:` lines with a real error message — visible now, unlike v11).
+
+*Done 2026-09-30 with the cutover's app rebuild: v22 logged 10 `-- OK` lines (the 8 dead-MV statements plus `credential_dedup_partial` and `credential_dedup_meta`), "DDL now at v22"; the objects were already gone (dropped by hand 2026-09-29).*
 
 Confirm the objects are actually gone:
 
