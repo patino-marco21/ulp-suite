@@ -231,3 +231,25 @@ below). The stale comment in `lib/domain-match.ts` is updated when the new build
 - Rewriting the UI exact-filter or phase-2 `email_domain IN (...)` predicates: they
   benefit automatically (measured), no change needed.
 - Persisting B's state in SQLite, and an "approximate total" flag in the API response.
+
+## Gate C0 results (2026-09-30, live `ulp.credentials`, 1,393,449,551 rows)
+
+C0 ran **after** the C code was committed rather than before it: the UI was in active use
+when the gate was due (16–27 interactive queries per 10 minutes), so the mutation was started
+in a quiet gap instead of under interactive load. The merge and deploy were still gated on it.
+
+| Check | Result |
+|---|---|
+| Projection on every active part | 8 / 8 parts; **5.68 GiB** (3.68 GiB in 202607, 2.00 GiB in 202608) against the 5.9 GiB extrapolation |
+| `MATERIALIZE` duration | 202608 (1 part, 495.8M rows): 350 s; 202607 (7 parts, 897.6M rows): 95 s; 7.4 min in total |
+| `MATERIALIZE` memory | per-task peak **142 MiB** (the far heavier `proj_imported_desc` restore peaked ~620 MiB per task); container never above ~4.5 GiB of 20 including concurrent user searches; 0 restarts, no OOM |
+| Disk | real free space steady at ~207–213 GiB; `system.disks.unreserved_space` dipped by the tasks' conservative reservations (each reserves the source part's size; ~125 GiB while five tasks ran) and recovered on completion |
+| Result equality (17-domain monitor predicate) | original + projections off vs rewritten: both `n = 4`, value hash `14879193306084178667` |
+| Original query | 8.7 s, 474.2M rows read, 21,469 / 21,469 marks |
+| Rewritten query via the projection | **0.197 s**, 6.97M rows read, 109 marks (109 / 21,469 granules, 93 ranges): 44× faster |
+| Parameterized form (`{p:String}`) | same plan shape (16 / 21,469 granules for two domains) and executes, returning the expected values: `reverse({p})` folds, no pre-reversed literals needed |
+| UI exact filter `email_domain = 'protonmail.com'` | 31 ms / 1.18M rows / 18 marks (was ~4.8 s earlier the same day), with no query change |
+| Browse plans (two shapes) | identical before and after |
+| `domain` scan (projections off) | unchanged by construction (`optimize_use_projections = 0` disables every projection) |
+
+Stop conditions never tripped. Decision: go.
