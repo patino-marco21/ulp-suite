@@ -252,12 +252,17 @@ async function resolveCandidates(mode: MatchMode, domains: string[]): Promise<Ca
 
   const scans = columns.map(async column => {
     const { clause, params } = buildCandidateColumnWhereClause(column, domains)
+    // optimize_use_projections = 0: for this scan's shape the planner prefers any
+    // narrow covering projection (proj_imported_desc includes email_domain) over the
+    // base table's ngram skip indexes and then reads every row -- measured live
+    // 2026-09-30: 22s / 1.39B rows with it vs 9s / 545M rows without, identical
+    // results. Skip indexes are what actually prune this predicate.
     const rows = await executeQuery(
       `SELECT DISTINCT ${column} AS value
        FROM ulp.credentials
        WHERE ${clause}
        LIMIT {candidateLimit:UInt32}
-       SETTINGS max_execution_time = ${PHASE1_MAX_EXECUTION_TIME}, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1`,
+       SETTINGS max_execution_time = ${PHASE1_MAX_EXECUTION_TIME}, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1, optimize_use_projections = 0`,
       { ...params, candidateLimit: CANDIDATE_LIMIT + 1 }
     ) as { value: string }[]
     return { column, values: rows.map(r => r.value) }

@@ -46,6 +46,22 @@ describe('resolveMonitorMatches', () => {
     expect(sql).toContain('endsWith(domain')
   })
 
+  // Measured live 2026-09-30 on the real table: for this scan's shape the planner
+  // prefers ANY narrow covering projection (proj_imported_desc carries email_domain)
+  // over the base table's ngram skip index, and reads every row -- 22s / 1.39B
+  // rows via the projection vs 9s / 545M rows with projections off, identical
+  // result set. (Before the dedup cutover, via proj_domain_reversed: 41-76s against
+  // this scan's 90s timeout.) Disabling projections for just these scans keeps the
+  // skip indexes in play.
+  test('phase 1 candidate scans disable projection use so the ngram skip indexes do the pruning', async () => {
+    await resolveMonitorMatches('both', ['projections-off.example'])
+    const scans = mockExecuteQuery.mock.calls
+      .map(([sql]) => sql as string)
+      .filter(sql => sql.includes('SELECT DISTINCT domain') || sql.includes('SELECT DISTINCT email_domain'))
+    expect(scans).toHaveLength(2)
+    for (const sql of scans) expect(sql).toContain('optimize_use_projections = 0')
+  })
+
   test('mode "url" only scans the domain column, not email_domain', async () => {
     await resolveMonitorMatches('url', ['ledger.com'])
     const emailDomainScan = mockExecuteQuery.mock.calls.find(
