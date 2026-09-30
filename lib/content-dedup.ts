@@ -133,7 +133,7 @@
  *
  * DEFERRED PROJECTIONS (2026-09-30): the clone is created WITHOUT
  * ulp.credentials' PROJECTIONs (buildDedupedTableCreateDdl) and
- * proj_imported_desc is restored on the live table after the swap and
+ * proj_email_domain_rev and proj_imported_desc are restored on the live table after the swap and
  * catch-up (tick step 9). Projections were 64% of the table's 381 GiB, and
  * building with them cost ~18 GiB per populate bucket against ~6.5 without --
  * enough to trip the disk guard against the real 2.78B-row table three times.
@@ -161,7 +161,12 @@ import { getClient } from '@/lib/clickhouse'
 import { URL_CONTENT_KEY } from '@/lib/url-content-key'
 import { SEARCH_INDEX_DEFINITIONS } from '@/lib/search-index-definitions'
 import { createDiskGuard, DiskHeadroomError, type DiskGuard } from '@/lib/clickhouse-disk-guard'
-import { restoreImportedDescProjection, stripProjectionsFromCreateTableDdl } from '@/lib/credentials-projections'
+import {
+  EMAIL_DOMAIN_REV_PROJECTION_NAME,
+  restoreEmailDomainRevProjection,
+  restoreImportedDescProjection,
+  stripProjectionsFromCreateTableDdl,
+} from '@/lib/credentials-projections'
 
 /** Content identity: same destination + same credential (scheme/trailing-slash-insensitive on the URL). */
 export const CONTENT_KEY = `${URL_CONTENT_KEY}, email, password`
@@ -645,6 +650,33 @@ async function queryTableRowCount(client: ClickHouseClient): Promise<number | nu
 }
 
 /**
+ * Runs each deferred-projection restore on its own, so one failing (most likely a disk-guard
+ * trip) never blocks the others. True only if every restorer succeeded. A failure is reported
+ * with the re-run command but never turns the tick into applied: false -- the swap and
+ * catch-up are already done and ulp.credentials is correct without the projections.
+ */
+export async function restoreDeferredProjections(
+  trigger: string,
+  restorers: Array<{ name: string; run: () => Promise<unknown> }>,
+): Promise<boolean> {
+  let allRestored = true
+  for (const { name, run } of restorers) {
+    try {
+      await run()
+    } catch (err) {
+      allRestored = false
+      console.error(
+        `[content-dedup] ${trigger}: swap and catch-up succeeded, but restoring ${name} failed -- ` +
+          `ulp.credentials is live and correct, just without the projection for some partitions. ` +
+          `Re-run with: npx tsx scripts/run-content-dedup-once.ts --restore-projections. Cause:`,
+        err instanceof Error ? err.message : String(err),
+      )
+    }
+  }
+  return allRestored
+}
+
+/**
  * Runs a single-pass total/distinct stats query -- shared by the stats
  * step, the cutoff step, and the verify step below, each passing its own
  * SQL (buildContentKeyStatsSql or buildVerifyDedupedTableStatsSql). Both
@@ -797,24 +829,17 @@ export async function runContentDedupTick(
     // 8. Catch up anything imported during the build window.
     await client.exec({ query: buildCatchupInsertSql(cutoff) })
 
-    // 9. Restore the projection deferred out of the build (see DEFERRED
+    // 9. Restore the projections deferred out of the build (see DEFERRED
     // PROJECTIONS in the file header). The swap and catch-up are already done
-    // and ulp.credentials is correct without it -- only the "newest first"
-    // default sort is slower for partitions still waiting -- so a failure here
-    // (most likely a disk-guard trip while the archived original is still on
-    // disk) is reported but must NOT turn this into applied: false.
-    let projectionsRestored = true
-    try {
-      await restoreImportedDescProjection(client, createDiskGuard('ulp.credentials'))
-    } catch (err) {
-      projectionsRestored = false
-      console.error(
-        `[content-dedup] ${trigger}: swap and catch-up succeeded, but restoring proj_imported_desc failed -- ` +
-          `ulp.credentials is live and correct, just without the projection for some partitions. ` +
-          `Re-run with: npx tsx scripts/run-content-dedup-once.ts --restore-projections. Cause:`,
-        err instanceof Error ? err.message : String(err),
-      )
-    }
+    // and ulp.credentials is correct without them -- the "newest first" default
+    // sort and the monitor's email_domain scan are merely slower (the resolver
+    // falls back on its own) -- so a failure here (most likely a disk-guard trip
+    // while the archived original is still on disk) is reported but must NOT turn
+    // this into applied: false. The small email_domain one goes first.
+    const projectionsRestored = await restoreDeferredProjections(trigger, [
+      { name: EMAIL_DOMAIN_REV_PROJECTION_NAME, run: () => restoreEmailDomainRevProjection(client, createDiskGuard('ulp.credentials')) },
+      { name: 'proj_imported_desc', run: () => restoreImportedDescProjection(client, createDiskGuard('ulp.credentials')) },
+    ])
 
     console.log(`[content-dedup] ${trigger}: completed rewrite+swap (~${excess} duplicate rows removed, projectionsRestored=${projectionsRestored})`)
     return { total, excess, applied: true, projectionsRestored }

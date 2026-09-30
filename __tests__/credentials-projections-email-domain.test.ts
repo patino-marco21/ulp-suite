@@ -1,3 +1,4 @@
+import { readFileSync } from 'fs'
 import { describe, test, expect, vi } from 'vitest'
 import { DiskHeadroomError, type DiskGuard } from '@/lib/clickhouse-disk-guard'
 import {
@@ -219,5 +220,39 @@ describe('credentials-projections — proj_email_domain_rev', () => {
       ])
       expect(statements.some(s => /DROP/i.test(s))).toBe(false)
     })
+  })
+})
+
+describe('schema plumbing for proj_email_domain_rev', () => {
+  const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8')
+
+  test('DDL v23 adds the projection through the shared builder and does NOT materialize at deploy', () => {
+    const src = read('../lib/clickhouse-migrations.ts')
+    expect(src).toMatch(/const DDL_VERSION = 23\b/)
+    const block = src.slice(src.indexOf('if (lastDdl < 23)'), src.indexOf('if (lastDdl < DDL_VERSION)'))
+    expect(block).toContain('buildAddEmailDomainRevProjectionSql()')
+    expect(block).not.toContain('MATERIALIZE')
+  })
+
+  test('the init SQL mirror carries the same projection body for fresh installs', () => {
+    const sql = read('../docker/clickhouse/init/01-ulp-tables.sql')
+    expect(sql).toContain('PROJECTION proj_email_domain_rev')
+    expect(sql).toMatch(/SELECT _part_offset\s+ORDER BY reverse\(email_domain\)/)
+  })
+
+  test('the dedup tick restores both projections through restoreDeferredProjections', () => {
+    const src = read('../lib/content-dedup.ts')
+    const tick = src.slice(src.indexOf('export async function runContentDedupTick'))
+    expect(tick).toContain('restoreDeferredProjections(')
+    expect(tick).toContain('restoreEmailDomainRevProjection(')
+    expect(tick).toContain('restoreImportedDescProjection(')
+  })
+
+  test('the one-off script can restore just the email_domain projection, and --restore-projections covers both', () => {
+    const script = read('../scripts/run-content-dedup-once.ts')
+    expect(script).toContain('--restore-email-domain-projection')
+    expect(script).toContain('--restore-projections')
+    expect(script).toContain('restoreEmailDomainRevProjection')
+    expect(script).toContain('restoreImportedDescProjection')
   })
 })

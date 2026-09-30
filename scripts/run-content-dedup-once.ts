@@ -23,22 +23,31 @@
  *   # add -e CONTENT_DEDUP_APPLY=true to the same command to apply for real
  *
  * The rewrite+swap builds the deduped table WITHOUT ulp.credentials'
- * projections and restores proj_imported_desc afterwards (see
- * lib/credentials-projections.ts). If that last step failed -- or the run was
- * interrupted after the swap -- re-run just the restore, same docker command
- * with `--restore-projections` appended to the `npx tsx` line (no
- * CONTENT_DEDUP_APPLY needed; it never touches row data).
+ * projections and restores proj_email_domain_rev and proj_imported_desc
+ * afterwards (see lib/credentials-projections.ts). If that last step failed --
+ * or the run was interrupted after the swap -- re-run just the restore, same
+ * docker command with `--restore-projections` appended to the `npx tsx` line
+ * (no CONTENT_DEDUP_APPLY needed; it never touches row data). Use
+ * `--restore-email-domain-projection` to restore only the small email_domain
+ * one (idempotent: materializes only partitions still missing it) without
+ * re-materializing the large proj_imported_desc.
  */
 import { pathToFileURL } from 'node:url'
 import { getClient } from '@/lib/clickhouse'
 import { createDiskGuard } from '@/lib/clickhouse-disk-guard'
 import { runContentDedupTick } from '@/lib/content-dedup'
-import { restoreImportedDescProjection } from '@/lib/credentials-projections'
+import { restoreEmailDomainRevProjection, restoreImportedDescProjection } from '@/lib/credentials-projections'
 
 async function main(): Promise<void> {
-  if (process.argv.includes('--restore-projections')) {
-    const { partitions } = await restoreImportedDescProjection(getClient(), createDiskGuard('ulp.credentials'))
-    console.log(`[run-content-dedup-once] proj_imported_desc restored for partitions: ${partitions.join(', ') || '(none in the recency window)'}`)
+  const restoreAll = process.argv.includes('--restore-projections')
+  const restoreEmailOnly = process.argv.includes('--restore-email-domain-projection')
+  if (restoreAll || restoreEmailOnly) {
+    const email = await restoreEmailDomainRevProjection(getClient(), createDiskGuard('ulp.credentials'))
+    console.log(`[run-content-dedup-once] proj_email_domain_rev materialized for partitions: ${email.partitions.join(', ') || '(none missing)'}`)
+    if (restoreAll) {
+      const imported = await restoreImportedDescProjection(getClient(), createDiskGuard('ulp.credentials'))
+      console.log(`[run-content-dedup-once] proj_imported_desc restored for partitions: ${imported.partitions.join(', ') || '(none in the recency window)'}`)
+    }
     await getClient().close()
     return
   }
@@ -55,7 +64,7 @@ async function main(): Promise<void> {
   }
   if (result.applied && result.projectionsRestored === false) {
     console.error(
-      '[run-content-dedup-once] the swap succeeded but restoring proj_imported_desc failed -- ' +
+      '[run-content-dedup-once] the swap succeeded but restoring a projection failed -- ' +
       'ulp.credentials is live and correct; re-run with --restore-projections once the cause above is addressed.',
     )
     process.exit(2)

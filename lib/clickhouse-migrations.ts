@@ -10,7 +10,7 @@ import { buildFreeWebmailInClause } from './webmail-providers'
 import { NOISE_EXPR } from './ulp-noise'
 import { dbGet, dbRun } from './sqlite'
 import { SEARCH_INDEX_DEFINITIONS } from './search-index-definitions'
-import { IMPORTED_DESC_PROJECTION_BODY } from './credentials-projections'
+import { IMPORTED_DESC_PROJECTION_BODY, buildAddEmailDomainRevProjectionSql } from './credentials-projections'
 import { URL_CONTENT_KEY } from './url-content-key'
 
 // Per-process guard (still useful to avoid redundant calls within one process)
@@ -199,7 +199,16 @@ let migrationsDone = false
 //      migration exists so a fresh install or a not-yet-restarted
 //      deployment reaches the same end state automatically. See
 //      docs/superpowers/specs/2026-09-28-dedup-reconciliation-design.md.
-const DDL_VERSION = 22
+// v23: proj_email_domain_rev — partial projection (`SELECT _part_offset ORDER BY
+//      reverse(email_domain)`) that lets the domain monitor's email_domain
+//      candidate scan range-prune a suffix match instead of reading the table.
+//      ADD only (metadata-only; new parts carry it). Existing parts are backfilled
+//      by the supervised, per-partition, disk-guarded restoreEmailDomainRevProjection
+//      (lib/credentials-projections.ts), deliberately NOT fired here the way v14 fires
+//      its MATERIALIZE: app start must not be coupled to a mutation. Until every part
+//      carries it the resolver runs its original skip-index scan. See
+//      docs/superpowers/specs/2026-09-30-query-perf-wins-design.md.
+const DDL_VERSION = 23
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -918,6 +927,18 @@ export async function runClickHouseMigrations(): Promise<void> {
       }
     }
     console.warn('[ClickHouse migration] DDL v22 applied (dropped dead stats/reuse MV tables + views, and the superseded credential_dedup_meta backfill table)')
+  }
+
+  // v23 — proj_email_domain_rev (see DDL_VERSION comment above). ADD only. Logged with full
+  // detail like v22: a failure just means the monitor keeps using its skip-index scan
+  // (the readiness check sees no projection).
+  if (lastDdl < 23) {
+    try {
+      await client.exec({ query: buildAddEmailDomainRevProjectionSql() })
+      console.warn('[ClickHouse migration] DDL v23 applied (added proj_email_domain_rev projection -- existing parts need restoreEmailDomainRevProjection)')
+    } catch (err) {
+      console.error('[ClickHouse migration] v23: ADD PROJECTION proj_email_domain_rev -- FAILED:', err instanceof Error ? err.message : String(err))
+    }
   }
 
   if (lastDdl < DDL_VERSION) {

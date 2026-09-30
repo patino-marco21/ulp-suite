@@ -298,6 +298,15 @@ CREATE TABLE IF NOT EXISTS ulp.credentials
                password_length, password_mask, url_scheme, is_corporate_email, email_domain,
                url_host, password_entropy_band, imported_at, domain
         ORDER BY negate(toUnixTimestamp(imported_at)), domain, email, url, password
+    ),
+
+    -- proj_email_domain_rev: partial projection (projection index) for the domain monitor's
+    -- email_domain scan. Ordering by the REVERSED value turns `endsWith(email_domain, '.x')`
+    -- into a prefix range ClickHouse can prune on. Mirrors DDL v23 in
+    -- lib/clickhouse-migrations.ts — that file is the source of truth; keep both in sync.
+    PROJECTION proj_email_domain_rev (
+        SELECT _part_offset
+        ORDER BY reverse(email_domain)
     )
 )
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/ulp/credentials', '{replica}')
