@@ -30,6 +30,12 @@
  *     identical result set (same row count and value hash).
  * Letting it fall away with the swap therefore retires it. If it is ever wanted
  * back: ADD PROJECTION ... ORDER BY reverse(domain), then MATERIALIZE.
+ *
+ * proj_email_domain_rev IS restored, for all partitions still missing it (it is
+ * ~5.9 GiB at 1.39B rows, so the recency window does not apply): a partial
+ * projection (`SELECT _part_offset ORDER BY reverse(email_domain)`) that lets the
+ * domain monitor's `email_domain = 'x' OR endsWith(email_domain, '.x')` scan range-prune
+ * instead of reading the table. See docs/superpowers/specs/2026-09-30-query-perf-wins-design.md.
  */
 import type { ClickHouseClient } from '@clickhouse/client'
 import type { DiskGuard } from '@/lib/clickhouse-disk-guard'
@@ -121,8 +127,37 @@ export function buildRecentPartitionsSql(cutoff: string): string {
  * safe.
  */
 export function buildMaterializeProjectionSql(partition: string): string {
-  return `ALTER TABLE ulp.credentials MATERIALIZE PROJECTION ${PROJECTION_NAME} IN PARTITION '${partition}'
+  return buildMaterializeSql(PROJECTION_NAME, partition)
+}
+
+/** Shared by every projection this file restores; see buildMaterializeProjectionSql for the settings' reasoning. */
+function buildMaterializeSql(projectionName: string, partition: string): string {
+  return `ALTER TABLE ulp.credentials MATERIALIZE PROJECTION ${projectionName} IN PARTITION '${partition}'
   SETTINGS mutations_sync = 1, max_execution_time = 3300, timeout_overflow_mode = 'throw'`
+}
+
+/**
+ * One partition at a time, each behind the disk guard, logging progress. Shared by every
+ * restore in this file. A guard trip propagates (the table being worked on is the live
+ * one, so nothing is ever dropped here).
+ */
+async function materializeEachPartition(
+  client: ClickHouseClient,
+  guard: DiskGuard,
+  projectionName: string,
+  partitions: string[],
+): Promise<void> {
+  if (partitions.length === 0) return
+  await guard.preflight()
+  for (let i = 0; i < partitions.length; i++) {
+    await guard.checkBeforeIteration(undefined, { index: i, total: partitions.length })
+    const startedAt = Date.now()
+    await client.exec({ query: buildMaterializeSql(projectionName, partitions[i]) })
+    console.warn(
+      `[credentials-projections] materialized ${projectionName} for partition ${partitions[i]} ` +
+        `(${i + 1}/${partitions.length}) in ${Math.round((Date.now() - startedAt) / 1000)}s`,
+    )
+  }
 }
 
 /**
@@ -148,17 +183,103 @@ export async function restoreImportedDescProjection(
   const cutoff = cutoffPartition(projectionScopeWindowMonths(), opts.now ?? new Date())
   const res = await client.query({ query: buildRecentPartitionsSql(cutoff), format: 'JSONEachRow' })
   const partitions = ((await res.json()) as Array<{ partition: string }>).map(row => row.partition)
-  if (partitions.length === 0) return { partitions }
+  await materializeEachPartition(client, guard, PROJECTION_NAME, partitions)
+  return { partitions }
+}
 
-  await guard.preflight()
-  for (let i = 0; i < partitions.length; i++) {
-    await guard.checkBeforeIteration(undefined, { index: i, total: partitions.length })
-    const startedAt = Date.now()
-    await client.exec({ query: buildMaterializeProjectionSql(partitions[i]) })
+// ── proj_email_domain_rev ────────────────────────────────────────────────────
+
+export const EMAIL_DOMAIN_REV_PROJECTION_NAME = 'proj_email_domain_rev'
+
+/**
+ * A PARTIAL projection (projection index): it stores only the sort key and each row's
+ * position, ~4.55 bytes/row. Ordering by the REVERSED value turns a suffix match into a
+ * prefix range -- `endsWith(v, '.x')` == `startsWith(reverse(v), reverse('.x'))`,
+ * byte-for-byte -- which ClickHouse can range-prune on. Shared by DDL v23, the init SQL
+ * mirror and restoreEmailDomainRevProjection so they cannot drift apart.
+ */
+export const EMAIL_DOMAIN_REV_PROJECTION_BODY = `SELECT _part_offset
+        ORDER BY reverse(email_domain)`
+
+/** Metadata-only and idempotent: new inserts get the projection immediately, existing parts need MATERIALIZE. */
+export function buildAddEmailDomainRevProjectionSql(): string {
+  return `ALTER TABLE ulp.credentials ADD PROJECTION IF NOT EXISTS ${EMAIL_DOMAIN_REV_PROJECTION_NAME} (${EMAIL_DOMAIN_REV_PROJECTION_BODY})`
+}
+
+/**
+ * Partitions that still have at least one active part without the projection -- so a
+ * re-run after a finished restore finds nothing to do. Newest first: newer partitions are
+ * usually the smaller ones, which keeps the disk guard's linear projection from
+ * over-projecting after one big partition.
+ */
+export function buildPartitionsMissingEmailDomainRevSql(): string {
+  return `SELECT DISTINCT partition FROM system.parts
+    WHERE database = 'ulp' AND table = 'credentials' AND active
+      AND name NOT IN (
+        SELECT parent_name FROM system.projection_parts
+        WHERE database = 'ulp' AND table = 'credentials'
+          AND name = '${EMAIL_DOMAIN_REV_PROJECTION_NAME}' AND active
+      )
+    ORDER BY partition DESC`
+}
+
+export function buildMaterializeEmailDomainRevProjectionSql(partition: string): string {
+  return buildMaterializeSql(EMAIL_DOMAIN_REV_PROJECTION_NAME, partition)
+}
+
+/** Active parts vs active parts carrying the projection, in one metadata-only query. */
+export function buildEmailDomainRevProjectionReadySql(): string {
+  return `SELECT
+    (SELECT count() FROM system.parts
+      WHERE database = 'ulp' AND table = 'credentials' AND active) AS parts,
+    (SELECT count() FROM system.projection_parts
+      WHERE database = 'ulp' AND table = 'credentials'
+        AND name = '${EMAIL_DOMAIN_REV_PROJECTION_NAME}' AND active) AS with_projection`
+}
+
+/**
+ * Ready only when there are parts and EVERY one carries the projection. A mixed state
+ * would run the rewritten predicate over parts without the index -- measured worse than
+ * today's plan (a full read).
+ */
+export function emailDomainRevProjectionReady(counts: { parts: number; withProjection: number }): boolean {
+  return Number.isFinite(counts.parts) && counts.parts > 0 && counts.parts === counts.withProjection
+}
+
+/**
+ * Fails CLOSED: any error means "not ready", so the caller runs the original skip-index
+ * plan. `run` is injected (the resolver passes executeQuery) so this stays unit-testable.
+ */
+export async function isEmailDomainRevProjectionReady(
+  run: (sql: string) => Promise<Array<{ parts?: unknown; with_projection?: unknown }>>,
+): Promise<boolean> {
+  try {
+    const [row] = await run(buildEmailDomainRevProjectionReadySql())
+    return emailDomainRevProjectionReady({ parts: Number(row?.parts), withProjection: Number(row?.with_projection) })
+  } catch (err) {
     console.warn(
-      `[credentials-projections] materialized ${PROJECTION_NAME} for partition ${partitions[i]} ` +
-        `(${i + 1}/${partitions.length}) in ${Math.round((Date.now() - startedAt) / 1000)}s`,
+      '[credentials-projections] proj_email_domain_rev readiness check failed -- using the skip-index scan:',
+      err instanceof Error ? err.message : String(err),
     )
+    return false
   }
+}
+
+/**
+ * Re-creates proj_email_domain_rev on the live ulp.credentials: ADD it (new inserts carry it
+ * at once), then materialize each partition that still has a part without it, behind the
+ * disk guard. Idempotent: when nothing is missing it is just the IF NOT EXISTS ADD. Like
+ * restoreImportedDescProjection, a guard trip must NOT drop anything -- the table is live and
+ * correct without the projection (the monitor falls back to its skip-index scan).
+ */
+export async function restoreEmailDomainRevProjection(
+  client: ClickHouseClient,
+  guard: DiskGuard,
+): Promise<{ partitions: string[] }> {
+  await client.exec({ query: buildAddEmailDomainRevProjectionSql() })
+
+  const res = await client.query({ query: buildPartitionsMissingEmailDomainRevSql(), format: 'JSONEachRow' })
+  const partitions = ((await res.json()) as Array<{ partition: string }>).map(row => row.partition)
+  await materializeEachPartition(client, guard, EMAIL_DOMAIN_REV_PROJECTION_NAME, partitions)
   return { partitions }
 }
