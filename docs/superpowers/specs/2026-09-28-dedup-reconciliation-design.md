@@ -88,7 +88,7 @@ One mechanism (`lib/content-dedup.ts`'s bucketed, disk-guarded rewrite-swap), tw
 3. **Sanity gate (hard):** excess-row percentage must be ≥ 49.84% (the `credential_dedup_meta` figure from 2026-09-26 — content-dedup's key is a superset, so its number should be equal or higher). If this fails, stop and investigate before proceeding.
 3b. **Sanity check (judgment call, not an automated threshold):** re-run the domain-variance-within-groups query from the Current State section above and compare against the measured 0.0022% baseline. This is a human-reviewed spot-check, not a bright-line gate — there's no principled exact cutoff, just "does this still look like the same negligible parser-noise pattern, or has something changed." A materially higher number (not just noise around 0.0022%) is worth investigating before proceeding.
 4. Run again with `CONTENT_DEDUP_APPLY=true` set for the invocation — the real, watched, first-ever apply. Disk guard preflight + per-bucket checks are live since this is the same code path as the cron.
-5. Verify: row count in `ulp.credentials`, spot-check the browser/API, confirm `ulp.credentials_predup_auto` (automatic rollback archive) exists, confirm `proj_imported_desc`/`proj_domain_reversed` projections are present and functioning on the new table (e.g. via `SHOW CREATE TABLE` and the same `force_optimize_projection=1` technique migration `v14` used to confirm the projection actually gets matched).
+5. Verify: row count in `ulp.credentials`, spot-check the browser/API, confirm `ulp.credentials_predup_auto` (automatic rollback archive) exists, confirm the `proj_imported_desc` projection is present and functioning on the new table (e.g. via `SHOW CREATE TABLE` and the same `force_optimize_projection=1` technique migration `v14` used to confirm the projection actually gets matched). *(Amended 2026-09-30: the deduped copy is built without projections and `proj_imported_desc` is restored after the swap; `proj_domain_reversed` is intentionally retired — see "Amendments from the live cutover" below.)*
 6. Set `CONTENT_DEDUP_APPLY=true` in `.env` so the daily cron takes over unattended from here on.
 7. Legacy cleanup (only once the above is verified good — these are all things this design's own correctness depends on being superseded, so wait for proof):
    - Drop `ulp.credential_dedup_meta`, delete `scripts/backfill-credential-dedup.sh`.
@@ -123,6 +123,14 @@ cd ~/ulp-suite
 git pull && docker compose up -d --build app
 ```
 The cutover script and legacy-cleanup steps run manually per the sequence above — this is a deliberate, watched, one-time operation, not something that ships and runs itself.
+
+## Amendments from the live cutover (2026-09-30)
+
+The first real runs against the 2.78B-row table changed the design in two places and corrected one assumption. Full detail and measurements are in the plan's "Amendments" section (`docs/superpowers/plans/2026-09-28-dedup-reconciliation.md`); the design-relevant outcomes:
+
+- **Projections are deferred, not cloned.** They were 64% of the table (243 of 381 GiB) and made the build ~2.5x larger than it needs to be (~288 GiB vs ~114 GiB), which the disk guard correctly refused. The clone carries the base table and all skip indexes only; `proj_imported_desc` is restored on the live table after the swap, within the existing `lib/projection-scope.ts` recency window. A projection is a redundant derived copy, so nothing is lost — only query speed until the restore finishes.
+- **`proj_domain_reversed` is retired.** The "both projections present" expectation in step 5 was wrong: only this instance has it (an abandoned 2026-08-25 experiment — no migration defines it), and it makes the domain monitor's `email_domain` query ~6x slower. Bring-back command is in the plan.
+- **The catch-up step could not have worked at this scale** and was rewritten to probe the live table with the candidate keys instead of building a set of every key (in-memory IN-sets have no disk spill; 1.39B keys needs ~34 GB against an 18 GiB limit).
 
 ## Out of Scope
 

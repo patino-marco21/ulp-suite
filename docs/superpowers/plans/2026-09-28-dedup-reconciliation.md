@@ -16,6 +16,19 @@
 - Task 4 (legacy cleanup) may only run after Task 3 (supervised cutover) is verified successful — it deletes the fallback mechanisms this design's own correctness currently depends on being superseded.
 - Task 5 (dead MV cleanup) has no functional dependency on Tasks 1-4's dedup work, but it edits the same file as Task 1 (`lib/clickhouse-migrations.ts`'s version-comment block and `DDL_VERSION` constant). Run Task 5 immediately after Task 1 completes and is committed — not concurrently with it, and not before it — so the two new migration versions (21, 22) land in a single, unambiguous sequence with no merge conflict. Tasks 2-4 may still happen in any order relative to Task 5 otherwise.
 
+## Amendments from the live cutover (2026-09-29 / 2026-09-30)
+
+Task 3's attempts against the real 2.78B-row table surfaced problems that were invisible from the code alone. Every item below was confirmed against the live container, and each changes what Tasks 3-4 expect. The plan text below is otherwise unchanged; where an amendment overrides a step, the step carries a pointer back here.
+
+1. **Stats / verify queries** (`830c7b3`, `44fe3c7`). The 200-bucket loops cost ~107 s per bucket because `cityHash64(...) % N = i` is unprunable, so every bucket was a full scan: ~6 h per pass, twice per tick. Replaced by one `GROUP BY content_key_hash` pass (101 s, 11.4 GiB peak, identical result: total 2,778,102,283, distinct 1,393,449,551); timeout raised to 900 s.
+2. **Populate** (`7748ef9`). The `ORDER BY … LIMIT 1 BY` sort hit MEMORY_LIMIT_EXCEEDED even unbucketed, and 200 buckets projected to ~28 h. Replaced by `argMin` + `GROUP BY` over 16 buckets at `max_threads = 6`.
+3. **Disk guard projection** (`c005ba0`). It extrapolated free-space delta, which mixes real growth with ~30 GiB/bucket of non-compounding transient overhead, so it over-projected regardless of headroom. It now projects from the target table's own `bytes_on_disk`.
+4. **Cleanup pulled forward.** Task 5's dead-table drops and `credential_dedup_meta` (124 GiB) were applied by hand on 2026-09-29 to free cutover headroom, and codified in migration v22 (`28f58e4`). Task 4's "drop the legacy table" step (Step 7) is therefore already done.
+5. **Deferred projections.** Projections are 64% of `ulp.credentials`' 381 GiB (`proj_imported_desc` 157.55 GiB, `proj_domain_reversed` 85.21 GiB, column data 82.33 GiB, skip indexes 56.10 GiB). Building the deduped copy with them cost ~18 GiB per populate bucket (~288 GiB) against ~252 GiB of usable headroom, so the guard tripped on every attempt. The clone is now created **without** projections (measured on a real bucket: 7.10 GiB, ~114 GiB total) and `proj_imported_desc` is restored on the live table after the swap and catch-up, newest partition first, within `lib/projection-scope.ts`'s recency window, behind the disk guard (`lib/credentials-projections.ts`). Measured on a 1/16 sample: ADD PROJECTION 0.2 s, MATERIALIZE ~5 min, planner selects it (`force_optimize_projection = 1`). A failed restore never drops the live table and never flips the result to `applied: false`; `scripts/run-content-dedup-once.ts --restore-projections` retries it.
+6. **`proj_domain_reversed` is retired, not restored.** No migration defines it (v19 replaced the `reverse(domain)` projection with `idx_ngram_domain`, so a fresh install never has it — only this instance does, from an abandoned 2026-08-25 experiment), and it is counterproductive: the domain monitor's `SELECT DISTINCT email_domain … LIMIT 1001` (`max_execution_time = 90`) makes the planner pick it as a thin covering copy and scan all 2.78B rows — 41 s / 21.12 GiB (75 s in the app's own runs) — where the base table's ngram skip index prunes to 404M rows: 7 s / 3.39 GiB with an identical result set (same count and value hash). **Task 3 Step 5's projection check therefore expects 1, not 2.** To bring it back: `ADD PROJECTION proj_domain_reversed (SELECT url, email, password, domain, email_domain, imported_at ORDER BY reverse(domain))`, then `MATERIALIZE PROJECTION`.
+7. **Catch-up rewrite.** `buildCatchupInsertSql`'s `NOT IN (SELECT cityHash64(…) FROM ulp.credentials)` builds an in-memory hash set of every distinct key. At 1.39B keys it failed live with MEMORY_LIMIT_EXCEEDED ("would use 28.73 GiB", limit 18 GiB) — and it runs *after* the swap, so it would have failed at the end of a ~2 h cutover. It now probes the live table with the (tiny) set of candidate keys: 77 s / 628 MiB on the same probe, inserting identical rows to the old form on tables built from the real schema.
+8. **The deployed app image predates all of the above** (built 2026-09-28): its report-only cron still ran the 200-bucket stats loop and hit the old 300 s timeout. Step 6's rebuild is what ships the fixes.
+
 ---
 
 ### Task 1: `was_duplicated` column + populate/catch-up SQL
@@ -368,13 +381,13 @@ FORMAT PrettyCompact
 
 Expected: `new_row_count` roughly matches `total - excess` from Step 1/4's result; `archived_original_count` roughly matches the pre-apply `total`; `flagged_as_duplicated` is nonzero and plausible relative to `excess`.
 
-Confirm the query-speed projections survived the swap:
+Confirm the query-speed projection was restored after the swap (amended — see "Amendments" #5/#6 at the top: the clone is built without projections and `proj_imported_desc` is re-created afterwards; `proj_domain_reversed` is intentionally retired):
 
 ```bash
 docker exec ulpsuite_clickhouse clickhouse-client --query "SHOW CREATE TABLE ulp.credentials FORMAT TabSeparatedRaw" | grep -c "PROJECTION proj_"
 ```
 
-Expected: `2` (`proj_imported_desc` and `proj_domain_reversed`, both present).
+Expected: `1` (`proj_imported_desc`). Also confirm it is materialized for every partition inside the recency window (`system.projection_parts`), and that the result line reported `projectionsRestored: true`. If it reported `false`, `ulp.credentials` is still live and correct — re-run `scripts/run-content-dedup-once.ts --restore-projections`.
 
 Spot-check the app itself: open the Credentials Browser, confirm results look sane and row counts in the UI match the new total.
 
@@ -387,7 +400,7 @@ docker compose up -d --build app
 docker compose logs app | grep "content-dedup] cron started"
 ```
 
-Expected: log line confirming the cron is armed with the next tick time.
+Expected: log line confirming the cron is armed with the next tick time. (This rebuild is also what ships the stats/populate/guard/catch-up fixes to the running app — see "Amendments" #8.)
 
 ---
 
