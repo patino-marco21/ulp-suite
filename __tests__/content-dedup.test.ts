@@ -17,6 +17,7 @@ import {
   buildEnsureSearchIndexesSql,
   buildVerifyDedupedTableStatsSql,
   buildRenameSwapSql,
+  buildDropTableSql,
   buildCatchupInsertSql,
   populateDedupedTableWithGuard,
   dedupCronHours,
@@ -327,6 +328,29 @@ ORDER BY url`
     })
   })
 
+  // ClickHouse refuses to DROP a table larger than max_table_size_to_drop (default
+  // 50 GB, unchanged on this server) with Code 359 TABLE_SIZE_EXCEEDS_MAX_DROP_SIZE_LIMIT.
+  // Both tables this routine manages are far past that: the archived original is
+  // 381 GiB, and even the deduped archive of a later cycle is ~185 GiB. Confirmed live
+  // 2026-09-30: a bare `DROP TABLE ... SYNC` under a too-small limit errors and leaves
+  // the table; appending `SETTINGS max_table_size_to_drop = 0` drops it. Without the
+  // override the tick's step 2 (drop the previous archive) would throw on every
+  // applying run after this one, so the cron could never rebuild again.
+  describe('buildDropTableSql', () => {
+    test('drops synchronously and lifts the size limit, for each table the tick manages', () => {
+      for (const table of [AUTO_PREDUP_TABLE, AUTO_DEDUP_TABLE]) {
+        expect(buildDropTableSql(table)).toBe(`DROP TABLE IF EXISTS ${table} SYNC SETTINGS max_table_size_to_drop = 0`)
+      }
+    })
+
+    test('runContentDedupTick and the populate cleanup use it everywhere -- no bare size-limited DROP of a managed table is left', () => {
+      const source = readFileSync(new URL('../lib/content-dedup.ts', import.meta.url), 'utf8')
+      expect(source).not.toMatch(/DROP TABLE IF EXISTS \$\{AUTO_/)
+      // definition + steps 2 and 3 + verification-failure cleanup + populate guard-trip cleanup
+      expect(source.match(/buildDropTableSql\(/g)?.length).toBeGreaterThanOrEqual(5)
+    })
+  })
+
   describe('buildRenameSwapSql', () => {
     test('atomically renames the original to the predup name and the deduped copy into place', () => {
       const sql = buildRenameSwapSql()
@@ -456,6 +480,23 @@ ORDER BY url`
       // Only bucket 0's populate ran -- bucket 1's guard check threw before its populate call.
       expect(client.exec).toHaveBeenCalledTimes(2) // 1 populate (bucket 0) + 1 DROP TABLE cleanup
       expect(client.exec).toHaveBeenLastCalledWith({ query: expect.stringContaining(`DROP TABLE IF EXISTS ${AUTO_DEDUP_TABLE} SYNC`) })
+    })
+
+    // If the cleanup DROP itself fails, the guard's DiskHeadroomError -- the actual
+    // reason the run stopped -- must still be what the caller sees, not the drop error.
+    test('still re-throws the original DiskHeadroomError when the cleanup DROP itself fails', async () => {
+      const client = fakeClient()
+      client.exec.mockImplementation(async ({ query }: { query: string }) => {
+        if (query.includes('DROP TABLE')) throw new Error('drop failed')
+      })
+      const tripError = new DiskHeadroomError('projected-breach', 'nope', null, null)
+      const guard = fakeGuard({
+        checkBeforeIteration: vi.fn()
+          .mockResolvedValueOnce(undefined)
+          .mockRejectedValueOnce(tripError),
+      })
+
+      await expect(populateDedupedTableWithGuard(client as any, 5, guard)).rejects.toBe(tripError)
     })
 
     test('re-throws without a DROP TABLE cleanup when the guard throws something other than DiskHeadroomError', async () => {

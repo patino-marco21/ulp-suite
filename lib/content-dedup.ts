@@ -453,6 +453,21 @@ export function buildEnsureSearchIndexesSql(): string[] {
   ])
 }
 
+/**
+ * DROP for a table this routine manages (AUTO_PREDUP_TABLE / AUTO_DEDUP_TABLE).
+ * SYNC for the ZK-path reason given at tick step 2. `max_table_size_to_drop = 0`
+ * lifts ClickHouse's size guard: the server default is 50 GB (unchanged here) and
+ * a bigger table is refused with Code 359 TABLE_SIZE_EXCEEDS_MAX_DROP_SIZE_LIMIT
+ * -- yet the archived original is 381 GiB and even a later cycle's archive is
+ * ~185 GiB, so without this the tick's step 2 would throw on every applying run
+ * after the first and the cron could never rebuild again. Confirmed live
+ * 2026-09-30 (bare DROP under a too-small limit errors and leaves the table; the
+ * SETTINGS form drops it). Only ever called with this file's own constants.
+ */
+export function buildDropTableSql(table: string): string {
+  return `DROP TABLE IF EXISTS ${table} SYNC SETTINGS max_table_size_to_drop = 0`
+}
+
 /** Atomic, metadata-only swap: the deduped copy becomes ulp.credentials; the original is archived under AUTO_PREDUP_TABLE. */
 export function buildRenameSwapSql(): string {
   return `RENAME TABLE ulp.credentials TO ${AUTO_PREDUP_TABLE}, ${AUTO_DEDUP_TABLE} TO ulp.credentials`
@@ -520,7 +535,13 @@ export async function populateDedupedTableWithGuard(
       await guard.checkBeforeIteration(undefined, { index: bucket, total: bucketCount })
     } catch (err) {
       if (err instanceof DiskHeadroomError) {
-        await client.exec({ query: `DROP TABLE IF EXISTS ${AUTO_DEDUP_TABLE} SYNC` })
+        // A failing cleanup must not replace the guard's error -- that is the real
+        // reason the run stopped. The next tick's step 3 retries the drop anyway.
+        try {
+          await client.exec({ query: buildDropTableSql(AUTO_DEDUP_TABLE) })
+        } catch (dropErr) {
+          console.error('[content-dedup] cleanup DROP of the partial build failed (original error re-thrown):', dropErr instanceof Error ? dropErr.message : String(dropErr))
+        }
       }
       throw err
     }
@@ -641,13 +662,13 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
     // moments later can race the still-pending cleanup and fail with
     // REPLICA_ALREADY_EXISTS -- confirmed live 2026-07-08, retrying this
     // exact tick right after a prior drop hit exactly that.
-    await client.exec({ query: `DROP TABLE IF EXISTS ${AUTO_PREDUP_TABLE} SYNC` })
+    await client.exec({ query: buildDropTableSql(AUTO_PREDUP_TABLE) })
 
     // 3. Drop any partial build left over from a crashed run -- an unattended
     // tick always starts fresh rather than trying to resume. SYNC for the
     // same reason as step 2: this table's ZK path is about to be reused by
     // step 4's CREATE TABLE moments later.
-    await client.exec({ query: `DROP TABLE IF EXISTS ${AUTO_DEDUP_TABLE} SYNC` })
+    await client.exec({ query: buildDropTableSql(AUTO_DEDUP_TABLE) })
 
     // 4. Create the deduped-table clone (schema + rewritten ZK path, unique
     // to this cycle -- see the file's ZK PATH REUSE comment for why a fixed
@@ -689,7 +710,7 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
       console.error(
         `[content-dedup] verification failed (cdedup_rows=${cdedupRows} expected_rows=${expectedRows} excess_after=${excessAfter}) -- aborting, original table untouched`,
       )
-      await client.exec({ query: `DROP TABLE IF EXISTS ${AUTO_DEDUP_TABLE} SYNC` })
+      await client.exec({ query: buildDropTableSql(AUTO_DEDUP_TABLE) })
       return { total, excess, applied: false }
     }
 
