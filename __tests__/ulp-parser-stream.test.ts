@@ -17,10 +17,11 @@ import { parseULPStream, parseULPContent } from '@/lib/ulp-parser'
 
 const FILE = 'stream-test.txt'
 
-test('dedup-cap guidance names the content-key script, not the removed admin endpoint', () => {
+test('dedup-cap guidance names the one-off trigger script, not the removed admin endpoint or the removed manual script', () => {
   const source = readFileSync(new URL('../lib/ulp-parser.ts', import.meta.url), 'utf8')
-  expect(source).toContain('bash scripts/dedup-credentials-content.sh')
+  expect(source).toContain('npx tsx scripts/run-content-dedup-once.ts')
   expect(source).not.toContain('POST /api/admin/dedup')
+  expect(source).not.toContain('bash scripts/dedup-credentials-content.sh')
 })
 
 function streamFromChunks(chunks: string[]): ReadableStream<Uint8Array> {

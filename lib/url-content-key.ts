@@ -8,8 +8,6 @@
  *  - docker/clickhouse/init/01-ulp-tables.sql (fresh-deploy content_key_hash
  *    column definition) — hand-copy this exact expression there too; plain
  *    SQL can't import TS.
- *  - scripts/dedup-credentials-content.sh (manual purge, destructive —
- *    hand-copy this exact expression there too; bash can't import TS)
  *
  * lib/ulp-dedupe.ts (view-level browser dedupe) no longer computes this
  * expression live — it references the content_key_hash column by name

@@ -44,7 +44,7 @@ describe('content-dedup', () => {
   })
 
   describe('CONTENT_DEDUP_SURVIVOR_ORDER', () => {
-    test('mirrors scripts/dedup-credentials-content.sh\'s ORDER exactly', () => {
+    test('is the earliest-imported_at tie-break order the retired manual script used (url, email, password, imported_at)', () => {
       expect(CONTENT_DEDUP_SURVIVOR_ORDER).toBe('url, email, password, imported_at')
     })
   })

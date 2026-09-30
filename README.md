@@ -143,11 +143,12 @@ mv ~/ulp-suite/inbox/failed/* ~/ulp-suite/inbox/
 ```
 
 **Large files:** Files with >2M unique credentials disable in-file dedup once the cap is hit. The old post-file full-table dedup step is removed; scheduled or manual dedup remains available.
-For manual content dedup, use the verified script:
+For manual content dedup, use the one-off trigger script (report-only by default):
 ```bash
-bash scripts/dedup-credentials-content.sh
-APPLY=1 bash scripts/dedup-credentials-content.sh
+npx tsx scripts/run-content-dedup-once.ts
+CONTENT_DEDUP_APPLY=true npx tsx scripts/run-content-dedup-once.ts
 ```
+ClickHouse's port isn't published to the host, so run it from a throwaway container on the compose network — the exact `docker run` command is in the script's header comment.
 
 ### Import throughput tuning
 
@@ -219,7 +220,7 @@ docker exec ulpsuite_clickhouse clickhouse-client \
   --query "SELECT formatReadableQuantity(count()) FROM ulp.credentials"
 
 # Run manual content dedup (dry-run by default)
-bash scripts/dedup-credentials-content.sh
+npx tsx scripts/run-content-dedup-once.ts
 
 # Check ClickHouse async-insert health (failures + throughput, last 60 min)
 curl -s -b cookies.txt http://localhost:3000/api/monitoring/async-inserts | jq
@@ -275,8 +276,8 @@ The old post-file full-table dedup pass is removed; scheduled or manual dedup re
 
 ```bash
 # one-time (dry-run, then apply)
-bash scripts/dedup-credentials-content.sh
-APPLY=1 bash scripts/dedup-credentials-content.sh
+npx tsx scripts/run-content-dedup-once.ts
+CONTENT_DEDUP_APPLY=true npx tsx scripts/run-content-dedup-once.ts
 ```
 
 The app supports scheduled or manual dedup — **report-only until you opt in**:

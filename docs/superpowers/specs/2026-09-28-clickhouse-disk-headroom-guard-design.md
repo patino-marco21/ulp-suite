@@ -1,7 +1,7 @@
 # ClickHouse disk-headroom guard — design
 
 **Date:** 2026-09-28
-**Status:** Approved, not yet implemented (spec → plan → build)
+**Status:** Implemented (merged 2026-09-28, commits 85ad9f7/d41dd49/7ebacae); growth projection revised 2026-09-29 to use target-table growth instead of free-space delta (c005ba0)
 
 ## Why
 

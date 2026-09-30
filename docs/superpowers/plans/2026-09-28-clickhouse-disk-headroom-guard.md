@@ -30,7 +30,7 @@
 **Interfaces:**
 - Produces: `DiskHeadroom { freeBytes: number, totalBytes: number, ratio: number }`, `DiskGuardOptions { minFreeBytes?: number, minFreeRatio?: number }`, `IterationContext { index: number, total: number }`, `DiskHeadroomReason = 'floor-breached' | 'projected-breach' | 'check-failed'`, `class DiskHeadroomError extends Error` with readonly `headroom: DiskHeadroom | null`, `effectiveFloorBytes: number | null`, `reason: DiskHeadroomReason`, `formatBytes(bytes: number): string`, `resolveDiskGuardOptions(opts?: DiskGuardOptions, env?: NodeJS.ProcessEnv): Required<DiskGuardOptions>`, `computeEffectiveFloorBytes(opts: Required<DiskGuardOptions>, totalBytes: number): number`, `type ProjectionResult = { trip: false } | { trip: true; reason: 'floor-breached' | 'projected-breach' }`, `checkProjection(params): ProjectionResult`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/clickhouse-disk-guard.test.ts`:
 
@@ -134,12 +134,12 @@ describe('checkProjection', () => {
 })
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `npx vitest run __tests__/clickhouse-disk-guard.test.ts`
 Expected: FAIL — `Cannot find module '@/lib/clickhouse-disk-guard'` (the file doesn't exist yet).
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `lib/clickhouse-disk-guard.ts`:
 
@@ -264,7 +264,7 @@ against this project's `tsconfig.json`: neither `noUnusedLocals` nor
 `noUnusedParameters` is set, so an unused import is not a typecheck error here —
 no cleanup needed between Task 1 and Task 2.
 
-- [ ] **Step 4: Run tests to verify they pass, and typecheck**
+- [x] **Step 4: Run tests to verify they pass, and typecheck**
 
 Run: `npx vitest run __tests__/clickhouse-disk-guard.test.ts`
 Expected: PASS — all tests green.
@@ -272,7 +272,7 @@ Expected: PASS — all tests green.
 Run: `npm run typecheck`
 Expected: no errors.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/clickhouse-disk-guard.ts __tests__/clickhouse-disk-guard.test.ts
@@ -300,7 +300,7 @@ testing a live-ClickHouse-query function: mock `@/lib/clickhouse`'s `getClient()
 entirely via `vi.mock`, rather than requiring a live container for these tests
 (a live spot-check happens in Step 5 below, separately).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `__tests__/clickhouse-disk-guard.test.ts` (new imports merge with the existing
 `import { ... } from 'vitest'` and `@/lib/clickhouse-disk-guard'` lines at the top —
@@ -411,14 +411,14 @@ describe('createDiskGuard', () => {
 })
 ```
 
-- [ ] **Step 2: Run tests to verify the new ones fail**
+- [x] **Step 2: Run tests to verify the new ones fail**
 
 Run: `npx vitest run __tests__/clickhouse-disk-guard.test.ts`
 Expected: FAIL — `checkDiskHeadroom`, `createDiskGuard`, `DiskHeadroomError` (as an
 import target used in `.toMatchObject`/`instanceof` checks) are not yet exported
 from `lib/clickhouse-disk-guard.ts`'s current (Task 1) contents.
 
-- [ ] **Step 3: Add the implementation**
+- [x] **Step 3: Add the implementation**
 
 Append to `lib/clickhouse-disk-guard.ts`, after `checkProjection` (the
 `import { getClient } from '@/lib/clickhouse'` line Task 1 added is already there
@@ -506,7 +506,7 @@ export function createDiskGuard(opts: DiskGuardOptions = {}): DiskGuard {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass, and typecheck**
+- [x] **Step 4: Run tests to verify they pass, and typecheck**
 
 Run: `npx vitest run __tests__/clickhouse-disk-guard.test.ts`
 Expected: PASS — all tests green, including Task 1's.
@@ -514,7 +514,7 @@ Expected: PASS — all tests green, including Task 1's.
 Run: `npm run typecheck`
 Expected: no errors.
 
-- [ ] **Step 5: Live spot-check against the real container**
+- [x] **Step 5: Live spot-check against the real container**
 
 This is the one piece Task 1/2's mocked tests can't cover: whether `system.disks`
 really has a `name = 'default'` row with the expected column names on the actual
@@ -531,7 +531,7 @@ If this returns zero rows or a different disk name, stop — the `WHERE name =
 continuing, and that's a real finding worth flagging back rather than silently
 patching around.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/clickhouse-disk-guard.ts __tests__/clickhouse-disk-guard.test.ts
@@ -571,7 +571,7 @@ progress line, not a liveness/tick-summary signal, and was deliberately excluded
 from the 2026-09-28 `console.warn` promotion pass for exactly that reason (see
 `[[project_removeconsole_strips_logs]]`). Only the loop body changes.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `__tests__/content-dedup.test.ts` (new top-of-file imports: add
 `populateDedupedTableWithGuard` to the existing `from '@/lib/content-dedup'`
@@ -639,13 +639,13 @@ describe('populateDedupedTableWithGuard', () => {
 })
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `npx vitest run __tests__/content-dedup.test.ts`
 Expected: FAIL — `populateDedupedTableWithGuard` is not exported from
 `lib/content-dedup.ts` yet.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 In `lib/content-dedup.ts`, add the new import alongside the existing ones at the top:
 
@@ -703,12 +703,12 @@ with:
     await populateDedupedTableWithGuard(client, bucketCount, createDiskGuard())
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run __tests__/content-dedup.test.ts __tests__/clickhouse-disk-guard.test.ts`
 Expected: PASS — all tests green.
 
-- [ ] **Step 5: Full verification pass**
+- [x] **Step 5: Full verification pass**
 
 Run the complete suite and typecheck, since this task touches a file
 (`content-dedup.ts`) other tests may transitively import:
@@ -730,7 +730,7 @@ npm run build
 
 Expected: build succeeds with no errors.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/content-dedup.ts __tests__/content-dedup.test.ts

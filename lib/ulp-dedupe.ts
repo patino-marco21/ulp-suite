@@ -5,11 +5,11 @@
  * (url, email, password), where url is compared scheme- and
  * trailing-slash-insensitively. These survive in storage because every
  * storage-level dedup keys on source_file + imported_at to preserve
- * provenance (see app/api/admin/dedup/route.ts and lib/upload-dedup.ts), so
+ * provenance (see lib/upload-dedup.ts), so
  * the same credential arriving in multiple combolist files shows up 2-3x in
  * results.
  *
- * scripts/dedup-credentials-content.sh removes the existing copies from storage;
+ * lib/content-dedup.ts removes the existing copies from storage;
  * this keeps the VIEW unique going forward (a new overlapping import can't make
  * the browser show dupes before the next storage pass), without another rewrite.
  *

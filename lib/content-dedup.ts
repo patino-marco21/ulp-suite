@@ -1,6 +1,7 @@
 /**
- * Content-level deduplication of ulp.credentials — the durable follow-up to the
- * one-time scripts/dedup-credentials-content.sh.
+ * Content-level deduplication of ulp.credentials — the durable successor to the
+ * one-time manual script (scripts/dedup-credentials-content.sh, retired
+ * 2026-09-30 -- see git history) it grew out of.
  *
  * WHY this exists (and why OPTIMIZE can't): content duplicates — identical
  * email/password and the same URL once scheme and a trailing slash are
@@ -12,8 +13,8 @@
  * dedup must compare only (url,email,password).
  *
  * MECHANISM: insert-select-rename (matching ClickHouse's own guidance to
- * avoid mutations for large transformations, and this codebase's own proven
- * scripts/dedup-credentials-content.sh). Builds a deduplicated copy of
+ * avoid mutations for large transformations, and the approach the since-retired
+ * scripts/dedup-credentials-content.sh proved out). Builds a deduplicated copy of
  * ulp.credentials into AUTO_DEDUP_TABLE via `INSERT ... SELECT ... ORDER BY
  * CONTENT_DEDUP_SURVIVOR_ORDER LIMIT 1 BY CONTENT_KEY` (keeps the earliest
  * imported_at per content key — LIMIT 1 BY has no "exact ties" failure mode,
@@ -24,10 +25,8 @@
  *
  * SAFETY: report-only by default. It logs how many rows it WOULD remove;
  * nothing is touched unless CONTENT_DEDUP_APPLY=true. The scheduled cron
- * (lib/dedup-cron.ts) invokes this routine; operators can also run the
- * separate, manual scripts/dedup-credentials-content.sh (unchanged by this
- * design — it uses its own _cdedup/_predup table names, so the two never
- * collide if both are run around the same time).
+ * (lib/dedup-cron.ts) invokes this routine; operators can trigger the same
+ * guarded, bucketed code path by hand with scripts/run-content-dedup-once.ts.
  *
  * PRIOR DESIGNS (all superseded — see the design doc above for the full
  * investigation): (1) lightweight `DELETE FROM` — rejected outright by the
@@ -167,7 +166,7 @@ import { restoreImportedDescProjection, stripProjectionsFromCreateTableDdl } fro
 /** Content identity: same destination + same credential (scheme/trailing-slash-insensitive on the URL). */
 export const CONTENT_KEY = `${URL_CONTENT_KEY}, email, password`
 
-/** Build target for the rewrite+swap cycle. Distinct from scripts/dedup-credentials-content.sh's ulp.credentials_cdedup so the two never collide. */
+/** Build target for the rewrite+swap cycle. The _auto suffix keeps it distinct from ulp.credentials_cdedup, the name the retired manual script used. */
 export const AUTO_DEDUP_TABLE = 'ulp.credentials_cdedup_auto'
 
 /** Archived original after a successful swap -- kept one full cron interval as a rollback safety net (see ROLLBACK above). */
@@ -175,7 +174,7 @@ export const AUTO_PREDUP_TABLE = 'ulp.credentials_predup_auto'
 
 /**
  * Deterministic tie-break for LIMIT 1 BY: keeps the earliest imported_at per
- * content key. Mirrors scripts/dedup-credentials-content.sh's ORDER exactly
+ * content key. Mirrored the (since-retired) scripts/dedup-credentials-content.sh's ORDER exactly
  * -- the raw url column (not the normalized URL_CONTENT_KEY expression);
  * imported_at ASC is what actually decides the survivor among same-content-key
  * rows once LIMIT 1 BY groups them.

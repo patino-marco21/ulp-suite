@@ -43,7 +43,7 @@ Task 3's attempts against the real 2.78B-row table surfaced problems that were i
 - Consumes: `CONTENT_KEY` (`lib/content-dedup.ts:146`, unchanged), `AUTO_DEDUP_TABLE`, `AUTO_PREDUP_TABLE`, `CONTENT_DEDUP_SURVIVOR_ORDER`, `CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES`, `CONTENT_DEDUP_MAX_THREADS` — all unchanged, already exported.
 - Produces: `buildPopulateDedupedTableSqlForBucket(bucketIndex, bucketCount): string` and `buildCatchupInsertSql(cutoff): string` — same signatures, new SQL shape. Task 2 and Task 3 depend on these emitting correct `was_duplicated` handling once `runContentDedupTick` (unchanged, calls these internally) runs.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Edit `__tests__/content-dedup.test.ts`. Replace the existing `buildPopulateDedupedTableSqlForBucket` describe block (lines 171-191) with:
 
@@ -98,12 +98,12 @@ Replace the existing `buildCatchupInsertSql` describe block (lines 281-297) with
   })
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `npx vitest run __tests__/content-dedup.test.ts`
 Expected: FAIL — the two new/changed assertions expecting the `SELECT * REPLACE (...)` fragment don't match the current `SELECT * FROM ulp.credentials` / `... FROM ${AUTO_PREDUP_TABLE}` output.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 In `lib/content-dedup.ts`, replace `buildPopulateDedupedTableSqlForBucket` (lines 316-323):
 
@@ -175,12 +175,12 @@ Insert a new block immediately after the existing `if (lastDdl < 20) { ... }` bl
   }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass, and typecheck**
+- [x] **Step 4: Run tests to verify they pass, and typecheck**
 
 Run: `npx vitest run __tests__/content-dedup.test.ts && npx tsc --noEmit`
 Expected: PASS, no type errors.
 
-- [ ] **Step 5: Live spot-check against the real container**
+- [x] **Step 5: Live spot-check against the real container**
 
 Confirm the window-function query shape doesn't regress the hard-won memory/time budget on a realistic slice of the real table (read-only — no INSERT, nothing is written):
 
@@ -199,7 +199,7 @@ SETTINGS max_bytes_before_external_sort = 4294967296, max_threads = 2, max_execu
 
 Expected: a single count (roughly 1/32 of the table's distinct content-key count), completing well under the 1800s timeout with no `MEMORY_LIMIT_EXCEEDED`. This has already been verified correct on a small disposable table during design (`ulp.test_wd_src`, cleaned up) — this step is specifically about scale, not correctness. If it fails on memory, the existing `CONTENT_DEDUP_MAX_THREADS`/bucket-count knobs are the first things to revisit (this is expected to work: a window function over the same `PARTITION BY` keys `LIMIT 1 BY` already sorts by is not new grouping cost, just a second read of the same sorted state).
 
-- [ ] **Step 6: Deploy the migration**
+- [x] **Step 6: Deploy the migration**
 
 ```bash
 cd ~/ulp-suite
@@ -209,7 +209,7 @@ docker compose logs app | grep "ClickHouse migration"
 
 Expected: `DDL v21 applied (added was_duplicated column)` appears in the logs.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add lib/content-dedup.ts lib/clickhouse-migrations.ts __tests__/content-dedup.test.ts
@@ -234,7 +234,7 @@ EOF
 - Consumes: `runContentDedupTick(opts: { trigger?: string }): Promise<DedupTickResult>` from `lib/content-dedup.ts:497` (unchanged signature), `getClient()` from `lib/clickhouse.ts`.
 - Produces: a CLI entry point Task 3 invokes. **Discovered during Task 2 execution:** ClickHouse's port isn't exposed to the host and this script isn't in the production app image, so it must run from a throwaway container on the `ulpsuite_network` Docker network (see the script's own header comment for the exact command), not as a bare `npx tsx` from the host.
 
-- [ ] **Step 1: Write the script**
+- [x] **Step 1: Write the script**
 
 ```ts
 /**
@@ -283,12 +283,12 @@ if (pathToFileURL(process.argv[1] ?? '').href === import.meta.url) {
 }
 ```
 
-- [ ] **Step 2: Typecheck**
+- [x] **Step 2: Typecheck**
 
 Run: `npx tsc --noEmit`
 Expected: no type errors.
 
-- [ ] **Step 3: Dry-run against the real container**
+- [x] **Step 3: Dry-run against the real container**
 
 ```bash
 docker run --rm --network ulpsuite_network -v "$(pwd)":/app -w /app \
@@ -298,7 +298,7 @@ docker run --rm --network ulpsuite_network -v "$(pwd)":/app -w /app \
 
 Expected: exits 0, logs `[content-dedup] manual: total=<N> excess=<M> willApply=false (report-only — set CONTENT_DEDUP_APPLY=true to enable cleanup)` followed by `[run-content-dedup-once] result: { total: <N>, excess: <M>, applied: false }`. This is a sequential 200-bucket stats scan against a 2.4B-row table (`CONTENT_DEDUP_BUCKET_COUNT=200` in `.env`) — expect several minutes to complete, not seconds. Run in the background rather than blocking on it.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add scripts/run-content-dedup-once.ts
@@ -317,7 +317,7 @@ This task is a live, watched operational procedure against the real 2.4B-row tab
 - Consumes: `scripts/run-content-dedup-once.ts` (Task 2), `CONTENT_DEDUP_APPLY` env var (`lib/content-dedup.ts:431`).
 - Produces: a live table state that Task 4 depends on (verified deduped `ulp.credentials`, with `ulp.credentials_predup_auto` as rollback archive).
 
-- [ ] **Step 1: Dry-run and capture the numbers**
+- [x] **Step 1: Dry-run and capture the numbers**
 
 ```bash
 docker run --rm --network ulpsuite_network -v "$(pwd)":/app -w /app \
@@ -327,7 +327,7 @@ docker run --rm --network ulpsuite_network -v "$(pwd)":/app -w /app \
 
 A sequential 200-bucket scan against 2.4B rows — run in the background, not blocking, and expect several minutes. Extract `total` and `excess` from the result line once it completes.
 
-- [ ] **Step 2: Sanity gates**
+- [x] **Step 2: Sanity gates**
 
 Hard gate: `excess / total` must be **≥ 49.84%** (the `credential_dedup_meta` figure confirmed 2026-09-26 — content-dedup's key is a superset, so its number should be equal or higher). If below, STOP — do not proceed to Step 3. Investigate why content-dedup finds fewer duplicates than the narrower legacy mechanism did; something is wrong.
 
@@ -353,11 +353,11 @@ FORMAT PrettyCompact
 
 Expected: `pct_groups_multi_domain` near 0.0022%. A materially higher number is worth investigating before proceeding, but use judgment — this isn't an automated abort condition.
 
-- [ ] **Step 3: STOP — present both numbers to the user and get explicit confirmation before proceeding**
+- [x] **Step 3: STOP — present both numbers to the user and get explicit confirmation before proceeding**
 
 Show: total row count, excess count, excess percentage, and the domain-variance check result. Do not run Step 4 until the user explicitly confirms.
 
-- [ ] **Step 4: Apply for real**
+- [x] **Step 4: Apply for real**
 
 ```bash
 docker run --rm --network ulpsuite_network -v "$(pwd)":/app -w /app \
@@ -367,7 +367,7 @@ docker run --rm --network ulpsuite_network -v "$(pwd)":/app -w /app \
 
 Expected: `applied: true` in the result line. This is the real, watched, first-ever destructive run.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 ```bash
 docker exec ulpsuite_clickhouse clickhouse-client --query "
@@ -422,19 +422,19 @@ Expected: log line confirming the cron is armed with the next tick time. (This r
 
 **Interfaces:** none — this task only removes code and repoints strings; nothing downstream depends on its outputs.
 
-- [ ] **Step 1: Delete the orphaned admin route**
+- [x] **Step 1: Delete the orphaned admin route**
 
 ```bash
 git rm app/api/admin/dedup/route.ts
 ```
 
-- [ ] **Step 2: Delete the two superseded scripts**
+- [x] **Step 2: Delete the two superseded scripts**
 
 ```bash
 git rm scripts/dedup-credentials-content.sh scripts/backfill-credential-dedup.sh
 ```
 
-- [ ] **Step 3: Update README.md**
+- [x] **Step 3: Update README.md**
 
 In the "Large files" paragraph, replace:
 
@@ -496,7 +496,7 @@ CONTENT_DEDUP_APPLY=true npx tsx scripts/run-content-dedup-once.ts
 ```
 ```
 
-- [ ] **Step 4: Update lib/ulp-parser.ts's guidance strings**
+- [x] **Step 4: Update lib/ulp-parser.ts's guidance strings**
 
 At line 776, change:
 ```
@@ -534,7 +534,7 @@ to:
           'Remaining rows skip in-file dedup — run npx tsx scripts/run-content-dedup-once.ts after import.')
 ```
 
-- [ ] **Step 5: Update the two pinning tests**
+- [x] **Step 5: Update the two pinning tests**
 
 In `__tests__/pagination-import-docs.test.ts`, change line 17 from:
 ```ts
@@ -564,7 +564,7 @@ test('dedup-cap guidance names the one-off trigger script, not the removed admin
 })
 ```
 
-- [ ] **Step 6: Run the full test suite and typecheck**
+- [x] **Step 6: Run the full test suite and typecheck**
 
 ```bash
 npx vitest run && npx tsc --noEmit
@@ -572,13 +572,13 @@ npx vitest run && npx tsc --noEmit
 
 Expected: PASS. (This also confirms no other test file references the deleted route/scripts — if one does, fix it the same way as Step 5 before proceeding.)
 
-- [ ] **Step 7: Drop the legacy table**
+- [x] **Step 7: Drop the legacy table**
 
 ```bash
 docker exec ulpsuite_clickhouse clickhouse-client --query "DROP TABLE IF EXISTS ulp.credential_dedup_meta"
 ```
 
-- [ ] **Step 8: Fix doc bookkeeping**
+- [x] **Step 8: Fix doc bookkeeping**
 
 In `docs/superpowers/specs/2026-09-28-clickhouse-disk-headroom-guard-design.md`, change line 4 from:
 ```
@@ -600,7 +600,7 @@ grep -c '^- \[x\] \*\*Step' docs/superpowers/plans/2026-09-28-clickhouse-disk-he
 ```
 Expected: `17`.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add -A
@@ -632,7 +632,7 @@ EOF
 
 **Interfaces:** none.
 
-- [ ] **Step 1: Write the implementation**
+- [x] **Step 1: Write the implementation**
 
 In `lib/clickhouse-migrations.ts`, insert this comment paragraph immediately before the `const DDL_VERSION = 21` line Task 1 left in place:
 
@@ -677,7 +677,7 @@ Insert a new block immediately after the `if (lastDdl < 21) { ... }` block from 
   }
 ```
 
-- [ ] **Step 2: Typecheck**
+- [x] **Step 2: Typecheck**
 
 Run: `npx tsc --noEmit`
 Expected: no type errors.
@@ -702,7 +702,7 @@ SELECT name FROM system.tables WHERE database='ulp' AND name IN ('domain_counts'
 
 Expected: empty result. If any rows remain, investigate the corresponding `FAILED` log line before considering this task done.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add lib/clickhouse-migrations.ts
