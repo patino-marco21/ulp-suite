@@ -132,6 +132,16 @@
  * per-mutation part-rewrite cost. Full design:
  * docs/superpowers/specs/2026-07-08-content-dedup-bucketed-populate-design.md
  *
+ * DEFERRED PROJECTIONS (2026-09-30): the clone is created WITHOUT
+ * ulp.credentials' PROJECTIONs (buildDedupedTableCreateDdl) and
+ * proj_imported_desc is restored on the live table after the swap and
+ * catch-up (tick step 9). Projections were 64% of the table's 381 GiB, and
+ * building with them cost ~18 GiB per populate bucket against ~6.5 without --
+ * enough to trip the disk guard against the real 2.78B-row table three times.
+ * Nothing is lost: a projection only re-stores columns the base table already
+ * has. Full reasoning, including why proj_domain_reversed is retired rather
+ * than restored: lib/credentials-projections.ts.
+ *
  * CATCH-UP: ulp.credentials keeps receiving live inserts from the ingest
  * pipeline throughout the (potentially tens-of-minutes) rebuild. A cutoff
  * timestamp captured against ClickHouse's own clock (not Node's — imported_at
@@ -152,6 +162,7 @@ import { getClient } from '@/lib/clickhouse'
 import { URL_CONTENT_KEY } from '@/lib/url-content-key'
 import { SEARCH_INDEX_DEFINITIONS } from '@/lib/search-index-definitions'
 import { createDiskGuard, DiskHeadroomError, type DiskGuard } from '@/lib/clickhouse-disk-guard'
+import { restoreImportedDescProjection, stripProjectionsFromCreateTableDdl } from '@/lib/credentials-projections'
 
 /** Content identity: same destination + same credential (scheme/trailing-slash-insensitive on the URL). */
 export const CONTENT_KEY = `${URL_CONTENT_KEY}, email, password`
@@ -220,6 +231,18 @@ export function rewriteCreateTableDdl(showCreateSql: string, targetTable: string
     throw new Error(`[content-dedup] rewriteCreateTableDdl failed to rewrite the ZK path -- expected to find '${expectedMarker}' in the output but didn't. Refusing to return unrewritten DDL.`)
   }
   return rewritten
+}
+
+/**
+ * The CREATE TABLE for AUTO_DEDUP_TABLE: rewriteCreateTableDdl's clone with
+ * every PROJECTION stripped out -- the DEFERRED PROJECTIONS approach described
+ * in the file header. The clone keeps the base table and all skip indexes;
+ * proj_imported_desc is restored on the live table after the swap
+ * (restoreImportedDescProjection, tick step 9). Pure, so the combination is
+ * unit-testable.
+ */
+export function buildDedupedTableCreateDdl(showCreateSql: string, uniqueSuffix: string): string {
+  return stripProjectionsFromCreateTableDdl(rewriteCreateTableDdl(showCreateSql, AUTO_DEDUP_TABLE, uniqueSuffix))
 }
 
 /**
@@ -444,12 +467,35 @@ export function buildRenameSwapSql(): string {
  * at the cutoff boundary) and deduplicates the catch-up set against itself.
  * `cutoff` must be a ClickHouse-clock timestamp string (e.g. from `SELECT
  * now()`), not a Node-clock value -- see the file's CATCH-UP comment.
+ *
+ * "Already present" is checked by PROBING the live table with the (tiny) set
+ * of candidate keys, never by building a set of the live table's keys --
+ * REWRITTEN 2026-09-30. The earlier shape, `NOT IN (SELECT cityHash64(
+ * CONTENT_KEY) FROM ulp.credentials)`, makes ClickHouse build an in-memory
+ * hash set (no disk spill exists for IN-sets) of every distinct content key:
+ * at today's 1.39B keys that is a ~34 GB open-addressing table (8-byte
+ * slots, <= 50% fill) against the server's 18 GiB per-query limit. It passed
+ * in 2026-07 only because the table then had ~467M keys, and since this step
+ * runs AFTER the swap it would have failed at the very end of a ~2h cutover.
+ * Reading the table's own MATERIALIZED content_key_hash (== cityHash64(
+ * CONTENT_KEY), what populate already groups on) for just the candidate keys
+ * is a single-column scan with a few-row result set.
+ *
+ * Confirmed live 2026-09-30 against the real 2.78B-row table (same 1.39B
+ * distinct keys the new table will have), old shape vs this one, each with the
+ * table standing in for its own archive: the old shape died after 57s with
+ * MEMORY_LIMIT_EXCEEDED ("would use 28.73 GiB (attempt to allocate chunk of
+ * 16.00 GiB)... While executing CreatingSetsTransform"); this shape ran the
+ * identical probe (1.1M candidate rows) in 77s at a 628 MiB peak. A side-by-side
+ * run of both shapes on small tables built from the real schema -- covering a
+ * key already present under a different URL spelling, a within-batch duplicate,
+ * a pre-cutoff row and a pre-flagged row -- inserted identical rows.
  */
 export function buildCatchupInsertSql(cutoff: string): string {
   return `INSERT INTO ulp.credentials
   SELECT * REPLACE (greatest(was_duplicated, if(count() OVER (PARTITION BY ${CONTENT_KEY}) > 1, 1, 0)) AS was_duplicated) FROM ${AUTO_PREDUP_TABLE}
   WHERE imported_at > '${cutoff}'
-    AND cityHash64(${CONTENT_KEY}) NOT IN (SELECT cityHash64(${CONTENT_KEY}) FROM ulp.credentials)
+    AND cityHash64(${CONTENT_KEY}) NOT IN (SELECT content_key_hash FROM ulp.credentials WHERE content_key_hash IN (SELECT cityHash64(${CONTENT_KEY}) FROM ${AUTO_PREDUP_TABLE} WHERE imported_at > '${cutoff}'))
   ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}
   LIMIT 1 BY ${CONTENT_KEY}
   SETTINGS max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}, max_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_insert_threads = ${CONTENT_DEDUP_MAX_THREADS}, max_execution_time = 1800, timeout_overflow_mode = 'throw'`
@@ -523,6 +569,8 @@ export interface DedupTickResult {
   total: number
   excess: number
   applied: boolean
+  /** Only set when applied: whether proj_imported_desc was restored after the swap (see tick step 9). */
+  projectionsRestored?: boolean
 }
 
 /**
@@ -609,7 +657,7 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
     const [showCreateRow] = (await showCreateRes.json()) as Array<{ statement: string }>
     const showCreateSql = showCreateRow?.statement
     if (!showCreateSql) throw new Error('[content-dedup] SHOW CREATE TABLE returned nothing')
-    await client.exec({ query: rewriteCreateTableDdl(showCreateSql, AUTO_DEDUP_TABLE, String(Date.now())) })
+    await client.exec({ query: buildDedupedTableCreateDdl(showCreateSql, String(Date.now())) })
 
     // 4b. Ensure the still-empty clone has the full search-index set before it's
     // populated (see buildEnsureSearchIndexesSql's comment for why this exists
@@ -652,8 +700,27 @@ export async function runContentDedupTick(opts: { trigger?: string } = {}): Prom
     // 8. Catch up anything imported during the build window.
     await client.exec({ query: buildCatchupInsertSql(cutoff) })
 
-    console.log(`[content-dedup] ${trigger}: completed rewrite+swap (~${excess} duplicate rows removed)`)
-    return { total, excess, applied: true }
+    // 9. Restore the projection deferred out of the build (see DEFERRED
+    // PROJECTIONS in the file header). The swap and catch-up are already done
+    // and ulp.credentials is correct without it -- only the "newest first"
+    // default sort is slower for partitions still waiting -- so a failure here
+    // (most likely a disk-guard trip while the archived original is still on
+    // disk) is reported but must NOT turn this into applied: false.
+    let projectionsRestored = true
+    try {
+      await restoreImportedDescProjection(client, createDiskGuard('ulp.credentials'))
+    } catch (err) {
+      projectionsRestored = false
+      console.error(
+        `[content-dedup] ${trigger}: swap and catch-up succeeded, but restoring proj_imported_desc failed -- ` +
+          `ulp.credentials is live and correct, just without the projection for some partitions. ` +
+          `Re-run with: npx tsx scripts/run-content-dedup-once.ts --restore-projections. Cause:`,
+        err instanceof Error ? err.message : String(err),
+      )
+    }
+
+    console.log(`[content-dedup] ${trigger}: completed rewrite+swap (~${excess} duplicate rows removed, projectionsRestored=${projectionsRestored})`)
+    return { total, excess, applied: true, projectionsRestored }
   } catch (err) {
     console.error('[content-dedup] tick error:', err instanceof Error ? err.message : String(err))
     return { total: 0, excess: 0, applied: false }

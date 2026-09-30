@@ -10,6 +10,7 @@ import { buildFreeWebmailInClause } from './webmail-providers'
 import { NOISE_EXPR } from './ulp-noise'
 import { dbGet, dbRun } from './sqlite'
 import { SEARCH_INDEX_DEFINITIONS } from './search-index-definitions'
+import { IMPORTED_DESC_PROJECTION_BODY } from './credentials-projections'
 import { URL_CONTENT_KEY } from './url-content-key'
 
 // Per-process guard (still useful to avoid redundant calls within one process)
@@ -763,12 +764,7 @@ export async function runClickHouseMigrations(): Promise<void> {
   // MATERIALIZE PROJECTION backfills existing parts as a background mutation.
   if (lastDdl < 14) {
     await runMigration(
-      `ALTER TABLE ulp.credentials ADD PROJECTION IF NOT EXISTS proj_imported_desc (
-        SELECT url, email, password, source_file, breach_name, country_tier, login_type,
-               password_length, password_mask, url_scheme, is_corporate_email, email_domain,
-               url_host, password_entropy_band, imported_at, domain
-        ORDER BY negate(toUnixTimestamp(imported_at)), domain, email, url, password
-      )`,
+      `ALTER TABLE ulp.credentials ADD PROJECTION IF NOT EXISTS proj_imported_desc (${IMPORTED_DESC_PROJECTION_BODY})`,
       `ALTER TABLE ulp.credentials MATERIALIZE PROJECTION proj_imported_desc`
     )
     console.warn('[ClickHouse migration] DDL v14 applied (added proj_imported_desc projection — MATERIALIZE running in background)')

@@ -7,6 +7,7 @@ import {
   AUTO_PREDUP_TABLE,
   CONTENT_DEDUP_SURVIVOR_ORDER,
   rewriteCreateTableDdl,
+  buildDedupedTableCreateDdl,
   buildCutoffTimestampSql,
   buildContentKeyStatsSql,
   CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES,
@@ -140,6 +141,52 @@ ORDER BY (domain, email, imported_at)`
 ENGINE = MergeTree()
 ORDER BY url`
       expect(() => rewriteCreateTableDdl(noZkPathFixture, AUTO_DEDUP_TABLE, '1234567890')).toThrow()
+    })
+  })
+
+  // The deferred-projection build (see lib/credentials-projections.ts): the
+  // clone is created with the base table + skip indexes only, and
+  // proj_imported_desc is restored on the live table after the swap. Building
+  // with both projections cost ~18 GiB/bucket vs ~6.5 without, which is what
+  // tripped the disk guard on the real 2.78B-row cutover.
+  describe('buildDedupedTableCreateDdl', () => {
+    const withProjection = `CREATE TABLE ulp.credentials
+(
+    \`url\` String CODEC(ZSTD(3)),
+    INDEX idx_bf_url url TYPE bloom_filter(0.05) GRANULARITY 1,
+    PROJECTION proj_imported_desc
+    (
+        SELECT url
+        ORDER BY url
+    )
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/ulp/credentials_cdedup_auto_1784508692786', '{replica}')
+ORDER BY url`
+
+    test('targets AUTO_DEDUP_TABLE with a fresh per-cycle ZK path AND carries no projections', () => {
+      const ddl = buildDedupedTableCreateDdl(withProjection, '1234567890')
+      expect(ddl.split('\n')[0]).toBe(`CREATE TABLE ${AUTO_DEDUP_TABLE}`)
+      expect(ddl).toContain(`/ulp/credentials_cdedup_auto_1234567890'`)
+      expect(ddl).not.toContain('PROJECTION')
+    })
+
+    test('keeps the skip indexes -- only projections are deferred', () => {
+      expect(buildDedupedTableCreateDdl(withProjection, '1234567890')).toContain('INDEX idx_bf_url url TYPE bloom_filter(0.05)')
+    })
+
+    test('runContentDedupTick builds the clone through it, not through rewriteCreateTableDdl alone (which would silently bring the projections back)', () => {
+      const source = readFileSync(new URL('../lib/content-dedup.ts', import.meta.url), 'utf8')
+      expect(source).toContain('buildDedupedTableCreateDdl(showCreateSql')
+      expect(source).not.toContain('query: rewriteCreateTableDdl(')
+    })
+
+    test('runContentDedupTick restores the projection after the catch-up, and a failed restore does not flip the result to applied: false (the swap already happened)', () => {
+      const source = readFileSync(new URL('../lib/content-dedup.ts', import.meta.url), 'utf8')
+      const catchupAt = source.indexOf('buildCatchupInsertSql(cutoff)')
+      const restoreAt = source.indexOf('restoreImportedDescProjection(client')
+      expect(catchupAt).toBeGreaterThan(-1)
+      expect(restoreAt).toBeGreaterThan(catchupAt)
+      expect(source).toContain('projectionsRestored')
     })
   })
 
@@ -288,12 +335,28 @@ ORDER BY url`
   })
 
   describe('buildCatchupInsertSql', () => {
+    // ClickHouse builds an IN-subquery's hash set fully in memory, with no disk
+    // spill. A `NOT IN (SELECT <key> FROM ulp.credentials)` over the WHOLE live
+    // table needs a set of every distinct content key: at 1.39B keys that is a
+    // ~34 GB open-addressing table (8-byte slots, <= 50% fill) against this
+    // server's 18 GiB per-query limit. It passed when the table had ~467M keys
+    // (2026-07) and could not have passed at today's scale -- and the catch-up
+    // runs AFTER the swap, so the failure would surface only at the very end of
+    // a ~2h cutover. Only the recent rows' keys matter, so the set must be built
+    // from THEM and the big table only probed against it.
+    test('never builds an in-memory set over every key of the live table: the big table is only probed against the (tiny) set of candidate keys', () => {
+      const sql = buildCatchupInsertSql('2026-07-07 15:07:51')
+      expect(sql).not.toContain(`NOT IN (SELECT cityHash64(${CONTENT_KEY}) FROM ulp.credentials)`)
+      expect(sql).toContain(
+        `cityHash64(${CONTENT_KEY}) NOT IN (SELECT content_key_hash FROM ulp.credentials WHERE content_key_hash IN (SELECT cityHash64(${CONTENT_KEY}) FROM ${AUTO_PREDUP_TABLE} WHERE imported_at > '2026-07-07 15:07:51'))`,
+      )
+    })
+
     test('copies rows imported after cutoff, excluding content keys already present, deduplicated against itself, with disk-spill, bounded threads, and a raised timeout', () => {
       const sql = buildCatchupInsertSql('2026-07-07 15:07:51')
       expect(sql).toContain('INSERT INTO ulp.credentials')
       expect(sql).toContain(`SELECT * REPLACE (greatest(was_duplicated, if(count() OVER (PARTITION BY ${CONTENT_KEY}) > 1, 1, 0)) AS was_duplicated) FROM ${AUTO_PREDUP_TABLE}`)
       expect(sql).toContain("WHERE imported_at > '2026-07-07 15:07:51'")
-      expect(sql).toContain(`cityHash64(${CONTENT_KEY}) NOT IN (SELECT cityHash64(${CONTENT_KEY}) FROM ulp.credentials)`)
       expect(sql).toContain(`ORDER BY ${CONTENT_DEDUP_SURVIVOR_ORDER}`)
       expect(sql).toContain(`LIMIT 1 BY ${CONTENT_KEY}`)
       expect(sql).toContain(`max_bytes_before_external_sort = ${CONTENT_DEDUP_SORT_MAX_MEMORY_BYTES}`)

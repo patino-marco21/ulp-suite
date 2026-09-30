@@ -21,12 +21,28 @@
  *     node:24-bookworm-slim npx tsx scripts/run-content-dedup-once.ts
  *
  *   # add -e CONTENT_DEDUP_APPLY=true to the same command to apply for real
+ *
+ * The rewrite+swap builds the deduped table WITHOUT ulp.credentials'
+ * projections and restores proj_imported_desc afterwards (see
+ * lib/credentials-projections.ts). If that last step failed -- or the run was
+ * interrupted after the swap -- re-run just the restore, same docker command
+ * with `--restore-projections` appended to the `npx tsx` line (no
+ * CONTENT_DEDUP_APPLY needed; it never touches row data).
  */
 import { pathToFileURL } from 'node:url'
 import { getClient } from '@/lib/clickhouse'
+import { createDiskGuard } from '@/lib/clickhouse-disk-guard'
 import { runContentDedupTick } from '@/lib/content-dedup'
+import { restoreImportedDescProjection } from '@/lib/credentials-projections'
 
 async function main(): Promise<void> {
+  if (process.argv.includes('--restore-projections')) {
+    const { partitions } = await restoreImportedDescProjection(getClient(), createDiskGuard('ulp.credentials'))
+    console.log(`[run-content-dedup-once] proj_imported_desc restored for partitions: ${partitions.join(', ') || '(none in the recency window)'}`)
+    await getClient().close()
+    return
+  }
+
   const result = await runContentDedupTick({ trigger: 'manual' })
   console.log('[run-content-dedup-once] result:', result)
   await getClient().close()
@@ -36,6 +52,13 @@ async function main(): Promise<void> {
       'check the [content-dedup] log lines above for why (excess below DEDUP_MIN_EXCESS, or verification failed).',
     )
     process.exit(1)
+  }
+  if (result.applied && result.projectionsRestored === false) {
+    console.error(
+      '[run-content-dedup-once] the swap succeeded but restoring proj_imported_desc failed -- ' +
+      'ulp.credentials is live and correct; re-run with --restore-projections once the cause above is addressed.',
+    )
+    process.exit(2)
   }
 }
 
