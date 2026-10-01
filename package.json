@@ -87,7 +87,7 @@
     "@types/react-dom": "^19.2.3",
     "@typescript-eslint/eslint-plugin": "^8.52.0",
     "@typescript-eslint/parser": "^8.52.0",
-    "@vitest/coverage-v8": "^4.1.7",
+    "@vitest/coverage-v8": "^4.1.11",
     "eslint": "^8.57.1",
     "eslint-config-next": "^15.5.18",
     "postcss": "^8.5.10",
@@ -95,7 +95,7 @@
     "tsx": "^4.19.2",
     "typescript": "^5",
     "vite-tsconfig-paths": "^6.1.1",
-    "vitest": "^4.1.7"
+    "vitest": "^4.1.11"
   },
   "overrides": {
     "lodash": "4.18.1",
