@@ -48,7 +48,7 @@
              after a merge can leave a torn merged part with the durable sources already gone.
              Merges that produce >= 1M rows or >= 128 MiB (every wide part) are fsynced; tiny
              compact-part merges are not. ulp.credentials also carries these as table
-             settings (DDL v25 in lib/clickhouse-migrations.ts) -- those are what already-created
+             settings (DDL v25 in lib/clickhouse-migrations.ts); those are what already-created
              tables use; this block covers tables created later without them. -->
         <min_rows_to_fsync_after_merge>1000000</min_rows_to_fsync_after_merge>
         <min_compressed_bytes_to_fsync_after_merge>134217728</min_compressed_bytes_to_fsync_after_merge>
