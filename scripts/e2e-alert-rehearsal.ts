@@ -7,14 +7,17 @@
  *   3. a monitor + a file dropped in the inbox -> parsed -> inserted -> in-process match -> webhook delivered, signed, with
  *      a success row in monitor_alerts; the ingest policy holds (a T3 row is dropped, a login with no "@" is not tiered);
  *   4. rows that appear in ClickHouse WITHOUT passing through the importer (what the legacy-row repair does) are found by the
- *      scheduled rescan and delivered ("[scheduled-rescan]"), and nothing is left in webhook_outbox.
+ *      scheduled rescan and delivered ("[scheduled-rescan]"), and nothing is left in webhook_outbox;
+ *   5. scripts/repair-scheme-split-rows.sh runs for real against this stack: it appends the one repairable legacy row that
+ *      was not already there (original imported_at / source_file, real domain), skips the credential that already existed, the
+ *      T3 row and the too-short password, leaves the legacy rows alone, drops its scratch table, and a second run appends nothing.
  *
  *   docker compose build app                   # once: the rehearsal uses the image it produces
  *   npx tsx scripts/e2e-alert-rehearsal.ts     # about 3-4 minutes; --keep leaves the stack up for inspection
  *
  * Needs the app image (ulp-suite-app:latest), Docker, about 6 GiB of free memory and port 3101. Exit 0 when every check passes.
  */
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -239,6 +242,41 @@ async function main(): Promise<number> {
     check('...signed', rescan?.signature_ok === true)
     const outbox = appNode(`const D=require('better-sqlite3');const db=new D('/app/data/ulp.db',{readonly:true});console.log(db.prepare("SELECT count(*) c FROM webhook_outbox WHERE status != 'delivered'").get().c)`)
     check('nothing is waiting in webhook_outbox', outbox === '0', `rows: ${outbox}`)
+
+    console.log('5. Scheme-split repair (scripts/repair-scheme-split-rows.sh against this stack)')
+    const stamp = '2026-07-24 05:14:13'
+    const insertRow = (url: string, email: string, password: string, domain: string, file: string) =>
+      `('${url}', '${email}', '${password}', '${domain}', '${file}', '', '${stamp}')`
+    const legacy = [
+      insertRow('https', '//docs.example.com/y', 'hank@example.com|Pa55-seven', '', 'legacy.txt'), // repairable, not there yet
+      insertRow('https', `//${DOMAIN}/portal`, `frank@${DOMAIN}|Pa55-six`, '', 'legacy.txt'), // repairable, but the correct copy exists
+      insertRow('https', '//shop.example.com/x', 'gina|ab', '', 'legacy.txt'), // password too short
+      insertRow('https', '//site.example.ru/login', 'x@mail.ru|Secret-Pa55', '', 'legacy.txt'), // T3 once corrected
+    ]
+    chQuery(`INSERT INTO ulp.credentials (url, email, password, domain, source_file, breach_name, imported_at) VALUES ${legacy.join(', ')}`)
+    chQuery(
+      `INSERT INTO ulp.credentials (url, email, password, domain, source_file, breach_name, imported_at) VALUES ${insertRow(`https://${DOMAIN}/portal`, `frank@${DOMAIN}`, 'Pa55-six', DOMAIN, 'other.txt')}`,
+    )
+    const wrapper = (apply: boolean) =>
+      spawnSync('bash', ['scripts/repair-scheme-split-rows.sh'], {
+        encoding: 'utf8',
+        env: { ...process.env, CLICKHOUSE_CONTAINER: CH, APP_CONTAINER: APP, APPLY: apply ? '1' : '0' },
+        timeout: 300_000,
+      })
+    const count = (where: string) => chQuery(`SELECT count() FROM ulp.credentials WHERE ${where}`)
+
+    const dry = wrapper(false)
+    check('the dry run finds the 4 legacy rows, would repair 2, and changes nothing', dry.status === 0 && /candidates:\s+4/.test(dry.stdout) && /repaired:\s+2/.test(dry.stdout) && count("source_file = 'legacy.txt'") === '4', (dry.stdout + dry.stderr).slice(-200))
+    const first = wrapper(true)
+    check('APPLY=1 appends exactly the one repairable row that was not already there', first.status === 0 && /appended: 1 repaired/.test(first.stdout), (first.stdout + first.stderr).slice(-300))
+    check('...with its original imported_at and source_file and a real domain', count(`url = 'https://docs.example.com/y' AND email = 'hank@example.com' AND password = 'Pa55-seven' AND domain = 'docs.example.com' AND source_file = 'legacy.txt' AND imported_at = '${stamp}'`) === '1')
+    check('the credential that already existed was not duplicated', count(`email = 'frank@${DOMAIN}' AND url = 'https://${DOMAIN}/portal'`) === '1')
+    check('the T3 row and the too-short password were not appended', count("email = 'x@mail.ru'") === '0' && count("url = 'https://shop.example.com/x'") === '0')
+    check('the four legacy rows are untouched', count("source_file = 'legacy.txt' AND domain = ''") === '4')
+    check('the scratch table is gone', chQuery("SELECT count() FROM system.tables WHERE database = 'ulp' AND name = 'zz_scheme_split_repaired'") === '0')
+    const second = wrapper(true)
+    check('a second run appends nothing', second.status === 0 && /appended: 0 repaired/.test(second.stdout), (second.stdout + second.stderr).slice(-300))
+    check('...and the row count is unchanged', count("url = 'https://docs.example.com/y'") === '1')
   } catch (err) {
     check('the rehearsal ran without an unexpected error', false, err instanceof Error ? err.message.split('\n')[0] : String(err))
   } finally {
