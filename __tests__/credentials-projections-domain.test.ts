@@ -233,8 +233,10 @@ describe('schema plumbing for proj_domain_rev', () => {
 
   test('DDL v24 adds the projection through the shared builder and does NOT materialize at deploy', () => {
     const src = read('../lib/clickhouse-migrations.ts')
-    expect(src).toMatch(/const DDL_VERSION = 24\b/)
-    const block = src.slice(src.indexOf('if (lastDdl < 24)'), src.indexOf('if (lastDdl < DDL_VERSION)'))
+    expect(src).toMatch(/const DDL_VERSION = (2[4-9]|[3-9]\d)\b/)
+    const start = src.indexOf('if (lastDdl < 24)')
+    // the v24 block ends where the next version's block begins
+    const block = src.slice(start, src.indexOf('if (lastDdl <', start + 1))
     expect(block).toContain('buildAddDomainRevProjectionSql()')
     expect(block).not.toContain('MATERIALIZE')
   })

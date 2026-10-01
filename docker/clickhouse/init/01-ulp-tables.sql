@@ -336,7 +336,13 @@ SETTINGS
     max_parts_in_total      = 100000,
 
     -- Allow async deduplication cleanup without blocking inserts
-    merge_with_ttl_timeout = 86400;
+    merge_with_ttl_timeout = 86400,
+
+    -- Durability for merges (inserts are already fsynced by fsync_after_insert in
+    -- ulp-performance.xml): fsync a merged part's files before the source parts are dropped.
+    -- Mirrors DDL v25 in lib/clickhouse-migrations.ts (the source of truth) -- keep in sync.
+    min_rows_to_fsync_after_merge = 1000000,
+    min_compressed_bytes_to_fsync_after_merge = 134217728;   -- 128 MiB
 
 -- ── Import source / upload history ───────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS ulp.sources

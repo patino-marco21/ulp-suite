@@ -213,7 +213,28 @@ let migrationsDone = false
 //      candidate scan, which ran 42.7 s / 666M rows cold. ADD only, backfilled by
 //      restoreDomainRevProjection, and the resolver uses it only once every part carries
 //      it (see v23). See docs/superpowers/specs/2026-09-30-related-panel-and-domain-rev-design.md.
-const DDL_VERSION = 24
+// v25: fsync after MERGES. fsync_after_insert / fsync_part_directory (ulp-performance.xml) make every
+//      freshly inserted part durable, but a merge writes its result part and then DROPS the source
+//      parts; with min_rows_to_fsync_after_merge / min_compressed_bytes_to_fsync_after_merge at their
+//      default of 0 the merged part is not fsynced, so a power loss or kernel crash right after a
+//      merge can leave a torn merged part with its durable sources already gone. This laptop
+//      suspends and has no backup, so the settings are set (1M rows or 128 MiB: every wide part) as a
+//      table-level MODIFY SETTING -- metadata only, takes effect for the next merge, undone with
+//      `ALTER TABLE ulp.credentials RESET SETTING min_rows_to_fsync_after_merge,
+//      min_compressed_bytes_to_fsync_after_merge`. Mirrored in the init SQL and ulp-performance.xml.
+const DDL_VERSION = 25
+
+/** Table settings v25 applies; the init SQL and ulp-performance.xml carry the same two numbers. */
+export const MERGE_FSYNC_SETTINGS = {
+  min_rows_to_fsync_after_merge: 1_000_000,
+  min_compressed_bytes_to_fsync_after_merge: 134_217_728,
+} as const
+
+export function buildMergeFsyncSettingsSql(): string {
+  return `ALTER TABLE ulp.credentials MODIFY SETTING
+            min_rows_to_fsync_after_merge = ${MERGE_FSYNC_SETTINGS.min_rows_to_fsync_after_merge},
+            min_compressed_bytes_to_fsync_after_merge = ${MERGE_FSYNC_SETTINGS.min_compressed_bytes_to_fsync_after_merge}`
+}
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -953,6 +974,17 @@ export async function runClickHouseMigrations(): Promise<void> {
       console.warn('[ClickHouse migration] DDL v24 applied (added proj_domain_rev projection -- existing parts need restoreDomainRevProjection)')
     } catch (err) {
       console.error('[ClickHouse migration] v24: ADD PROJECTION proj_domain_rev -- FAILED:', err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  // v25 — fsync after merges (see DDL_VERSION comment above). MODIFY SETTING is metadata-only and
+  // idempotent; a failure leaves merges un-fsynced, as before, and is logged in full.
+  if (lastDdl < 25) {
+    try {
+      await client.exec({ query: buildMergeFsyncSettingsSql() })
+      console.warn('[ClickHouse migration] DDL v25 applied (fsync after merges: min_rows_to_fsync_after_merge, min_compressed_bytes_to_fsync_after_merge)')
+    } catch (err) {
+      console.error('[ClickHouse migration] v25: MODIFY SETTING fsync-after-merge -- FAILED:', err instanceof Error ? err.message : String(err))
     }
   }
 
