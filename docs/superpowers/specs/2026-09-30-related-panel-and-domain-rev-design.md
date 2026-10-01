@@ -152,7 +152,7 @@ domain-filtered browse 0.96 s, both without any projection and unchanged in shap
 to 22 ms (noise); `domain = x OR domain LIKE '%.x'` counts now plan through `proj_domain_rev` and went from 12.6 s to
 7.0 s with the same result (1,187,564); the `url_host LIKE '%x%'` branch is untouched (10.9 s).
 
-### Findings the gate surfaced (not fixed here)
+### Findings the gate surfaced (fixed 2026-10-01; see the follow-up below)
 
 1. **The legacy probe is now the slowest part of a cold rescan, and it scales with the number of domains.** The
    `domain IN ('', 'http', 'https') AND <full match condition>` scan reads 22.6M rows and needs 404 CPU-seconds
@@ -170,3 +170,89 @@ to 22 ms (noise); `domain = x OR domain LIKE '%.x'` counts now plan through `pro
    UI's default sort (`domain_asc`) is unaffected.
 3. `NORM_COLS` corrections look like a no-op under the default alias semantics (0 of 5,000 legacy-bucket rows altered
    against about 28 with `prefer_column_name_to_alias = 1`), so ~38K legacy rows probably show raw values. Not investigated.
+   **Investigated 2026-10-01: it is a real display defect, not a no-op, and it affects 3.16M rows, not 38K.** See below.
+
+## Follow-up, 2026-10-01 — fixes, measurements, and what was deliberately not done
+
+All merged to `main` and deployed locally unless stated. Every timing is cold (`--use_query_cache=0`, condition cache
+dropped) on the 1.39B-row table.
+
+### Fixed
+
+| Item | Before | After |
+|---|---|---|
+| Monitor legacy probe (17 domains) | 37-40 s, linear in the number of domains | 4.3 s (normalise once, `arrayExists` over two arrays); whole cold resolver 56.9 s -> 5.5 s, identical rows and hash |
+| Unique + non-domain sort (e.g. newest first) | 300 s timeout | 41 s (top-3n window, then `LIMIT 1 BY` inside it; dupes collapse within the window, the documented gap) |
+| Search page totals | rows waited for the count; projection trap | one scan for both totals, rows first; `skip_totals=1` / `totals_only=1` |
+| v1 batch lookup, ordinary email | **30 s timeout for every email**, even one with a single row (alias shadowing) | 0.8-1.3 s; `admin@gmail.com` 22.7 s |
+| v1 batch lookup, domain | 30 s timeout | 0.8 s |
+| `/api/search` | same alias shadowing | raw-column inner query |
+| `GET /api/v1/summary` | `MEMORY_LIMIT_EXCEEDED` after 12.7 s on every call (exact `countDistinct`), 18 GiB attempted per call | `uniq` (17.6 s) + in-order `GROUP BY` (11.0 s), bounded memory, computed at most every 10 min and served stale-while-revalidate; response adds `as_of`, `stale`, `approximate` |
+| Public `/api/check` on a slow lookup | `timeout_overflow_mode = 'break'`: a truncated list (verified: 3 s cap returned 500 rows starting at 23:13:26 where the true newest 500 start at 23:20:08) or no rows, rendered as "not found" | throws; 503 + `Retry-After`; ordinary addresses 0.3-1.2 s |
+| Related panel timeouts | swallowed into an empty bucket / ignored by the page | `allSettled`; failed buckets named in `failed`; the sheet says "couldn't be loaded" instead of "none found" |
+| `NORM_COLS` display (see below) | Case D rows half-repaired | repaired; `prefer_column_name_to_alias = 1` on every query that selects it |
+| Merge durability | merges never fsynced | DDL v25: `min_rows_to_fsync_after_merge = 1000000`, `min_compressed_bytes_to_fsync_after_merge = 134217728` |
+| Disk-space alerting | none (937 GB -> 311 MB free went unnoticed on 2026-09-26) | `lib/disk-watch.ts`: ok/warn/critical every 10 min, log + optional webhook, shown in Ingest Health; fired a real WARNING within a minute of deploy (156 GiB free during a 66 GiB merge) |
+| App port | published on 0.0.0.0 | 127.0.0.1 unless `APP_BIND_ADDR` is set (every audit-log entry came from the Docker gateway = the laptop itself) |
+| SQLite (users, keys, monitors) backup | none | daily verified snapshots in `./data/backups`, keep 7; first one written in production |
+| Backup tooling | `ulp.*` would snapshot and upload the 381 GiB archive; local snapshots unguarded | live tables only; disk-space guard; `space`/`local`/`status`; local copy deleted after upload; retention 2; Ingest Health shows backup age. Local flow rehearsed on a sandbox table; **the S3 flow has not been exercised (no destination)** |
+| npm audit | 1 high (brace-expansion, dev-only) | 0; verified with `npm ci` and the versions read from `node_modules` |
+| Inbox file with a date for an extension | `inbox/failed/` | unrecognised names are judged by content (zip magic / text); Retry on the Inbox page re-queues the stuck file. **It was not re-queued: importing it writes to the live database.** |
+| README / plans | Next.js 14, 6 GB RAM table, "tens of billions", P99 < 200 ms, 52 of 55 plans with unchecked boxes | corrected; `docs/superpowers/plans/README.md` explains the boxes |
+
+### `NORM_COLS` is neither a no-op nor correct: what was found
+
+`NORM_COLS` aliases `url`/`email`/`password`/`domain` to expressions that read those same names. With ClickHouse's
+default alias resolution the reference inside another alias's expression means the *alias*, so the Case A-D
+conditions stop matching once a sibling alias has rewritten what they test. Through the exact production form
+(outer `SELECT NORM_COLS` over a raw-column subquery), on 20,000 well-formed Case D rows:
+
+| | url | email | password | domain |
+|---|---|---|---|---|
+| default | 0 | 0 | 13,447 | 20,000 |
+| `prefer_column_name_to_alias = 1` | 20,000 | 20,000 | 19,942 | 20,000 |
+
+So the display of those rows was half-repaired (real domain, URL still in the email column, password stripped of its
+login). 900,000 ordinary rows from six key ranges are identical under both settings. Fixed by the setting.
+
+How many rows are involved (counts only, nothing printed), over the 21.6M rows whose stored domain is `''`, `http`
+or `https`:
+
+- 3,163,342 are changed by the corrections, all stored domain `''`: 2,825,065 + 203,610 are Case D with a host-like
+  email (real corruption), ~134K are Case D with an email that is not host-like (may be legitimate rows the
+  correction rewrites), 104 are Case A. No Case B row exists anywhere (0 of 1.39B), no space-form Case C row is left.
+- **3,288,434 further rows (2.17M imported July, 1.11M August 2026) are repaired by no case at all:** stored url
+  `http`/`https`, email `//host/path` (no space), the login and password packed into `password` as `login|pass` or
+  `login:pass`. Their stored domain is `''`. The original repair mutations (`lib/clickhouse-migrations.ts`) cover
+  the space form only, and ran once. The current parser rejects a leading `//` and handles the blank-first-tab and
+  country-code shapes at import; nothing has been imported since 2026-08-28.
+- Consequence: an exact `domain =` / `email =` filter on stored columns cannot find ~6.3M rows (0.45%), and the
+  domain monitor cannot match the second group at all.
+
+### Deliberately NOT done (each needs the owner)
+
+1. **Dropping the 381 GiB archive `ulp.credentials_predup_auto`.** It is the only second copy of the data and no
+   backup exists. Preconditions, in order: S3 configured in `.env`; `./scripts/clickhouse-backup.sh space`,
+   `full`, `status` (exit 0) and `verify` all succeed; `SELECT count() FROM ulp.credentials` agrees with the
+   backup's restored count. Then:
+   `docker exec ulpsuite_clickhouse clickhouse-client -q "DROP TABLE ulp.credentials_predup_auto SYNC SETTINGS max_table_size_to_drop = 0"`
+   (the default 50 GB limit refuses it otherwise; `SYNC` releases the space at once). It frees ~381 GiB.
+   **Note:** the content-dedup tick drops the previous archive itself in step 2 of its next *applying* cycle
+   (`CONTENT_DEDUP_APPLY=true`, needs >= `DEDUP_MIN_EXCESS` = 14,000,000 excess rows, so not soon) - without asking.
+2. **Enrolling 2FA** (needs the owner's authenticator). The loopback binding is the interim mitigation.
+3. **S3 credentials / destination** for the off-host backup.
+4. **Major upgrades**: Next 15 -> 16, Tailwind 3 -> 4, ESLint 8 -> 10 (8 is EOL), Zod 3 -> 4, TypeScript 5.9 -> 7, vitest 4 -> 5.
+5. **Repairing the ~6.3M legacy rows in storage.** An `ALTER ... UPDATE` rewrites url/email/password/domain and every
+   derived column in every part (plus `proj_imported_desc`); insert-then-delete is blocked by projections
+   (`DELETE FROM` needs `lightweight_mutation_projection_mode`). Sketch that fits the disk: build a repaired copy
+   per partition into a scratch table (`INSERT ... SELECT` with the corrected columns, ~65 GiB / ~68 GiB), verify
+   counts and a hash of the unaffected rows, then `REPLACE PARTITION`; imports paused meanwhile. Needs a backup
+   first and ~70 GiB of headroom per partition. Not rehearsed.
+6. **Token / substring search over the whole table** (`accounts.google.com` as a token: 25-43 s for 50 rows).
+   A dictionary-backed or sorted-projection design was judged too risky to improvise.
+7. **Keyset paging across legacy rows**: the cursor is built from the normalised row but compared against stored
+   columns, so rows of the 0.45% above can be skipped or repeated at a page boundary that falls inside one
+   `imported_at` second. Fixing it means returning raw cursor columns alongside the normalised ones.
+8. **`/api/check` is unauthenticated and rate-limited by the `X-Forwarded-For` header**, which a client can set. It
+   returns breach names and up to 10 domains per breach, no passwords. Left as designed; tightening it needs a
+   decision about the deployment (trusted proxy or not).
