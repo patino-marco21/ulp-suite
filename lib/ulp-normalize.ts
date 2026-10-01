@@ -24,15 +24,32 @@
  *     domain   = ''
  *
  * These SQL expressions correct the display at query time without waiting for
- * the background ALTER TABLE UPDATE mutations to finish.  Once mutations
- * complete, the IF conditions match zero rows and the expressions are no-ops.
+ * the background ALTER TABLE UPDATE mutations to finish.
  *
- * Escaping note
- * -------------
- * ClickHouse string literals use `\\` for one backslash, so the regex `\s`
- * requires `\\s` in the SQL text.  In a JS template literal `\\\\s` produces
- * the two-character JS string `\\s`, which becomes `\s` after ClickHouse
- * string parsing → whitespace in RE2.  Same logic: `\\.` → `\\\\.` in JS.
+ * They are NOT no-ops, though. Measured 2026-10-01 on the 1.39B-row table:
+ *
+ *   Repaired here. Of the 21.6M rows whose stored domain is '', 'http' or 'https', 3,163,342 (0.23% of
+ *   the table) are still changed by these expressions, all with a stored domain of '':
+ *     - 2,825,065 + 203,610 are Case D rows whose email column holds a host-like string
+ *       ("site.com/path"): real corruption, and the correction recovers a domain for them;
+ *     - ~134K are Case D rows whose email column is NOT host-like (a login that merely contains a
+ *       '/'): the correction may be rewriting a legitimate row;
+ *     - 104 are Case A (jsessionid).
+ *   No Case B row exists anywhere in the table (0 of 1.39B) and no space-form Case C row is left.
+ *
+ *   NOT repaired by any case. 3,288,434 rows (2.17M imported in July, 1.11M in August 2026) have a stored
+ *   url of 'http' or 'https' and an email of '//host/path' with no space: the old parser split the URL
+ *   at the scheme's colon, and the real login and password sit packed in `password` ("login|pass" or
+ *   "login:pass"). Their stored domain is '', and Case C needs a space, so they come back unchanged.
+ *   The current parser rejects a leading '//' and handles the blank-first-tab and country-code shapes
+ *   at import, so these are historic rows; nothing imported since 2026-08-28.
+ *
+ * What this means: an exact domain/email filter on the STORED columns cannot see any of these rows (their
+ * stored domain is ''), the display repairs only the first group, and lib/monitor-match-resolver.ts's
+ * legacy probe (which normalizes with these expressions) can only match that first group too. Repairing
+ * them in storage means rewriting url/email/password/domain (and every column derived from them, plus
+ * proj_imported_desc) in every part, or insert-then-delete under projections; neither is something to run
+ * on a table with no backup. See docs/superpowers/specs/2026-09-30-related-panel-and-domain-rev-design.md.
  */
 
 /**

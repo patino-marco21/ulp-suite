@@ -21,8 +21,8 @@ const VALID_MASKS = new Set(['alpha', 'numeric', 'alphanumeric', 'mixed', 'empty
 
 
 // Read by the inner query (see query site below) — deliberately raw url/email/
-// password/domain, no NORM_COLS. NORM_COLS's nested-if correction (for ~38K
-// legacy corrupted rows) is expensive enough per-row that including it here
+// password/domain, no NORM_COLS. NORM_COLS's nested-if correction (for the 3.16M
+// legacy corrupted rows left on 2026-10-01; see lib/ulp-normalize.ts) is expensive enough per-row that including it here
 // defeats proj_imported_desc: confirmed via force_optimize_projection=1 that
 // the identical query WITH NORM_COLS inline gets PROJECTION_NOT_USED, while
 // this raw-column form uses the projection successfully. Below the fold at
