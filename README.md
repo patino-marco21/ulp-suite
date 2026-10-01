@@ -8,7 +8,7 @@
 
 ## What it is
 
-ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores them in ClickHouse, and exposes a fast search and monitoring interface. It is designed for **tens to hundreds of billions of credential lines** and runs entirely on your own infrastructure.
+ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores them in ClickHouse, and exposes a fast search and monitoring interface. It runs entirely on your own infrastructure, on one machine: the reference deployment holds **1.39 billion rows (~132 GiB on disk)** on a 32 GB laptop.
 
 **Tech stack:** Next.js 15 · React 19 · ClickHouse · SQLite · TypeScript · Docker
 
@@ -55,13 +55,13 @@ ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores 
 ```
 Browser / API client
        │
-  Next.js 14 (App Router)
+  Next.js 15 (App Router)
        │
   ┌────┴────────────┐
   │                 │
 ClickHouse       SQLite
 (credentials,    (users, sessions,
- 100B+ rows)      monitors, webhooks,
+ 1.39B rows)      monitors, webhooks,
                   API keys, audit log)
 ```
 
@@ -85,12 +85,15 @@ ClickHouse       SQLite
 
 | Component | Default `mem_limit` | Notes |
 |---|---|---|
-| App (Node.js 24) | 6 GB | 4 GB heap + 2 GB headroom |
-| ClickHouse | 6 GB | Scales caches to limit |
-| OS | ~2 GB minimum | |
-| **Total** | **~14 GB** | 16 GB laptop recommended |
+| App (Node.js 24) | 8 GB | 6 GB heap (`NODE_OPTIONS`) + 2 GB headroom |
+| ClickHouse | 20 GB | `max_server_memory_usage` is 18 GB, 2 GB under the limit on purpose |
+| OS | ~4 GB | |
+| **Total** | **32 GB** | the sizing the 1.39B-row reference deployment runs on |
 
-**8 GB laptop:** Lower both services to `mem_limit: 4g` in `docker-compose.yml`.
+**Smaller machines:** lower the two `mem_limit`s in `docker-compose.yml` together with the
+settings they back: `--max-old-space-size` in the app's `NODE_OPTIONS`, and
+`max_server_memory_usage` in `docker/clickhouse/config/ulp-performance.xml`. Only the
+32 GB sizing has been run at this table size.
 
 ### Quick Start (Ubuntu / Linux)
 
@@ -119,6 +122,9 @@ docker compose logs -f app | grep -m1 "Ready in"
 Open [http://localhost:3000](http://localhost:3000). Log in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
 
 > **Security:** Change the admin password immediately. The app logs a warning at startup if it is still `admin`.
+>
+> The app's port is published on **127.0.0.1 only** (reachable from the machine itself). To reach it from
+> other machines set `APP_BIND_ADDR=0.0.0.0` in `.env` — and enrol 2FA for every account first.
 
 ### Inbox folder (batch / automated uploads)
 
@@ -285,7 +291,7 @@ The app supports scheduled or manual dedup — **report-only until you opt in**:
 ```bash
 CONTENT_DEDUP_APPLY=true   # allow the background ALTER … DELETE
 DEDUP_CRON_HOURS=24        # 0 disables the scheduled job
-DEDUP_MIN_EXCESS=1000      # skip the (heavy) mutation below this many excess rows
+DEDUP_MIN_EXCESS=1000      # skip the (heavy) rewrite below this many excess rows (the 1.39B-row deployment uses 14000000, ~1% of the table)
 ```
 
 ### Ingest tier filter — permanently reject T3
@@ -346,16 +352,37 @@ Full interactive docs at `/docs` when the app is running.
 
 ## Performance
 
-Tested at tens of billions of credential lines:
+Reference deployment: 1.39 billion rows, one 32 GB laptop (cold timings, measured 2026-09/10):
 
 | Metric | Value |
 |---|---|
 | Insert throughput | ~1–2M rows/min on laptop SSD (single-process) |
 | Peak heap per 500K-row batch | ~100 MB (array in memory before insert) |
 | Dedup Set cap | 2M entries → ~440 MB max (prevents OOM on huge files) |
-| Credential search P99 | <200 ms with ClickHouse bloom filters |
+| Exact domain / email lookup | 0.03–1.3 s cold (bloom filters + primary key); a very popular value such as `admin@gmail.com` takes 7–23 s |
+| Token / substring search | seconds to tens of seconds depending on the term and sort; the total is a separate query that arrives after the rows |
+| Domain-monitor re-scan | ~5 s per tick for 17 domains (reversed-key projections + a single normalising pass over the legacy bucket) |
 | Monitor re-scan tick | 15 minutes, in-process, no external queue |
 | Inbox reconciliation | Every 30 s — catches any missed chokidar events |
+
+---
+
+## Operations
+
+- **Disk space.** The app checks free space on the ClickHouse data disk every 10 minutes
+  (`lib/disk-watch.ts`), logs a warning when it gets low, and shows it in the Ingest Health panel
+  (Upload and Inbox pages). Optional: `DISK_ALERT_WEBHOOK_URL` also POSTs each alert to a
+  Slack-compatible webhook; nothing is sent anywhere unless you set it. Heavy jobs (dedup, projection
+  restores) refuse to start below the same floor.
+- **Backups.** The app snapshots its own SQLite (users, API keys, monitors) into `./data/backups` daily.
+  ClickHouse backups are taken with `./scripts/clickhouse-backup.sh` and need an S3-compatible
+  destination (`S3_*` in `.env`); until one exists the panel says "No ClickHouse backup recorded".
+  Read `docs/clickhouse-backup-runbook.md` first — it explains why local snapshots are guarded by a
+  disk-space check.
+- **Durability.** Inserts and merges are fsynced (`fsync_after_insert`, and `min_rows_to_fsync_after_merge`
+  from DDL v25).
+- **Known data-quality gap.** About 6.3M rows (0.45%) imported by an earlier parser sit in the wrong
+  columns, so an exact domain/email filter cannot see them; see the header of `lib/ulp-normalize.ts`.
 
 ---
 

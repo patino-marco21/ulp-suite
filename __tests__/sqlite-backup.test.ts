@@ -87,12 +87,19 @@ describe('runSqliteBackup', () => {
     expect(listSqliteBackups(sqliteBackupDir(env))).toEqual([])
   })
 
-  test('a stale .partial file from a crash is cleaned up', async () => {
+  test('a stale .partial file from a crash (and its WAL companions) is cleaned up', async () => {
     const dir = sqliteBackupDir(env)
     fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(path.join(dir, 'ulp-20260101-000000.db.partial'), 'torn')
+    for (const f of ['ulp-20260101-000000.db.partial', 'ulp-20260101-000000.db.partial-wal', 'ulp-20260101-000000.db.partial-shm']) {
+      fs.writeFileSync(path.join(dir, f), 'torn')
+    }
     await runSqliteBackup({ env, now: at('2026-10-01T01:00:00Z'), backup: backupFromSrc })
-    expect(fs.readdirSync(dir).filter(f => f.endsWith('.partial'))).toEqual([])
+    expect(fs.readdirSync(dir).filter(f => f.includes('.partial'))).toEqual([])
+  })
+
+  test('a successful run leaves only the snapshot and the status file behind', async () => {
+    await runSqliteBackup({ env, now: at('2026-10-01T01:00:00Z'), backup: backupFromSrc })
+    expect(fs.readdirSync(sqliteBackupDir(env)).sort()).toEqual(['sqlite-last.json', 'ulp-20261001-010000.db'])
   })
 
   test('verifySqliteSnapshot rejects a file that is not a database', () => {

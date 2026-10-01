@@ -89,8 +89,9 @@ export async function runSqliteBackup(
   const verify = deps.verify ?? verifySqliteSnapshot
 
   fs.mkdirSync(dir, { recursive: true })
-  // A crash between the backup and the rename leaves a .partial file; nothing else ever reads one.
-  for (const f of fs.readdirSync(dir)) if (f.endsWith('.partial')) fs.rmSync(path.join(dir, f), { force: true })
+  // A crash between the backup and the rename leaves a .partial file (and, if it was opened for
+  // verification, its -wal/-shm companions); nothing else ever reads one.
+  for (const f of fs.readdirSync(dir)) if (f.includes('.db.partial')) fs.rmSync(path.join(dir, f), { force: true })
   const name = `ulp-${stamp(now())}.db`
   const final = path.join(dir, name)
   const partial = `${final}.partial`
@@ -100,9 +101,10 @@ export async function runSqliteBackup(
     verify(partial)
     fs.renameSync(partial, final)
   } catch (err) {
-    fs.rmSync(partial, { force: true })
+    for (const f of [partial, `${partial}-wal`, `${partial}-shm`]) fs.rmSync(f, { force: true })
     throw err
   }
+  for (const f of [`${partial}-wal`, `${partial}-shm`]) fs.rmSync(f, { force: true })
 
   const bytes = fs.statSync(final).size
   const all = listSqliteBackups(dir)
