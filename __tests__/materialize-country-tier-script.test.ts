@@ -33,7 +33,9 @@ case "$sql" in
   *"AS pending_mutations"*)      echo "\${STUB_PENDING:-0}" ;;
   *"AS free_gib"*)               echo "\${STUB_FREE_GIB:-200}" ;;
   *"cityHash64(email, url) %"*)  cat "$STUB_PARITY" ;;
+  *"AS mutation_state"*"MATERIALIZE PROJECTION"*) printf '%b' "\${STUB_PROJ_MUTATION_STATE:-1\\t0\\t\\n}" ;;
   *"AS mutation_state"*)         printf '%b' "\${STUB_MUTATION_STATE:-1\\t0\\t\\n}" ;;
+  *"AS last_mutation"*)          echo "\${STUB_LAST_MUTATION-}" ;;
   *"MATERIALIZE COLUMN"*)        : ;;
   *"AS stored_ne_expression"*)   echo "\${STUB_FULL_MISMATCH:-0}" ;;
   *"AS projection_partition"*)   printf '%b' "\${STUB_PROJ_PARTS-202608\\n}" ;;
@@ -86,6 +88,9 @@ function run(env: Record<string, string>, parity = PARITY_OK) {
 
 // The ALTER statement itself (the progress query mentions the same words in a LIKE).
 const materializes = (calls: string) => (calls.match(/ALTER TABLE ulp\.credentials MATERIALIZE COLUMN country_tier/g) ?? []).length
+/** Every statement the script sent, whitespace collapsed, in order. */
+const statements = (calls: string) => calls.split('-- end of statement --').map(s => s.replace(/\s+/g, ' ').trim()).filter(Boolean)
+
 /** Every statement the script sent that is not a read: the first word of each recorded statement, uppercased. */
 const writes = (calls: string) =>
   calls.split('-- end of statement --').map(s => s.trim()).filter(s => /^(ALTER|KILL|INSERT|DROP|CREATE|DELETE|TRUNCATE|OPTIMIZE|SYSTEM)\b/i.test(s)).map(s => s.replace(/\s+/g, ' ').replace(/ SETTINGS .*/, ''))
@@ -117,6 +122,32 @@ describe('scripts/materialize-country-tier.sh', () => {
     expect(r.calls).toMatch(/AS stored_ne_expression[\s\S]*optimize_use_projections = 0/)
     expect(destructive(r.calls)).toBe(false)
     expect(r.out).toMatch(/country_tier is now consistent/i)
+  }, 120_000)
+
+  test('the projection rebuild is submitted asynchronously and polled (a synchronous ALTER sits silent past the client\'s 300 s receive timeout and killed the first live run)', () => {
+    const r = run({ APPLY: '1' })
+    expect(r.status).toBe(0)
+    const rebuild = statements(r.calls).find(s => s.startsWith('ALTER TABLE ulp.credentials MATERIALIZE PROJECTION'))!
+    expect(rebuild).toContain('mutations_sync = 0')
+    expect(rebuild).not.toContain('mutations_sync = 1')
+    const rebuildAt = statements(r.calls).indexOf(rebuild)
+    const polls = statements(r.calls).slice(rebuildAt + 1).filter(s => s.includes('AS mutation_state') && s.includes('MATERIALIZE PROJECTION proj_imported_desc IN PARTITION'))
+    expect(polls.length).toBeGreaterThan(0)
+  }, 120_000)
+
+  test('it only waits for a mutation NEWER than the newest one that existed before it submitted its own (an earlier finished run must not pass for this one)', () => {
+    const r = run({ APPLY: '1', STUB_LAST_MUTATION: '0000000012' })
+    expect(r.status).toBe(0)
+    const polls = statements(r.calls).filter(s => s.includes('AS mutation_state'))
+    expect(polls.length).toBeGreaterThanOrEqual(2) // the column, then the projection
+    for (const poll of polls) expect(poll).toContain("mutation_id > '0000000012'")
+  }, 120_000)
+
+  test('exit 6 when the projection rebuild fails, and it says which one', () => {
+    const r = run({ APPLY: '1', STUB_PROJ_MUTATION_STATE: '0\\t1\\tCode: 243. DB::Exception: Not enough space\\n' })
+    expect(r.status).toBe(6)
+    expect(r.out).toMatch(/proj_imported_desc/)
+    expect(r.out).toMatch(/Code: 243/)
   }, 120_000)
 
   test('every partition that carries the projection is rebuilt, and only those', () => {

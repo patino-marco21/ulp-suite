@@ -242,7 +242,11 @@ or `https`:
 2. **Enrolling 2FA** (needs the owner's authenticator). The loopback binding is the interim mitigation.
 3. **S3 credentials / destination** for the off-host backup.
 4. **Major upgrades**: Next 15 -> 16, Tailwind 3 -> 4, ESLint 8 -> 10 (8 is EOL), Zod 3 -> 4, TypeScript 5.9 -> 7, vitest 4 -> 5.
-5. **Repairing the ~6.3M legacy rows in storage.** An `ALTER ... UPDATE` rewrites url/email/password/domain and every
+5. **Repairing the ~6.3M legacy rows in storage.** *Update 2026-10-01:* the 3,288,434 scheme-split rows (url `https`,
+   email `//host/path`, password `login|pass`) have a tool that APPENDS corrected copies instead of rewriting a partition
+   (`scripts/repair-scheme-split-rows.sh`, `lib/legacy-repair.ts`; dry run only so far: 309,707 of a 409,801-row sample
+   repair, 80,631 are T3 once corrected and are not re-introduced). The 3.16M Case D rows are display-repaired and stay
+   as they are until a backup exists. The paragraph below is the original plan for a full rewrite. An `ALTER ... UPDATE` rewrites url/email/password/domain and every
    derived column in every part (plus `proj_imported_desc`); insert-then-delete is blocked by projections
    (`DELETE FROM` needs `lightweight_mutation_projection_mode`). Sketch that fits the disk: build a repaired copy
    per partition into a scratch table (`INSERT ... SELECT` with the corrected columns, ~65 GiB / ~68 GiB), verify
@@ -250,9 +254,15 @@ or `https`:
    first and ~70 GiB of headroom per partition. Not rehearsed.
 6. **Token / substring search over the whole table** (`accounts.google.com` as a token: 25-43 s for 50 rows).
    A dictionary-backed or sorted-projection design was judged too risky to improvise.
-7. **Keyset paging across legacy rows**: the cursor is built from the normalised row but compared against stored
-   columns, so rows of the 0.45% above can be skipped or repeated at a page boundary that falls inside one
-   `imported_at` second. Fixing it means returning raw cursor columns alongside the normalised ones.
-8. **`/api/check` is unauthenticated and rate-limited by the `X-Forwarded-For` header**, which a client can set. It
-   returns breach names and up to 10 domains per breach, no passwords. Left as designed; tightening it needs a
-   decision about the deployment (trusted proxy or not).
+7. ~~**Keyset paging across legacy rows**~~ **Fixed 2026-10-01 (`e290042`).** The cursor was built from the normalised
+   row but compared against stored columns. It is now built from the stored values, which the routes select under `_c_`
+   aliases and strip again before responding (`lib/cursor-pagination.ts`). It was worse than "a page boundary inside one
+   second": on the live table a `domain_asc` page ending on a Case D row (stored domain `''`) would have resumed at the repaired
+   domain's position and skipped 170,182,664 of the 1,382,183,595 rows after it.
+8. ~~**`/api/check` is rate-limited by the `X-Forwarded-For` header**, which a client can set.~~ **Changed 2026-10-01
+   (`e01bf55`).** Next.js only fills that header in when the client sent none, so with nothing in front of the app it is
+   whatever the caller wrote. `lib/client-ip.ts` is now the only place that reads it: `TRUST_PROXY_HOPS` (default 0) is the
+   number of reverse proxies that append the client address, and the client is the entry that many places from the right.
+   Without a trusted proxy `/api/check` has a 60/min budget shared by everyone, 50/hour per email and at most 4 lookups in
+   flight; a trusted address also gets 10/min. Verified live: with a different forged address on every call, request 61
+   got a 429.

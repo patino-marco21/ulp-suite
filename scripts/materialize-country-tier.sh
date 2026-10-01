@@ -55,7 +55,8 @@ if [[ ! -x "$TSX_BIN" ]]; then
 fi
 
 ch() {
-  "$DOCKER_BIN" exec "$CONTAINER" clickhouse-client --query "$1"
+  # --receive_timeout: the client's default is 300 s of silence; a query that only waits (or a long scan) must not be abandoned.
+  "$DOCKER_BIN" exec "$CONTAINER" clickhouse-client --receive_timeout=7200 --send_timeout=7200 --query "$1"
 }
 
 echo "ULP Suite - country_tier backfill (DDL v26)"
@@ -127,47 +128,63 @@ if [[ "$APPLY" != "1" ]]; then
 fi
 
 # ── apply ────────────────────────────────────────────────────────────────────
-echo
-echo "Starting: ALTER TABLE ulp.credentials MATERIALIZE COLUMN country_tier (asynchronous; this script watches it)"
-ch "ALTER TABLE ulp.credentials MATERIALIZE COLUMN country_tier SETTINGS mutations_sync = 0"
 
-deadline=$(( $(date +%s) + MAX_MINUTES * 60 ))
-not_found=0
-while true; do
-  state="$(ch "SELECT is_done, parts_to_do, latest_fail_reason AS mutation_state FROM system.mutations WHERE database = 'ulp' AND table = 'credentials' AND command LIKE '%MATERIALIZE COLUMN country_tier%' ORDER BY create_time DESC LIMIT 1 FORMAT TSVRaw")"
-  if [[ -z "$state" ]]; then
-    not_found=$(( not_found + 1 ))
-    if (( not_found >= 5 )); then
-      echo "ERROR: the MATERIALIZE mutation is not in system.mutations; check it by hand before running this again." >&2
+# Newest mutation id whose command matches a LIKE pattern, read BEFORE submitting a new one, so that we only ever wait for a
+# mutation NEWER than that (an earlier finished run with the same command must not pass for this one).
+last_mutation_id() {
+  ch "SELECT max(mutation_id) AS last_mutation FROM system.mutations WHERE database = 'ulp' AND table = 'credentials' AND command LIKE '$1' FORMAT TSVRaw"
+}
+
+# wait_for_mutation LIKE_PATTERN LABEL BEFORE_ID: poll system.mutations until the newest matching mutation after BEFORE_ID is
+# done. Exit 6 if it is failing or cannot be found, 4 (after killing it) if free disk drops below ABORT_FREE_GIB, 5 on timeout.
+# Every long step is submitted with mutations_sync = 0 and polled: an ALTER that waits holds a silent connection, and the
+# client abandoned the first live run's projection rebuild after 300 s while the server went on and finished it.
+wait_for_mutation() {
+  local pattern="$1" label="$2" before="$3"
+  local deadline=$(( $(date +%s) + MAX_MINUTES * 60 )) not_found=0 state is_done parts_to_do fail_reason free_now
+  while true; do
+    state="$(ch "SELECT is_done, parts_to_do, latest_fail_reason AS mutation_state FROM system.mutations WHERE database = 'ulp' AND table = 'credentials' AND command LIKE '$pattern' AND mutation_id > '$before' ORDER BY mutation_id DESC LIMIT 1 FORMAT TSVRaw")"
+    if [[ -z "$state" ]]; then
+      not_found=$(( not_found + 1 ))
+      if (( not_found >= 5 )); then
+        echo "ERROR: the $label mutation is not in system.mutations; check it by hand before running this again." >&2
+        exit 6
+      fi
+      sleep "$POLL_SECONDS"
+      continue
+    fi
+    IFS=$'\t' read -r is_done parts_to_do fail_reason <<<"$state"
+    if [[ -n "${fail_reason:-}" ]]; then
+      echo "ERROR: the $label mutation is failing: $fail_reason" >&2
+      echo "       It keeps retrying. To stop it:  docker exec $CONTAINER clickhouse-client --query \"KILL MUTATION WHERE database='ulp' AND table='credentials' AND command LIKE '$pattern' AND mutation_id > '$before'\"" >&2
       exit 6
     fi
+    if [[ "${is_done:-0}" == "1" ]]; then
+      return 0
+    fi
+    free_now="$(ch "SELECT toUInt64(floor(free_space / 1073741824)) AS free_gib FROM system.disks WHERE name = 'default' FORMAT TSVRaw")"
+    free_now="${free_now:-0}"
+    echo "  $(date -u +%H:%M:%S) $label: parts still to rewrite: ${parts_to_do:-?}; free disk ${free_now} GiB"
+    if (( free_now < ABORT_FREE_GIB )); then
+      ch "KILL MUTATION WHERE database = 'ulp' AND table = 'credentials' AND command LIKE '$pattern' AND mutation_id > '$before'" || true
+      echo "ERROR: free disk fell to $free_now GiB (< $ABORT_FREE_GIB); the $label mutation was killed. Free space and run again." >&2
+      exit 4
+    fi
+    if (( $(date +%s) > deadline )); then
+      echo "ERROR: the $label mutation is still running after $MAX_MINUTES minutes. It was NOT stopped; watch it in system.mutations." >&2
+      exit 5
+    fi
     sleep "$POLL_SECONDS"
-    continue
-  fi
-  IFS=$'\t' read -r is_done parts_to_do fail_reason <<<"$state"
-  if [[ -n "${fail_reason:-}" ]]; then
-    echo "ERROR: the mutation is failing: $fail_reason" >&2
-    echo "       It keeps retrying. To stop it:  docker exec $CONTAINER clickhouse-client --query \"KILL MUTATION WHERE database='ulp' AND table='credentials' AND command LIKE '%MATERIALIZE COLUMN country_tier%'\"" >&2
-    exit 6
-  fi
-  if [[ "${is_done:-0}" == "1" ]]; then
-    break
-  fi
-  free_now="$(ch "SELECT toUInt64(floor(free_space / 1073741824)) AS free_gib FROM system.disks WHERE name = 'default' FORMAT TSVRaw")"
-  free_now="${free_now:-0}"
-  echo "  $(date -u +%H:%M:%S) parts still to rewrite: ${parts_to_do:-?}; free disk ${free_now} GiB"
-  if (( free_now < ABORT_FREE_GIB )); then
-    ch "KILL MUTATION WHERE database = 'ulp' AND table = 'credentials' AND command LIKE '%MATERIALIZE COLUMN country_tier%'" || true
-    echo "ERROR: free disk fell to $free_now GiB (< $ABORT_FREE_GIB); the mutation was killed. Free space and run again." >&2
-    exit 4
-  fi
-  if (( $(date +%s) > deadline )); then
-    echo "ERROR: still running after $MAX_MINUTES minutes. It was NOT stopped; watch it in system.mutations." >&2
-    exit 5
-  fi
-  sleep "$POLL_SECONDS"
-done
-echo "mutation finished"
+  done
+}
+
+echo
+echo "Starting: ALTER TABLE ulp.credentials MATERIALIZE COLUMN country_tier (asynchronous; this script watches it)"
+COLUMN_PATTERN="%MATERIALIZE COLUMN country_tier%"
+before="$(last_mutation_id "$COLUMN_PATTERN")"
+ch "ALTER TABLE ulp.credentials MATERIALIZE COLUMN country_tier SETTINGS mutations_sync = 0"
+wait_for_mutation "$COLUMN_PATTERN" "country_tier backfill" "$before"
+echo "country_tier backfill finished"
 
 # ── proj_imported_desc: clear and rebuild it where it exists (see the header) ─────────────────────────────────────────
 projection_partitions="$(ch "SELECT DISTINCT partition AS projection_partition FROM system.projection_parts WHERE database = 'ulp' AND table = 'credentials' AND name = 'proj_imported_desc' AND active ORDER BY partition FORMAT TSVRaw")"
@@ -182,8 +199,12 @@ for p in $projection_partitions; do
   fi
   echo
   echo "Rebuilding proj_imported_desc for partition $p (it carries country_tier; this takes a while)..."
+  PROJ_PATTERN="%MATERIALIZE PROJECTION proj_imported_desc IN PARTITION%$p%"
   ch "ALTER TABLE ulp.credentials CLEAR PROJECTION proj_imported_desc IN PARTITION '$p' SETTINGS mutations_sync = 2"
-  ch "ALTER TABLE ulp.credentials MATERIALIZE PROJECTION proj_imported_desc IN PARTITION '$p' SETTINGS mutations_sync = 1, max_execution_time = 7200, timeout_overflow_mode = 'throw'"
+  before="$(last_mutation_id "$PROJ_PATTERN")"
+  ch "ALTER TABLE ulp.credentials MATERIALIZE PROJECTION proj_imported_desc IN PARTITION '$p' SETTINGS mutations_sync = 0"
+  wait_for_mutation "$PROJ_PATTERN" "proj_imported_desc rebuild (partition $p)" "$before"
+  echo "proj_imported_desc rebuilt for partition $p"
 done
 
 # ── verify: the stored label must now equal the expression on EVERY row (base columns), and in the projection ──────────
