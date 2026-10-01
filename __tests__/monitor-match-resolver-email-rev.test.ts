@@ -21,9 +21,12 @@ beforeEach(() => {
 
 // Each test uses its own domain: the resolver caches phase-1 results per (mode, domains)
 // in a module-level Map that clearAllMocks does not reset.
+// Answers the readiness query for proj_email_domain_rev only; proj_domain_rev reports "not built"
+// so these tests keep exercising today's domain plan (see monitor-match-resolver-domain-rev.test.ts).
 function answerReadiness(result: unknown[] | Error) {
   mockExecuteQuery.mockImplementation(async (sql: string) => {
     if (sql.includes('system.projection_parts')) {
+      if (!sql.includes(`name = 'proj_email_domain_rev'`)) return [{ parts: '8', with_projection: '0' }]
       if (result instanceof Error) throw result
       return result as any[]
     }
@@ -45,7 +48,7 @@ describe('resolveMonitorMatches — email_domain candidate scan plan', () => {
     expect(sql).not.toContain('endsWith(email_domain')
   })
 
-  test('the domain scan is unaffected -- same endsWith predicate, projections still off', async () => {
+  test('the domain scan is unaffected while proj_domain_rev is not built -- same endsWith predicate, projections still off', async () => {
     answerReadiness([{ parts: '8', with_projection: '8' }])
     await resolveMonitorMatches('both', ['rev-domain-unchanged.example'])
     const sql = domainScan()!
@@ -77,10 +80,10 @@ describe('resolveMonitorMatches — email_domain candidate scan plan', () => {
     warn.mockRestore()
   })
 
-  test('does not run the readiness check for url-mode monitors (no email_domain scan at all)', async () => {
+  test('does not run the email_domain readiness check for url-mode monitors (no email_domain scan at all)', async () => {
     answerReadiness([{ parts: '8', with_projection: '8' }])
     await resolveMonitorMatches('url', ['rev-url-mode.example'])
-    expect(sqlCalls().some(sql => sql.includes('system.projection_parts'))).toBe(false)
+    expect(sqlCalls().some(sql => sql.includes(`name = 'proj_email_domain_rev'`))).toBe(false)
     expect(emailScan()).toBeUndefined()
   })
 })

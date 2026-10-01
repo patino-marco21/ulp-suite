@@ -10,7 +10,7 @@ import { buildFreeWebmailInClause } from './webmail-providers'
 import { NOISE_EXPR } from './ulp-noise'
 import { dbGet, dbRun } from './sqlite'
 import { SEARCH_INDEX_DEFINITIONS } from './search-index-definitions'
-import { IMPORTED_DESC_PROJECTION_BODY, buildAddEmailDomainRevProjectionSql } from './credentials-projections'
+import { IMPORTED_DESC_PROJECTION_BODY, buildAddDomainRevProjectionSql, buildAddEmailDomainRevProjectionSql } from './credentials-projections'
 import { URL_CONTENT_KEY } from './url-content-key'
 
 // Per-process guard (still useful to avoid redundant calls within one process)
@@ -208,7 +208,12 @@ let migrationsDone = false
 //      its MATERIALIZE: app start must not be coupled to a mutation. Until every part
 //      carries it the resolver runs its original skip-index scan. See
 //      docs/superpowers/specs/2026-09-30-query-perf-wins-design.md.
-const DDL_VERSION = 23
+// v24: proj_domain_rev — the same partial projection for the `domain` column
+//      (`SELECT _part_offset ORDER BY reverse(domain)`), for the monitor's `domain`
+//      candidate scan, which ran 42.7 s / 666M rows cold. ADD only, backfilled by
+//      restoreDomainRevProjection, and the resolver uses it only once every part carries
+//      it (see v23). See docs/superpowers/specs/2026-09-30-related-panel-and-domain-rev-design.md.
+const DDL_VERSION = 24
 
 // Per-version persistence: stored in SQLite app_settings.
 // Key: 'ch_ddl_version' — value: last completed DDL_VERSION.
@@ -938,6 +943,16 @@ export async function runClickHouseMigrations(): Promise<void> {
       console.warn('[ClickHouse migration] DDL v23 applied (added proj_email_domain_rev projection -- existing parts need restoreEmailDomainRevProjection)')
     } catch (err) {
       console.error('[ClickHouse migration] v23: ADD PROJECTION proj_email_domain_rev -- FAILED:', err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  // v24 — proj_domain_rev (see DDL_VERSION comment above). ADD only; same failure mode as v23.
+  if (lastDdl < 24) {
+    try {
+      await client.exec({ query: buildAddDomainRevProjectionSql() })
+      console.warn('[ClickHouse migration] DDL v24 applied (added proj_domain_rev projection -- existing parts need restoreDomainRevProjection)')
+    } catch (err) {
+      console.error('[ClickHouse migration] v24: ADD PROJECTION proj_domain_rev -- FAILED:', err instanceof Error ? err.message : String(err))
     }
   }
 

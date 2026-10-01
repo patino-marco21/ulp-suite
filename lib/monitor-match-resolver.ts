@@ -59,12 +59,15 @@
 import { executeQuery } from '@/lib/clickhouse'
 import { NORM_DOMAIN_EXPR } from '@/lib/ulp-normalize'
 import {
+  DOMAIN_REV_PROJECTION_NAME,
   EMAIL_DOMAIN_REV_PROJECTION_NAME,
+  isDomainRevProjectionReady,
   isEmailDomainRevProjectionReady,
 } from '@/lib/credentials-projections'
 import {
   buildDomainSetWhereClause,
   buildCandidateColumnWhereClause,
+  buildDomainRevCandidateWhereClause,
   buildEmailDomainRevCandidateWhereClause,
   buildCandidateValueBranches,
   compareMatches,
@@ -125,6 +128,10 @@ const CANDIDATE_LIMIT = 1000
  * prefix ranges; resolveCandidates uses it whenever the projection is fully
  * materialized and this skip-index plan otherwise. See
  * docs/superpowers/specs/2026-09-30-query-perf-wins-design.md.
+ *
+ * The `domain` scan has the same shape of problem (its ngram index prunes nothing either: 42.7 s /
+ * 666M rows cold for 17 domains, fast only while the query condition cache was warm) and the same
+ * fix, proj_domain_rev; see docs/superpowers/specs/2026-09-30-related-panel-and-domain-rev-design.md.
  */
 const PHASE1_MAX_EXECUTION_TIME = 90
 
@@ -253,6 +260,20 @@ function candidateCacheKey(mode: MatchMode, domains: string[]): string {
   return JSON.stringify([mode, [...domains].sort()])
 }
 
+/** Per candidate column: the reversed-key projection that serves its scan, the predicate rewritten for it, and any extra planner setting it needs. */
+const REVERSED_KEY_SCANS = {
+  domain: {
+    projection: DOMAIN_REV_PROJECTION_NAME,
+    buildWhere: buildDomainRevCandidateWhereClause,
+    extraSettings: ', optimize_distinct_in_order = 0',
+  },
+  email_domain: {
+    projection: EMAIL_DOMAIN_REV_PROJECTION_NAME,
+    buildWhere: buildEmailDomainRevCandidateWhereClause,
+    extraSettings: '',
+  },
+} as const
+
 /**
  * Resolve the exact column values phase 2 can prune to. Runs the per-column
  * scans and the legacy-normalization probe concurrently; the slowest one
@@ -263,27 +284,32 @@ async function resolveCandidates(mode: MatchMode, domains: string[]): Promise<Ca
   if (mode === 'url' || mode === 'both') columns.push('domain')
   if (mode === 'credential' || mode === 'both') columns.push('email_domain')
 
-  // One metadata query (system.parts vs system.projection_parts) decides how the email_domain
-  // scan runs: through proj_email_domain_rev only when EVERY active part carries it, otherwise
-  // today's skip-index plan verbatim. Fails closed -- see isEmailDomainRevProjectionReady.
-  const viaRevProjection =
-    columns.includes('email_domain') && (await isEmailDomainRevProjectionReady(sql => executeQuery(sql)))
+  // One metadata query per column (system.parts vs system.projection_parts) decides how its scan
+  // runs: through the reversed-key projection only when EVERY active part carries it, otherwise
+  // today's skip-index plan verbatim. Fails closed -- see isDomainRevProjectionReady.
+  const runMetadata = (sql: string) => executeQuery(sql)
+  const [domainViaRev, emailViaRev] = await Promise.all([
+    columns.includes('domain') ? isDomainRevProjectionReady(runMetadata) : false,
+    columns.includes('email_domain') ? isEmailDomainRevProjectionReady(runMetadata) : false,
+  ])
 
   const scans = columns.map(async column => {
-    const useRev = column === 'email_domain' && viaRevProjection
-    const { clause, params } = useRev
-      ? buildEmailDomainRevCandidateWhereClause(domains)
-      : buildCandidateColumnWhereClause(column, domains)
+    const rev = (column === 'domain' ? domainViaRev : emailViaRev) ? REVERSED_KEY_SCANS[column] : null
+    const { clause, params } = rev ? rev.buildWhere(domains) : buildCandidateColumnWhereClause(column, domains)
     // Plan settings differ per path:
     //  - reversed-key projection index: projections stay ON and the named projection is
-    //    preferred. `reverse(email_domain)` turns each `= 'x' OR endsWith(.., '.x')` pair into
+    //    preferred. `reverse(<column>)` turns each `= 'x' OR endsWith(.., '.x')` pair into
     //    prefix ranges, so the scan reads ~(domains x one granule) instead of the table.
+    //    `domain` also needs optimize_distinct_in_order = 0: it is the primary key's first column,
+    //    so the planner otherwise answers SELECT DISTINCT by reading the base table in key order
+    //    and never considers the projection (measured on a sandbox: 1224 of 1224 granules and no
+    //    projection used, against 29 granules and 1.8M rows read with the setting off).
     //  - skip-index plan: optimize_use_projections = 0. For this predicate shape the planner
     //    prefers any narrow covering projection (proj_imported_desc includes email_domain) over
     //    the base table's ngram skip indexes and then reads every row -- measured live
     //    2026-09-30: 22s / 1.39B rows with it vs 9s / 545M rows without, identical results.
-    const planSettings = useRev
-      ? `preferred_optimize_projection_name = '${EMAIL_DOMAIN_REV_PROJECTION_NAME}'`
+    const planSettings = rev
+      ? `preferred_optimize_projection_name = '${rev.projection}'${rev.extraSettings}`
       : 'optimize_use_projections = 0'
     const rows = await executeQuery(
       `SELECT DISTINCT ${column} AS value

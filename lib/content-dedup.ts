@@ -133,8 +133,8 @@
  *
  * DEFERRED PROJECTIONS (2026-09-30): the clone is created WITHOUT
  * ulp.credentials' PROJECTIONs (buildDedupedTableCreateDdl) and
- * proj_email_domain_rev and proj_imported_desc are restored on the live table after the swap and
- * catch-up (tick step 9). Projections were 64% of the table's 381 GiB, and
+ * proj_email_domain_rev, proj_domain_rev and proj_imported_desc are restored on the live table
+ * after the swap and catch-up (tick step 9). Projections were 64% of the table's 381 GiB, and
  * building with them cost ~18 GiB per populate bucket against ~6.5 without --
  * enough to trip the disk guard against the real 2.78B-row table three times.
  * Nothing is lost: a projection only re-stores columns the base table already
@@ -162,7 +162,9 @@ import { URL_CONTENT_KEY } from '@/lib/url-content-key'
 import { SEARCH_INDEX_DEFINITIONS } from '@/lib/search-index-definitions'
 import { createDiskGuard, DiskHeadroomError, type DiskGuard } from '@/lib/clickhouse-disk-guard'
 import {
+  DOMAIN_REV_PROJECTION_NAME,
   EMAIL_DOMAIN_REV_PROJECTION_NAME,
+  restoreDomainRevProjection,
   restoreEmailDomainRevProjection,
   restoreImportedDescProjection,
   stripProjectionsFromCreateTableDdl,
@@ -832,12 +834,13 @@ export async function runContentDedupTick(
     // 9. Restore the projections deferred out of the build (see DEFERRED
     // PROJECTIONS in the file header). The swap and catch-up are already done
     // and ulp.credentials is correct without them -- the "newest first" default
-    // sort and the monitor's email_domain scan are merely slower (the resolver
+    // sort and the monitor's email_domain and domain scans are merely slower (the resolver
     // falls back on its own) -- so a failure here (most likely a disk-guard trip
     // while the archived original is still on disk) is reported but must NOT turn
-    // this into applied: false. The small email_domain one goes first.
+    // this into applied: false. The two small reversed-key ones go first.
     const projectionsRestored = await restoreDeferredProjections(trigger, [
       { name: EMAIL_DOMAIN_REV_PROJECTION_NAME, run: () => restoreEmailDomainRevProjection(client, createDiskGuard('ulp.credentials')) },
+      { name: DOMAIN_REV_PROJECTION_NAME, run: () => restoreDomainRevProjection(client, createDiskGuard('ulp.credentials')) },
       { name: 'proj_imported_desc', run: () => restoreImportedDescProjection(client, createDiskGuard('ulp.credentials')) },
     ])
 

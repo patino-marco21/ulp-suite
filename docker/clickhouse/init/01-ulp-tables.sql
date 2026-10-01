@@ -307,6 +307,14 @@ CREATE TABLE IF NOT EXISTS ulp.credentials
     PROJECTION proj_email_domain_rev (
         SELECT _part_offset
         ORDER BY reverse(email_domain)
+    ),
+
+    -- proj_domain_rev: the same partial projection for the monitor's `domain` scan
+    -- (`domain = 'x' OR endsWith(domain, '.x')`). Mirrors DDL v24 in
+    -- lib/clickhouse-migrations.ts — that file is the source of truth; keep both in sync.
+    PROJECTION proj_domain_rev (
+        SELECT _part_offset
+        ORDER BY reverse(domain)
     )
 )
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/ulp/credentials', '{replica}')

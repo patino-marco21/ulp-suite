@@ -286,12 +286,14 @@ export type CandidateColumn = 'domain' | 'email_domain'
  * history — kept there instead of re-explained on every read of this file.
  *
  * 2026-09-30 addendum: that attempt used a normal covering projection and a minmax
- * index. A PARTIAL projection (`SELECT _part_offset ORDER BY reverse(email_domain)`,
+ * index. A PARTIAL projection (`SELECT _part_offset ORDER BY reverse(<column>)`,
  * ClickHouse 26.3 projection-index filtering) IS selected by the planner and does
- * range-prune the reversed predicate — measured on a sandbox and then on the live table;
- * see buildEmailDomainRevCandidateWhereClause below and
- * docs/superpowers/specs/2026-09-30-query-perf-wins-design.md. This builder remains the
- * fallback whenever that projection is not fully materialized.
+ * range-prune the reversed predicate — measured on a sandbox and then on the live table,
+ * for `email_domain` (proj_email_domain_rev) and for `domain` (proj_domain_rev); see
+ * buildReversedCandidateWhereClause below and
+ * docs/superpowers/specs/2026-09-30-query-perf-wins-design.md and
+ * docs/superpowers/specs/2026-09-30-related-panel-and-domain-rev-design.md. This builder
+ * remains the fallback whenever the matching projection is not fully materialized.
  */
 export function buildCandidateColumnWhereClause(
   column: CandidateColumn,
@@ -306,29 +308,44 @@ export function buildCandidateColumnWhereClause(
 }
 
 /**
- * The same domain-or-subdomain semantics as buildCandidateColumnWhereClause('email_domain', ...),
- * rewritten against the reversed value so ClickHouse can range-prune it through
- * proj_email_domain_rev (`ORDER BY reverse(email_domain)`): `= 'x'` becomes an equality on the
- * reversed key and `endsWith(v, '.x')` becomes `startsWith(reverse(v), reverse('.x'))`, a
+ * The same domain-or-subdomain semantics as buildCandidateColumnWhereClause(column, ...),
+ * rewritten against the reversed value so ClickHouse can range-prune it through the
+ * column's reversed-key projection (`ORDER BY reverse(<column>)`): `= 'x'` becomes an equality
+ * on the reversed key and `endsWith(v, '.x')` becomes `startsWith(reverse(v), reverse('.x'))`, a
  * prefix range. `reverse` is byte-wise on both sides, so the two forms match exactly the
  * same rows. Same parameter names and values as the original builder.
  *
  * ONLY valid to run when that projection exists on every part: without it this form is a
  * full read, worse than the original (measured) — callers gate on
- * isEmailDomainRevProjectionReady (lib/credentials-projections.ts).
+ * isEmailDomainRevProjectionReady / isDomainRevProjectionReady (lib/credentials-projections.ts).
  */
-export function buildEmailDomainRevCandidateWhereClause(
+export function buildReversedCandidateWhereClause(
+  column: CandidateColumn,
   domains: string[],
 ): { clause: string; params: Record<string, string> } {
-  const { params, names } = candidateParams('email_domain', domains)
+  const { params, names } = candidateParams(column, domains)
   const parts = names.map(
     ({ eqParam, suffixParam }) =>
-      `(reverse(email_domain) = reverse({${eqParam}:String}) OR startsWith(reverse(email_domain), reverse({${suffixParam}:String})))`,
+      `(reverse(${column}) = reverse({${eqParam}:String}) OR startsWith(reverse(${column}), reverse({${suffixParam}:String})))`,
   )
   return { clause: parts.length ? `(${parts.join(' OR ')})` : '0', params }
 }
 
-/** Parameter names/values shared by both candidate builders: per domain, the bare value and its dot-prefixed suffix. */
+/** buildReversedCandidateWhereClause for `email_domain` — served by proj_email_domain_rev. */
+export function buildEmailDomainRevCandidateWhereClause(
+  domains: string[],
+): { clause: string; params: Record<string, string> } {
+  return buildReversedCandidateWhereClause('email_domain', domains)
+}
+
+/** buildReversedCandidateWhereClause for `domain` — served by proj_domain_rev. */
+export function buildDomainRevCandidateWhereClause(
+  domains: string[],
+): { clause: string; params: Record<string, string> } {
+  return buildReversedCandidateWhereClause('domain', domains)
+}
+
+/** Parameter names/values shared by the candidate builders: per domain, the bare value and its dot-prefixed suffix. */
 function candidateParams(
   column: CandidateColumn,
   domains: string[],

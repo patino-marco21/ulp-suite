@@ -28,14 +28,20 @@
  *     its rows -- 41s / 21.12 GiB (76s in the app's own run) -- where the base
  *     table's ngram skip index prunes to 404M rows: 7s / 3.39 GiB, with an
  *     identical result set (same row count and value hash).
- * Letting it fall away with the swap therefore retires it. If it is ever wanted
- * back: ADD PROJECTION ... ORDER BY reverse(domain), then MATERIALIZE.
+ * Letting it fall away with the swap therefore retires it. Its job -- a
+ * reverse(domain) order for the monitor's suffix match -- is done by the much
+ * smaller PARTIAL projection proj_domain_rev below, which the planner can only
+ * use as an index, never as a thin covering copy.
  *
  * proj_email_domain_rev IS restored, for all partitions still missing it (it is
  * ~5.9 GiB at 1.39B rows, so the recency window does not apply): a partial
  * projection (`SELECT _part_offset ORDER BY reverse(email_domain)`) that lets the
  * domain monitor's `email_domain = 'x' OR endsWith(email_domain, '.x')` scan range-prune
  * instead of reading the table. See docs/superpowers/specs/2026-09-30-query-perf-wins-design.md.
+ *
+ * proj_domain_rev is restored the same way (all partitions still missing it), for the
+ * monitor's `domain = 'x' OR endsWith(domain, '.x')` scan. See
+ * docs/superpowers/specs/2026-09-30-related-panel-and-domain-rev-design.md.
  */
 import type { ClickHouseClient } from '@clickhouse/client'
 import type { DiskGuard } from '@/lib/clickhouse-disk-guard'
@@ -187,23 +193,24 @@ export async function restoreImportedDescProjection(
   return { partitions }
 }
 
-// ── proj_email_domain_rev ────────────────────────────────────────────────────
-
-export const EMAIL_DOMAIN_REV_PROJECTION_NAME = 'proj_email_domain_rev'
+// ── Reversed-key partial projections: proj_email_domain_rev, proj_domain_rev ──────
 
 /**
- * A PARTIAL projection (projection index): it stores only the sort key and each row's
- * position, ~4.55 bytes/row. Ordering by the REVERSED value turns a suffix match into a
- * prefix range -- `endsWith(v, '.x')` == `startsWith(reverse(v), reverse('.x'))`,
- * byte-for-byte -- which ClickHouse can range-prune on. Shared by DDL v23, the init SQL
- * mirror and restoreEmailDomainRevProjection so they cannot drift apart.
+ * A PARTIAL projection (projection index) stores only the sort key and each row's position,
+ * ~4.5 bytes/row. Ordering by the REVERSED value turns a suffix match into a prefix range --
+ * `endsWith(v, '.x')` == `startsWith(reverse(v), reverse('.x'))`, byte-for-byte -- which
+ * ClickHouse can range-prune on. The two below share every builder in this section; only the
+ * name and the column differ. Each body is shared by its DDL migration, the init SQL mirror and
+ * its restore function so they cannot drift apart.
  */
-export const EMAIL_DOMAIN_REV_PROJECTION_BODY = `SELECT _part_offset
-        ORDER BY reverse(email_domain)`
+interface ReversedKeyProjection {
+  name: string
+  body: string
+}
 
 /** Metadata-only and idempotent: new inserts get the projection immediately, existing parts need MATERIALIZE. */
-export function buildAddEmailDomainRevProjectionSql(): string {
-  return `ALTER TABLE ulp.credentials ADD PROJECTION IF NOT EXISTS ${EMAIL_DOMAIN_REV_PROJECTION_NAME} (${EMAIL_DOMAIN_REV_PROJECTION_BODY})`
+function buildAddReversedKeyProjectionSql(projection: ReversedKeyProjection): string {
+  return `ALTER TABLE ulp.credentials ADD PROJECTION IF NOT EXISTS ${projection.name} (${projection.body})`
 }
 
 /**
@@ -212,29 +219,25 @@ export function buildAddEmailDomainRevProjectionSql(): string {
  * usually the smaller ones, which keeps the disk guard's linear projection from
  * over-projecting after one big partition.
  */
-export function buildPartitionsMissingEmailDomainRevSql(): string {
+function buildPartitionsMissingProjectionSql(projectionName: string): string {
   return `SELECT DISTINCT partition FROM system.parts
     WHERE database = 'ulp' AND table = 'credentials' AND active
       AND name NOT IN (
         SELECT parent_name FROM system.projection_parts
         WHERE database = 'ulp' AND table = 'credentials'
-          AND name = '${EMAIL_DOMAIN_REV_PROJECTION_NAME}' AND active
+          AND name = '${projectionName}' AND active
       )
     ORDER BY partition DESC`
 }
 
-export function buildMaterializeEmailDomainRevProjectionSql(partition: string): string {
-  return buildMaterializeSql(EMAIL_DOMAIN_REV_PROJECTION_NAME, partition)
-}
-
 /** Active parts vs active parts carrying the projection, in one metadata-only query. */
-export function buildEmailDomainRevProjectionReadySql(): string {
+function buildProjectionReadySql(projectionName: string): string {
   return `SELECT
     (SELECT count() FROM system.parts
       WHERE database = 'ulp' AND table = 'credentials' AND active) AS parts,
     (SELECT count() FROM system.projection_parts
       WHERE database = 'ulp' AND table = 'credentials'
-        AND name = '${EMAIL_DOMAIN_REV_PROJECTION_NAME}' AND active) AS with_projection`
+        AND name = '${projectionName}' AND active) AS with_projection`
 }
 
 /**
@@ -242,23 +245,24 @@ export function buildEmailDomainRevProjectionReadySql(): string {
  * would run the rewritten predicate over parts without the index -- measured worse than
  * today's plan (a full read).
  */
-export function emailDomainRevProjectionReady(counts: { parts: number; withProjection: number }): boolean {
+export function reversedKeyProjectionReady(counts: { parts: number; withProjection: number }): boolean {
   return Number.isFinite(counts.parts) && counts.parts > 0 && counts.parts === counts.withProjection
 }
 
 /**
- * Fails CLOSED: any error means "not ready", so the caller runs the original skip-index
- * plan. `run` is injected (the resolver passes executeQuery) so this stays unit-testable.
+ * Fails CLOSED: any error means "not ready", so the caller runs the original plan. `run` is
+ * injected (the resolver passes executeQuery) so this stays unit-testable.
  */
-export async function isEmailDomainRevProjectionReady(
+async function isReversedKeyProjectionReady(
+  projectionName: string,
   run: (sql: string) => Promise<Array<{ parts?: unknown; with_projection?: unknown }>>,
 ): Promise<boolean> {
   try {
-    const [row] = await run(buildEmailDomainRevProjectionReadySql())
-    return emailDomainRevProjectionReady({ parts: Number(row?.parts), withProjection: Number(row?.with_projection) })
+    const [row] = await run(buildProjectionReadySql(projectionName))
+    return reversedKeyProjectionReady({ parts: Number(row?.parts), withProjection: Number(row?.with_projection) })
   } catch (err) {
     console.warn(
-      '[credentials-projections] proj_email_domain_rev readiness check failed -- using the skip-index scan:',
+      `[credentials-projections] ${projectionName} readiness check failed -- using the original scan:`,
       err instanceof Error ? err.message : String(err),
     )
     return false
@@ -266,20 +270,113 @@ export async function isEmailDomainRevProjectionReady(
 }
 
 /**
- * Re-creates proj_email_domain_rev on the live ulp.credentials: ADD it (new inserts carry it
+ * Re-creates a reversed-key projection on the live ulp.credentials: ADD it (new inserts carry it
  * at once), then materialize each partition that still has a part without it, behind the
  * disk guard. Idempotent: when nothing is missing it is just the IF NOT EXISTS ADD. Like
  * restoreImportedDescProjection, a guard trip must NOT drop anything -- the table is live and
- * correct without the projection (the monitor falls back to its skip-index scan).
+ * correct without the projection (the monitor falls back to its original scan).
  */
-export async function restoreEmailDomainRevProjection(
+async function restoreReversedKeyProjection(
+  client: ClickHouseClient,
+  guard: DiskGuard,
+  projection: ReversedKeyProjection,
+): Promise<{ partitions: string[] }> {
+  await client.exec({ query: buildAddReversedKeyProjectionSql(projection) })
+
+  const res = await client.query({ query: buildPartitionsMissingProjectionSql(projection.name), format: 'JSONEachRow' })
+  const partitions = ((await res.json()) as Array<{ partition: string }>).map(row => row.partition)
+  await materializeEachPartition(client, guard, projection.name, partitions)
+  return { partitions }
+}
+
+// ── proj_email_domain_rev ────────────────────────────────────────────────────
+
+export const EMAIL_DOMAIN_REV_PROJECTION_NAME = 'proj_email_domain_rev'
+
+/** Orders by reverse(email_domain): see the section comment above. Shared by DDL v23, the init SQL mirror and the restore. */
+export const EMAIL_DOMAIN_REV_PROJECTION_BODY = `SELECT _part_offset
+        ORDER BY reverse(email_domain)`
+
+const EMAIL_DOMAIN_REV: ReversedKeyProjection = {
+  name: EMAIL_DOMAIN_REV_PROJECTION_NAME,
+  body: EMAIL_DOMAIN_REV_PROJECTION_BODY,
+}
+
+export function buildAddEmailDomainRevProjectionSql(): string {
+  return buildAddReversedKeyProjectionSql(EMAIL_DOMAIN_REV)
+}
+
+export function buildPartitionsMissingEmailDomainRevSql(): string {
+  return buildPartitionsMissingProjectionSql(EMAIL_DOMAIN_REV_PROJECTION_NAME)
+}
+
+export function buildMaterializeEmailDomainRevProjectionSql(partition: string): string {
+  return buildMaterializeSql(EMAIL_DOMAIN_REV_PROJECTION_NAME, partition)
+}
+
+export function buildEmailDomainRevProjectionReadySql(): string {
+  return buildProjectionReadySql(EMAIL_DOMAIN_REV_PROJECTION_NAME)
+}
+
+export const emailDomainRevProjectionReady = reversedKeyProjectionReady
+
+export function isEmailDomainRevProjectionReady(
+  run: (sql: string) => Promise<Array<{ parts?: unknown; with_projection?: unknown }>>,
+): Promise<boolean> {
+  return isReversedKeyProjectionReady(EMAIL_DOMAIN_REV_PROJECTION_NAME, run)
+}
+
+export function restoreEmailDomainRevProjection(
   client: ClickHouseClient,
   guard: DiskGuard,
 ): Promise<{ partitions: string[] }> {
-  await client.exec({ query: buildAddEmailDomainRevProjectionSql() })
+  return restoreReversedKeyProjection(client, guard, EMAIL_DOMAIN_REV)
+}
 
-  const res = await client.query({ query: buildPartitionsMissingEmailDomainRevSql(), format: 'JSONEachRow' })
-  const partitions = ((await res.json()) as Array<{ partition: string }>).map(row => row.partition)
-  await materializeEachPartition(client, guard, EMAIL_DOMAIN_REV_PROJECTION_NAME, partitions)
-  return { partitions }
+// ── proj_domain_rev ──────────────────────────────────────────────────────────
+
+export const DOMAIN_REV_PROJECTION_NAME = 'proj_domain_rev'
+
+/**
+ * Orders by reverse(domain): see the section comment above. Serves the monitor's `domain`
+ * candidate scan (`domain = 'x' OR endsWith(domain, '.x')`), which no index on the table can
+ * prune: it ran 42.7 s / 666M rows cold for 17 domains (measured 2026-09-30), and only the
+ * per-granule query condition cache ever made it fast. Shared by DDL v24, the init SQL mirror
+ * and restoreDomainRevProjection.
+ */
+export const DOMAIN_REV_PROJECTION_BODY = `SELECT _part_offset
+        ORDER BY reverse(domain)`
+
+const DOMAIN_REV: ReversedKeyProjection = {
+  name: DOMAIN_REV_PROJECTION_NAME,
+  body: DOMAIN_REV_PROJECTION_BODY,
+}
+
+export function buildAddDomainRevProjectionSql(): string {
+  return buildAddReversedKeyProjectionSql(DOMAIN_REV)
+}
+
+export function buildPartitionsMissingDomainRevSql(): string {
+  return buildPartitionsMissingProjectionSql(DOMAIN_REV_PROJECTION_NAME)
+}
+
+export function buildMaterializeDomainRevProjectionSql(partition: string): string {
+  return buildMaterializeSql(DOMAIN_REV_PROJECTION_NAME, partition)
+}
+
+export function buildDomainRevProjectionReadySql(): string {
+  return buildProjectionReadySql(DOMAIN_REV_PROJECTION_NAME)
+}
+
+export function isDomainRevProjectionReady(
+  run: (sql: string) => Promise<Array<{ parts?: unknown; with_projection?: unknown }>>,
+): Promise<boolean> {
+  return isReversedKeyProjectionReady(DOMAIN_REV_PROJECTION_NAME, run)
+}
+
+export function restoreDomainRevProjection(
+  client: ClickHouseClient,
+  guard: DiskGuard,
+): Promise<{ partitions: string[] }> {
+  return restoreReversedKeyProjection(client, guard, DOMAIN_REV)
 }

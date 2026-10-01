@@ -228,8 +228,8 @@ describe('schema plumbing for proj_email_domain_rev', () => {
 
   test('DDL v23 adds the projection through the shared builder and does NOT materialize at deploy', () => {
     const src = read('../lib/clickhouse-migrations.ts')
-    expect(src).toMatch(/const DDL_VERSION = 23\b/)
-    const block = src.slice(src.indexOf('if (lastDdl < 23)'), src.indexOf('if (lastDdl < DDL_VERSION)'))
+    expect(src).toMatch(/const DDL_VERSION = (2[3-9]|[3-9]\d)\b/)
+    const block = src.slice(src.indexOf('if (lastDdl < 23)'), src.indexOf('if (lastDdl < 24)'))
     expect(block).toContain('buildAddEmailDomainRevProjectionSql()')
     expect(block).not.toContain('MATERIALIZE')
   })
@@ -240,7 +240,7 @@ describe('schema plumbing for proj_email_domain_rev', () => {
     expect(sql).toMatch(/SELECT _part_offset\s+ORDER BY reverse\(email_domain\)/)
   })
 
-  test('the dedup tick restores both projections through restoreDeferredProjections', () => {
+  test('the dedup tick restores the projections through restoreDeferredProjections', () => {
     const src = read('../lib/content-dedup.ts')
     const tick = src.slice(src.indexOf('export async function runContentDedupTick'))
     expect(tick).toContain('restoreDeferredProjections(')
