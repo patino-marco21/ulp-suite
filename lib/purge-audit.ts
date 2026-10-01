@@ -13,6 +13,7 @@
  */
 import { classifyTier } from '@/lib/country-tiers'
 import { shouldDropAtIngest, type IngestDropPolicy } from '@/lib/ingest-filter'
+import { unescapeTsv } from '@/lib/tsv'
 
 export interface CandidateRow {
   email: string
@@ -81,12 +82,6 @@ export function auditPurgeCandidates(
     if (audit.done) break
   }
   return audit.summary()
-}
-
-const TSV_ESCAPES: Record<string, string> = { t: '\t', n: '\n', r: '\r', '0': '\0', b: '\b', f: '\f', "'": "'", '\\': '\\' }
-
-function unescapeTsv(field: string): string {
-  return field.replace(/\\([tnr0bf'\\])/g, (_, c: string) => TSV_ESCAPES[c])
 }
 
 /** One line of `SELECT email, url ... FORMAT TSV`. */

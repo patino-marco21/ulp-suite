@@ -57,11 +57,13 @@ type Row = Record<string, unknown>
  * older than `oldest` is ever skipped.
  */
 export function planWindows(a: { upTo: number | null; newest: number; oldest: number; floor?: number | null }): TimeWindow[] {
-  const top = a.upTo ?? a.newest
+  // A ceiling at or above the newest row is no ceiling: hang the windows from the data, not from empty time above it.
+  const ceiling = a.upTo !== null && a.upTo < a.newest ? a.upTo : null
+  const top = ceiling ?? a.newest
   const bottom = a.floor != null && a.floor - 1 > a.oldest ? a.floor - 1 : null
   const stop = bottom ?? a.oldest
   const windows: TimeWindow[] = []
-  let upTo = a.upTo
+  let upTo = ceiling
   let span = FIRST_SPAN_SECONDS
   for (let i = 0; i < 40; i++) {
     const after = top - span
@@ -101,7 +103,10 @@ export function windowClause(w: TimeWindow): { sql: string; params: Record<strin
 export async function collectNewestFirst(a: {
   windows: TimeWindow[]
   want: number
-  runWindow: (clause: { sql: string; params: Record<string, number> }, limit: number) => Promise<Row[]>
+  /** `projected`: the window lies wholly inside the projection's coverage, so the projection can answer it (skip indexes only hurt there). */
+  runWindow: (clause: { sql: string; params: Record<string, number> }, limit: number, window: { projected: boolean }) => Promise<Row[]>
+  /** Epoch second where the projection's coverage starts (the oldest row of the newest partition). */
+  coveredFrom?: number | null
   budgetMs?: number
   now?: () => number
 }): Promise<{ rows: Row[]; windowsRun: number; handedOff: boolean }> {
@@ -116,7 +121,9 @@ export async function collectNewestFirst(a: {
     if (i > 0 && now() - startedAt + lastMs * GROWTH >= budgetMs) return { rows: [], windowsRun, handedOff: true }
     const remaining = a.want - rows.length
     const windowStartedAt = now()
-    const got = await a.runWindow(windowClause(a.windows[i]), remaining)
+    const win = a.windows[i]
+    const projected = a.coveredFrom != null && win.after !== null && win.after >= a.coveredFrom
+    const got = await a.runWindow(windowClause(win), remaining, { projected })
     lastMs = now() - windowStartedAt
     windowsRun++
     rows.push(...got.slice(0, remaining))
@@ -187,7 +194,7 @@ export async function readAnchors(
 export async function runNewestFirst(a: {
   run: (sql: string, params?: Record<string, unknown>) => Promise<Row[]>
   /** The route's data query for one window: splice `windowSql` into its WHERE, end it with `LIMIT {nfwLimit:UInt32}`, and use the budget as max_execution_time. */
-  buildWindowSql: (windowSql: string, budgetSeconds: number) => string
+  buildWindowSql: (windowSql: string, budgetSeconds: number, window: { projected: boolean }) => string
   /** Parameters of the route's own query (search terms, filters, cursor). */
   baseParams: Record<string, unknown>
   /** Rows wanted in total (the page, or the page times the de-duplication window). */
@@ -204,11 +211,15 @@ export async function runNewestFirst(a: {
   now?: () => number
 }): Promise<Row[] | null> {
   const now = a.now ?? Date.now
-  if (!(await isNewestFirstReady(sql => a.run(sql)))) return null
+  const status = await getNewestFirstStatus(sql => a.run(sql))
+  if (!status.ready) return null
   const anchors = await readAnchors((sql, params) => a.run(sql, params), {
     cursorImportedAt: a.cursorImportedAt, dateFrom: a.dateFrom, dateTo: a.dateTo,
   })
   if (!anchors) return null
+  // A range that lies wholly older than the projection (a date_to in July, say) is the plain query's: every window would run on the
+  // base table, with nothing to prune them but the minmax index, and then hand off anyway.
+  if (anchors.upperTs !== null && status.coveredFrom !== null && anchors.upperTs < status.coveredFrom) return null
 
   const deadline = now() + (a.deadlineMs ?? DEFAULT_DEADLINE_MS)
   const windows = planWindows({ upTo: anchors.upperTs, newest: anchors.newest, oldest: anchors.oldest, floor: anchors.floorTs })
@@ -216,10 +227,11 @@ export async function runNewestFirst(a: {
     windows,
     want: a.want,
     budgetMs: a.handoffMs,
+    coveredFrom: status.coveredFrom,
     now,
-    runWindow: (clause, limit) => {
+    runWindow: (clause, limit, window) => {
       const budgetSeconds = Math.max(5, Math.min(300, Math.floor((deadline - now()) / 1000)))
-      return a.run(a.buildWindowSql(clause.sql, budgetSeconds), { ...a.baseParams, ...clause.params, nfwLimit: limit })
+      return a.run(a.buildWindowSql(clause.sql, budgetSeconds, window), { ...a.baseParams, ...clause.params, nfwLimit: limit })
     },
   })
   return handedOff ? null : rows
@@ -232,6 +244,7 @@ export async function runNewestFirst(a: {
  * the two columns the default Declutter + Unique view needs; an older projection without them cannot serve that query and
  * every window would scan the base table) AND every active part of the newest partition carries it. Older partitions may lack
  * it (they are outside the projection's recency window); windows that reach them are just slower, never wrong.
+ * `covered_from` is the oldest second in the newest partition: where the projection's coverage starts.
  */
 export function buildNewestFirstReadySql(): string {
   return `WITH (SELECT max(partition) FROM system.parts WHERE database = 'ulp' AND table = 'credentials' AND active) AS newest_partition
@@ -243,13 +256,22 @@ SELECT
     WHERE database = 'ulp' AND table = 'credentials' AND active AND partition = newest_partition) AS parts,
   (SELECT count() FROM system.projection_parts
     WHERE database = 'ulp' AND table = 'credentials' AND name = '${PROJECTION_NAME}' AND active
-      AND partition = newest_partition) AS with_projection`
+      AND partition = newest_partition) AS with_projection,
+  (SELECT toUnixTimestamp(min(min_time)) FROM system.parts
+    WHERE database = 'ulp' AND table = 'credentials' AND active AND partition = newest_partition) AS covered_from`
+}
+
+export interface NewestFirstStatus {
+  ready: boolean
+  /** Epoch second where the projection's coverage starts; null unless ready. */
+  coveredFrom: number | null
 }
 
 const READY_TTL_MS = 60_000
 const FAILED_TTL_MS = 5_000
-let readyCache: { at: number; ttl: number; value: boolean } | null = null
-let readyInflight: Promise<boolean> | null = null
+const NOT_READY: NewestFirstStatus = { ready: false, coveredFrom: null }
+let readyCache: { at: number; ttl: number; value: NewestFirstStatus } | null = null
+let readyInflight: Promise<NewestFirstStatus> | null = null
 
 export function resetNewestFirstReadyCache(): void {
   readyCache = null
@@ -257,24 +279,27 @@ export function resetNewestFirstReadyCache(): void {
 }
 
 /** Fails CLOSED (any error or odd answer = not ready); the answer is cached for a minute, a failure for five seconds. */
-export async function isNewestFirstReady(
+export async function getNewestFirstStatus(
   run: (sql: string) => Promise<Array<Record<string, unknown>>>,
   now: () => number = Date.now,
-): Promise<boolean> {
+): Promise<NewestFirstStatus> {
   const t = now()
   if (readyCache && t - readyCache.at < readyCache.ttl) return readyCache.value
   if (readyInflight) return readyInflight
 
   readyInflight = (async () => {
-    let value = false
+    let value = NOT_READY
     let ttl = FAILED_TTL_MS
     try {
       const [row] = await run(buildNewestFirstReadySql())
       const defined = Number(row?.defined)
       const parts = Number(row?.parts)
       const withProjection = Number(row?.with_projection)
-      value = defined === 1 && Number.isFinite(parts) && parts > 0 && parts === withProjection
-      ttl = value ? READY_TTL_MS : FAILED_TTL_MS
+      const coveredFrom = Number(row?.covered_from)
+      if (defined === 1 && Number.isFinite(parts) && parts > 0 && parts === withProjection && Number.isFinite(coveredFrom) && coveredFrom > 0) {
+        value = { ready: true, coveredFrom }
+        ttl = READY_TTL_MS
+      }
     } catch (err) {
       console.warn('[newest-first] readiness check failed -- using the plain query:', err instanceof Error ? err.message : String(err))
     }
@@ -286,4 +311,11 @@ export async function isNewestFirstReady(
   } finally {
     readyInflight = null
   }
+}
+
+export async function isNewestFirstReady(
+  run: (sql: string) => Promise<Array<Record<string, unknown>>>,
+  now: () => number = Date.now,
+): Promise<boolean> {
+  return (await getNewestFirstStatus(run, now)).ready
 }

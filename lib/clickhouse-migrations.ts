@@ -90,11 +90,12 @@ let migrationsDone = false
 //     A projection's ORDER BY can't use DESC (Code: 62 syntax error), so
 //     negate(toUnixTimestamp(imported_at)) stands in for "imported_at DESC" — ascending
 //     on the negated timestamp is exactly descending on imported_at. Confirmed live
-//     (2026-07-03, scripts/verify-imported-desc-projection.sh with
-//     force_optimize_projection=1 — a real yes/no, not a cache-warming timing artifact)
-//     that ClickHouse's optimizer does match the app's literal "imported_at DESC" query
-//     against this key via monotonic-function inference: 0.592s → 0.099s (6x) at 16.85M
-//     rows. Costs real disk — the projection re-stores these 16 columns in the new sort
+//     (2026-07-03, scripts/verify-imported-desc-projection.sh -- since removed, see v27 --
+//     with force_optimize_projection=1) that ClickHouse's optimizer uses the projection for
+//     the app's literal "imported_at DESC" query: 0.592s → 0.099s (6x) at 16.85M rows.
+//     CORRECTION 2026-10-01 at 1.39B rows: it is used as a narrow covering copy, never read
+//     in order (the plan has a Sorting step and reads every granule), and a predicate on
+//     imported_at does not range-prune it; see lib/newest-first.ts for what does. Costs real disk — the projection re-stores these 16 columns in the new sort
 //     order (1.04 GiB alongside a 533.50 MiB base table at 16.85M rows, so budget for
 //     roughly 2x the base table size, not a small fraction of it). ADD PROJECTION is
 //     metadata-only/instant; MATERIALIZE PROJECTION backfills existing parts in the

@@ -70,6 +70,14 @@ describe('planWindows', () => {
     expect(w[0]).toEqual({ upTo: cursorTs, after: cursorTs - 60 })
   })
 
+  test('a ceiling newer than the newest row is no ceiling: the windows hang from the newest row, not from empty time above it', () => {
+    // date_to = today with the newest import weeks ago: anchoring the first window above the data wasted the cheap windows on
+    // nothing and left the newest burst to one 4-hour window (6.7 s on the live table instead of ~0.1 s).
+    const plain = planWindows({ upTo: null, newest: NEWEST, oldest: NEWEST - 60 * DAY })
+    expect(planWindows({ upTo: NEWEST + 5 * DAY, newest: NEWEST, oldest: NEWEST - 60 * DAY })).toEqual(plain)
+    expect(planWindows({ upTo: NEWEST, newest: NEWEST, oldest: NEWEST - 60 * DAY })[0].after).toBe(NEWEST - 60)
+  })
+
   test('a cursor older than everything leaves one open window', () => {
     expect(planWindows({ upTo: 100, newest: NEWEST, oldest: 200 })).toEqual([{ upTo: 100, after: null }])
   })
@@ -153,6 +161,17 @@ describe('collectNewestFirst', () => {
     const out = await collectNewestFirst({ windows, want: 10, runWindow: run })
     expect(run).toHaveBeenCalledTimes(4)
     expect(out.rows).toEqual([])
+  })
+
+  test('tells each window whether it lies wholly inside the projection\'s coverage (the newest partition), where skip indexes only hurt', async () => {
+    const seen: boolean[] = []
+    const run = async (_c: { sql: string }, _limit: number, w: { projected: boolean }) => { seen.push(w.projected); return [] as Array<Record<string, unknown>> }
+    // coverage starts at 600: window 0 (900, after 900) and window 1 (after 500) -> only the first is wholly inside
+    await collectNewestFirst({ windows, want: 10, runWindow: run, coveredFrom: 600, budgetMs: 1_000_000 })
+    expect(seen).toEqual([true, false, false, false])
+    seen.length = 0
+    await collectNewestFirst({ windows, want: 10, runWindow: run, budgetMs: 1_000_000 })
+    expect(seen).toEqual([false, false, false, false])
   })
 
   test('never returns more than wanted even if a window misbehaves', async () => {
@@ -280,7 +299,7 @@ describe('readAnchors', () => {
 
 describe('isNewestFirstReady', () => {
   beforeEach(() => resetNewestFirstReadyCache())
-  const ready = { defined: 1, parts: 2, with_projection: 2 }
+  const ready = { defined: 1, parts: 2, with_projection: 2, covered_from: 1_786_000_000 }
 
   test('ready only when the projection has the new definition AND every part of the newest partition carries it', async () => {
     expect(await isNewestFirstReady(async () => [ready])).toBe(true)
@@ -318,17 +337,29 @@ describe('isNewestFirstReady', () => {
     expect(await isNewestFirstReady(run, () => 1_000 + 6_000)).toBe(true)
   })
 
+  test('it also reports where the projection\'s coverage starts (the oldest second in the newest partition), and is not ready without it', async () => {
+    const { getNewestFirstStatus } = await import('@/lib/newest-first')
+    expect(await getNewestFirstStatus(async () => [ready])).toEqual({ ready: true, coveredFrom: 1_786_000_000 })
+    resetNewestFirstReadyCache()
+    expect(await getNewestFirstStatus(async () => [{ ...ready, covered_from: 0 }])).toEqual({ ready: false, coveredFrom: null })
+    resetNewestFirstReadyCache()
+    expect(await getNewestFirstStatus(async () => [{ ...ready, covered_from: 'x' }])).toEqual({ ready: false, coveredFrom: null })
+    resetNewestFirstReadyCache()
+    expect(await getNewestFirstStatus(async () => [{ ...ready, defined: 0 }])).toEqual({ ready: false, coveredFrom: null })
+  })
+
   test('the check is metadata only: system.projections and system.parts, never the credentials table', () => {
     const sql = buildNewestFirstReadySql()
     expect(sql).toMatch(/system\.projections/)
     expect(sql).toMatch(/system\.projection_parts/)
     expect(sql).not.toMatch(/FROM ulp\.credentials/)
+    expect(sql).toMatch(/min\(min_time\)/)
   })
 })
 
 describe('runNewestFirst', () => {
   beforeEach(() => resetNewestFirstReadyCache())
-  const readyRow = { defined: 1, parts: 1, with_projection: 1 }
+  const readyRow = { defined: 1, parts: 1, with_projection: 1, covered_from: 1_785_000_000 }
   const ANCHORS = { newest: 1_787_960_054, oldest: 1_782_000_000 }
 
   /** A scripted ClickHouse: answers the readiness query, the anchor query, then each window query from `windowAnswers`. */
@@ -401,6 +432,24 @@ describe('runNewestFirst', () => {
     expect(seen[0]).toBeLessThanOrEqual(100)
     expect(seen[seen.length - 1]).toBeGreaterThanOrEqual(5)
     for (let i = 1; i < seen.length; i++) expect(seen[i]).toBeLessThanOrEqual(seen[i - 1])
+  })
+
+  test('a range that lies wholly older than the projection\'s coverage is not tried at all: null, and no window query runs', async () => {
+    const { run, log } = fakeRun({ anchors: { ...ANCHORS, date_to_ts: 1_784_000_000 } })
+    const out = await runNewestFirst({ run, buildWindowSql: build, baseParams: {}, want: 5, dateTo: '2026-07-10 23:59:59' })
+    expect(out).toBeNull()
+    expect(log.filter(c => c.sql.startsWith('SELECT 1'))).toHaveLength(0)
+  })
+
+  test('buildWindowSql is told which windows are inside the coverage', async () => {
+    const flags: boolean[] = []
+    const { run } = fakeRun({ windowAnswers: [[], []] })
+    await runNewestFirst({
+      run, baseParams: {}, want: 5, handoffMs: 10_000_000,
+      buildWindowSql: (w, secs, opts) => { flags.push(opts.projected); return build(w, secs) },
+    })
+    expect(flags[0]).toBe(true)  // the newest minute is inside coverage (it starts at 1_785_000_000)
+    expect(flags[flags.length - 1]).toBe(false) // the last window is open below, so it reaches outside it
   })
 
   test('a hand-off returns null, so the route runs the plain query (nothing partial is ever returned)', async () => {

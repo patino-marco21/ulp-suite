@@ -374,7 +374,9 @@ Reference deployment: 1.39 billion rows, one 32 GB laptop (cold timings, measure
 | Peak heap per 500K-row batch | ~100 MB (array in memory before insert) |
 | Dedup Set cap | 2M entries → ~440 MB max (prevents OOM on huge files) |
 | Exact domain / email lookup | 0.03–1.3 s cold (bloom filters + primary key); a very popular value such as `admin@gmail.com` takes 7–23 s |
-| Token / substring search | seconds to tens of seconds depending on the term and sort; the total is a separate query that arrives after the rows |
+| Browse / search, default sort (domain A-Z) | 5-14 s for the rows (read in primary-key order, stops after 200 matches); the total is a separate query (4-17 s) that arrives after the rows |
+| "Newest first" | 0.1-1 s for a plain browse, a popular domain or word, a tier/password filter or a date range inside the newest import (it was 18-76 s); a rare term, a term with no match, or a date range older than the projection is answered by the plain scan, 14-27 s. Run as time windows on `proj_imported_desc`: `lib/newest-first.ts`, `docs/superpowers/specs/2026-10-01-newest-first-windows-design.md`. The response's `plan` says which one answered |
+| Other sorts (email, password length) | 18-45 s: every matching row is read and sorted |
 | Domain-monitor re-scan | ~5 s per tick for 17 domains (reversed-key projections + a single normalising pass over the legacy bucket) |
 | Monitor re-scan tick | 15 minutes, in-process, no external queue |
 | Inbox reconciliation | Every 30 s — catches any missed chokidar events |
@@ -393,6 +395,12 @@ Reference deployment: 1.39 billion rows, one 32 GB laptop (cold timings, measure
   destination (`S3_*` in `.env`); until one exists the panel says "No ClickHouse backup recorded".
   Read `docs/clickhouse-backup-runbook.md` first — it explains why local snapshots are guarded by a
   disk-space check.
+- **The "Newest first" projection.** `proj_imported_desc` (DDL v27: it carries `is_noise` and `content_key_hash`) is what makes
+  that sort fast. It is built for the newest partition only (~34 GiB). After a content-dedup swap the tick restores it; if the
+  Credentials response says `"plan": "plain"` for `sort=imported_desc` long after one, run
+  `bash scripts/rebuild-imported-desc-projection.sh` (dry run by default; `APPLY=1` builds, asynchronously and polled, with a
+  free-disk floor), then `NFW_PARITY=1 npx vitest run __tests__/newest-first-parity.live.test.ts` to confirm the windowed pages
+  equal the plain query's. The projection scope cron never clears the newest partition.
 - **Durability.** Inserts and merges are fsynced (`fsync_after_insert`, and `min_rows_to_fsync_after_merge`
   from DDL v25).
 - **Known data-quality gap.** About 6.3M rows (0.45%) imported by an earlier parser sit in the wrong

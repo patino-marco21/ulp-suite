@@ -4,7 +4,8 @@ vi.mock('@/lib/auth', () => ({ validateRequest: vi.fn().mockResolvedValue({ id: 
 
 type Call = { sql: string; params: Record<string, unknown> }
 const calls: Call[] = []
-let readiness: Array<Record<string, unknown>> = [{ defined: 1, parts: 1, with_projection: 1 }]
+const READY = { defined: 1, parts: 1, with_projection: 1, covered_from: 1_786_000_000 }
+let readiness: Array<Record<string, unknown>> = [READY]
 let anchors: Array<Record<string, unknown>> = [{ newest: 1_787_960_054, oldest: 1_782_000_000 }]
 let windowAnswers: Array<Array<Record<string, unknown>> | Error> = []
 let legacyRows: Array<Record<string, unknown>> = []
@@ -42,7 +43,7 @@ const get = (qs: string) => GET(new NextRequest(`http://localhost/api/credential
 beforeEach(() => {
   calls.length = 0
   resetNewestFirstReadyCache()
-  readiness = [{ defined: 1, parts: 1, with_projection: 1 }]
+  readiness = [READY]
   anchors = [{ newest: 1_787_960_054, oldest: 1_782_000_000 }]
   windowAnswers = []
   legacyRows = []
@@ -56,6 +57,16 @@ describe('GET /api/credentials — "Newest first" runs as time windows over proj
     expect(body.results).toHaveLength(2)
     expect(windowCalls()).toHaveLength(1)
     expect(legacyDataCalls()).toHaveLength(0)
+  })
+
+  test('the response says which plan answered, so the speedup can be seen from the API: windows, or plain', async () => {
+    windowAnswers = [[row(1)]]
+    expect((await (await get('sort=imported_desc&limit=1&skip_totals=1')).json()).plan).toBe('windows')
+    readiness = [{ defined: 0, parts: 1, with_projection: 0 }]
+    resetNewestFirstReadyCache()
+    legacyRows = [row(1)]
+    expect((await (await get('sort=imported_desc&limit=1&skip_totals=1')).json()).plan).toBe('plain')
+    expect((await (await get('sort=domain_asc&limit=1&skip_totals=1')).json()).plan).toBe('plain')
   })
 
   test('each window is the route\'s own query plus a predicate on the projection\'s key expression and a LIMIT parameter', async () => {
@@ -73,6 +84,22 @@ describe('GET /api/credentials — "Newest first" runs as time windows over proj
     expect(sql).toMatch(/max_execution_time = \d+/)
     expect(sql.slice(sql.indexOf('FROM ('))).not.toMatch(/\bAS (url|email|password|domain)\b/i)
     expect(params).toMatchObject({ dom0: 'binance.com', nfwLimit: 2, nfwKeyHi: -(1_787_960_054 - 60) })
+  })
+
+  // Measured on the live table 2026-10-01 for a word token ('ledger'): ClickHouse planned the windows on the BASE table (the text
+  // and ngram skip indexes made it look cheaper), reading 202M rows for the newest minute (1.96 s) and 500M for the next 15 minutes
+  // (5.23 s). With the skip indexes off it uses the projection and its key range: 0.19 s and 0.93 s. Skip indexes only ever prune, so
+  // the rows are the same; the plain fallback keeps them on.
+  test('the windows turn skip indexes off, so word-token queries are answered from the projection too; the plain query keeps them', async () => {
+    windowAnswers = [[row(1)]]
+    await get('sort=imported_desc&limit=1&q=ledger&skip_totals=1')
+    expect(windowCalls()[0].sql).toContain('use_skip_indexes = 0')
+    readiness = [{ defined: 0, parts: 1, with_projection: 0 }]
+    resetNewestFirstReadyCache()
+    calls.length = 0
+    legacyRows = [row(1)]
+    await get('sort=imported_desc&limit=1&q=ledger&skip_totals=1')
+    expect(legacyDataCalls()[0].sql).not.toContain('use_skip_indexes')
   })
 
   test('the outer select still hands back the stored columns under _c_ aliases, so the cursor is built from stored values', async () => {

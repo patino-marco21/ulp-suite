@@ -28,10 +28,11 @@ const VALID_MASKS = new Set(['alpha', 'numeric', 'alphanumeric', 'mixed', 'empty
 // legacy corrupted rows left on 2026-10-01; see lib/ulp-normalize.ts) is expensive enough per-row that including it here
 // defeats proj_imported_desc: confirmed via force_optimize_projection=1 that
 // the identical query WITH NORM_COLS inline gets PROJECTION_NOT_USED, while
-// this raw-column form uses the projection successfully. Below the fold at
-// 67M+ rows that difference is a full unindexed table scan vs. a bounded
-// read — the former is what took production down with MEMORY_LIMIT_EXCEEDED
-// (2026-07-04).
+// this raw-column form uses the projection successfully. (Used as a narrower
+// covering copy: ClickHouse does not read a projection in order, so the
+// "Newest first" sort gets its speed from lib/newest-first.ts, which runs the
+// query as time windows on the projection's key.) A scan of the whole table is
+// what took production down with MEMORY_LIMIT_EXCEEDED (2026-07-04).
 const RAW_COLS = `url, email, password, domain,
   source_file, breach_name,
   country_tier, login_type, password_length, password_mask,
@@ -277,9 +278,8 @@ export async function GET(request: NextRequest) {
         // ORDER BY does not flush the sort buffer — ClickHouse issue #52234).
         //
         // Split into an inner (raw columns, ORDER BY, LIMIT) and outer (NORM_COLS)
-        // query — see RAW_COLS above for why. The inner query alone is what needs
-        // to read in order via proj_imported_desc; wrapping NORM_COLS around it
-        // instead of inlining it keeps that projection usable.
+        // query — see RAW_COLS above for why. Wrapping NORM_COLS around the inner
+        // query instead of inlining it keeps proj_imported_desc usable.
         dedupeInWindow
           ? `SELECT ${SELECT}
          FROM (
@@ -319,8 +319,12 @@ export async function GET(request: NextRequest) {
 
     // "Newest first" as exact time windows over proj_imported_desc (lib/newest-first.ts: 18-45 s -> well under a second for a
     // term that is not rare). The same filters, ordering, cursor and de-duplication as the plain query; only a predicate on the
-    // projection's key is added per window. Not ready (projection not rebuilt yet) or a window error that is not a timeout:
+    // projection's key is added per window, and skip indexes are switched off for a window that lies inside the projection's
+    // coverage: with them on, ClickHouse plans a word-token window on the base table (202M rows for the newest minute, 1.96 s)
+    // instead of the projection (0.19 s); they only prune, so the rows are the same. A window that reaches the older partition
+    // (no projection there) keeps them: without them its base-table scan took 28 s instead of 17 s. Not ready (projection not rebuilt yet) or a window error that is not a timeout:
     // the plain query answers, as it always did. A timeout is not retried: the plain query would take at least as long.
+    let plan: 'windows' | 'plain' = 'plain'
     const runNewestFirstData = async (): Promise<unknown[]> => {
       try {
         const { limit: _plainLimit, ...baseParams } = allParams
@@ -331,7 +335,7 @@ export async function GET(request: NextRequest) {
           cursorImportedAt,
           dateFrom: dateFrom ? `${dateFrom} 00:00:00` : null,
           dateTo: dateTo ? `${dateTo} 23:59:59` : null,
-          buildWindowSql: (windowSql, budgetSeconds) => `SELECT ${SELECT}${dedupe ? ', content_key_hash AS _c_hash' : ''}
+          buildWindowSql: (windowSql, budgetSeconds, { projected }) => `SELECT ${SELECT}${dedupe ? ', content_key_hash AS _c_hash' : ''}
          FROM (
            SELECT ${RAW_COLS}${dedupe ? ', content_key_hash' : ''}
            FROM ulp.credentials
@@ -343,9 +347,13 @@ export async function GET(request: NextRequest) {
                   timeout_overflow_mode = 'throw',
                   http_wait_end_of_query = 1,
                   max_bytes_before_external_sort = ${SORT_MAX_MEMORY_BYTES},
+                  ${projected ? 'use_skip_indexes = 0,' : ''}
                   ${NORM_COLS_SETTING}`,
         })
-        if (windowed) return dedupe ? dedupeRows(windowed, '_c_hash', limit) : windowed
+        if (windowed) {
+          plan = 'windows'
+          return dedupe ? dedupeRows(windowed, '_c_hash', limit) : windowed
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         if (msg.includes('TIMEOUT_EXCEEDED') || msg.includes('timeout') || msg.includes('Timeout')) throw err
@@ -382,6 +390,8 @@ export async function GET(request: NextRequest) {
       query_ms,
       timed_out,
       sort:        sortKey,
+      // Which plan answered the rows: 'windows' (lib/newest-first.ts) or 'plain'.
+      plan,
     })
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)

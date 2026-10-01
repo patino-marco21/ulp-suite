@@ -145,7 +145,7 @@ export function buildRecentPartitionsSql(cutoff: string): string {
 
 /**
  * One partition at a time, blocking until that partition's projection is built
- * (same pattern as scripts/add-imported-desc-projection.sh). max_execution_time
+ * (the pattern scripts/rebuild-imported-desc-projection.sh follows). max_execution_time
  * stays under lib/clickhouse.ts's 1h request_timeout so a slow partition fails
  * as a clean ClickHouse error rather than a dropped socket -- the mutation
  * itself keeps running server-side either way, and re-running the restore is
