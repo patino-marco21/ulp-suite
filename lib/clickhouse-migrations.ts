@@ -10,7 +10,14 @@ import { buildFreeWebmailInClause } from './webmail-providers'
 import { NOISE_EXPR } from './ulp-noise'
 import { dbGet, dbRun } from './sqlite'
 import { SEARCH_INDEX_DEFINITIONS } from './search-index-definitions'
-import { IMPORTED_DESC_PROJECTION_BODY, buildAddDomainRevProjectionSql, buildAddEmailDomainRevProjectionSql } from './credentials-projections'
+import {
+  IMPORTED_DESC_PROJECTION_BODY,
+  buildAddDomainRevProjectionSql,
+  buildAddEmailDomainRevProjectionSql,
+  buildAddImportedDescProjectionSql,
+  buildDropImportedDescProjectionSql,
+  buildImportedDescProjectionCurrentSql,
+} from './credentials-projections'
 import { URL_CONTENT_KEY } from './url-content-key'
 
 // Per-process guard (still useful to avoid redundant calls within one process)
@@ -231,7 +238,14 @@ let migrationsDone = false
 //      label, stored rows keep theirs). Backfilling the 1.39B existing rows is `MATERIALIZE COLUMN country_tier`,
 //      which also rebuilds the column's skip index and proj_imported_desc (it carries country_tier), so it is
 //      NOT fired here (see v23): run scripts/materialize-country-tier.sh, supervised.
-const DDL_VERSION = 26
+// v27: proj_imported_desc carries is_noise and content_key_hash. The default Credentials Browser view filters on
+//      is_noise (Declutter) and de-duplicates on content_key_hash (Unique); a projection missing a column the query
+//      needs is not used, so every default-view "Newest first" query read the base table (a plain browse: 40-48 s;
+//      measured 2026-10-01). With both columns lib/newest-first.ts can run the query as time windows on the
+//      projection's key (0.13 s). The old projection is dropped (instant; base rows untouched) and the new one added
+//      (metadata); building it for 495M rows is scripts/rebuild-imported-desc-projection.sh, supervised, NOT run here
+//      (see v23). Until it finishes the readiness gate (isNewestFirstReady) keeps the plain query in use.
+const DDL_VERSION = 27
 
 /** v26: swap country_tier's MATERIALIZED expression (metadata only; see the DDL_VERSION comment above). */
 export function buildCountryTierModifySql(): string {
@@ -1012,6 +1026,25 @@ export async function runClickHouseMigrations(): Promise<void> {
       console.warn('[ClickHouse migration] DDL v26 applied (country_tier now reads email_domain -- existing rows need scripts/materialize-country-tier.sh)')
     } catch (err) {
       console.error('[ClickHouse migration] v26: MODIFY COLUMN country_tier -- FAILED:', err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  // v27 — proj_imported_desc with is_noise + content_key_hash (see DDL_VERSION comment above). Replaced only when the live
+  // projection is not already current (a fresh install starts with it; the rebuild script may have run first). DROP and ADD are
+  // metadata-level; nothing is materialized here. A failure leaves the old projection (the plain query keeps working) and is logged.
+  if (lastDdl < 27) {
+    try {
+      const res = await client.query({ query: buildImportedDescProjectionCurrentSql(), format: 'JSONEachRow' })
+      const [row] = (await res.json()) as Array<{ projection_current?: unknown }>
+      if (Number(row?.projection_current) === 1) {
+        console.warn('[ClickHouse migration] DDL v27: proj_imported_desc already has is_noise + content_key_hash')
+      } else {
+        await client.exec({ query: buildDropImportedDescProjectionSql() })
+        await client.exec({ query: buildAddImportedDescProjectionSql() })
+        console.warn('[ClickHouse migration] DDL v27 applied (proj_imported_desc re-created with is_noise + content_key_hash -- existing parts need scripts/rebuild-imported-desc-projection.sh)')
+      }
+    } catch (err) {
+      console.error('[ClickHouse migration] v27: re-creating proj_imported_desc -- FAILED:', err instanceof Error ? err.message : String(err))
     }
   }
 

@@ -2,7 +2,8 @@
  * End-to-end rehearsal of the whole pipeline in an ISOLATED stack (docker-compose.rehearsal.yml): a fresh ClickHouse built from
  * the production init SQL, the app, and a webhook receiver. It shares nothing with the real stack. What it proves, in order:
  *
- *   1. a fresh install comes up: the init SQL is accepted, every DDL migration runs, country_tier reads email_domain (v26);
+ *   1. a fresh install comes up: the init SQL is accepted, every DDL migration runs, country_tier reads email_domain (v26) and
+ *      proj_imported_desc carries is_noise and content_key_hash (v27);
  *   2. the admin can log in; a webhook can be saved and its Test button reaches a receiver on the Docker network, signed;
  *   3. a monitor + a file dropped in the inbox -> parsed -> inserted -> in-process match -> webhook delivered, signed, with
  *      a success row in monitor_alerts; the ingest policy holds (a T3 row is dropped, a login with no "@" is not tiered);
@@ -10,7 +11,8 @@
  *      scheduled rescan and delivered ("[scheduled-rescan]"), and nothing is left in webhook_outbox;
  *   5. scripts/repair-scheme-split-rows.sh runs for real against this stack: it appends the one repairable legacy row that
  *      was not already there (original imported_at / source_file, real domain), skips the credential that already existed, the
- *      T3 row and the too-short password, leaves the legacy rows alone, drops its scratch table, and a second run appends nothing.
+ *      T3 row and the too-short password, leaves the legacy rows alone, drops its scratch table, and a second run appends nothing;
+ *   6. the Credentials Browser's "Newest first" runs as time windows on proj_imported_desc (lib/newest-first.ts), end to end.
  *
  *   docker compose build app                   # once: the rehearsal uses the image it produces
  *   npx tsx scripts/e2e-alert-rehearsal.ts     # about 3-4 minutes; --keep leaves the stack up for inspection
@@ -162,7 +164,9 @@ async function main(): Promise<number> {
     const expr = chQuery("SELECT default_expression FROM system.columns WHERE database='ulp' AND table='credentials' AND name='country_tier'")
     check('country_tier reads email_domain (DDL v26 / the init SQL)', expr.includes('email_domain') && !expr.includes("splitByChar('@', lower(email))"))
     const ddl = appNode(`const D=require('better-sqlite3');const db=new D('/app/data/ulp.db',{readonly:true});console.log(db.prepare("SELECT value FROM app_settings WHERE key_name='ch_ddl_version'").get().value)`)
-    check('the DDL version recorded in SQLite is 26', ddl === '26', `got ${ddl}`)
+    check('the DDL version recorded in SQLite is 27', ddl === '27', `got ${ddl}`)
+    const projCurrent = chQuery("SELECT count() FROM system.projections WHERE database = 'ulp' AND table = 'credentials' AND name = 'proj_imported_desc' AND position(query, 'is_noise') > 0 AND position(query, 'content_key_hash') > 0")
+    check('proj_imported_desc carries is_noise and content_key_hash (DDL v27 / the init SQL)', projCurrent === '1', `count ${projCurrent}`)
 
     console.log('2. Login and webhook')
     const login = await api('POST', '/api/auth/login', { email: secrets.REHEARSAL_ADMIN_EMAIL, password: secrets.REHEARSAL_ADMIN_PASSWORD })
@@ -279,6 +283,15 @@ async function main(): Promise<number> {
     const second = wrapper(true)
     check('a second run appends nothing', second.status === 0 && /appended: 0 repaired/.test(second.stdout), (second.stdout + second.stderr).slice(-300))
     check('...and the row count is unchanged', count("url = 'https://docs.example.com/y'") === '1')
+
+    console.log('6. "Newest first" as time windows on proj_imported_desc (lib/newest-first.ts)')
+    const newest = await api('GET', '/api/credentials?sort=imported_desc&limit=10&skip_totals=1&exclude_noise=1&dedupe=1')
+    check('the Credentials Browser answers a newest-first request', newest.status === 200 && newest.json?.success === true && Array.isArray(newest.json?.results) && newest.json.results.length > 0, `status ${newest.status}`)
+    chQuery('SYSTEM FLUSH LOGS')
+    const windowedRuns = chQuery("SELECT count() FROM system.query_log WHERE type = 'QueryFinish' AND position(query, 'nfwLimit') > 0 AND position(query, 'negate(toUnixTimestamp(imported_at))') > 0")
+    check('...it ran as time windows on the projection key', Number(windowedRuns) >= 1, `windowed queries in system.query_log: ${windowedRuns}`)
+    const onProjection = chQuery("SELECT count() FROM system.query_log WHERE type = 'QueryFinish' AND position(query, 'nfwLimit') > 0 AND has(projections, 'ulp.credentials.proj_imported_desc')")
+    check('...and ClickHouse answered them from proj_imported_desc', Number(onProjection) >= 1, `answered from the projection: ${onProjection}`)
   } catch (err) {
     check('the rehearsal ran without an unexpected error', false, err instanceof Error ? err.message.split('\n')[0] : String(err))
   } finally {

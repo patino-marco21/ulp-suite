@@ -41,7 +41,9 @@ const LIVE_DDL = `CREATE TABLE ulp.credentials
             url_host,
             password_entropy_band,
             imported_at,
-            domain
+            domain,
+            is_noise,
+            content_key_hash
         ORDER BY
             negate(toUnixTimestamp(imported_at)),
             domain,
@@ -151,6 +153,12 @@ ORDER BY url`
       expect(normalize(IMPORTED_DESC_PROJECTION_BODY)).toBe(normalize(liveBlock!))
     })
 
+    test('carries the two columns the default Declutter + Unique newest-first query needs, so the projection can serve it', () => {
+      // Measured 2026-10-01: a projection without is_noise cannot serve `... AND is_noise = 0`, and without content_key_hash it cannot
+      // serve the de-duplication window; ClickHouse then reads the base table for every window.
+      expect(normalize(IMPORTED_DESC_PROJECTION_BODY)).toContain('is_noise,content_key_hash')
+    })
+
     test('is shared with migration v14 rather than duplicated, so the two cannot drift apart', () => {
       const source = readFileSync(new URL('../lib/clickhouse-migrations.ts', import.meta.url), 'utf8')
       expect(source).toContain('IMPORTED_DESC_PROJECTION_BODY')
@@ -176,6 +184,11 @@ ORDER BY url`
     // are usually the smaller ones, the disk guard's linear projection
     // (average growth so far x iterations remaining) is not thrown off by a big
     // partition going first and over-projecting the rest.
+    test('buildRecentPartitionsSql always includes the newest partition, even one older than the cutoff', () => {
+      // Nothing may have been imported for months; the newest-first read starts in the newest partition (lib/newest-first.ts).
+      expect(buildRecentPartitionsSql('202608')).toMatch(/OR partition = \(SELECT max\(partition\) FROM system\.parts WHERE database = 'ulp' AND table = 'credentials' AND active\)/)
+    })
+
     test('buildRecentPartitionsSql orders newest partition first', () => {
       expect(buildRecentPartitionsSql('202608')).toContain('ORDER BY partition DESC')
     })

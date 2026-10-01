@@ -44,6 +44,12 @@ describe('SQL builders', () => {
     expect(sql).toContain("database = 'ulp'")
     expect(sql).toContain("table = 'credentials'")
   })
+  test('buildEligiblePartitionsSql never lists the newest partition, however old it is', () => {
+    // The window is measured from the calendar, but nothing may have been imported for months: the newest-first read
+    // (lib/newest-first.ts) starts in the newest partition, so that one keeps its projection.
+    const sql = buildEligiblePartitionsSql('202605')
+    expect(sql).toMatch(/partition < \(SELECT max\(partition\) FROM system\.parts WHERE database = 'ulp' AND table = 'credentials' AND active\)/)
+  })
   test('buildClearProjectionSql targets the exact projection and partition', () => {
     expect(buildClearProjectionSql('202605')).toBe(
       `ALTER TABLE ulp.credentials CLEAR PROJECTION ${PROJECTION_NAME} IN PARTITION '202605'`,

@@ -15,6 +15,7 @@ import {
   DEFAULT_CREDENTIAL_SORT,
   MAX_CREDENTIAL_LIMIT,
 } from "@/lib/credential-browse-defaults"
+import { runNewestFirst, dedupeRows } from "@/lib/newest-first"
 
 export const dynamic = 'force-dynamic'
 
@@ -208,6 +209,7 @@ export async function GET(request: NextRequest) {
   // columns, and the two differ for the ~0.45% legacy rows (lib/cursor-pagination.ts).
   let cursorClause = ''
   let cursorParams: Record<string, unknown> = {}
+  let cursorImportedAt: string | null = null
 
   if (cursorToken) {
     const cursor = decodeCursor(cursorToken)
@@ -215,6 +217,7 @@ export async function GET(request: NextRequest) {
       const { clause, params: cp } = buildCursorWhere(sortKey as SortKey, cursor)
       cursorClause = ` AND ${clause}`
       cursorParams = cp
+      cursorImportedAt = typeof cursor.v.imported_at === 'string' ? cursor.v.imported_at : null
     }
   }
 
@@ -268,9 +271,7 @@ export async function GET(request: NextRequest) {
           params
         )
 
-    const dataPromise: Promise<unknown[]> = !wantData
-      ? Promise.resolve([])
-      : executeQuery(
+    const runPlainDataQuery = (): Promise<unknown[]> => executeQuery(
         // Data query uses throw so a timeout produces a clear error (caught below)
         // rather than silently returning 0 rows (timeout_overflow_mode=break with
         // ORDER BY does not flush the sort buffer — ClickHouse issue #52234).
@@ -315,6 +316,47 @@ export async function GET(request: NextRequest) {
                   ${NORM_COLS_SETTING}`,
         dedupeInWindow ? { ...allParams, windowLimit: limit * DEDUPE_WINDOW_FACTOR } : allParams
       ) as Promise<unknown[]>
+
+    // "Newest first" as exact time windows over proj_imported_desc (lib/newest-first.ts: 18-45 s -> well under a second for a
+    // term that is not rare). The same filters, ordering, cursor and de-duplication as the plain query; only a predicate on the
+    // projection's key is added per window. Not ready (projection not rebuilt yet) or a window error that is not a timeout:
+    // the plain query answers, as it always did. A timeout is not retried: the plain query would take at least as long.
+    const runNewestFirstData = async (): Promise<unknown[]> => {
+      try {
+        const { limit: _plainLimit, ...baseParams } = allParams
+        const windowed = await runNewestFirst({
+          run: (sql, p) => executeQuery(sql, p) as Promise<Record<string, unknown>[]>,
+          baseParams,
+          want: dedupe ? limit * DEDUPE_WINDOW_FACTOR : limit,
+          cursorImportedAt,
+          dateFrom: dateFrom ? `${dateFrom} 00:00:00` : null,
+          dateTo: dateTo ? `${dateTo} 23:59:59` : null,
+          buildWindowSql: (windowSql, budgetSeconds) => `SELECT ${SELECT}${dedupe ? ', content_key_hash AS _c_hash' : ''}
+         FROM (
+           SELECT ${RAW_COLS}${dedupe ? ', content_key_hash' : ''}
+           FROM ulp.credentials
+           WHERE ${where}${cursorClause}${windowSql}
+           ORDER BY ${orderBy}
+           LIMIT {nfwLimit:UInt32}
+         ) AS t
+         SETTINGS max_execution_time = ${budgetSeconds},
+                  timeout_overflow_mode = 'throw',
+                  http_wait_end_of_query = 1,
+                  max_bytes_before_external_sort = ${SORT_MAX_MEMORY_BYTES},
+                  ${NORM_COLS_SETTING}`,
+        })
+        if (windowed) return dedupe ? dedupeRows(windowed, '_c_hash', limit) : windowed
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes('TIMEOUT_EXCEEDED') || msg.includes('timeout') || msg.includes('Timeout')) throw err
+        console.warn('[credentials] newest-first windows failed -- using the plain query:', msg)
+      }
+      return runPlainDataQuery()
+    }
+
+    const dataPromise: Promise<unknown[]> = !wantData
+      ? Promise.resolve([])
+      : sortKey === 'imported_desc' ? runNewestFirstData() : runPlainDataQuery()
 
     const [totalsResult, rows] = await Promise.all([totalsPromise, dataPromise])
     const query_ms = Date.now() - t0

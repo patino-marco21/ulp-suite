@@ -361,16 +361,19 @@ CREATE TABLE IF NOT EXISTS ulp.credentials
     -- minmax: date range on imported_at
     INDEX idx_mm_imported_at imported_at TYPE minmax GRANULARITY 1,
 
-    -- proj_imported_desc: lets the Credentials Browser's default view (ORDER BY
-    -- imported_at DESC, domain ASC, email ASC, url ASC, password ASC) read in order
-    -- instead of a full read + sort (this table's own ORDER BY has imported_at LAST).
-    -- Mirrors DDL v14 in lib/clickhouse-migrations.ts — that file is the source of
-    -- truth; keep both in sync. negate(toUnixTimestamp(imported_at)) stands in for
-    -- "imported_at DESC" since a projection's ORDER BY can't use DESC directly.
+    -- proj_imported_desc: a copy of the browse columns sorted newest-first (this table's own
+    -- ORDER BY has imported_at LAST). ClickHouse does not read a projection in order, but it DOES
+    -- range-prune it on a predicate written on its key expression, which is how lib/newest-first.ts
+    -- runs "Newest first" as time windows (0.13 s instead of 18-45 s). is_noise and
+    -- content_key_hash are in it because the default Declutter + Unique view filters and
+    -- de-duplicates on them; a projection missing a column the query needs is not used.
+    -- Mirrors IMPORTED_DESC_PROJECTION_BODY (lib/credentials-projections.ts, DDL v14/v27 in
+    -- lib/clickhouse-migrations.ts) — a test pins them together. negate(toUnixTimestamp(imported_at))
+    -- stands in for "imported_at DESC" since a projection's ORDER BY can't use DESC directly.
     PROJECTION proj_imported_desc (
         SELECT url, email, password, source_file, breach_name, country_tier, login_type,
                password_length, password_mask, url_scheme, is_corporate_email, email_domain,
-               url_host, password_entropy_band, imported_at, domain
+               url_host, password_entropy_band, imported_at, domain, is_noise, content_key_hash
         ORDER BY negate(toUnixTimestamp(imported_at)), domain, email, url, password
     ),
 

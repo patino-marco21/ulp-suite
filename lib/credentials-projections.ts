@@ -54,10 +54,15 @@ import { PROJECTION_NAME, cutoffPartition, projectionScopeWindowMonths } from '@
  * created it and the restore that re-creates it after every swap cannot drift
  * apart. A projection's ORDER BY can't use DESC, so negate(toUnixTimestamp(
  * imported_at)) stands in for "imported_at DESC" -- see DDL v14's comment.
+ *
+ * DDL v27 added is_noise and content_key_hash. The Credentials Browser's default view filters on is_noise (Declutter) and
+ * de-duplicates on content_key_hash (Unique); a projection that lacks a column a query needs cannot serve that query, so
+ * with the v14 body ClickHouse read the base table for every default-view newest-first query. lib/newest-first.ts runs
+ * those queries as time windows over this projection and only does so when the live definition has both columns.
  */
 export const IMPORTED_DESC_PROJECTION_BODY = `SELECT url, email, password, source_file, breach_name, country_tier, login_type,
                password_length, password_mask, url_scheme, is_corporate_email, email_domain,
-               url_host, password_entropy_band, imported_at, domain
+               url_host, password_entropy_band, imported_at, domain, is_noise, content_key_hash
         ORDER BY negate(toUnixTimestamp(imported_at)), domain, email, url, password`
 
 /**
@@ -110,9 +115,22 @@ export function buildAddImportedDescProjectionSql(): string {
   return `ALTER TABLE ulp.credentials ADD PROJECTION IF NOT EXISTS ${PROJECTION_NAME} (${IMPORTED_DESC_PROJECTION_BODY})`
 }
 
+/** Drops the projection and its stored copy in every partition (instant); the base rows are untouched. */
+export function buildDropImportedDescProjectionSql(): string {
+  return `ALTER TABLE ulp.credentials DROP PROJECTION IF EXISTS ${PROJECTION_NAME}`
+}
+
+/** 1 when the live projection already has the current definition (both columns DDL v27 added), 0 when it is missing or older. */
+export function buildImportedDescProjectionCurrentSql(): string {
+  return `SELECT count() AS projection_current FROM system.projections
+    WHERE database = 'ulp' AND table = 'credentials' AND name = '${PROJECTION_NAME}'
+      AND position(query, 'is_noise') > 0 AND position(query, 'content_key_hash') > 0`
+}
+
 /**
  * Partitions that keep the projection -- the complement of lib/projection-scope.ts's
- * buildEligiblePartitionsSql. Newest first: that is the data "browse newest first"
+ * buildEligiblePartitionsSql, so the NEWEST partition is always among them (the window is measured from the
+ * calendar, and nothing may have been imported for months; lib/newest-first.ts starts every read there). Newest first: that is the data "browse newest first"
  * reads, so it gets the speedup soonest, and newer partitions are usually the
  * smaller ones, which keeps the disk guard's linear projection (average growth so
  * far x iterations remaining) from over-projecting after one big partition.
@@ -120,7 +138,8 @@ export function buildAddImportedDescProjectionSql(): string {
 export function buildRecentPartitionsSql(cutoff: string): string {
   return `SELECT DISTINCT partition FROM system.parts
     WHERE database = 'ulp' AND table = 'credentials' AND active
-      AND partition >= '${cutoff}'
+      AND (partition >= '${cutoff}'
+        OR partition = (SELECT max(partition) FROM system.parts WHERE database = 'ulp' AND table = 'credentials' AND active))
     ORDER BY partition DESC`
 }
 

@@ -32,10 +32,16 @@ export function cutoffPartition(windowMonths: number, now: Date): string {
   return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}`
 }
 
+/**
+ * Partitions to clear: older than the cutoff, but NEVER the newest one. The cutoff is counted from the calendar, and
+ * nothing may have been imported for months (the newest row is 2026-08-28): without this the projection would be cleared
+ * from the only partition lib/newest-first.ts needs it on, as soon as the calendar moved two months past it.
+ */
 export function buildEligiblePartitionsSql(cutoff: string): string {
   return `SELECT DISTINCT partition FROM system.parts
     WHERE database = 'ulp' AND table = 'credentials' AND active
       AND partition < '${cutoff}'
+      AND partition < (SELECT max(partition) FROM system.parts WHERE database = 'ulp' AND table = 'credentials' AND active)
     ORDER BY partition`
 }
 
