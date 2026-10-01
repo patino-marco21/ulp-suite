@@ -193,7 +193,7 @@ dropped) on the 1.39B-row table.
 | `NORM_COLS` display (see below) | Case D rows half-repaired | repaired; `prefer_column_name_to_alias = 1` on every query that selects it |
 | Merge durability | merges never fsynced | DDL v25: `min_rows_to_fsync_after_merge = 1000000`, `min_compressed_bytes_to_fsync_after_merge = 134217728` |
 | Disk-space alerting | none (937 GB -> 311 MB free went unnoticed on 2026-09-26) | `lib/disk-watch.ts`: ok/warn/critical every 10 min, log + optional webhook, shown in Ingest Health; fired a real WARNING within a minute of deploy (156 GiB free during a 66 GiB merge) |
-| App port | published on 0.0.0.0 | 127.0.0.1 unless `APP_BIND_ADDR` is set (every audit-log entry came from the Docker gateway = the laptop itself) |
+| App port | published on 0.0.0.0 | 127.0.0.1 unless `APP_BIND_ADDR` is set (all 56 audit-log entries came from the Docker gateway address, which is how the laptop's own connections appear) |
 | SQLite (users, keys, monitors) backup | none | daily verified snapshots in `./data/backups`, keep 7; first one written in production |
 | Backup tooling | `ulp.*` would snapshot and upload the 381 GiB archive; local snapshots unguarded | live tables only; disk-space guard; `space`/`local`/`status`; local copy deleted after upload; retention 2; Ingest Health shows backup age. Local flow rehearsed on a sandbox table; **the S3 flow has not been exercised (no destination)** |
 | npm audit | 1 high (brace-expansion, dev-only) | 0; verified with `npm ci` and the versions read from `node_modules` |

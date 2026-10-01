@@ -78,8 +78,8 @@ services:
     restart: unless-stopped
     ports:
       # Loopback only by default. This app is a credential database and ships with 2FA off; a
-      # published 0.0.0.0:3000 put its login page on every network the laptop joins (the audit log
-      # shows every past access came from the laptop itself). To reach it from another machine set
+      # published 0.0.0.0:3000 put its login page on every network the laptop joins (all 56 audit-log
+      # entries to date came from the Docker gateway address, i.e. from the laptop itself). To reach it from another machine set
       # APP_BIND_ADDR=0.0.0.0 in .env -- and enrol 2FA for every account first.
       - "${APP_BIND_ADDR:-127.0.0.1}:3000:3000"
     # Memory: 8 GB container / 6 GB Node.js heap = 2 GB OS headroom.
