@@ -100,8 +100,15 @@ export async function GET(request: NextRequest) {
 
   try {
     // Return breach names + domains only — NO passwords exposed.
-    // email is in the primary key (ORDER BY domain, email, imported_at) and has a
-    // bloom_filter skip index — point lookup is fast even at 1.46B rows.
+    // email has a bloom_filter skip index — point lookup is fast even at 1.39B rows
+    // (measured 2026-09-30: 0.3-1.2 s for ordinary addresses, ~22 s for a very popular one).
+    //
+    // 'throw', not 'break': 'break' returns whatever had been read when the deadline hit -- a
+    // truncated newest-500 list (verified 2026-10-01 with a 3 s cap on a popular address: 500 rows
+    // that are not the newest 500), or no rows at all if the matching granules were not reached
+    // yet, which is rendered below as "found: false": someone told their address is not in the
+    // data when the query simply ran out of time. http_wait_end_of_query keeps a mid-stream
+    // timeout from arriving as garbled JSON.
     const rows = await executeQuery(
       `SELECT
          breach_name,
@@ -111,8 +118,8 @@ export async function GET(request: NextRequest) {
        WHERE email = {email:String}
        ORDER BY imported_at DESC
        LIMIT 500
-       SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break',
-                use_query_cache = 0`,
+       SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw',
+                http_wait_end_of_query = 1, use_query_cache = 0`,
       { email: rawEmail }
     ) as Array<{ breach_name: string; domain: string; imported_at: string }>
 
@@ -164,6 +171,14 @@ export async function GET(request: NextRequest) {
       }
     )
   } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    if (msg.includes("TIMEOUT_EXCEEDED") || msg.includes("Timeout") || msg.includes("timeout")) {
+      // Not "found: false": we do not know. Say so, and let the client retry.
+      return NextResponse.json(
+        { success: false, timed_out: true, error: "The lookup took too long. Please try again in a moment." },
+        { status: 503, headers: { "Retry-After": "30", "Cache-Control": "private, no-store" } }
+      )
+    }
     console.error("Check API error:", error)
     return NextResponse.json({ success: false, error: "Lookup failed" }, { status: 500 })
   }
