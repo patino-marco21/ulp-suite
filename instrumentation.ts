@@ -76,6 +76,23 @@ export async function register() {
       } catch (err) {
         console.error('[instrumentation] Projection-scope cron failed to start:', err)
       }
+
+      // Rolling SQLite snapshots (users, API keys, monitors -- outside clickhouse-backup's reach).
+      try {
+        const { startSqliteBackupCron } = await import('./lib/sqlite-backup-cron')
+        startSqliteBackupCron()
+      } catch (err) {
+        console.error('[instrumentation] SQLite backup cron failed to start:', err)
+      }
+
+      // Passive disk-space watcher: logs (and optionally POSTs to DISK_ALERT_WEBHOOK_URL) when
+      // free space on the ClickHouse disk drops into warn / critical. See lib/disk-watch.ts.
+      try {
+        const { startDiskWatchCron } = await import('./lib/disk-watch-cron')
+        startDiskWatchCron()
+      } catch (err) {
+        console.error('[instrumentation] Disk-watch cron failed to start:', err)
+      }
     }
   }
 }

@@ -3,6 +3,8 @@ import { validateRequest, requireAdminRole } from '@/lib/auth'
 import { executeQuery } from '@/lib/clickhouse'
 import { getIngestMetrics } from '@/lib/ingest-metrics'
 import { diskBudgetBytes, buildLiveBytesSql, diskBudgetPct } from '@/lib/disk-budget'
+import { readDisk } from '@/lib/disk-watch'
+import { readBackupStatus } from '@/lib/backup-status'
 
 export const dynamic = 'force-dynamic'
 
@@ -58,5 +60,9 @@ export async function GET(request: NextRequest) {
     diskBudget.note = note
   }
 
-  return NextResponse.json({ app: getIngestMetrics(), clickhouse, diskBudget })
+  // Free space on the ClickHouse data disk (the number the dedup/projection guard and the passive
+  // watcher in lib/disk-watch.ts act on) -- diskBudget above is the table's own size against its budget.
+  const disk = await readDisk()
+
+  return NextResponse.json({ app: getIngestMetrics(), clickhouse, diskBudget, disk, backup: readBackupStatus() })
 }

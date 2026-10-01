@@ -407,6 +407,14 @@ export function dbExec(sql: string): void {
   getDb().exec(sql)
 }
 
+/**
+ * Write a consistent snapshot of the live database (WAL included) to `destPath`, using SQLite's online
+ * backup API: safe while the app is reading and writing, unlike copying ulp.db by hand.
+ */
+export function backupDb(destPath: string): Promise<unknown> {
+  return getDb().backup(destPath)
+}
+
 // Ensure the DB is initialised (idempotent - safe to call at startup)
 export function ensureDb(): void {
   getDb()

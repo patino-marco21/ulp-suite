@@ -77,7 +77,11 @@ services:
     # restarts on crash, not after a clean Docker daemon restart).
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      # Loopback only by default. This app is a credential database and ships with 2FA off; a
+      # published 0.0.0.0:3000 put its login page on every network the laptop joins (the audit log
+      # shows every past access came from the laptop itself). To reach it from another machine set
+      # APP_BIND_ADDR=0.0.0.0 in .env -- and enrol 2FA for every account first.
+      - "${APP_BIND_ADDR:-127.0.0.1}:3000:3000"
     # Memory: 8 GB container / 6 GB Node.js heap = 2 GB OS headroom.
     # Node.js 24 is container-aware — NODE_OPTIONS makes the limit explicit.
     mem_limit: 8g
@@ -134,6 +138,20 @@ services:
       DEDUP_CRON_HOUR_UTC: ${DEDUP_CRON_HOUR_UTC:-4}
       DEDUP_MIN_EXCESS: ${DEDUP_MIN_EXCESS:-1000}
       CONTENT_DEDUP_BUCKET_COUNT: ${CONTENT_DEDUP_BUCKET_COUNT:-32}
+      # Disk-space watcher (lib/disk-watch.ts) -- optional; forwarded explicitly (see above).
+      # Empty values fall back to the defaults in code (check every 10 min; warn below the larger of
+      # 100 GiB and 20% free; the critical floor is DISK_GUARD_MIN_FREE_BYTES / _RATIO).
+      DISK_WATCH_MINUTES: ${DISK_WATCH_MINUTES:-}
+      DISK_WARN_FREE_BYTES: ${DISK_WARN_FREE_BYTES:-}
+      DISK_WARN_FREE_RATIO: ${DISK_WARN_FREE_RATIO:-}
+      DISK_ALERT_WEBHOOK_URL: ${DISK_ALERT_WEBHOOK_URL:-}
+      DISK_ALERT_REMINDER_HOURS: ${DISK_ALERT_REMINDER_HOURS:-}
+      DISK_GUARD_MIN_FREE_BYTES: ${DISK_GUARD_MIN_FREE_BYTES:-}
+      DISK_GUARD_MIN_FREE_RATIO: ${DISK_GUARD_MIN_FREE_RATIO:-}
+      # SQLite snapshots (lib/sqlite-backup.ts) into ./data/backups -- optional, same rule.
+      SQLITE_BACKUP_HOURS: ${SQLITE_BACKUP_HOURS:-}
+      SQLITE_BACKUP_KEEP: ${SQLITE_BACKUP_KEEP:-}
+      BACKUP_MAX_AGE_HOURS: ${BACKUP_MAX_AGE_HOURS:-}
     volumes:
       - ./uploads:/app/uploads
       - ./data:/app/data

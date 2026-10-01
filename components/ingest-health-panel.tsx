@@ -30,6 +30,21 @@ interface IngestHealth {
     pct: number
     note?: string
   }
+  // Backups: SQLite snapshots (the app's own job) and the last ClickHouse backup scripts/clickhouse-backup.sh
+  // recorded; lastAt null means none has ever been recorded.
+  backup?: {
+    sqlite: { lastAt: string | null; ageHours: number | null; stale: boolean }
+    clickhouse: { lastAt: string | null; ageHours: number | null; stale: boolean; offHost: boolean | null }
+    maxAgeHours: number
+  }
+  // Free space on the ClickHouse data disk; status is ok / warn / critical, or unknown when unreadable.
+  disk?: {
+    status: "ok" | "warn" | "critical" | "unknown"
+    freeBytes: number | null
+    totalBytes: number | null
+    freeRatio: number | null
+    error?: string
+  }
 }
 
 const fmtRate = (n: number) =>
@@ -37,6 +52,7 @@ const fmtRate = (n: number) =>
 const fmtRows = (n: number) =>
   n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(0)}K` : String(n)
 const fmtGB = (b: number) => `${(b / 2 ** 30).toFixed(1)} GB`
+const fmtAge = (h: number) => (h < 1 ? "just now" : h < 48 ? `${Math.round(h)} h ago` : `${Math.round(h / 24)} d ago`)
 
 export function IngestHealthPanel() {
   const [data, setData] = useState<IngestHealth | null>(null)
@@ -59,7 +75,7 @@ export function IngestHealthPanel() {
   }, [])
 
   if (!data) return null
-  const { app, clickhouse, diskBudget } = data
+  const { app, clickhouse, diskBudget, disk, backup } = data
   const active = app.filename !== null && Date.now() - app.updatedAt < 5_000
   const partsPct = Math.min(100, Math.round((clickhouse.activeParts / clickhouse.partsThreshold) * 100))
 
@@ -126,8 +142,42 @@ export function IngestHealthPanel() {
               {fmtGB(diskBudget.usedBytes)} / {fmtGB(diskBudget.budgetBytes)} ({diskBudget.pct}%)
             </span>
           </div>
+          {disk && (
+            <div
+              className="flex items-center gap-1.5"
+              title={disk.error ?? "Free space on the ClickHouse data disk"}
+              data-testid="disk-free"
+            >
+              <HardDrive className={`h-3.5 w-3.5 ${disk.status === "critical" ? "text-red-600" : disk.status === "warn" ? "text-amber-600" : "text-muted-foreground"}`} />
+              <span className={disk.status === "critical" ? "text-red-600 font-medium" : disk.status === "warn" ? "text-amber-600 font-medium" : ""}>
+                {disk.freeBytes === null || disk.freeRatio === null
+                  ? "disk free: unknown"
+                  : `${fmtGB(disk.freeBytes)} free (${Math.round(disk.freeRatio * 100)}%)${disk.status === "critical" ? " — critical" : disk.status === "warn" ? " — low" : ""}`}
+              </span>
+            </div>
+          )}
           {clickhouse.note && <span className="text-xs text-muted-foreground">({clickhouse.note})</span>}
         </div>
+        {backup && (
+          <div className="flex gap-6 flex-wrap text-xs border-t pt-3" data-testid="backup-status">
+            <span
+              className={backup.clickhouse.lastAt === null || backup.clickhouse.stale || backup.clickhouse.offHost === false ? "text-amber-600 font-medium" : "text-muted-foreground"}
+              title="Credential data (ClickHouse). Run ./scripts/clickhouse-backup.sh; see docs/clickhouse-backup-runbook.md"
+            >
+              {backup.clickhouse.lastAt === null || backup.clickhouse.ageHours === null
+                ? "No ClickHouse backup recorded"
+                : `ClickHouse backup ${fmtAge(backup.clickhouse.ageHours)}${backup.clickhouse.offHost ? " (off-host)" : " (this disk only)"}${backup.clickhouse.stale ? " — stale" : ""}`}
+            </span>
+            <span
+              className={backup.sqlite.lastAt === null || backup.sqlite.stale ? "text-amber-600 font-medium" : "text-muted-foreground"}
+              title="Users, API keys and monitors (SQLite), snapshotted by the app into data/backups"
+            >
+              {backup.sqlite.lastAt === null || backup.sqlite.ageHours === null
+                ? "No SQLite snapshot yet"
+                : `SQLite snapshot ${fmtAge(backup.sqlite.ageHours)}${backup.sqlite.stale ? " — stale" : ""}`}
+            </span>
+          </div>
+        )}
       </CardContent>
     </Card>
   )

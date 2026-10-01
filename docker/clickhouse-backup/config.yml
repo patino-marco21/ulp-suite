@@ -16,8 +16,10 @@
 
 general:
   remote_storage: s3
-  # Retention: keep the 7 most recent snapshots locally, 30 on S3.
-  backups_to_keep_local: 7
+  # Retention: 30 on S3. LOCAL snapshots are hardlinks on the live disk, and each one pins every part
+  # a merge later replaces (a merge of one partition can cost that partition's whole size), so keep
+  # very few: 2. scripts/clickhouse-backup.sh full/inc also delete their local copy once it is uploaded.
+  backups_to_keep_local: 2
   backups_to_keep_remote: 30
   log_level: info
   # Parallelism for S3 transfer (modest — this is a single small box today).
