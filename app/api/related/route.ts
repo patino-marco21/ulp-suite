@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { executeQuery } from "@/lib/clickhouse"
 import { validateRequest } from "@/lib/auth"
-import { NORM_COLS } from "@/lib/ulp-normalize"
+import { RELATED_BY_EMAIL_SQL, RELATED_BY_DOMAIN_SQL, RELATED_BY_PASSWORD_SQL } from "@/lib/related-queries"
 
 export const dynamic = 'force-dynamic'
 
@@ -12,7 +12,10 @@ export const dynamic = 'force-dynamic'
  *   by_domain   — same domain, different email (exposure breadth)
  *   by_password — same password, different email (password reuse)
  *
- * Up to 25 results per bucket. All are fast point-lookups via bloom filter indexes.
+ * Up to 25 results per bucket, each ~1 s on the 1.39B-row table. The SQL lives in
+ * lib/related-queries.ts, which explains why it is shaped the way it is (raw-column inner
+ * query, primary-key-order sample) -- an earlier single-level form ran into its 30 s cap on
+ * every call and returned nothing.
  */
 export async function GET(request: NextRequest) {
   const user = await validateRequest(request)
@@ -29,38 +32,21 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: false, error: 'email or domain required' }, { status: 400 })
   }
 
-  const SELECT = `${NORM_COLS}, breach_name, country_tier, login_type, imported_at`
-
   try {
     const [byEmail, byDomain, byPassword] = await Promise.all([
       // By email — all credentials sharing this login (cross-domain reuse)
       email
-        ? executeQuery(
-            `SELECT ${SELECT} FROM ulp.credentials
-             WHERE email = {email:String}
-             ORDER BY imported_at DESC LIMIT 25 SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break', use_query_cache = 0`,
-            { email }
-          )
+        ? executeQuery(RELATED_BY_EMAIL_SQL, { email })
         : Promise.resolve([]),
 
       // By domain — other logins on the same domain
       domain
-        ? executeQuery(
-            `SELECT ${SELECT} FROM ulp.credentials
-             WHERE domain = {domain:String} AND email != {email:String}
-             ORDER BY imported_at DESC LIMIT 25 SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break', use_query_cache = 0`,
-            { domain, email }
-          )
+        ? executeQuery(RELATED_BY_DOMAIN_SQL, { domain, email })
         : Promise.resolve([]),
 
       // By password — other accounts using the exact same password
       password && password.length >= 3
-        ? executeQuery(
-            `SELECT ${SELECT} FROM ulp.credentials
-             WHERE password = {password:String} AND email != {email:String}
-             ORDER BY imported_at DESC LIMIT 25 SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break', use_query_cache = 0`,
-            { password, email }
-          )
+        ? executeQuery(RELATED_BY_PASSWORD_SQL, { password, email })
         : Promise.resolve([]),
     ])
 
