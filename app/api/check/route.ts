@@ -5,58 +5,34 @@
  * Returns breach names only — passwords are NEVER exposed.
  * Designed for end-user self-lookup ("have I been pwned?").
  *
- * Rate limits:
- *   • 10 requests per IP per minute
+ * Limits (in this order):
+ *   • 10 requests per client address per minute — ONLY when a trusted reverse proxy vouches for the address
+ *     (TRUST_PROXY_HOPS, lib/client-ip.ts). Without one, the forwarded-address header is whatever the caller
+ *     wrote, so it cannot key a limit.
+ *   • 60 requests per minute across ALL callers, always. This is what protects ClickHouse when the caller's
+ *     address cannot be trusted: every caller shares it, so rotating the header buys nothing.
  *   • 50 requests per email per hour (prevents enumeration via same target)
+ *   • 4 lookups in flight at once: an address that matches millions of rows can take 20-30 s, and without a
+ *     cap a burst queues up behind them in ClickHouse.
  */
 
 import { NextRequest, NextResponse } from "next/server"
 import { executeQuery } from "@/lib/clickhouse"
+import { checkLimit } from "@/lib/rate-limiter"
+import { trustedClientIp } from "@/lib/client-ip"
 
 export const dynamic = "force-dynamic"
 
-// ── In-memory rate limiters (edge-compatible) ─────────────────────────────────
+// ── In-memory rate limiters (single process; see lib/rate-limiter.ts) ─────────
 
-const ipLimiter    = new Map<string, { count: number; resetAt: number }>()
-const emailLimiter = new Map<string, { count: number; resetAt: number }>()
+const ipLimiter     = new Map<string, { count: number; resetAt: number }>()
+const emailLimiter  = new Map<string, { count: number; resetAt: number }>()
+const globalLimiter = new Map<string, { count: number; resetAt: number }>()
 
-function checkLimit(
-  map: Map<string, { count: number; resetAt: number }>,
-  key: string,
-  maxCount: number,
-  windowMs: number
-): { allowed: boolean; remaining: number; resetAt: number } {
-  const now = Date.now()
-
-  // Periodic cleanup to prevent unbounded growth
-  if (map.size > 5000) {
-    for (const [k, v] of map) {
-      if (now > v.resetAt) map.delete(k)
-    }
-  }
-
-  const entry = map.get(key)
-  if (!entry || now > entry.resetAt) {
-    const resetAt = now + windowMs
-    map.set(key, { count: 1, resetAt })
-    return { allowed: true, remaining: maxCount - 1, resetAt }
-  }
-
-  if (entry.count >= maxCount) {
-    return { allowed: false, remaining: 0, resetAt: entry.resetAt }
-  }
-
-  entry.count++
-  return { allowed: true, remaining: maxCount - entry.count, resetAt: entry.resetAt }
-}
-
-function getClientIP(req: NextRequest): string {
-  return (
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    req.headers.get("x-real-ip") ||
-    "unknown"
-  )
-}
+const IP_PER_MINUTE     = 10
+const GLOBAL_PER_MINUTE = 60
+const MAX_IN_FLIGHT     = 4
+let inFlight = 0
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 
@@ -71,19 +47,34 @@ export async function GET(request: NextRequest) {
     )
   }
 
-  const ip = getClientIP(request)
-
-  // IP rate limit: 10 / minute
-  const ipCheck = checkLimit(ipLimiter, ip, 10, 60_000)
-  if (!ipCheck.allowed) {
+  // Per client address: only when a trusted proxy vouches for it (see the header comment).
+  const ip = trustedClientIp(request.headers)
+  const ipCheck = ip ? checkLimit(ipLimiter, ip, IP_PER_MINUTE, 60_000) : null
+  if (ipCheck && !ipCheck.allowed) {
     return NextResponse.json(
       { success: false, error: "Too many requests from your IP. Please wait a minute." },
       {
         status: 429,
         headers: {
           "Retry-After":        String(Math.ceil((ipCheck.resetAt - Date.now()) / 1000)),
-          "X-RateLimit-Limit":  "10",
+          "X-RateLimit-Limit":  String(IP_PER_MINUTE),
           "X-RateLimit-Reset":  String(ipCheck.resetAt),
+        },
+      }
+    )
+  }
+
+  // Everyone shares this budget, whatever the forwarded-address header says.
+  const globalCheck = checkLimit(globalLimiter, "all", GLOBAL_PER_MINUTE, 60_000)
+  if (!globalCheck.allowed) {
+    return NextResponse.json(
+      { success: false, error: "Too many requests. Please wait a minute." },
+      {
+        status: 429,
+        headers: {
+          "Retry-After":        String(Math.ceil((globalCheck.resetAt - Date.now()) / 1000)),
+          "X-RateLimit-Limit":  String(GLOBAL_PER_MINUTE),
+          "X-RateLimit-Reset":  String(globalCheck.resetAt),
         },
       }
     )
@@ -98,6 +89,13 @@ export async function GET(request: NextRequest) {
     )
   }
 
+  if (inFlight >= MAX_IN_FLIGHT) {
+    return NextResponse.json(
+      { success: false, error: "The service is busy. Please try again in a moment." },
+      { status: 503, headers: { "Retry-After": "5", "Cache-Control": "private, no-store" } }
+    )
+  }
+  inFlight++
   try {
     // Return breach names + domains only — NO passwords exposed.
     // email has a bloom_filter skip index — point lookup is fast even at 1.39B rows
@@ -128,7 +126,7 @@ export async function GET(request: NextRequest) {
         { success: true, email: rawEmail, found: false, breach_count: 0, breaches: [] },
         {
           headers: {
-            "X-RateLimit-Remaining": String(ipCheck.remaining),
+            "X-RateLimit-Remaining": String((ipCheck ?? globalCheck).remaining),
             "Cache-Control":         "private, no-store",
           },
         }
@@ -165,7 +163,7 @@ export async function GET(request: NextRequest) {
       },
       {
         headers: {
-          "X-RateLimit-Remaining": String(ipCheck.remaining),
+          "X-RateLimit-Remaining": String((ipCheck ?? globalCheck).remaining),
           "Cache-Control":         "private, no-store",
         },
       }
@@ -181,5 +179,7 @@ export async function GET(request: NextRequest) {
     }
     console.error("Check API error:", error)
     return NextResponse.json({ success: false, error: "Lookup failed" }, { status: 500 })
+  } finally {
+    inFlight--
   }
 }

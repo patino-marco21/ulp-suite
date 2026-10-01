@@ -119,6 +119,9 @@ services:
       # Default admin (seeded on first startup if no users exist)
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@ulpsuite.local}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+      # Reverse proxies in front of the app that APPEND the client address to X-Forwarded-For
+      # (lib/client-ip.ts). 0 = none, the default: the app is published on 127.0.0.1 only.
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-0}
       # Import filtering — optional, configured in .env. These must be forwarded
       # explicitly because Compose does not inject arbitrary .env keys.
       INGEST_FILTER_HARD_DROP_TIERS: ${INGEST_FILTER_HARD_DROP_TIERS:-T3}

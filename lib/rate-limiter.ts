@@ -1,4 +1,5 @@
 import { type NextRequest } from 'next/server'
+import { rateLimitKey } from '@/lib/client-ip'
 
 /**
  * Shared in-memory rate limiter.
@@ -42,11 +43,12 @@ export function checkLimit(
   return { allowed: true, remaining: maxCount - entry.count, resetAt: entry.resetAt }
 }
 
+/**
+ * What to key a limiter on for this request: the caller's address when a trusted reverse proxy vouches for it
+ * (TRUST_PROXY_HOPS, see lib/client-ip.ts), otherwise one shared key. The forwarded-address header is whatever
+ * the caller wrote unless a proxy appended to it, so keying on it lets a caller pick a fresh bucket per request.
+ */
 export function getClientIP(req: NextRequest): string {
-  return (
-    req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-    req.headers.get('x-real-ip') ||
-    'unknown'
-  )
+  return rateLimitKey(req.headers)
 }
 

@@ -1,4 +1,5 @@
 import { dbRun } from '@/lib/sqlite'
+import { clientIpForLog } from '@/lib/client-ip'
 
 export type AuditAction =
   | 'upload.start' | 'upload.complete' | 'upload.fail'
@@ -23,10 +24,8 @@ export interface AuditLogEntry {
 }
 
 export function getClientInfo(request: Request): { ip: string | null; userAgent: string | null } {
-  const forwarded = request.headers.get('x-forwarded-for')
-  const ip = forwarded ? forwarded.split(',')[0].trim() : request.headers.get('x-real-ip')
   return {
-    ip: ip || null,
+    ip: clientIpForLog(request.headers),
     userAgent: (request.headers.get('user-agent') || '').substring(0, 500) || null,
   }
 }

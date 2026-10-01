@@ -125,6 +125,12 @@ Open [http://localhost:3000](http://localhost:3000). Log in with `ADMIN_EMAIL` /
 >
 > The app's port is published on **127.0.0.1 only** (reachable from the machine itself). To reach it from
 > other machines set `APP_BIND_ADDR=0.0.0.0` in `.env` — and enrol 2FA for every account first.
+>
+> **Behind a reverse proxy**, set `TRUST_PROXY_HOPS` to the number of proxies that *append* the client's address to
+> `X-Forwarded-For` (`1` for one nginx/Caddy/Traefik). Without it the app does not believe that header, because
+> with nothing in front of the app the caller writes it: the public `/api/check` lookup (60 requests a minute and
+> 4 in flight, shared by everyone), uploads and rescans then share one rate-limit budget instead of one per
+> address, and the audit log stores the address as a lead rather than proof.
 
 ### Inbox folder (batch / automated uploads)
 

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { dbQuery, dbRun, dbGet } from '@/lib/sqlite'
+import { clientIpForLog } from '@/lib/client-ip'
 
 const API_KEY_PREFIX = 'bv_'
 const API_KEY_LENGTH = 32
@@ -175,8 +176,7 @@ export async function logApiRequest(
   endpoint: string
 ): Promise<void> {
   try {
-    const ip = request.headers.get('x-forwarded-for')?.split(',')[0].trim()
-      || request.headers.get('x-real-ip') || null
+    const ip = clientIpForLog(request.headers)
     const ua = (request.headers.get('user-agent') || '').substring(0, 500) || null
     dbRun(
       `INSERT INTO api_request_logs (api_key_id, endpoint, method, status_code, ip_address, user_agent)
