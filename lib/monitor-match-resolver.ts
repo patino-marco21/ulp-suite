@@ -70,6 +70,7 @@ import {
   buildDomainRevCandidateWhereClause,
   buildEmailDomainRevCandidateWhereClause,
   buildCandidateValueBranches,
+  buildNormalizedDomainSetMatch,
   compareMatches,
   mergeMatchPages,
   type CandidateColumn,
@@ -323,23 +324,17 @@ async function resolveCandidates(mode: MatchMode, domains: string[]): Promise<Ca
   })
 
   // Matches hiding under a legacy-normalization domain, fetched as rows. The
-  // scan is bounded by the primary key to those three values (21.3M rows,
-  // measured 5.7–7.9 s on the old 2.4B-row table) and, unlike the column scans above, has to evaluate
-  // the full match condition — so it is by far the most expensive thing phase
-  // 1 does when it finds nothing, and exactly the thing worth caching.
+  // scan is bounded by the primary key to those three values (22.6M rows) and, unlike
+  // the column scans above, has to evaluate the full match condition on every one of
+  // them -- so it is by far the most expensive thing phase 1 does when it finds
+  // nothing, and exactly the thing worth caching.
   //
-  // Re-measured 2026-09-30 on the deduped 8-part table, idle server, cold, with the 17-domain
-  // monitor: 40 s for 22.6M rows, 404 CPU-seconds (~18 µs per row), and 55 s when it ran beside
-  // the 666M-row `domain` scan. It is now the slowest part of a cold rescan (the two column
-  // scans take ~0.5 s each through their reversed-key projections), and sits at 40-55 s
-  // against PHASE1_MAX_EXECUTION_TIME = 90. The cost looks proportional to domains x rows:
-  // buildDomainSetWhereClause repeats the NORM_* expressions once per domain and per column.
-  const { clause: exactClause, params: exactParams } = buildDomainSetWhereClause(domains, mode)
-  const legacyScan = selectMatches(
-    `domain IN {legacyDomains:Array(String)} AND ${exactClause}`,
-    { ...exactParams, legacyDomains: NORMALIZED_LEGACY_DOMAINS },
-    PHASE1_MAX_EXECUTION_TIME,
-  )
+  // Measured 2026-09-30 on the deduped 8-part table, idle server, cold, 17-domain monitor:
+  // the old per-domain form took 37-40 s / ~400 CPU-seconds (it repeated the NORM_* text
+  // per domain; 1 domain 2.9 s, 4 domains 9.9 s), the normalize-once form
+  // (selectLegacyMatches) 4.3 s / 47 CPU-seconds with identical results on five domain
+  // sets that do hit legacy rows (up to 426,684 matching rows, all three modes).
+  const legacyScan = selectLegacyMatches(domains, mode, PHASE1_MAX_EXECUTION_TIME)
 
   const [scanResults, legacyRows] = await Promise.all([Promise.all(scans), legacyScan])
 
@@ -426,6 +421,49 @@ function selectMatches(
      SETTINGS max_execution_time = ${maxExecutionTime}, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1`,
     { ...params, matchLimit: MATCH_LIMIT }
   ) as Promise<MatchRow[]>
+}
+
+/**
+ * The legacy-normalization probe: the rows stored under one of NORMALIZED_LEGACY_DOMAINS whose
+ * NORMALIZED domain (or email domain) matches the monitored set. Same result as
+ * selectMatches(`domain IN (...) AND ${buildDomainSetWhereClause(...)}`), but each row is
+ * normalized once and then tested against the whole set (buildNormalizedDomainSetMatch)
+ * instead of re-evaluating the NORM_* expressions per monitored domain -- which made this scan
+ * linear in the domain count (17 domains: 40 s / 404 CPU-seconds for 22.6M rows).
+ *
+ * Three levels, because each has one job: the innermost reads RAW columns with the primary-key
+ * filter `domain IN (...)` and adds the normalized helper columns (aliases that do not reuse a
+ * column name, so the filter still prunes); the middle applies the match, orders by the primary-key
+ * prefix and limits; the outer applies NORM_DOMAIN_EXPR to the (at most MATCH_LIMIT) survivors,
+ * exactly as selectMatches does.
+ */
+export function buildLegacyProbeQuery(
+  domains: string[],
+  mode: MatchMode,
+  maxExecutionTime: number,
+): { sql: string; params: Record<string, unknown> } {
+  const { clause, params, normalizedColumns } = buildNormalizedDomainSetMatch(domains, mode)
+  return {
+    sql: `SELECT url, email, password, (${NORM_DOMAIN_EXPR}) AS domain
+     FROM (
+       SELECT url, email, password, domain
+       FROM (
+         SELECT url, email, password, domain, ${normalizedColumns}
+         FROM ulp.credentials
+         WHERE domain IN {legacyDomains:Array(String)}
+       )
+       WHERE ${clause}
+       ORDER BY ${MATCH_ORDER_BY}
+       LIMIT {matchLimit:UInt32}
+     ) AS t
+     SETTINGS max_execution_time = ${maxExecutionTime}, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1`,
+    params: { ...params, legacyDomains: NORMALIZED_LEGACY_DOMAINS, matchLimit: MATCH_LIMIT },
+  }
+}
+
+function selectLegacyMatches(domains: string[], mode: MatchMode, maxExecutionTime: number) {
+  const { sql, params } = buildLegacyProbeQuery(domains, mode, maxExecutionTime)
+  return executeQuery(sql, params) as Promise<MatchRow[]>
 }
 
 export interface ResolvedMatches {

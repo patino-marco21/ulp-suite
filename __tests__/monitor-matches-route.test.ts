@@ -84,7 +84,9 @@ describe('monitor matches route — two-phase query plan', () => {
       .map(line => line.trim())
       // SQL lines only — the surrounding prose explains why this rule exists.
       .filter(line => /^ORDER BY /.test(line))
-    expect(orderBys).toEqual(['ORDER BY ${MATCH_ORDER_BY}'])
+    // Every query builder here (selectMatches and the legacy-normalization probe) uses that same constant.
+    expect(orderBys.length).toBeGreaterThan(0)
+    for (const line of orderBys) expect(line).toBe('ORDER BY ${MATCH_ORDER_BY}')
   })
 
   test('applies NORM_DOMAIN_EXPR outside the filtered subquery, never beside the WHERE', () => {
@@ -92,11 +94,27 @@ describe('monitor matches route — two-phase query plan', () => {
     // LIMIT-sized result instead of every scanned row, AND a `(...) AS domain`
     // alias sitting next to a WHERE shadows the real `domain` column inside it,
     // silently converting `domain IN (...)` into an unprunable expression.
-    const [outer, inner] = resolverSource.split(/FROM \(\s*\n\s*SELECT url, email, password, domain/)
-    expect(inner).toBeDefined()
-    expect(outer).toContain('${NORM_DOMAIN_EXPR}) AS domain')
-    expect(inner).not.toContain('NORM_DOMAIN_EXPR')
-    expect(inner).toContain('WHERE ${where}')
+    // Checked for every query builder in the resolver: selectMatches (the phase-1 branches' and phase-2
+    // reads) and buildLegacyProbeQuery (the legacy-normalization probe, which adds normalized helper
+    // columns INSIDE its filtered subquery under aliases that do not reuse a stored column name).
+    const functionSource = (header: string) => {
+      const from = resolverSource.indexOf(header)
+      expect(from).toBeGreaterThan(-1)
+      return resolverSource.slice(from, resolverSource.indexOf('\n}\n', from))
+    }
+    const queries = [
+      { src: functionSource('function selectMatches('), where: 'WHERE ${where}' },
+      { src: functionSource('export function buildLegacyProbeQuery('), where: 'WHERE ${clause}' },
+    ]
+    for (const { src, where } of queries) {
+      const open = src.indexOf('FROM (')
+      const close = src.indexOf(') AS t')
+      expect(open).toBeGreaterThan(-1)
+      expect(close).toBeGreaterThan(open)
+      expect(src.slice(0, open)).toContain('${NORM_DOMAIN_EXPR}) AS domain')
+      expect(src.slice(open, close)).not.toContain('NORM_DOMAIN_EXPR')
+      expect(src.slice(open, close)).toContain(where)
+    }
   })
 
   test('caps the query with a named LIMIT constant', () => {

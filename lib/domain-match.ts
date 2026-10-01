@@ -235,6 +235,54 @@ export function buildDomainSetWhereClause(
   return { clause: parts.length ? `(${parts.join(' OR ')})` : '0', params }
 }
 
+/**
+ * The same match as buildDomainSetWhereClause, for rows whose normalized values the CALLER
+ * computes ONCE PER ROW (see `normalizedColumns`) instead of once per monitored domain.
+ *
+ * buildDomainSetWhereClause repeats the NORM_DOMAIN_EXPR / NORM_EMAIL_EXPR text for every
+ * domain in the set, and ClickHouse does not share the common subexpression across the OR
+ * branches: the legacy-normalization probe (22.6M rows) measured 2.9 s with 1 domain, 9.9 s
+ * with 4 and 39.9 s with 17 (28 / 101 / 406 CPU-seconds, 2026-09-30), i.e. linear in the number
+ * of domains. Here the set is bound as two parallel arrays and tested with one arrayExists per
+ * row against the precomputed `nd` (normalized domain), `ne` (lowercased normalized email) and
+ * `ed` (the part of `ne` after its LAST '@'), so the per-row cost no longer depends on the
+ * number of domains. The semantics are exactly those of buildDomainSetWhereClause: a value
+ * matches a monitored domain d when it equals d or ends with '.d', and an email only counts if
+ * it contains an '@' (position() returns 0, not -1, when absent -- see domainConditionSQL).
+ *
+ * Usage: put `normalizedColumns` in the SELECT list of an inner query that reads the RAW
+ * columns (it adds the `nd` / `ne` / `ed` aliases the clause refers to, and none of them
+ * reuses a column name, so a WHERE on the raw `domain` still prunes), then apply `clause`
+ * in the query around it.
+ */
+export function buildNormalizedDomainSetMatch(
+  domains: string[],
+  mode: MatchMode,
+): { clause: string; params: Record<string, string[]>; normalizedColumns: string } {
+  const cleaned = domains.map(d => d.toLowerCase().trim())
+  const params = { matchDomains: cleaned, matchSuffixes: cleaned.map(d => `.${d}`) }
+
+  const anyOf = (column: string) =>
+    `arrayExists((d, s) -> ${column} = d OR endsWith(${column}, s), {matchDomains:Array(String)}, {matchSuffixes:Array(String)})`
+  const urlCond = anyOf('nd')
+  const emailCond = `(position(ne, '@') > 0 AND ${anyOf('ed')})`
+
+  const columns: string[] = []
+  if (mode !== 'credential') columns.push(`(${NORM_DOMAIN_EXPR}) AS nd`)
+  if (mode !== 'url') {
+    columns.push(`lower(${NORM_EMAIL_EXPR}) AS ne`)
+    columns.push(`arrayElement(splitByChar('@', ne), -1) AS ed`)
+  }
+
+  let clause: string
+  if (cleaned.length === 0) clause = '0'
+  else if (mode === 'url') clause = urlCond
+  else if (mode === 'credential') clause = emailCond
+  else clause = `(${urlCond} OR ${emailCond})`
+
+  return { clause, params, normalizedColumns: columns.join(', ') }
+}
+
 // ─── Two-phase candidate resolution ────────────────────────────────────────
 //
 // buildDomainSetWhereClause's endsWith() subdomain test is not prunable by any
