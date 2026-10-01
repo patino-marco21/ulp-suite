@@ -26,6 +26,7 @@ import {
   DEFAULT_CREDENTIAL_SORT,
 } from "@/lib/credential-browse-defaults"
 import type { SortKey } from "@/lib/cursor-pagination"
+import { parseTotals, recordsLabel, resultsLabel, totalsParams, withPendingTotals, withTotals } from "@/lib/credential-totals"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -72,6 +73,10 @@ interface ApiResult {
   // queueing + a possible concurrent superseded request, none of which
   // query_ms can see.
   total_ms?:   number
+  // Client-only. On a first page the rows are fetched without the totals (skip_totals=1) and the
+  // totals arrive from a second request (totals_only=1); see lib/credential-totals.ts.
+  totalPending?: boolean   // rows are showing, the count is still being computed
+  totalFailed?:  boolean   // the count request failed; the rows are still valid
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -696,15 +701,35 @@ export default function CredentialsPage() {
     setLoading(true)
     const t0 = performance.now()
     try {
-      const res  = await fetch(`/api/credentials?${buildParams(cursor, overrides)}`, { signal: controller.signal })
+      const params = buildParams(cursor, overrides)
+      // First page: the rows and the whole-table totals are two requests, so the table renders as soon
+      // as its rows are ready instead of waiting for a count that scans the table (11 s for a
+      // domain-token search on 1.39B rows against ~3 s for the first page). Both share this request's
+      // AbortController, so a newer load() cancels both.
+      const splitTotals = cursor === null
+      const totalsRequest = splitTotals
+        ? fetch(`/api/credentials?${totalsParams(params)}`, { signal: controller.signal })
+            .then(r => r.json())
+            .then(parseTotals)
+            .catch(() => null)
+        : null
+      const res  = await fetch(`/api/credentials?${params}${splitTotals ? '&skip_totals=1' : ''}`, { signal: controller.signal })
       const json = await res.json()
       const total_ms = Math.round(performance.now() - t0)
       if (json.success) {
         // On deeper cursor pages the server skips the count() and returns
         // total:null — carry the page-1 total forward so the header/footer keep
         // showing the real count instead of flashing to 0.
-        setData(prev => (json.total == null ? { ...json, total: prev?.total ?? 0, total_ms } : { ...json, total_ms }))
+        setData(prev => {
+          if (splitTotals) return withPendingTotals({ ...json, total_ms })
+          return json.total == null ? { ...json, total: prev?.total ?? 0, total_ms } : { ...json, total_ms }
+        })
         setCurrentCursor(cursor)
+        // The totals are applied only if this is still the current request; this runs after the rows above
+        // were set, whichever of the two requests answered first.
+        totalsRequest?.then(totals => {
+          if (loadAbortRef.current === controller) setData(prev => withTotals(prev, totals))
+        })
       } else if (json.timed_out) {
         // 408 timeout: show the structured timeout response in the results panel
         // instead of a toast — the user can see why and what to do.
@@ -866,8 +891,8 @@ export default function CredentialsPage() {
             {data && (
               <>
                 <p className="text-sm text-muted-foreground">
-                  {data.total.toLocaleString()} records
-                  {data.raw_total != null && data.raw_total !== data.total && (
+                  {recordsLabel(data)}
+                  {!data.totalPending && !data.totalFailed && data.raw_total != null && data.raw_total !== data.total && (
                     <span className="opacity-50">
                       {' '}of {data.raw_total.toLocaleString()} total imported
                     </span>
@@ -1390,7 +1415,9 @@ export default function CredentialsPage() {
             {loading ? null : (
               // count>0 but results=0 means the data query timed out (timeout_overflow_mode=break
               // flushes 0 rows when ORDER BY query is interrupted mid-sort).
-              data && data.total > 0
+              data?.totalPending
+                ? <span className="text-muted-foreground text-sm">No rows yet — counting matches…</span>
+                : data && data.total > 0
                 ? (
                   <div className="space-y-2">
                     <p className="text-amber-600 dark:text-amber-400 font-medium">
@@ -1422,7 +1449,7 @@ export default function CredentialsPage() {
             <ChevronLeft className="h-4 w-4" />
           </Button>
           <span className="text-sm text-muted-foreground tabular-nums">
-            {data?.total.toLocaleString()} results
+            {resultsLabel(data)}
           </span>
           <Button
             size="sm" variant="outline"

@@ -53,7 +53,13 @@ export function dedupeLimitBy(dedupe: boolean): string {
  *   rows imported since the last rebuild, which the nightly tick bounds at
  *   DEDUP_MIN_EXCESS (~1%) — the same order as uniq's own error (measured
  *   -0.79% .. +0.32%).
+ *
+ * `onlyIf` turns either form into its -If variant (`uniqIf(hash, cond)` / `countIf(cond)`).
  */
-export function dedupeCountExpr(dedupe: boolean, hasUserFilter = true): string {
-  return dedupe && hasUserFilter ? `uniq(${DEDUPE_BY})` : 'count()'
+export function dedupeCountExpr(dedupe: boolean, hasUserFilter = true, onlyIf?: string): string {
+  const distinct = dedupe && hasUserFilter
+  // `onlyIf` moves a row condition (the Declutter noise filter) from the WHERE into the aggregate, so one
+  // scan of the search predicate can also produce the unrestricted count beside it.
+  if (onlyIf) return distinct ? `uniqIf(${DEDUPE_BY}, ${onlyIf})` : `countIf(${onlyIf})`
+  return distinct ? `uniq(${DEDUPE_BY})` : 'count()'
 }

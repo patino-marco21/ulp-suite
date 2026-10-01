@@ -97,6 +97,8 @@ const DEDUPE_WINDOW_FACTOR = 3
  *   date_to       string    ISO date e.g. 2024-12-31
  *   exclude_noise '1'       hide low-signal rows: IP-host / :port / .php / localhost URLs
  *   dedupe        '1'       collapse exact (url,email,password) duplicates (one row each)
+ *   skip_totals   '1'       data query only: total / raw_total come back null
+ *   totals_only   '1'       totals only (no rows): { total, raw_total, query_ms, timed_out }
  */
 export async function GET(request: NextRequest) {
   const user = await validateRequest(request)
@@ -136,6 +138,11 @@ export async function GET(request: NextRequest) {
   // Dedupe: collapse exact (url,email,password) duplicates in the view (one row
   // per unique credential). Default-on in the UI; absent param = off here.
   const dedupe = sp.get('dedupe') === '1'
+  // skip_totals=1: run only the data query and return total/raw_total as null -- the Credentials page
+  // asks for the totals separately (totals_only=1) so the table renders as soon as its rows are ready
+  // instead of waiting for a whole-table count. totals_only=1: run only the totals, no data query.
+  const skipTotals = sp.get('skip_totals') === '1'
+  const totalsOnly = sp.get('totals_only') === '1'
 
   const orderBy    = SORT_MAP[sortKey as SortKey] ?? SORT_MAP['imported_desc']
   // See DEDUPE_WINDOW_FACTOR: Unique + a non-domain-leading sort de-duplicates inside a bounded window.
@@ -215,52 +222,53 @@ export async function GET(request: NextRequest) {
     const t0 = Date.now()
 
     // The total only changes when the result SET changes (new filters/sort), not
-    // when paging through it. The first page is always cursor-less, so count() runs
-    // there; on deeper cursor pages we skip it entirely (total = null) and the client
+    // when paging through it. The first page is always cursor-less, so the totals run
+    // there; on deeper cursor pages we skip them entirely (total = null) and the client
     // carries the page-1 total forward. At billions of rows a filtered search can
-    // match tens of millions, and count() has no LIMIT — re-counting all of them on
+    // match tens of millions, and counting them has no LIMIT -- re-counting all of them on
     // every page turn is the single most expensive avoidable part of the request.
-    const countPromise: Promise<Array<{ total?: unknown }> | null> = cursorToken
+    const wantData   = !totalsOnly
+    const wantTotals = totalsOnly || (!cursorToken && !skipTotals)
+
+    // BOTH totals in ONE scan of the search predicate: `total` (the Declutter/Unique view) and `raw_total`
+    // (the same search without those view-only restrictions, so the header can say "X of Y total imported"
+    // instead of a bare filtered number that looks like missing data). They used to be two separate
+    // scans of the same WHERE; measured cold on 1.39B rows for a domain-token search ("binance.com"):
+    // 13.9 s + 32.6 s in parallel, 11.0 s as one query, identical numbers (1,233,798 / 1,232,511), and the
+    // word token "ledger" 17.8 s -> 11.2 s.
+    //
+    // The WHERE is whereRaw (no noise condition) and the noise filter moves inside the aggregate
+    // (uniqIf / countIf), which is exactly the old `WHERE ${where}` count. When deduping a filtered search,
+    // total = distinct credentials via uniq() (HLL); with no filter it is a plain count() -- storage is
+    // deduped at rest (see dedupeCountExpr for the measured cost and error bound).
+    //
+    // optimize_use_projections = 0 unless the search is bounded by a date range: otherwise the planner
+    // takes proj_imported_desc as a "thin covering copy" and scans all of it -- 32.6 s against 11.0 s on
+    // the base table, whose domain / url_host / email_domain columns are sorted and compress far better.
+    // A date range is the one predicate that projection genuinely prunes, so it keeps the planner's choice.
+    //
+    // optimize_trivial_count_query: for WHERE-free queries ClickHouse reads the partition metadata instead
+    // of scanning rows -- nearly instant. For filtered queries the setting is a no-op.
+    // Count uses break so a partial count is returned rather than an error.
+    // use_query_cache = 0: ClickHouse 26.x throws error 731 when use_query_cache=1
+    // (active from the user profile) is combined with timeout_overflow_mode='break'.
+    // Partial/timed-out counts must not be cached anyway -- they are not the real count.
+    const totalsPromise: Promise<Array<{ total?: unknown; raw_total?: unknown }> | null> = !wantTotals
       ? Promise.resolve(null)
-      // optimize_trivial_count_query: for WHERE-free queries ClickHouse reads
-      // the partition metadata instead of scanning rows — nearly instant.
-      // For filtered queries the setting is a no-op and the WHERE runs normally.
-      // Count uses break so a partial count is returned rather than an error.
-      // use_query_cache = 0: ClickHouse 26.x throws error 731 when use_query_cache=1
-      // (active from the user profile) is combined with timeout_overflow_mode='break'.
-      // Partial/timed-out counts must not be cached anyway — they are not the real count.
       : executeQuery(
-          // When deduping a filtered search, total = distinct credentials via uniq()
-          // (HLL); with no filter it is a plain count() — storage is deduped at rest
-          // (see dedupeCountExpr for the measured cost and error bound).
-          `SELECT ${dedupeCountExpr(dedupe, hasUserFilter)} AS total FROM ulp.credentials WHERE ${where}
+          `SELECT ${dedupeCountExpr(dedupe, hasUserFilter, excludeNoise ? NOISE_FILTER : undefined)} AS total,
+                  count() AS raw_total
+           FROM ulp.credentials WHERE ${whereRaw}
            SETTINGS optimize_trivial_count_query = 1,
                     max_execution_time = 300,
                     timeout_overflow_mode = 'break',
-                    use_query_cache = 0`,
+                    use_query_cache = 0${dateFrom || dateTo ? '' : ',\n                    optimize_use_projections = 0'}`,
           params
         )
 
-    // raw_total: plain count() (not uniq()) against whereRaw — the same search,
-    // without the Declutter/Unique restrictions. A WHERE-free or lightly-filtered
-    // count() hits optimize_trivial_count_query same as countPromise, so this is
-    // effectively free next to the existing count. Lets the UI show "X of Y total
-    // imported" instead of a bare filtered number that looks like missing data.
-    const rawTotalPromise: Promise<Array<{ raw_total?: unknown }> | null> = cursorToken
-      ? Promise.resolve(null)
+    const dataPromise: Promise<unknown[]> = !wantData
+      ? Promise.resolve([])
       : executeQuery(
-          `SELECT count() AS raw_total FROM ulp.credentials WHERE ${whereRaw}
-           SETTINGS optimize_trivial_count_query = 1,
-                    max_execution_time = 300,
-                    timeout_overflow_mode = 'break',
-                    use_query_cache = 0`,
-          params
-        )
-
-    const [countResult, rawTotalResult, rows] = await Promise.all([
-      countPromise,
-      rawTotalPromise,
-      executeQuery(
         // Data query uses throw so a timeout produces a clear error (caught below)
         // rather than silently returning 0 rows (timeout_overflow_mode=break with
         // ORDER BY does not flush the sort buffer — ClickHouse issue #52234).
@@ -302,15 +310,20 @@ export async function GET(request: NextRequest) {
                   http_wait_end_of_query = 1,
                   max_bytes_before_external_sort = ${SORT_MAX_MEMORY_BYTES}`,
         dedupeInWindow ? { ...allParams, windowLimit: limit * DEDUPE_WINDOW_FACTOR } : allParams
-      ),
-    ])
+      ) as Promise<unknown[]>
+
+    const [totalsResult, rows] = await Promise.all([totalsPromise, dataPromise])
     const query_ms = Date.now() - t0
-    // null on cursor pages (count skipped above) — the client keeps the page-1 total.
-    const total = countResult ? Number(countResult[0]?.total || 0) : null
-    const raw_total = rawTotalResult ? Number(rawTotalResult[0]?.raw_total || 0) : null
+    // null on cursor pages and with skip_totals (totals not computed) — the client keeps/fetches them separately.
+    const total = totalsResult ? Number(totalsResult[0]?.total || 0) : null
+    const raw_total = totalsResult ? Number(totalsResult[0]?.raw_total || 0) : null
     const timed_out = query_ms > 250_000
 
-    const nextCursor = (rows as unknown[]).length === limit
+    if (totalsOnly) {
+      return NextResponse.json({ success: true, total, raw_total, query_ms, timed_out })
+    }
+
+    const nextCursor = rows.length === limit
       ? encodeCursor(sortKey as SortKey, (rows as Record<string, unknown>[])[rows.length - 1])
       : null
 

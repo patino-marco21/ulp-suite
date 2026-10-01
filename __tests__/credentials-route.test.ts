@@ -35,8 +35,10 @@ describe('credentials route — raw_total (unfiltered count alongside the noise/
     expect(source).toMatch(/whereRaw\s*=/)
   })
 
-  test('computes raw_total via a plain count(), not uniq() — cheap trivial-count path', () => {
-    expect(getFn).toMatch(/SELECT count\(\) AS raw_total FROM ulp\.credentials WHERE \$\{whereRaw\}/)
+  test('computes raw_total as a plain count(), not uniq(), in the same scan as the total', () => {
+    // One query yields both numbers (it used to be two scans of the same predicate: 13.9 s + 32.6 s in
+    // parallel vs 11.0 s measured cold for a domain-token search); see credentials-route-totals.test.ts.
+    expect(getFn).toMatch(/count\(\) AS raw_total\s+FROM ulp\.credentials WHERE \$\{whereRaw\}/)
   })
 
   test('response includes raw_total', () => {
@@ -53,6 +55,6 @@ describe('credentials route — Unique total skips the hash scan when nothing is
   })
 
   test('passes it to dedupeCountExpr for the total', () => {
-    expect(getFn).toContain('dedupeCountExpr(dedupe, hasUserFilter)')
+    expect(getFn).toContain('dedupeCountExpr(dedupe, hasUserFilter,')
   })
 })

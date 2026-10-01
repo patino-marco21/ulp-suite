@@ -30,5 +30,14 @@ describe('ulp-dedupe', () => {
       expect(dedupeCountExpr(false, true)).toBe('count()')
       expect(dedupeCountExpr(false, false)).toBe('count()')
     })
+
+    test('onlyIf turns the distinct form into uniqIf, so the noise filter can live inside the aggregate', () => {
+      expect(dedupeCountExpr(true, true, 'is_noise = 0')).toBe('uniqIf(content_key_hash, is_noise = 0)')
+    })
+    test('onlyIf turns every non-distinct form into countIf', () => {
+      expect(dedupeCountExpr(true, false, 'is_noise = 0')).toBe('countIf(is_noise = 0)')
+      expect(dedupeCountExpr(false, true, 'is_noise = 0')).toBe('countIf(is_noise = 0)')
+      expect(dedupeCountExpr(false, false, 'is_noise = 0')).toBe('countIf(is_noise = 0)')
+    })
   })
 })
