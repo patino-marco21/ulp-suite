@@ -8,8 +8,13 @@
 # INGEST_FILTER_DROP_SUFFIXES once (in .env), then the filter blocks new imports
 # and this clears what's already stored.
 #
-# Deletes via the stored, indexed columns (country_tier / email_domain / tld) —
-# country_tier mirrors classifyTier() (same source arrays). The DELETE is a
+# Deletes via the stored, indexed columns (country_tier / email_domain / tld). Those
+# are a SQL copy of classifyTier() and the copy has DRIFTED (on 2026-10-01 1.9M rows
+# were stored as T3 that the importer calls untiered, T1 or T2), so no row is deleted
+# on the stored columns alone: every candidate is first replayed through the importer's
+# own policy (scripts/audit-purge-candidates.ts, lib/purge-audit.ts), and if the
+# importer would have kept even one of them nothing is deleted (exit 3). The audit
+# also runs in the dry run and needs `npm ci` (tsx) in this checkout. The DELETE is a
 # race-safe background mutation (concurrent inserts are never lost).
 #
 # Config (read from env, else from ./.env, else the TIERS=/SUFFIXES= overrides):
@@ -32,6 +37,7 @@ cd "$PROJECT_DIR"
 
 CH="docker exec ulpsuite_clickhouse clickhouse-client --query"
 APPLY="${APPLY:-0}"
+TSX_BIN="${TSX_BIN:-$PROJECT_DIR/node_modules/.bin/tsx}"
 
 # ── Resolve policy: explicit env → INGEST_FILTER_* → ./.env file ──────────────
 TIERS_RAW="${INGEST_FILTER_DROP_TIERS:-${TIERS:-}}"
@@ -106,7 +112,7 @@ echo "KEEP_SUFFIXES = ${KEEP_RAW:-(none)}"
 echo "WHERE $PRED"
 echo ""
 
-echo "═══ 1/3  How many rows match ════════════════════════════════════"
+echo "═══ 1/4  How many rows match ════════════════════════════════════"
 $CH "
 SELECT count() AS total_rows,
        countIf($PRED) AS to_delete,
@@ -124,7 +130,7 @@ SETTINGS max_execution_time = 300
 " --format PrettyCompact
 echo ""
 
-echo "═══ 2/3  Sample 15 rows that WOULD be deleted (verify) ══════════"
+echo "═══ 2/4  Sample 15 rows that WOULD be deleted (verify) ══════════"
 $CH "
 SELECT substring(url,1,45) AS url, substring(email,1,28) AS email, country_tier, tld
 FROM ulp.credentials WHERE $PRED LIMIT 15
@@ -132,11 +138,43 @@ SETTINGS max_execution_time = 120
 " --format PrettyCompact
 echo ""
 
-echo "═══ 3/3  Delete ═════════════════════════════════════════════════"
+echo "═══ 3/4  Label audit (the importer must agree with every row) ═══"
+audit_report=""
+audit_rc=0
+if [ ! -x "$TSX_BIN" ]; then
+  audit_rc=127
+  echo "Label audit: cannot run; $TSX_BIN is missing (run 'npm ci' in $PROJECT_DIR)."
+else
+  audit_report="$($CH "SELECT email, url FROM ulp.credentials WHERE $PRED SETTINGS max_threads = 4 FORMAT TSV" |
+    INGEST_FILTER_HARD_DROP_TIERS= INGEST_FILTER_DROP_NOISE= \
+    INGEST_FILTER_DROP_TIERS="$TIERS_RAW" INGEST_FILTER_DROP_SUFFIXES="$SUFFIXES_RAW" INGEST_FILTER_KEEP_SUFFIXES="$KEEP_RAW" \
+    "$TSX_BIN" "$SCRIPT_DIR/audit-purge-candidates.ts")"
+  audit_rc=$?
+fi
+[ -n "$audit_report" ] && echo "$audit_report"
+audited="$(sed -n 's/^audit-result: checked=\([0-9]*\) .*/\1/p' <<<"$audit_report")"
+echo ""
+
+echo "═══ 4/4  Delete ═════════════════════════════════════════════════"
 if [ "$APPLY" != "1" ]; then
+  if [ "$audit_rc" != "0" ]; then
+    echo "BLOCKED: APPLY=1 would refuse to delete anything (the label audit did not pass, exit $audit_rc)."
+    echo "The stored country_tier / tld / email_domain disagree with the importer's own rules; see README, \"Purge safety gate\"."
+    echo ""
+  fi
   echo "Dry-run. Review the count + sample above. To delete:"
   echo "  APPLY=1 INGEST_FILTER_DROP_TIERS='${TIERS_RAW}' INGEST_FILTER_DROP_SUFFIXES='${SUFFIXES_RAW}' INGEST_FILTER_KEEP_SUFFIXES='${KEEP_RAW}' bash scripts/purge-existing-low-tier.sh"
 else
+  if [ "$audit_rc" != "0" ]; then
+    echo "ERROR: refusing to purge: the label audit did not pass (exit $audit_rc); nothing was deleted."
+    echo "The stored country_tier / tld / email_domain disagree with the importer's own rules; see README, \"Purge safety gate\"."
+    exit 3
+  fi
+  candidates_now="$($CH "SELECT count() AS candidate_rows FROM ulp.credentials WHERE $PRED FORMAT TSVRaw")"
+  if [ "$candidates_now" != "$audited" ]; then
+    echo "ERROR: the candidate set changed while it was being audited ($audited audited, $candidates_now now); rerun."
+    exit 3
+  fi
   echo "Firing ALTER TABLE ulp.credentials DELETE WHERE <policy> (async mutation)..."
   if ! $CH "ALTER TABLE ulp.credentials DELETE WHERE $PRED SETTINGS mutations_sync = 0"; then
     echo "ERROR: DELETE mutation failed to submit."

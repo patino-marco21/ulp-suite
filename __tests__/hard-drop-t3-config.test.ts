@@ -12,6 +12,17 @@ describe('hard T3 deployment policy', () => {
     expect(readme).toContain('background merges reclaim physical disk space gradually')
   })
 
+  test('README documents the purge safety gate that both purge scripts point to', () => {
+    const readme = readFileSync('README.md', 'utf8')
+    expect(readme).toContain('#### Purge safety gate')
+    expect(readme).toContain('scripts/audit-purge-candidates.ts')
+    for (const name of ['purge-existing-t3.sh', 'purge-existing-low-tier.sh']) {
+      const script = readFileSync(`scripts/${name}`, 'utf8')
+      expect(script).toContain('audit-purge-candidates.ts')
+      expect(script).toContain('Purge safety gate')
+    }
+  })
+
   test('Compose defaults hard-drop tiers to T3', () => {
     const compose = readFileSync('docker-compose.yml', 'utf8')
     expect(compose).toContain(

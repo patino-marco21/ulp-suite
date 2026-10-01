@@ -330,6 +330,14 @@ ACCEPT_PERMANENT_DATA_LOSS=1 APPLY=1 bash scripts/purge-existing-t3.sh
 
 After pulling an update, rerun the same destructive command if an earlier purge failed. The script cancels only a failed exact T3 mutation, refuses to run while any other credential-table mutation is active, and then uses a bounded-memory lightweight delete. The rows become invisible when the command completes; background merges reclaim physical disk space gradually, so the script does not run a memory-intensive `OPTIMIZE FINAL`.
 
+#### Purge safety gate
+
+The purges select rows by the **stored** `country_tier` (and `tld` / `email_domain`) columns, which are a SQL copy of `lib/country-tiers.ts`, and the copy has drifted. On 2026-10-01, 1,919,919 rows were stored as `T3` and the importer's own `classifyTier()` called none of the rows it was shown T3: the stored expression treats a login with no `@` as if it were an email domain (`ED` in `buildCountryTierExpression()`), and its provider lists are an older snapshot (`att.com` is T1 in the code). The importer's T3 hard-drop is unaffected; only the stored label is wrong, so a purge on that label would have deleted mainstream sign-ins the importer accepts.
+
+So `scripts/purge-existing-t3.sh` and `scripts/purge-existing-low-tier.sh` never delete on the label alone. Both first stream every candidate row through the importer's own decision (`shouldDropAtIngest()`, via `scripts/audit-purge-candidates.ts`, which needs `npm ci` for `tsx`), in the dry run as well as in apply mode. If the importer would have kept even one candidate, apply mode exits 3 without deleting and the dry run prints `BLOCKED`, with counts only and never row content. The audit stops reading after the first 1,000 disagreements. When it passes, the script re-counts the candidates just before deleting and refuses if they changed.
+
+Until the stored column is repaired (a DDL change plus a `MATERIALIZE COLUMN` over the whole table, not done yet), both purges report `BLOCKED` on this data. That is expected: on 2026-10-01 none of the rows checked were rows the importer would have dropped, which fits the importer having dropped T3 since the hard-drop shipped.
+
 Tiers: **T1** = US/UK/CA/AU/NZ · **T2** = W.Europe/JP/KR/SG/IL/AE · **T3** = RU/CN/BR/LATAM/SEA.
 
 ---
