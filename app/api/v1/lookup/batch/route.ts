@@ -24,6 +24,18 @@ export const dynamic = "force-dynamic"
 const MAX_QUERIES  = 100
 const RESULTS_CAP  = 50
 
+// Inner queries filter, sort and LIMIT BY on RAW columns; NORM_COLS is applied to the (at most
+// MAX_QUERIES x RESULTS_CAP) rows that survive. NORM_COLS aliases url/email/password/domain, and in a
+// single-level SELECT those aliases shadow the stored columns in WHERE / ORDER BY / LIMIT BY, which
+// disables the primary-key and bloom-filter pruning that make these lookups cheap (the same defect that
+// left the Related panel empty: see lib/related-queries.ts). Measured 2026-09-30 on 1.39B rows: the
+// single-level email lookup hit the 30 s cap even for an address with one row; this form takes ~1 s.
+// Rows are matched back to the request on the output (normalized) email / domain below, as before.
+// Rows in the legacy bucket (stored domain '', 'http' or 'https'; ~22.6M) are found under their stored
+// values, as in every other lookup route -- only lib/monitor-match-resolver.ts normalizes them first.
+const RAW_COLS = `url, email, password, domain, source_file, breach_name, imported_at`
+const OUTER_COLS = `${NORM_COLS}, source_file, breach_name, imported_at`
+
 interface BatchResult {
   found: boolean
   count: number
@@ -80,11 +92,15 @@ export async function POST(request: NextRequest) {
       emails.forEach((e, i) => { emailParams[`email${i}`] = e.toLowerCase() })
 
       const rows = await executeQuery(
-        `SELECT ${NORM_COLS}, source_file, breach_name, imported_at
-         FROM ulp.credentials
-         WHERE email IN (${emailList})
-         ORDER BY email ASC, imported_at DESC
-         LIMIT {cap:UInt32} BY email
+        `SELECT ${OUTER_COLS}
+         FROM (
+           SELECT ${RAW_COLS}
+           FROM ulp.credentials
+           WHERE email IN (${emailList})
+           ORDER BY email ASC, imported_at DESC
+           LIMIT {cap:UInt32} BY email
+         ) AS t
+         ORDER BY t.email ASC, t.imported_at DESC
          ${SETTINGS}`,
         { ...emailParams, cap: RESULTS_CAP }
       ) as Array<{ email: string; url: string; password: string; domain: string; source_file: string; breach_name: string; imported_at: string }>
@@ -103,11 +119,15 @@ export async function POST(request: NextRequest) {
       domains.forEach((d, i) => { domainParams[`domain${i}`] = d.toLowerCase() })
 
       const rows = await executeQuery(
-        `SELECT ${NORM_COLS}, source_file, breach_name, imported_at
-         FROM ulp.credentials
-         WHERE domain IN (${domainList})
-         ORDER BY domain ASC, imported_at DESC
-         LIMIT {cap:UInt32} BY domain
+        `SELECT ${OUTER_COLS}
+         FROM (
+           SELECT ${RAW_COLS}
+           FROM ulp.credentials
+           WHERE domain IN (${domainList})
+           ORDER BY domain ASC, imported_at DESC
+           LIMIT {cap:UInt32} BY domain
+         ) AS t
+         ORDER BY t.domain ASC, t.imported_at DESC
          ${SETTINGS}`,
         { ...domainParams, cap: RESULTS_CAP }
       ) as Array<{ email: string; url: string; password: string; domain: string; source_file: string; breach_name: string; imported_at: string }>

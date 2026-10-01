@@ -15,6 +15,17 @@ const SELECT = `${NORM_COLS},
                 url_scheme, is_corporate_email, email_domain,
                 url_host, password_entropy_band, imported_at`
 
+// Read by the inner query below -- raw url/email/password/domain, no NORM_COLS. NORM_COLS aliases those
+// four columns, and in a single-level SELECT the aliases shadow the stored columns in WHERE and ORDER BY
+// (no primary-key or bloom-filter pruning, and a sort on the normalized expression instead of the
+// column the keyset cursor compares). NORM_COLS is applied to the LIMIT-sized result instead, the split
+// app/api/credentials/route.ts uses.
+const RAW_COLS = `url, email, password, domain,
+                source_file, breach_name,
+                country_tier, login_type, password_length, password_mask,
+                url_scheme, is_corporate_email, email_domain,
+                url_host, password_entropy_band, imported_at`
+
 // Valid password mask values — used to sanitize the pw_mask query param so it
 // can be safely interpolated into SQL without a parameterised placeholder.
 const VALID_MASKS = new Set(['alpha', 'numeric', 'alphanumeric', 'mixed', 'empty'])
@@ -128,10 +139,13 @@ export async function GET(request: NextRequest) {
       ),
       executeQuery(
         `SELECT ${SELECT}
-         FROM ulp.credentials
-         WHERE ${clause}${allExtras}${cursorClause}
-         ORDER BY ${orderBy}
-         LIMIT {limit:UInt32}
+         FROM (
+           SELECT ${RAW_COLS}
+           FROM ulp.credentials
+           WHERE ${clause}${allExtras}${cursorClause}
+           ORDER BY ${orderBy}
+           LIMIT {limit:UInt32}
+         ) AS t
          SETTINGS max_execution_time = 300,
                   timeout_overflow_mode = 'throw',
                   http_wait_end_of_query = 1`,
