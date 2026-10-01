@@ -33,9 +33,12 @@ export const IMPORTED_KEY_EXPR = 'negate(toUnixTimestamp(imported_at))'
 const FIRST_SPAN_SECONDS = 60
 const GROWTH = 16
 /**
- * How long the windows may take, in total, before the plain query is run instead. Window 1 (the newest minute) took 0.13 s and
- * window 3 (the newest 4 hours, the whole newest import burst) will take seconds; this lets a term that fills its page in the first
- * two or three windows finish, and hands a rare one back after the first. Tune it from the timings the parity test prints.
+ * How long the windows may take, in total, before the plain query is run instead. Measured on the live projection (2026-10-01): the
+ * newest minute costs 0.11-0.17 s, the next 15 minutes 0.4-1.1 s, the next 4 hours (the whole newest import burst, ~140M rows) 3.7-7.8 s.
+ * At 2.5 s the first two windows fit and a third, predicted at 16x the second, does not: a term that fills its page from the newest
+ * half hour finishes, anything rarer is handed back after ~0.5 s. Raising it would let mid-rare terms (a word like `ledger`, 8.8 s by
+ * windows against 18 s plain) finish too, at the price of wasting more time on terms with no match; tune it from the timings the live
+ * parity test prints (NFW_TIMING_ONLY=1).
  */
 const HANDOFF_MS = 2_500
 /** All windows of one request share the 300 s max_execution_time the plain query had, less a margin. */
