@@ -13,9 +13,10 @@
  * skip indexes can prune. The planner then scans proj_imported_desc newest-first looking for
  * 25 matches. Measured live 2026-09-30 on 1.39B rows: all 78 queries the panel sent in three
  * hours ran into max_execution_time = 30 and returned 0 rows (`timeout_overflow_mode =
- * 'break'` on a query with ORDER BY returns nothing, so the panel just looked empty). The
- * inner query must stay free of NORM_COLS and of any alias that reuses a column name, or
- * that pruning is lost again.
+ * 'break'` hands back whatever was read by the deadline, here nothing, so the panel just looked
+ * empty). The cap now THROWS, so a bucket that cannot finish is reported as failed (see the
+ * route) instead of as "none found". The inner query must stay free of NORM_COLS and of any
+ * alias that reuses a column name, or that pruning is lost again.
  *
  * `prefer_column_name_to_alias = 1` would also make the single-level form fast, but it changes
  * what NORM_COLS outputs for the legacy-corrupted rows, so this panel would stop agreeing with
@@ -62,7 +63,7 @@ function relatedQuery(where: string): string {
        LIMIT ${RELATED_LIMIT}
      ) AS t
      ORDER BY imported_at DESC
-     SETTINGS max_execution_time = 30, timeout_overflow_mode = 'break', use_query_cache = 0`
+     SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1, use_query_cache = 0`
 }
 
 /** Same login on other rows -- cross-domain reuse of one account. */

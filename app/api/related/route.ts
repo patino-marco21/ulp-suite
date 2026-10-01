@@ -16,7 +16,19 @@ export const dynamic = 'force-dynamic'
  * lib/related-queries.ts, which explains why it is shaped the way it is (raw-column inner
  * query, primary-key-order sample) -- an earlier single-level form ran into its 30 s cap on
  * every call and returned nothing.
+ *
+ * The buckets are independent: one that cannot be computed (timeout or error) comes back empty
+ * and is named in `failed`, so the panel can say "timed out" instead of "none found" while the
+ * others still show. Only when every requested bucket fails is the request itself an error.
  */
+
+const BUCKETS = ['by_email', 'by_domain', 'by_password'] as const
+
+function isTimeout(reason: unknown): boolean {
+  const msg = reason instanceof Error ? reason.message : String(reason)
+  return msg.includes('TIMEOUT_EXCEEDED') || msg.includes('Timeout') || msg.includes('timeout')
+}
+
 export async function GET(request: NextRequest) {
   const user = await validateRequest(request)
   if (!user) {
@@ -32,32 +44,56 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: false, error: 'email or domain required' }, { status: 400 })
   }
 
-  try {
-    const [byEmail, byDomain, byPassword] = await Promise.all([
-      // By email — all credentials sharing this login (cross-domain reuse)
-      email
-        ? executeQuery(RELATED_BY_EMAIL_SQL, { email })
-        : Promise.resolve([]),
+  const asked = [!!email, !!domain, !!password && password.length >= 3]
 
-      // By domain — other logins on the same domain
-      domain
-        ? executeQuery(RELATED_BY_DOMAIN_SQL, { domain, email })
-        : Promise.resolve([]),
+  const settled = await Promise.allSettled([
+    // By email — all credentials sharing this login (cross-domain reuse)
+    email
+      ? executeQuery(RELATED_BY_EMAIL_SQL, { email })
+      : Promise.resolve([]),
 
-      // By password — other accounts using the exact same password
-      password && password.length >= 3
-        ? executeQuery(RELATED_BY_PASSWORD_SQL, { password, email })
-        : Promise.resolve([]),
-    ])
+    // By domain — other logins on the same domain
+    domain
+      ? executeQuery(RELATED_BY_DOMAIN_SQL, { domain, email })
+      : Promise.resolve([]),
 
-    return NextResponse.json({
-      success: true,
-      by_email:    byEmail,
-      by_domain:   byDomain,
-      by_password: byPassword,
-    })
-  } catch (error) {
-    console.error('Related query error:', error)
-    return NextResponse.json({ success: false, error: 'Query failed' }, { status: 500 })
+    // By password — other accounts using the exact same password
+    password && password.length >= 3
+      ? executeQuery(RELATED_BY_PASSWORD_SQL, { password, email })
+      : Promise.resolve([]),
+  ])
+
+  const rows: Record<(typeof BUCKETS)[number], unknown[]> = { by_email: [], by_domain: [], by_password: [] }
+  const failed: string[] = []
+  let timedOut = false
+  settled.forEach((result, i) => {
+    if (result.status === 'fulfilled') {
+      rows[BUCKETS[i]] = result.value
+      return
+    }
+    failed.push(BUCKETS[i])
+    if (isTimeout(result.reason)) timedOut = true
+    else console.error(`Related query error (${BUCKETS[i]}):`, result.reason)
+  })
+
+  if (failed.length > 0 && failed.length === asked.filter(Boolean).length) {
+    return NextResponse.json(
+      {
+        success: false,
+        timed_out: timedOut,
+        failed,
+        error: timedOut ? 'Related lookup timed out' : 'Query failed',
+      },
+      { status: timedOut ? 504 : 500 }
+    )
   }
+
+  return NextResponse.json({
+    success: true,
+    by_email:    rows.by_email,
+    by_domain:   rows.by_domain,
+    by_password: rows.by_password,
+    failed,
+    timed_out:   timedOut,
+  })
 }

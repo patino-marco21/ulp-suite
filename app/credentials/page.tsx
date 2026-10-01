@@ -53,6 +53,9 @@ interface RelatedData {
   by_email:    Credential[]
   by_domain:   Credential[]
   by_password: Credential[]
+  // Buckets the server could not compute (timeout or error). Their arrays are empty, which must not be
+  // shown as "none found".
+  failed:      string[]
 }
 
 interface ApiResult {
@@ -155,11 +158,13 @@ function RelatedBucket({
   Icon,
   items,
   loading,
+  failed = false,
 }: {
   title: string
   Icon: React.ElementType
   items: Credential[]
   loading: boolean
+  failed?: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
   const LIMIT = 3
@@ -170,6 +175,15 @@ function RelatedBucket({
       <div className="flex items-center gap-2 py-2 text-xs text-muted-foreground">
         <Loader2 className="h-3 w-3 animate-spin" />
         <span>Loading…</span>
+      </div>
+    )
+  }
+
+  if (failed) {
+    return (
+      <div className="flex items-center gap-2 py-1">
+        <Icon className="h-3.5 w-3.5 text-amber-500/70 shrink-0" />
+        <span className="text-xs text-amber-600/80">{title} — couldn&apos;t be loaded (timed out or failed); reopen to retry</span>
       </div>
     )
   }
@@ -241,6 +255,7 @@ function CredentialDetailSheet({
 }) {
   const [related, setRelated]             = useState<RelatedData | null>(null)
   const [relatedLoading, setRelatedLoading] = useState(false)
+  const [relatedError, setRelatedError]     = useState<string | null>(null)
 
   // Fetch related credentials whenever the sheet opens on a new credential
   useEffect(() => {
@@ -251,6 +266,7 @@ function CredentialDetailSheet({
     let cancelled = false
     setRelatedLoading(true)
     setRelated(null)
+    setRelatedError(null)
     const params = new URLSearchParams()
     if (cred.email)  params.set('email', cred.email)
     if (cred.password) params.set('password', cred.password)
@@ -258,15 +274,19 @@ function CredentialDetailSheet({
     fetch(`/api/related?${params}`)
       .then(r => r.json())
       .then(data => {
-        if (!cancelled && data.success) {
+        if (cancelled) return
+        if (data.success) {
           setRelated({
             by_email:    data.by_email    ?? [],
             by_domain:   data.by_domain   ?? [],
             by_password: data.by_password ?? [],
+            failed:      Array.isArray(data.failed) ? data.failed : [],
           })
+        } else {
+          setRelatedError(data.timed_out ? 'The related-records lookup timed out.' : 'Related records could not be loaded.')
         }
       })
-      .catch(() => { /* silently ignore */ })
+      .catch(() => { if (!cancelled) setRelatedError('Related records could not be loaded.') })
       .finally(() => { if (!cancelled) setRelatedLoading(false) })
     return () => { cancelled = true }
   }, [open, cred])
@@ -294,6 +314,7 @@ function CredentialDetailSheet({
     related.by_domain.length > 0 ||
     related.by_password.length > 0
   )
+  const relatedFailed = related?.failed ?? []
 
   return (
     <Sheet open={open} onOpenChange={v => !v && onClose()}>
@@ -566,25 +587,32 @@ function CredentialDetailSheet({
                   Icon={Link2}
                   items={related.by_email}
                   loading={false}
+                  failed={relatedFailed.includes('by_email')}
                 />
                 <RelatedBucket
                   title="Other accounts on this domain"
                   Icon={Users}
                   items={related.by_domain}
                   loading={false}
+                  failed={relatedFailed.includes('by_domain')}
                 />
                 <RelatedBucket
                   title="Same password reused elsewhere"
                   Icon={KeyRound}
                   items={related.by_password}
                   loading={false}
+                  failed={relatedFailed.includes('by_password')}
                 />
-                {!hasRelated && (
+                {!hasRelated && relatedFailed.length === 0 && (
                   <p className="text-xs text-muted-foreground/50 py-1">
                     No related credentials found.
                   </p>
                 )}
               </div>
+            ) : relatedError ? (
+              <p className="text-xs text-amber-600/80 py-1">
+                {relatedError} Reopen this credential to retry.
+              </p>
             ) : (
               <p className="text-xs text-muted-foreground/40 py-1">
                 Open a credential to load related records.
