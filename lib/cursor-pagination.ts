@@ -28,11 +28,38 @@ const CURSOR_COLS: Record<SortKey, string[]> = {
 
 type CursorPayload = { sort: SortKey; v: Record<string, unknown> }
 
+/**
+ * Rows are ordered, filtered and compared by their STORED url / email / password / domain, but the browse
+ * and search routes show NORM_COLS' repaired versions of those four (lib/ulp-normalize.ts). A cursor built
+ * from what the page displays points somewhere else in the sort order for every legacy row it touches: the
+ * next page can skip, or repeat, a long run of rows (a repaired Case D row is stored with domain '' but shown
+ * with its real domain, so a domain_asc cursor taken from it leapt over everything stored between the two).
+ *
+ * So the routes also select the stored values under `_c_<column>` aliases, encodeCursor reads those, and
+ * stripCursorColumns removes them again before the rows go out.
+ */
+export const CURSOR_RAW_COLS = ['url', 'email', 'password', 'domain'] as const
+export const CURSOR_RAW_SELECT = CURSOR_RAW_COLS.map(c => `${c} AS _c_${c}`).join(', ')
+
+const RAW_PREFIX = '_c_'
+
 export function encodeCursor(sort: SortKey, row: Record<string, unknown>): string {
   const cols = CURSOR_COLS[sort]
   const v: Record<string, unknown> = {}
-  for (const col of cols) v[col] = row[col]
+  for (const col of cols) {
+    const raw = `${RAW_PREFIX}${col}`
+    v[col] = (CURSOR_RAW_COLS as readonly string[]).includes(col) && raw in row ? row[raw] : row[col]
+  }
   return Buffer.from(JSON.stringify({ sort, v })).toString('base64')
+}
+
+/** Drop the `_c_` cursor helper columns from result rows (shallow copies; the input is left alone). */
+export function stripCursorColumns<T extends Record<string, unknown>>(rows: T[]): T[] {
+  return rows.map(row => {
+    const out: Record<string, unknown> = {}
+    for (const [k, val] of Object.entries(row)) if (!k.startsWith(RAW_PREFIX)) out[k] = val
+    return out as T
+  })
 }
 
 export function decodeCursor(token: string): CursorPayload | null {

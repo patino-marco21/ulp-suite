@@ -5,7 +5,9 @@ import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-sear
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS, NORM_COLS_SETTING } from "@/lib/ulp-normalize"
-import { SORT_MAP, type SortKey, encodeCursor, decodeCursor, buildCursorWhere } from "@/lib/cursor-pagination"
+import {
+  SORT_MAP, type SortKey, encodeCursor, decodeCursor, buildCursorWhere, stripCursorColumns, CURSOR_RAW_SELECT,
+} from "@/lib/cursor-pagination"
 
 export const dynamic = 'force-dynamic'
 
@@ -13,7 +15,8 @@ const SELECT = `${NORM_COLS},
                 source_file, breach_name,
                 country_tier, login_type, password_length, password_mask,
                 url_scheme, is_corporate_email, email_domain,
-                url_host, password_entropy_band, imported_at`
+                url_host, password_entropy_band, imported_at,
+                ${CURSOR_RAW_SELECT}`
 
 // Read by the inner query below -- raw url/email/password/domain, no NORM_COLS. NORM_COLS aliases those
 // four columns, and in a single-level SELECT the aliases shadow the stored columns in WHERE and ORDER BY
@@ -108,9 +111,9 @@ export async function GET(request: NextRequest) {
   const loginTypeExtra = loginTypeWhere(loginTypes)
   const allExtras      = extras.join('') + tierExtra + loginTypeExtra
 
-  // Cursor values compare against raw storage columns. Safe because all data-repair
-  // mutations are done — raw columns match normalized values for all rows.
-  // Verify with: SELECT countIf(is_done=0) FROM system.mutations WHERE table='credentials'
+  // The cursor holds the STORED url/email/password/domain of the last row (the `_c_` columns the outer
+  // SELECT hands back), not the repaired values the page shows: rows are ordered and compared by stored
+  // columns, and the two differ for the ~0.45% legacy rows (lib/cursor-pagination.ts).
   let cursorClause = ''
   let cursorParams: Record<string, unknown> = {}
 
@@ -163,7 +166,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       success:           true,
-      results:           rows,
+      results:           stripCursorColumns(rows as Record<string, unknown>[]),
       total,
       next_cursor:       nextCursor,
       query:             q,

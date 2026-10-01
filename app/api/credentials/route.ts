@@ -7,7 +7,9 @@ import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS, NORM_COLS_SETTING } from "@/lib/ulp-normalize"
 import { NOISE_FILTER } from "@/lib/ulp-noise"
 import { dedupeLimitBy, dedupeCountExpr } from "@/lib/ulp-dedupe"
-import { SORT_MAP, type SortKey, encodeCursor, decodeCursor, buildCursorWhere } from "@/lib/cursor-pagination"
+import {
+  SORT_MAP, type SortKey, encodeCursor, decodeCursor, buildCursorWhere, stripCursorColumns, CURSOR_RAW_SELECT,
+} from "@/lib/cursor-pagination"
 import {
   DEFAULT_CREDENTIAL_LIMIT,
   DEFAULT_CREDENTIAL_SORT,
@@ -41,7 +43,8 @@ const SELECT = `${NORM_COLS},
   source_file, breach_name,
   country_tier, login_type, password_length, password_mask,
   url_scheme, is_corporate_email, email_domain,
-  url_host, password_entropy_band, imported_at`
+  url_host, password_entropy_band, imported_at,
+  ${CURSOR_RAW_SELECT}`
 
 // Confirmed live against ulp.credentials (2.4B+ rows, measured 2026-08-23/26 —
 // see docs/superpowers/specs/2026-09-24-scale-audit-followups-design.md):
@@ -200,10 +203,9 @@ export async function GET(request: NextRequest) {
   // With no filter the Unique tally is a plain count() — see dedupeCountExpr.
   const hasUserFilter = conditionsRaw.length > 1 || tierExtra !== '' || loginTypeExtra !== ''
 
-  // Cursor values are captured from result rows (which are normalized via NORM_COLS)
-  // and compared against raw storage columns in buildCursorWhere. This is safe because
-  // all data-repair mutations are done — raw columns match normalized values for all rows.
-  // Verify with: SELECT countIf(is_done=0) FROM system.mutations WHERE table='credentials'
+  // The cursor holds the STORED url/email/password/domain of the last row (the `_c_` columns the outer
+  // SELECT hands back), not the repaired values the page shows: rows are ordered and compared by stored
+  // columns, and the two differ for the ~0.45% legacy rows (lib/cursor-pagination.ts).
   let cursorClause = ''
   let cursorParams: Record<string, unknown> = {}
 
@@ -331,7 +333,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       success:     true,
-      results:     rows,
+      results:     stripCursorColumns(rows as Record<string, unknown>[]),
       total,
       raw_total,
       next_cursor: nextCursor,
