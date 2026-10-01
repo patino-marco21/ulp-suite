@@ -8,7 +8,7 @@
  * Detection strategy — dual signal, email-first:
  *   1. Email domain ccTLD suffix  (.co.uk, .ca, .com.au …)
  *   2. Known country ISP / carrier email providers
- *   3. URL TLD fallback  (tld column, already materialized from url)
+ *   3. URL TLD fallback  (the host's last label, derived from url the way urlTldOf does)
  *
  * buildCountryTierExpression() emits the ClickHouse MATERIALIZED column expression.
  * tierWhereClause() emits the WHERE fragment for search / export filtering.
@@ -217,8 +217,28 @@ function sqlList(items: string[]): string {
   return `(${items.map(s => `'${s}'`).join(',')})`
 }
 
-/** Email domain (lowercased): everything after the last '@' — handles multi-@ addresses */
-const ED = `splitByChar('@', lower(email))[-1]`
+/**
+ * Email domain (lowercased): everything after the last '@' (so multi-@ addresses work), or '' when the login
+ * has no '@'. This is the stored email_domain column, read rather than re-derived: the expression used to be
+ * splitByChar('@', lower(email))[-1], which is the WHOLE login when there is no '@', so a login such as
+ * "someone.co" was classified by a "domain" that was never a domain and 1,781,728 rows of ulp.credentials were
+ * stored as Tier 3 that the importer (emailDomainOf below, which returns '') calls untiered, T1 or T2.
+ */
+const ED = 'email_domain'
+
+/**
+ * Top-level label of the URL's host (lowercased; '' for a host with no dot), derived exactly like urlTldOf below:
+ * drop the scheme, cut the authority at the first / ? or #, drop the userinfo (everything up to the LAST '@'),
+ * drop the port (from the first ':'), then take the last dotted label.
+ *
+ * Not ClickHouse's topLevelDomain(url) / the stored `tld` column: for a URL that carries credentials it returns ''
+ * (https://user:pw@host.co.uk:8080/x) or reads the userinfo as the host (https://a.b.c.d:pw@host.com:9/ -> 'd'), and it
+ * returns '' for android:// URLs whose userinfo is a base64 fingerprint ending in '='. Measured on a 1.39M-row sample of
+ * the live table: 536 rows (0.0385%) were labelled differently from the importer for those shapes.
+ */
+const URL_AFTER_SCHEME = `if(position(url, '://') > 0, substring(url, position(url, '://') + 3), url)`
+const URL_HOST = `lower(splitByChar(':', splitByChar('@', splitByRegexp('[/?#]', ${URL_AFTER_SCHEME})[1])[-1])[1])`
+const UT = `if(position(${URL_HOST}, '.') > 0, splitByChar('.', ${URL_HOST})[-1], '')`
 
 function buildEmailCondition(suffixes: string[], providers: string[]): string {
   const parts: string[] = []
@@ -233,11 +253,11 @@ function buildEmailCondition(suffixes: string[], providers: string[]): string {
 
 /**
  * Returns the ClickHouse MATERIALIZED column expression for country_tier.
- * References columns: email (String), tld (String MATERIALIZED topLevelDomain(url))
+ * References columns: email_domain (String MATERIALIZED, blank without an '@') and url
  *
  * Logic:
  *   1. Email suffix / ISP provider → T1 / T2 / T3
- *   2. URL TLD fallback (for generic providers like @gmail.com) → T1 / T2 / T3
+ *   2. URL TLD fallback (for generic providers like @gmail.com) → T1 / T2 / T3 (see UT)
  *   3. Default → '' (untiered)
  */
 export function buildCountryTierExpression(): string {
@@ -245,9 +265,9 @@ export function buildCountryTierExpression(): string {
   const t2e = buildEmailCondition(T2_EMAIL_SUFFIXES, T2_EMAIL_PROVIDERS)
   const t3e = buildEmailCondition(T3_EMAIL_SUFFIXES, T3_EMAIL_PROVIDERS)
 
-  const t1u = `lower(tld) IN ${sqlList(T1_URL_TLDS)}`
-  const t2u = `lower(tld) IN ${sqlList(T2_URL_TLDS)}`
-  const t3u = `lower(tld) IN ${sqlList(T3_URL_TLDS)}`
+  const t1u = `${UT} IN ${sqlList(T1_URL_TLDS)}`
+  const t2u = `${UT} IN ${sqlList(T2_URL_TLDS)}`
+  const t3u = `${UT} IN ${sqlList(T3_URL_TLDS)}`
 
   // multiIf(cond1, val1, cond2, val2, ..., else)
   return [

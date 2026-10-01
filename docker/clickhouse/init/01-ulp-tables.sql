@@ -38,103 +38,177 @@ CREATE TABLE IF NOT EXISTS ulp.credentials
 
     tld String MATERIALIZED topLevelDomain(url) CODEC(ZSTD(1)),
 
+    -- country_tier is GENERATED from lib/country-tiers.ts (buildCountryTierExpression): do not edit it by hand.
+    -- __tests__/country-tier-expression.test.ts fails when this block drifts from the generator, and DDL v26
+    -- (lib/clickhouse-migrations.ts) swaps a running table to the same expression. It reads email_domain, which
+    -- is blank for a login with no "@" (the old form re-derived the domain and got the whole login).
     country_tier LowCardinality(String) MATERIALIZED multiIf(
-        -- ── Email signal: Tier 1 ──────────────────────────────────────────────
-        endsWith(splitByChar('@',lower(email))[-1],'.co.uk')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.me.uk')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.org.uk')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.ca')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.com.au')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.net.au')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.co.nz')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.net.nz')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.us')
-        OR splitByChar('@',lower(email))[-1] IN (
-            'comcast.net','xfinity.com','verizon.net','att.net','cox.net','charter.net',
-            'earthlink.net','bellsouth.net','sbcglobal.net','aol.com','juno.com',
-            'btinternet.com','btopenworld.com','sky.com','talktalk.net','virginmedia.com',
-            'ntlworld.com','plusnet.com','blueyonder.co.uk','tiscali.co.uk',
-            'hotmail.co.uk','yahoo.co.uk','live.co.uk',
-            'rogers.com','bell.net','telus.net','shaw.ca','sympatico.ca','videotron.ca',
-            'cogeco.ca','eastlink.ca','mts.net','sasktel.net','yahoo.ca','live.ca','hotmail.ca',
-            'bigpond.com','bigpond.net.au','optusnet.com.au','iinet.net.au','aapt.com.au',
-            'dodo.com.au','internode.on.net','westnet.com.au','tpg.com.au','yahoo.com.au','hotmail.com.au',
-            'xtra.co.nz','clear.net.nz','paradise.net.nz','orcon.net.nz','slingshot.co.nz','yahoo.co.nz'
-        ), 'T1',
-        -- ── Email signal: Tier 2 ──────────────────────────────────────────────
-        endsWith(splitByChar('@',lower(email))[-1],'.de')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.fr')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.it')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.es')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.nl')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.se')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.no')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.dk')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.fi')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.ch')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.at')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.be')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.ie')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.pt')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.jp')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.kr')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.sg')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.il')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.ae')
-        OR splitByChar('@',lower(email))[-1] IN (
-            'web.de','gmx.de','gmx.net','gmx.com','t-online.de','freenet.de','posteo.de','arcor.de',
-            'orange.fr','free.fr','sfr.fr','laposte.net','wanadoo.fr','hotmail.fr','yahoo.fr','outlook.fr','live.fr',
-            'libero.it','tiscali.it','alice.it','virgilio.it','tin.it','hotmail.it','yahoo.it','live.it',
-            'terra.es','hotmail.es','yahoo.es','outlook.es',
-            'ziggo.nl','kpnmail.nl','hetnet.nl','xs4all.nl',
-            'telenet.be','skynet.be','proximus.be',
-            'bluewin.ch','sunrise.ch',
-            'eircom.net','eir.ie',
-            'tele2.se','comhem.se',
-            'naver.com','daum.net','hanmail.net','kakao.com','nate.com',
-            'docomo.ne.jp','softbank.ne.jp','yahoo.co.jp','nifty.com',
-            'singnet.com.sg','pacific.net.sg',
-            'walla.com','netvision.net.il'
-        ), 'T2',
-        -- ── Email signal: Tier 3 ──────────────────────────────────────────────
-        endsWith(splitByChar('@',lower(email))[-1],'.ru')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.by')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.ua')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.pl')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.cz')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.ro')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.bg')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.cn')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.br')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.in')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.tr')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.ar')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.mx')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.id')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.vn')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.ph')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.sa')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.eg')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.za')
-        OR endsWith(splitByChar('@',lower(email))[-1],'.ng')
-        OR splitByChar('@',lower(email))[-1] IN (
-            'mail.ru','yandex.ru','yandex.com','rambler.ru','bk.ru','list.ru','inbox.ru','ya.ru',
-            'qq.com','163.com','126.com','sina.com','sohu.com','yeah.net','foxmail.com','21cn.com',
-            'yahoo.com.br','uol.com.br','bol.com.br','ig.com.br','terra.com.br','r7.com',
-            'rediffmail.com','sify.com','indiatimes.com',
-            'wp.pl','o2.pl','onet.pl','interia.pl','poczta.fm',
-            'seznam.cz','centrum.cz','atlas.cz',
-            'abv.bg','mail.bg','dir.bg',
-            'ukr.net','meta.ua','i.ua',
-            'mynet.com','yahoo.com.vn','yahoo.co.id'
-        ), 'T3',
-        -- ── URL TLD fallback ──────────────────────────────────────────────────
-        lower(tld) IN ('uk','ca','au','nz','us'), 'T1',
-        lower(tld) IN ('de','fr','it','es','nl','se','no','dk','fi','ch','at','be','ie','pt','jp','kr','sg','il','ae','lu','gr'), 'T2',
-        lower(tld) IN ('ru','cn','br','pl','cz','ro','bg','ua','by','sk','rs','hr','si','lt','lv','ee',
-                       'ar','mx','cl','pe','ve','ec','uy','bo','py','id','vn','th','ph','my','bd','pk','in',
-                       'tr','sa','eg','za','ng','ke','ma','dz','tn','ir'), 'T3',
-        ''
+      endsWith(email_domain,'.co.uk')
+            OR endsWith(email_domain,'.me.uk')
+            OR endsWith(email_domain,'.org.uk')
+            OR endsWith(email_domain,'.net.uk')
+            OR endsWith(email_domain,'.ca')
+            OR endsWith(email_domain,'.com.au')
+            OR endsWith(email_domain,'.net.au')
+            OR endsWith(email_domain,'.org.au')
+            OR endsWith(email_domain,'.edu.au')
+            OR endsWith(email_domain,'.co.nz')
+            OR endsWith(email_domain,'.net.nz')
+            OR endsWith(email_domain,'.org.nz')
+            OR endsWith(email_domain,'.us')
+            OR email_domain IN (
+                'comcast.net','xfinity.com','verizon.net','att.net','att.com','cox.net','charter.net','earthlink.net',
+                'bellsouth.net','sbcglobal.net','aol.com','juno.com','netzero.net','mindspring.com','adelphia.net','optonline.net',
+                'roadrunner.com','twc.com','rr.com','windstream.net','centurytel.net','suddenlink.net','mediacom.net','netscape.net',
+                'wmconnect.com','frontiernet.net','zoominternet.net','btinternet.com','btopenworld.com','sky.com','talktalk.net','virginmedia.com',
+                'ntlworld.com','plusnet.com','blueyonder.co.uk','tiscali.co.uk','freeserve.co.uk','pipex.com','madasafish.com','f2s.com',
+                'demon.co.uk','clara.net','globalnet.co.uk','hotmail.co.uk','yahoo.co.uk','live.co.uk','msn.co.uk','rogers.com',
+                'bell.net','telus.net','shaw.ca','sympatico.ca','videotron.ca','cogeco.ca','eastlink.ca','mts.net',
+                'sasktel.net','telus.com','bellnet.ca','persona.ca','primus.ca','look.ca','yahoo.ca','live.ca',
+                'hotmail.ca','outlook.ca','bigpond.com','bigpond.net.au','optusnet.com.au','iinet.net.au','aapt.com.au','dodo.com.au',
+                'internode.on.net','westnet.com.au','tpg.com.au','primus.com.au','eftel.com','iprimus.com.au','ozemail.com.au','chariot.net.au',
+                'activ8.net.au','pacific.net.au','yahoo.com.au','hotmail.com.au','live.com.au','xtra.co.nz','clear.net.nz','paradise.net.nz',
+                'orcon.net.nz','slingshot.co.nz','snap.net.nz','vodafone.co.nz','ihug.co.nz','callplus.net.nz','woosh.co.nz','maxnet.co.nz',
+                'yahoo.co.nz'
+            ), 'T1',
+      endsWith(email_domain,'.de')
+            OR endsWith(email_domain,'.fr')
+            OR endsWith(email_domain,'.it')
+            OR endsWith(email_domain,'.es')
+            OR endsWith(email_domain,'.nl')
+            OR endsWith(email_domain,'.se')
+            OR endsWith(email_domain,'.no')
+            OR endsWith(email_domain,'.dk')
+            OR endsWith(email_domain,'.fi')
+            OR endsWith(email_domain,'.ch')
+            OR endsWith(email_domain,'.at')
+            OR endsWith(email_domain,'.be')
+            OR endsWith(email_domain,'.ie')
+            OR endsWith(email_domain,'.pt')
+            OR endsWith(email_domain,'.jp')
+            OR endsWith(email_domain,'.kr')
+            OR endsWith(email_domain,'.sg')
+            OR endsWith(email_domain,'.il')
+            OR endsWith(email_domain,'.ae')
+            OR endsWith(email_domain,'.lu')
+            OR endsWith(email_domain,'.gr')
+            OR endsWith(email_domain,'.is')
+            OR endsWith(email_domain,'.mt')
+            OR email_domain IN (
+                'web.de','gmx.de','gmx.net','gmx.com','t-online.de','freenet.de','posteo.de','arcor.de',
+                'vodafone.de','1und1.de','online.de','orange.fr','free.fr','sfr.fr','laposte.net','bbox.fr',
+                'numericable.fr','neuf.fr','club-internet.fr','alice.fr','wanadoo.fr','hotmail.fr','yahoo.fr','outlook.fr',
+                'live.fr','libero.it','tiscali.it','alice.it','tim.it','virgilio.it','inwind.it','tin.it',
+                'fastwebnet.it','wind.it','aruba.it','hotmail.it','yahoo.it','live.it','outlook.it','terra.es',
+                'ya.com','jazztel.es','ono.com','telefonica.net','hotmail.es','yahoo.es','outlook.es','live.es',
+                'ziggo.nl','kpnmail.nl','hetnet.nl','home.nl','xs4all.nl','chello.nl','telenet.be','skynet.be',
+                'proximus.be','brutele.be','voo.be','bluewin.ch','hispeed.ch','sunrise.ch','gmx.ch','aon.at',
+                'chello.at','utanet.at','gmx.at','eircom.net','eir.ie','iolfree.ie','iol.ie','tele2.se',
+                'spray.se','comhem.se','telia.com','bredband.net','online.no','start.no','c2i.net','broadpark.no',
+                'post.dk','mail.dk','jubii.dk','ofir.dk','stofanet.dk','welho.com','dnainternet.fi','kolumbus.fi',
+                'luukku.com','mail.pt','sapo.pt','iol.pt','clix.pt','docomo.ne.jp','softbank.ne.jp','ezweb.ne.jp',
+                'au.com','yahoo.co.jp','nifty.com','excite.co.jp','ocn.ne.jp','naver.com','daum.net','hanmail.net',
+                'kakao.com','nate.com','singnet.com.sg','pacific.net.sg','starhub.net.sg','walla.com','netvision.net.il','bezeqint.net',
+                'zahav.net.il','etisalat.ae','du.ae'
+            ), 'T2',
+      endsWith(email_domain,'.ru')
+            OR endsWith(email_domain,'.by')
+            OR endsWith(email_domain,'.kz')
+            OR endsWith(email_domain,'.ua')
+            OR endsWith(email_domain,'.pl')
+            OR endsWith(email_domain,'.cz')
+            OR endsWith(email_domain,'.ro')
+            OR endsWith(email_domain,'.bg')
+            OR endsWith(email_domain,'.sk')
+            OR endsWith(email_domain,'.rs')
+            OR endsWith(email_domain,'.hr')
+            OR endsWith(email_domain,'.si')
+            OR endsWith(email_domain,'.lt')
+            OR endsWith(email_domain,'.lv')
+            OR endsWith(email_domain,'.ee')
+            OR endsWith(email_domain,'.md')
+            OR endsWith(email_domain,'.al')
+            OR endsWith(email_domain,'.ba')
+            OR endsWith(email_domain,'.mk')
+            OR endsWith(email_domain,'.ge')
+            OR endsWith(email_domain,'.am')
+            OR endsWith(email_domain,'.az')
+            OR endsWith(email_domain,'.cn')
+            OR endsWith(email_domain,'.id')
+            OR endsWith(email_domain,'.vn')
+            OR endsWith(email_domain,'.th')
+            OR endsWith(email_domain,'.ph')
+            OR endsWith(email_domain,'.my')
+            OR endsWith(email_domain,'.bd')
+            OR endsWith(email_domain,'.pk')
+            OR endsWith(email_domain,'.in')
+            OR endsWith(email_domain,'.lk')
+            OR endsWith(email_domain,'.np')
+            OR endsWith(email_domain,'.mm')
+            OR endsWith(email_domain,'.kh')
+            OR endsWith(email_domain,'.br')
+            OR endsWith(email_domain,'.ar')
+            OR endsWith(email_domain,'.mx')
+            OR endsWith(email_domain,'.cl')
+            OR endsWith(email_domain,'.co')
+            OR endsWith(email_domain,'.pe')
+            OR endsWith(email_domain,'.ve')
+            OR endsWith(email_domain,'.ec')
+            OR endsWith(email_domain,'.uy')
+            OR endsWith(email_domain,'.bo')
+            OR endsWith(email_domain,'.py')
+            OR endsWith(email_domain,'.gt')
+            OR endsWith(email_domain,'.cu')
+            OR endsWith(email_domain,'.do')
+            OR endsWith(email_domain,'.cr')
+            OR endsWith(email_domain,'.pa')
+            OR endsWith(email_domain,'.hn')
+            OR endsWith(email_domain,'.ni')
+            OR endsWith(email_domain,'.tr')
+            OR endsWith(email_domain,'.sa')
+            OR endsWith(email_domain,'.eg')
+            OR endsWith(email_domain,'.za')
+            OR endsWith(email_domain,'.ng')
+            OR endsWith(email_domain,'.ke')
+            OR endsWith(email_domain,'.ma')
+            OR endsWith(email_domain,'.dz')
+            OR endsWith(email_domain,'.tn')
+            OR endsWith(email_domain,'.ir')
+            OR endsWith(email_domain,'.iq')
+            OR endsWith(email_domain,'.sy')
+            OR endsWith(email_domain,'.lb')
+            OR endsWith(email_domain,'.jo')
+            OR endsWith(email_domain,'.ps')
+            OR endsWith(email_domain,'.ly')
+            OR email_domain IN (
+                'mail.ru','yandex.ru','yandex.com','rambler.ru','bk.ru','list.ru','inbox.ru','ya.ru',
+                'lenta.ru','autorambler.ru','qq.com','163.com','126.com','sina.com','sohu.com','yeah.net',
+                'foxmail.com','sina.cn','139.com','21cn.com','china.com','yahoo.com.br','uol.com.br','bol.com.br',
+                'ig.com.br','terra.com.br','r7.com','globomail.com','oi.com.br','rediffmail.com','sify.com','indiatimes.com',
+                'in.com','wp.pl','o2.pl','onet.pl','interia.pl','poczta.fm','gazeta.pl','seznam.cz',
+                'centrum.cz','email.cz','atlas.cz','abv.bg','mail.bg','dir.bg','yahoo.ro','mail.ro',
+                'ukr.net','meta.ua','i.ua','mynet.com','ttnet.net.tr','turk.net','yahoo.com.vn','yahoo.co.id',
+                'fibertel.com.ar','arnet.com.ar','prodigy.net.mx'
+            ), 'T3',
+      if(position(lower(splitByChar(':', splitByChar('@', splitByRegexp('[/?#]', if(position(url, '://') > 0, substring(url, position(url, '://') + 3), url))[1])[-1])[1]), '.') > 0, splitByChar('.', lower(splitByChar(':', splitByChar('@', splitByRegexp('[/?#]', if(position(url, '://') > 0, substring(url, position(url, '://') + 3), url))[1])[-1])[1]))[-1], '') IN (
+                'uk','ca','au','nz','us'
+            ), 'T1',
+      if(position(lower(splitByChar(':', splitByChar('@', splitByRegexp('[/?#]', if(position(url, '://') > 0, substring(url, position(url, '://') + 3), url))[1])[-1])[1]), '.') > 0, splitByChar('.', lower(splitByChar(':', splitByChar('@', splitByRegexp('[/?#]', if(position(url, '://') > 0, substring(url, position(url, '://') + 3), url))[1])[-1])[1]))[-1], '') IN (
+                'de','fr','it','es','nl','se','no','dk',
+                'fi','ch','at','be','ie','pt','jp','kr',
+                'sg','il','ae','lu','gr','is'
+            ), 'T2',
+      if(position(lower(splitByChar(':', splitByChar('@', splitByRegexp('[/?#]', if(position(url, '://') > 0, substring(url, position(url, '://') + 3), url))[1])[-1])[1]), '.') > 0, splitByChar('.', lower(splitByChar(':', splitByChar('@', splitByRegexp('[/?#]', if(position(url, '://') > 0, substring(url, position(url, '://') + 3), url))[1])[-1])[1]))[-1], '') IN (
+                'ru','by','kz','ua','pl','cz','ro','bg',
+                'sk','rs','hr','si','lt','lv','ee','md',
+                'am','ge','az','al','ba','mk','cn','id',
+                'vn','th','ph','my','bd','pk','in','lk',
+                'np','mm','br','ar','mx','cl','pe','ve',
+                'ec','uy','bo','py','gt','cu','do','cr',
+                'pa','hn','ni','tr','sa','eg','za','ng',
+                'ke','ma','dz','tn','ir'
+            ), 'T3',
+      ''
     ),
 
     login_type LowCardinality(String) MATERIALIZED multiIf(

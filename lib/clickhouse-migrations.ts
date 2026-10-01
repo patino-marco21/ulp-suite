@@ -222,7 +222,21 @@ let migrationsDone = false
 //      table-level MODIFY SETTING -- metadata only, takes effect for the next merge, undone with
 //      `ALTER TABLE ulp.credentials RESET SETTING min_rows_to_fsync_after_merge,
 //      min_compressed_bytes_to_fsync_after_merge`. Mirrored in the init SQL and ulp-performance.xml.
-const DDL_VERSION = 25
+// v26: country_tier reads the stored email_domain column. The expression used to re-derive the domain with
+//      splitByChar('@', lower(email))[-1], which is the whole login when there is no '@', so 1,781,728
+//      logins without an '@' (plus the 138,191 that were genuinely mislabelled by an older provider list)
+//      were stored as Tier 3 while the importer's classifyTier() calls them untiered/T1/T2 -- see
+//      __tests__/purge-audit.test.ts and docs/superpowers/specs/2026-09-30-related-panel-and-domain-rev-design.md.
+//      MODIFY COLUMN swaps the MATERIALIZED expression only (metadata: rows inserted from now on get the right
+//      label, stored rows keep theirs). Backfilling the 1.39B existing rows is `MATERIALIZE COLUMN country_tier`,
+//      which also rebuilds the column's skip index and proj_imported_desc (it carries country_tier), so it is
+//      NOT fired here (see v23): run scripts/materialize-country-tier.sh, supervised.
+const DDL_VERSION = 26
+
+/** v26: swap country_tier's MATERIALIZED expression (metadata only; see the DDL_VERSION comment above). */
+export function buildCountryTierModifySql(): string {
+  return `ALTER TABLE ulp.credentials MODIFY COLUMN country_tier LowCardinality(String) MATERIALIZED ${buildCountryTierExpression()}`
+}
 
 /** Table settings v25 applies; the init SQL and ulp-performance.xml carry the same two numbers. */
 export const MERGE_FSYNC_SETTINGS = {
@@ -272,6 +286,12 @@ export async function runClickHouseMigrations(): Promise<void> {
     { sql: `ALTER TABLE ulp.credentials ADD COLUMN IF NOT EXISTS breach_name String DEFAULT ''` },
     // tld materialized column
     { sql: `ALTER TABLE ulp.credentials ADD COLUMN IF NOT EXISTS tld String MATERIALIZED topLevelDomain(url)` },
+    // email_domain — lowercased domain portion of email (part after last @). Added BEFORE country_tier
+    // (v26): that expression reads this column.
+    {
+      sql: `ALTER TABLE ulp.credentials ADD COLUMN IF NOT EXISTS email_domain String MATERIALIZED lower(if(position(email,'@')>0,splitByChar('@',email)[-1],''))`,
+      materialize: `ALTER TABLE ulp.credentials MATERIALIZE COLUMN email_domain`,
+    },
     // country_tier — dual-signal (email TLD/ISP + URL TLD fallback)
     {
       sql: `ALTER TABLE ulp.credentials ADD COLUMN IF NOT EXISTS country_tier LowCardinality(String) MATERIALIZED ${countryTierExpr}`,
@@ -298,11 +318,6 @@ export async function runClickHouseMigrations(): Promise<void> {
     {
       sql: `ALTER TABLE ulp.credentials ADD COLUMN IF NOT EXISTS password_mask LowCardinality(String) MATERIALIZED multiIf(length(password)=0,'empty',match(password,'^[0-9]+$'),'numeric',match(password,'^[a-zA-Z]+$'),'alpha',match(password,'^[a-zA-Z0-9]+$'),'alphanumeric','mixed')`,
       materialize: `ALTER TABLE ulp.credentials MATERIALIZE COLUMN password_mask`,
-    },
-    // email_domain — lowercased domain portion of email (part after last @)
-    {
-      sql: `ALTER TABLE ulp.credentials ADD COLUMN IF NOT EXISTS email_domain String MATERIALIZED lower(if(position(email,'@')>0,splitByChar('@',email)[-1],''))`,
-      materialize: `ALTER TABLE ulp.credentials MATERIALIZE COLUMN email_domain`,
     },
     // url_scheme — http / https / empty (protocol() native function)
     {
@@ -985,6 +1000,18 @@ export async function runClickHouseMigrations(): Promise<void> {
       console.warn('[ClickHouse migration] DDL v25 applied (fsync after merges: min_rows_to_fsync_after_merge, min_compressed_bytes_to_fsync_after_merge)')
     } catch (err) {
       console.error('[ClickHouse migration] v25: MODIFY SETTING fsync-after-merge -- FAILED:', err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  // v26 — country_tier reads email_domain (see DDL_VERSION comment above). MODIFY COLUMN is metadata-only and
+  // idempotent; a failure leaves the old expression in place (new rows keep the old label) and is logged in
+  // full. Existing rows are backfilled by scripts/materialize-country-tier.sh, supervised, never from here.
+  if (lastDdl < 26) {
+    try {
+      await client.exec({ query: buildCountryTierModifySql() })
+      console.warn('[ClickHouse migration] DDL v26 applied (country_tier now reads email_domain -- existing rows need scripts/materialize-country-tier.sh)')
+    } catch (err) {
+      console.error('[ClickHouse migration] v26: MODIFY COLUMN country_tier -- FAILED:', err instanceof Error ? err.message : String(err))
     }
   }
 
