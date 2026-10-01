@@ -26,17 +26,6 @@ export interface JWTPayload {
 // =====================================================
 
 /**
- * Get user's role from JWT payload
- * SECURITY: Tokens without role field default to 'analyst' (lowest privilege)
- * This prevents privilege escalation from old/malformed tokens
- */
-export function getUserRole(payload: JWTPayload | null): UserRole {
-  if (!payload) return 'analyst' // No auth = lowest privilege
-  // SECURITY: Default to 'analyst' if role is missing - principle of least privilege
-  return payload.role || 'analyst'
-}
-
-/**
  * Check if user has admin role
  * SECURITY: Only explicit 'admin' role grants admin access
  */

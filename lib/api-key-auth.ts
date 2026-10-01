@@ -205,15 +205,6 @@ export async function getAllApiKeys(): Promise<Omit<ApiKeyRecord, 'key_hash'>[]>
   ) as Omit<ApiKeyRecord, 'key_hash'>[]
 }
 
-export async function revokeApiKey(keyId: number, userId?: number): Promise<boolean> {
-  const sql = userId
-    ? 'UPDATE api_keys SET is_active = 0 WHERE id = ? AND user_id = ?'
-    : 'UPDATE api_keys SET is_active = 0 WHERE id = ?'
-  const params = userId ? [keyId, userId] : [keyId]
-  const { changes } = dbRun(sql, params)
-  return changes > 0
-}
-
 export async function deleteApiKey(keyId: number, userId?: number): Promise<boolean> {
   const sql = userId ? 'DELETE FROM api_keys WHERE id = ? AND user_id = ?' : 'DELETE FROM api_keys WHERE id = ?'
   const params = userId ? [keyId, userId] : [keyId]

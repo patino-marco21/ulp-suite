@@ -34,15 +34,6 @@
  * accidentally match the pattern.
  */
 
-export type LoginType = 'email' | 'phone' | 'username' | ''
-
-export const LOGIN_TYPE_LABELS: Record<string, string> = {
-  email:    'Email addresses',
-  phone:    'Phone numbers',
-  username: 'Usernames',
-  '':       'All login types',
-}
-
 export const LOGIN_TYPE_SHORT: Record<string, string> = {
   email:    'Email',
   phone:    'Phone',

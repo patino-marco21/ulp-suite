@@ -275,37 +275,3 @@ export async function executeQuery(
     throw error
   }
 }
-
-/**
- * Test ClickHouse connection
- * Useful for health check or initialization verification
- */
-export async function testConnection(): Promise<boolean> {
-  try {
-    const result = await executeQuery("SELECT 1 as test")
-    return result.length > 0 && result[0].test === 1
-  } catch (error) {
-    console.error("❌ ClickHouse connection test failed:", error)
-    return false
-  }
-}
-
-/**
- * Close ClickHouse connection (for cleanup)
- * Usually not needed as client handles connection pooling
- */
-export async function closeConnection() {
-  try {
-    const chClient = getClickHouseClient()
-    await chClient.close()
-    // Clear global reference
-    if (globalForClickHouse.clickhouse) {
-      globalForClickHouse.clickhouse = undefined
-    }
-    console.warn("✅ ClickHouse connection closed")
-  } catch (error) {
-    console.error("❌ Error closing ClickHouse connection:", error)
-  }
-}
-
-

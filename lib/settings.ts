@@ -15,8 +15,6 @@ export const SETTING_KEYS = {
   UPLOAD_TEMP_CLEANUP_HOURS: 'upload_temp_cleanup_hours',
 } as const
 
-export type SettingKey = typeof SETTING_KEYS[keyof typeof SETTING_KEYS]
-
 // Bytes, matching how upload_max_file_size is actually stored (see
 // lib/sqlite.ts's seed, '10737418240') and how the settings page reads/
 // writes it (Math.round(bytes / 1024**3), formData.maxFileSizeGB * 1024**3)

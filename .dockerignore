@@ -61,7 +61,6 @@ README.md
 AUTHORS.md
 LICENSE
 docs/
-images/
 
 # ─── Tests (not needed in production image) ──────────────────────────────────
 *.test.ts

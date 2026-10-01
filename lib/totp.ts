@@ -142,13 +142,6 @@ export function verifyBackupCode(
 }
 
 /**
- * Format backup codes for display (add dash in middle)
- */
-export function formatBackupCode(code: string): string {
-  return `${code.slice(0, 4)}-${code.slice(4)}`
-}
-
-/**
  * Get current TOTP code (for testing/debug purposes only)
  * SECURITY: Only available in test/development environment (MED-03)
  */
