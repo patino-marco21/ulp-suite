@@ -324,9 +324,16 @@ async function resolveCandidates(mode: MatchMode, domains: string[]): Promise<Ca
 
   // Matches hiding under a legacy-normalization domain, fetched as rows. The
   // scan is bounded by the primary key to those three values (21.3M rows,
-  // measured 5.7–7.9 s) and, unlike the column scans above, has to evaluate
+  // measured 5.7–7.9 s on the old 2.4B-row table) and, unlike the column scans above, has to evaluate
   // the full match condition — so it is by far the most expensive thing phase
   // 1 does when it finds nothing, and exactly the thing worth caching.
+  //
+  // Re-measured 2026-09-30 on the deduped 8-part table, idle server, cold, with the 17-domain
+  // monitor: 40 s for 22.6M rows, 404 CPU-seconds (~18 µs per row), and 55 s when it ran beside
+  // the 666M-row `domain` scan. It is now the slowest part of a cold rescan (the two column
+  // scans take ~0.5 s each through their reversed-key projections), and sits at 40-55 s
+  // against PHASE1_MAX_EXECUTION_TIME = 90. The cost looks proportional to domains x rows:
+  // buildDomainSetWhereClause repeats the NORM_* expressions once per domain and per column.
   const { clause: exactClause, params: exactParams } = buildDomainSetWhereClause(domains, mode)
   const legacyScan = selectMatches(
     `domain IN {legacyDomains:Array(String)} AND ${exactClause}`,

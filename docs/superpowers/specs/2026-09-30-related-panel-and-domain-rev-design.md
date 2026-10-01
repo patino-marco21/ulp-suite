@@ -83,9 +83,13 @@ byte-for-byte the same match as `domain = x OR endsWith(domain, '.x')` and becom
 - `lib/domain-match.ts`: one reversed-key builder parameterized by column; `buildEmailDomainRevCandidateWhereClause`
   stays as a wrapper; add `buildDomainRevCandidateWhereClause`.
 - `lib/monitor-match-resolver.ts`: the `domain` scan uses the rewritten predicate plus
-  `preferred_optimize_projection_name = 'proj_domain_rev'` only when every active part carries the projection
-  (`isDomainRevProjectionReady`, fails closed); otherwise today's query with `optimize_use_projections = 0`.
-  The `email_domain` decision is unchanged. Both readiness checks are metadata-only.
+  `preferred_optimize_projection_name = 'proj_domain_rev'` and **`optimize_distinct_in_order = 0`** only when every
+  active part carries the projection (`isDomainRevProjectionReady`, fails closed); otherwise today's query with
+  `optimize_use_projections = 0`. The `email_domain` decision is unchanged. Both readiness checks are metadata-only.
+  The extra setting is needed because `domain` leads the primary key: with it on, the planner answers
+  `SELECT DISTINCT domain` by reading the base table in key order and never considers the projection
+  (sandbox: 1224 of 1224 granules, no projection used; with it off, 29 granules and 1.8M rows). `email_domain` is
+  not in the key, so that path never needed it.
 - DDL v24 (`ADD PROJECTION IF NOT EXISTS`, no MATERIALIZE at deploy), the init-SQL mirror, a third restorer in
   `runContentDedupTick` step 9 (order: `proj_email_domain_rev`, `proj_domain_rev`, then the 90 GiB
   `proj_imported_desc`), and `scripts/run-content-dedup-once.ts --restore-domain-projection` (idempotent).
@@ -93,25 +97,76 @@ byte-for-byte the same match as `domain = x OR endsWith(domain, '.x')` and becom
 - Unaffected by construction: `stripProjectionsFromCreateTableDdl` (removes any number of projections), the
   main search, and the UI's exact filters.
 
-### Hazard to measure, not assume: broad domains
+### Sandbox probe (throwaway `ulp.zz_probe_domain`, dropped afterwards)
 
-ClickHouse only uses a projection index when the rows it selects stay under
-`max_projection_rows_to_use_projection_index` (default 1M). A broad monitored domain (facebook.com) would
-then fall back to evaluating `reverse(domain)` over every row, which could be slower than today's column
-scan. Gate D0 measures a broad domain cold, original against rewritten, and the plan adds
-`max_projection_rows_to_use_projection_index` to the query's settings, or gates the rewrite on breadth, only if
-the measurement shows a regression.
+80.1M rows: a 1% hash sample plus every row of roblox.com and facebook.com (67M rows between them, to
+exercise broad domains) plus every row for the monitor's 17 domains; same `ORDER BY`, partitioning and
+granularity as the live table, merged to one part per partition. Projection size 4.47-4.55 bytes/row, so about
+5.9 GiB at 1.39B rows. With the setting above, the rewritten predicate returned **identical result sets** (value
+count and hash) to the original for the 17-domain monitor (44 values) and for facebook.com (811 values; a 31M-row
+domain), and for roblox.com plus facebook.com both overflow `CANDIDATE_LIMIT` (1001 values each; which 1001 is
+arbitrary, so only the count is comparable). Cost: 17 domains 1.7 s / 80M rows / 1224 granules -> 0.1 s / 1.8M rows
+/ 29 granules; facebook.com 0.37 s / 80M rows -> 0.23 s / 31M rows / 477 granules.
 
-### Gate D0 (live, before the resolver change is merged)
+Hazard that did not materialize: `max_projection_rows_to_use_projection_index` (default 1M) was a worry for broad
+domains, but raising it (and `min_table_rows_to_use_projection_index`) changed nothing for facebook.com, which
+reads the same 477 granules either way, so the rewrite needs no extra settings beyond the one above. Gate D0
+still measures a broad domain on the live table.
+
+Also measured: the sandbox's own `count()` shapes use `proj_domain_rev` directly (`Granules: 2/1224`), which is
+fine; and a **result cache** trap: this server runs with `use_query_cache = 1` (30 s TTL) for the default profile,
+so a repeated identical probe returns in 0 ms from the cache (`QueryCacheHits = 1`). Every timing here passes
+`--use_query_cache=0` and drops the query condition cache first.
+
+### Gate D0 (live)
 
 Precondition: no `clickhouse-js` queries in `system.query_log` for the last 10 minutes, free disk above the disk
 guard's floor. Steps: add the projection, materialize per partition behind the guard (partition 202608 first),
-record per-part size, time and peak per-task memory; then, with `SYSTEM DROP QUERY CONDITION CACHE`
-before each timing, measure the monitor's 17-domain `domain` scan before/after, and a broad domain
-(facebook.com) before/after; compare result sets (count and value hash). Stop and `DROP PROJECTION` if peak
-memory passes 8 GiB, free disk falls below 100 GiB, the server restarts, or any result set differs.
-Pass criteria: identical result sets, the 17-domain scan under 2 s cold, no regression on the broad domain.
+record per-part size, time and peak memory; then, with `SYSTEM DROP QUERY CONDITION CACHE` and
+`--use_query_cache=0` before each timing, measure the monitor's 17-domain `domain` scan before/after, a broad
+domain (facebook.com) before/after, and the whole resolver; compare result sets (count and value hash). Stop
+and `DROP PROJECTION` if peak memory passes 8 GiB, free disk falls below 100 GiB, the server restarts, or any
+result set differs. Pass criteria: identical result sets, the 17-domain scan under 2 s cold, no regression on
+the broad domain. Outcome: all met; see Results.
 
 ## Results
 
-Part 1: measured above; implementation and tests in this change. Part 2: filled in after Gate D0.
+**Part 1** is shipped and live (`ed26833`): measurements above, 27 tests, deployed bundle checked for the inner/outer text.
+
+**Part 2, Gate D0 on the live table (1.39B rows, 8 parts), all cold with the result cache off:**
+
+| Measure | Before | After |
+|---|---|---|
+| Monitor's 17-domain `domain` candidate scan, isolated | 16.9 s / 666,299,212 rows / 21,469 marks | **0.30 s / 8.4M rows / 128 marks**, identical 44 values (hash `7a6caecdda`) |
+| Broad domain (facebook.com, overflows the 1001-value limit) | 75 ms | 76 ms (no regression; both stop at the limit) |
+| Whole resolver, cold, real code path | 56.9 s | 41.4 s on two runs; the same 100 rows, `limited: true`, same hash `7d3086668fe4` before and after and across both runs |
+| `MATERIALIZE` | n/a | 243 s (202608, one 496M-row part) + 128 s (202607, seven parts) = 6.2 min |
+| Resources during it | n/a | container memory peaked at 2.5 GiB of 20; free disk dipped to 197.1 GiB (from 205.4) and settled at 199.2; no restart, no failed mutation |
+| Size | n/a | **6.62 GiB**: 5.19 bytes/row in 202607, 4.85 in 202608 (the sandbox's 4.5 was a little low; `domain` has more distinct, longer values) |
+
+The earlier "42.7 s" for the `domain` scan was measured while the user was searching; at idle it is 16.9 s
+isolated, and 45 s when it runs next to the legacy probe, which is how the resolver runs it.
+
+Side effects checked on the same table: the default browse sort (`domain_asc`, dedupe and noise on) 1.27 s and the
+domain-filtered browse 0.96 s, both without any projection and unchanged in shape; the exact `domain` filter 16 ms
+to 22 ms (noise); `domain = x OR domain LIKE '%.x'` counts now plan through `proj_domain_rev` and went from 12.6 s to
+7.0 s with the same result (1,187,564); the `url_host LIKE '%x%'` branch is untouched (10.9 s).
+
+### Findings the gate surfaced (not fixed here)
+
+1. **The legacy probe is now the slowest part of a cold rescan, and it scales with the number of domains.** The
+   `domain IN ('', 'http', 'https') AND <full match condition>` scan reads 22.6M rows and needs 404 CPU-seconds
+   for the 17-domain monitor: 40 s alone, 55 s beside another scan, against `PHASE1_MAX_EXECUTION_TIME = 90`. With
+   1, 4 and 17 domains it takes 2.9 s / 9.9 s / 39.9 s (27.8 / 101 / 406 CPU-seconds): `buildDomainSetWhereClause`
+   re-evaluates the `NORM_*` expressions once per domain and column. It returned 0 rows for this monitor, so the
+   40 s found nothing. The code comment's "5.7-7.9 s" dates from the old 2.4B-row table and has been corrected. A
+   fix is to normalize once per row in a subquery and match the domain set with `arrayExists` against that
+   (expected: about the 1-domain cost, ~3 s, independent of the domain count); it needs result-equality checks
+   against a domain set that does hit legacy rows.
+2. **Sorting by "newest first" with Unique on cannot finish at this scale.** `ORDER BY imported_at DESC` with
+   `LIMIT 1 BY content_key_hash` plans a full read plus external sort with no projection (read 1.22B rows, 9.8 GiB,
+   `TIMEOUT_EXCEEDED` at the route's 300 s cap). `projections: []` and the plan are the same as without
+   `proj_domain_rev`, so it predates this work; the route's own comment already says it was 16-30 s at 91M rows. The
+   UI's default sort (`domain_asc`) is unaffected.
+3. `NORM_COLS` corrections look like a no-op under the default alias semantics (0 of 5,000 legacy-bucket rows altered
+   against about 28 with `prefer_column_name_to_alias = 1`), so ~38K legacy rows probably show raw values. Not investigated.
