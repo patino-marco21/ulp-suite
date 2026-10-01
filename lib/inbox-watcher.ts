@@ -38,6 +38,7 @@ import { uploadQueue, queueSize, setCurrentJob } from '@/lib/upload-queue'
 import { logJob } from '@/lib/processing-log'
 import { processTextStream, processZipFile } from '@/lib/upload-processor'
 import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable } from '@/lib/inbox-claim'
+import { sniffFileKind } from '@/lib/inbox-helpers'
 import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 
 const INBOX = path.resolve('./inbox')
@@ -203,7 +204,21 @@ function cleanupOldFiles(dir: string, maxAgeMs: number): void {
  */
 async function enqueueFile(filePath: string): Promise<void> {
   const filename = path.basename(filePath)
-  const ext      = path.extname(filename).toLowerCase()
+  let ext        = path.extname(filename).toLowerCase()
+
+  // A name the watcher does not recognise is not proof the content is unusable: Telegram-style names
+  // such as "... - 29.04.2026 - ULP PRIVATE.08" have a date fragment for an "extension". Look at the
+  // content before giving up -- after the size has stopped changing, so a file still being copied in
+  // is not judged by its first few bytes.
+  if (!SUPPORTED_EXTS.has(ext)) {
+    if (!(await isFileSizeStable(filePath, STABILITY_CHECK_WAIT_MS))) return
+    const kind = await sniffFileKind(filePath).catch(() => 'binary' as const)
+    if (kind === 'zip') ext = '.zip'
+    else if (kind === 'text') ext = '.txt'
+    if (SUPPORTED_EXTS.has(ext)) {
+      console.warn(`[inbox-watcher] "${filename}" has no recognised extension; its content is ${kind}, importing it as ${ext}`)
+    }
+  }
 
   if (!SUPPORTED_EXTS.has(ext)) {
     // Previously a silent `return` here — the file just sat in inbox/ forever
@@ -227,7 +242,7 @@ async function enqueueFile(filePath: string): Promise<void> {
       imported:      0,
       skipped:       0,
       duration_ms:   0,
-      error_message: `Unsupported file extension "${ext || '(none)'}" — supported: .txt, .csv, .zip`,
+      error_message: `Unsupported file extension "${ext || '(none)'}" and the content is neither text nor a ZIP archive — supported: .txt, .csv, .zip`,
     })
     return
   }

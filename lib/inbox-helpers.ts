@@ -91,3 +91,52 @@ export function retryAllFailed(): string[] {
     return []
   }
 }
+
+// ─── Content sniffing for files whose name says nothing ──────────────────────
+
+export type SniffedKind = 'zip' | 'text' | 'binary'
+
+const SNIFF_BYTES = 64 * 1024
+
+/**
+ * Classify a file's first bytes. ZIP magic wins; otherwise it is text when there is no NUL byte,
+ * under 1% of the bytes are control characters other than tab/newline/return/form-feed, and under 5%
+ * of the decoded characters are U+FFFD (so a few mis-encoded lines, common in stealer logs, do not
+ * disqualify a file, while a PDF, executable or image does). An empty head is `binary`: there is
+ * nothing to import and nothing to learn from it.
+ */
+export function classifyHead(head: Buffer): SniffedKind {
+  if (head.length === 0) return 'binary'
+  if (
+    head.length >= 4 && head[0] === 0x50 && head[1] === 0x4b &&
+    (head[2] === 0x03 || head[2] === 0x05 || head[2] === 0x07) &&
+    (head[3] === 0x04 || head[3] === 0x06 || head[3] === 0x08)
+  ) return 'zip'
+  if (head.includes(0)) return 'binary'
+
+  let control = 0
+  for (const b of head) if (b < 0x20 && b !== 0x09 && b !== 0x0a && b !== 0x0d && b !== 0x0c) control++
+  if (control / head.length >= 0.01) return 'binary'
+
+  const decoded = head.toString('utf8')
+  let replacement = 0
+  for (const ch of decoded) if (ch === '\uFFFD') replacement++
+  if (decoded.length > 0 && replacement / decoded.length >= 0.05) return 'binary'
+  return 'text'
+}
+
+/**
+ * Sniff a file by content. The inbox only trusts `.txt`, `.csv` and `.zip` names, but files arrive
+ * from Telegram and similar sources with names like `... - 29.04.2026 - ULP PRIVATE.08`, whose
+ * "extension" is a date fragment; one such 81 MB file sat in inbox/failed/ for that reason alone.
+ */
+export async function sniffFileKind(filePath: string): Promise<SniffedKind> {
+  const handle = await fs.promises.open(filePath, 'r')
+  try {
+    const buf = Buffer.alloc(SNIFF_BYTES)
+    const { bytesRead } = await handle.read(buf, 0, SNIFF_BYTES, 0)
+    return classifyHead(buf.subarray(0, bytesRead))
+  } finally {
+    await handle.close()
+  }
+}
