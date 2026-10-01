@@ -198,7 +198,7 @@ dropped) on the 1.39B-row table.
 | Backup tooling | `ulp.*` would snapshot and upload the 381 GiB archive; local snapshots unguarded | live tables only; disk-space guard; `space`/`local`/`status`; local copy deleted after upload; retention 2; Ingest Health shows backup age. Local flow rehearsed on a sandbox table; **the S3 flow has not been exercised (no destination)** |
 | npm audit | 1 high (brace-expansion, dev-only) | 0; verified with `npm ci` and the versions read from `node_modules` |
 | Inbox file with a date for an extension | `inbox/failed/` | unrecognised names are judged by content (zip magic / text); Retry on the Inbox page re-queues the stuck file. **It was not re-queued: importing it writes to the live database.** |
-| README / plans | Next.js 14, 6 GB RAM table, "tens of billions", P99 < 200 ms, 52 of 55 plans with unchecked boxes | corrected; `docs/superpowers/plans/README.md` explains the boxes |
+| README / plans | Next.js 14, 6 GB RAM table, "tens of billions", P99 < 200 ms, 52 of 55 plans with unchecked boxes | corrected; `docs/superpowers/plans/README.md` explained the boxes, and the whole plans directory was removed on 2026-10-01 (`git show ad4e3a8:docs/superpowers/plans/README.md`) |
 
 ### `NORM_COLS` is neither a no-op nor correct: what was found
 

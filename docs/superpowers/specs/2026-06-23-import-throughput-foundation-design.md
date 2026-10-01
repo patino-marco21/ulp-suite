@@ -29,7 +29,8 @@ Three deliverables:
 A 10-item import-performance proposal was assessed against the current code and
 the ClickHouse docs. Two of its items — bigger batches (proposal item 1) and
 async inserts (item 8) — would **partially revert** deliberate decisions made in
-[`2026-06-21-pagination-import-resilience.md`](../plans/2026-06-21-pagination-import-resilience.md),
+`2026-06-21-pagination-import-resilience` (the plan; removed from the tree on 2026-10-01, recover it with
+`git show ad4e3a8:docs/superpowers/plans/2026-06-21-pagination-import-resilience.md`),
 which moved imports from 500K→100K batches and from async→synchronous,
 retryable, in-order inserts to survive ClickHouse restarts on multi-GB files
 under a tight memory budget. fsync durability (item 9) was likewise enabled
