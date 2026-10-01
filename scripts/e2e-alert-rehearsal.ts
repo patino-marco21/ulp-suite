@@ -250,6 +250,7 @@ async function main(): Promise<number> {
     const legacy = [
       insertRow('https', '//docs.example.com/y', 'hank@example.com|Pa55-seven', '', 'legacy.txt'), // repairable, not there yet
       insertRow('https', `//${DOMAIN}/portal`, `frank@${DOMAIN}|Pa55-six`, '', 'legacy.txt'), // repairable, but the correct copy exists
+      insertRow('https', `//${DOMAIN}/portal`, `frank@${DOMAIN}|Pa55-six`, '', 'legacy-b.txt'), // the same credential, staged twice
       insertRow('https', '//shop.example.com/x', 'gina|ab', '', 'legacy.txt'), // password too short
       insertRow('https', '//site.example.ru/login', 'x@mail.ru|Secret-Pa55', '', 'legacy.txt'), // T3 once corrected
     ]
@@ -266,13 +267,14 @@ async function main(): Promise<number> {
     const count = (where: string) => chQuery(`SELECT count() FROM ulp.credentials WHERE ${where}`)
 
     const dry = wrapper(false)
-    check('the dry run finds the 4 legacy rows, would repair 2, and changes nothing', dry.status === 0 && /candidates:\s+4/.test(dry.stdout) && /repaired:\s+2/.test(dry.stdout) && count("source_file = 'legacy.txt'") === '4', (dry.stdout + dry.stderr).slice(-200))
+    check('the dry run finds the 5 legacy rows, would repair 3, and changes nothing', dry.status === 0 && /candidates:\s+5/.test(dry.stdout) && /repaired:\s+3/.test(dry.stdout) && count("source_file LIKE 'legacy%'") === '5', (dry.stdout + dry.stderr).slice(-200))
     const first = wrapper(true)
-    check('APPLY=1 appends exactly the one repairable row that was not already there', first.status === 0 && /appended: 1 repaired/.test(first.stdout), (first.stdout + first.stderr).slice(-300))
+    // 3 rows are staged but 2 distinct credentials, and one of them (staged twice) is already in the table: the figures are DISTINCT credentials
+    check('APPLY=1 appends exactly the one repairable row that was not already there', first.status === 0 && /already in ulp.credentials \(skipped\): 1\b/.test(first.stdout) && /appended: 1 repaired/.test(first.stdout), (first.stdout + first.stderr).slice(-300))
     check('...with its original imported_at and source_file and a real domain', count(`url = 'https://docs.example.com/y' AND email = 'hank@example.com' AND password = 'Pa55-seven' AND domain = 'docs.example.com' AND source_file = 'legacy.txt' AND imported_at = '${stamp}'`) === '1')
     check('the credential that already existed was not duplicated', count(`email = 'frank@${DOMAIN}' AND url = 'https://${DOMAIN}/portal'`) === '1')
     check('the T3 row and the too-short password were not appended', count("email = 'x@mail.ru'") === '0' && count("url = 'https://shop.example.com/x'") === '0')
-    check('the four legacy rows are untouched', count("source_file = 'legacy.txt' AND domain = ''") === '4')
+    check('the five legacy rows are untouched', count("source_file LIKE 'legacy%' AND domain = ''") === '5')
     check('the scratch table is gone', chQuery("SELECT count() FROM system.tables WHERE database = 'ulp' AND name = 'zz_scheme_split_repaired'") === '0')
     const second = wrapper(true)
     check('a second run appends nothing', second.status === 0 && /appended: 0 repaired/.test(second.stdout), (second.stdout + second.stderr).slice(-300))

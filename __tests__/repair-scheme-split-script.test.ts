@@ -131,6 +131,17 @@ describe('scripts/repair-scheme-split-rows.sh', () => {
     expect(live).not.toMatch(/now\(\)/i)
   }, 120_000)
 
+  // A credential can be staged twice (two legacy rows that re-parse to the same line) and can sit in the live table more than
+  // once (duplicates at rest are normal until the next content-dedup). Counting ROWS on either side made the live run of
+  // 2026-10-01 report 998,267 appended when 1,009,474 had been appended, and would fail the final check on a table with duplicates.
+  test('it counts DISTINCT credentials on both sides of the append, never rows', () => {
+    const r = run({ APPLY: '1' })
+    const already = statements(r.calls).find(s => s.includes('AS already_present'))!
+    expect(already).toContain('SELECT uniqExact(content_key_hash) AS already_present')
+    const present = statements(r.calls).find(s => s.includes('AS keys_present'))!
+    expect(present).toContain('SELECT uniqExact(content_key_hash) AS keys_present')
+  }, 120_000)
+
   test('what goes into the scratch table is exactly the repaired rows, as JSON, with the original timestamps', () => {
     const r = run({ APPLY: '1' })
     expect(r.stdin).toEqual([

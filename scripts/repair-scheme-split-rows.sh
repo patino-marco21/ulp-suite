@@ -157,13 +157,15 @@ if [[ "${scratch_rows:-x}" != "$repaired" ]]; then
   exit 6
 fi
 
-already="$(ch "SELECT count() AS already_present FROM $SCRATCH WHERE content_key_hash IN (SELECT content_key_hash FROM ulp.credentials WHERE content_key_hash IN (SELECT content_key_hash FROM $SCRATCH)) FORMAT TSVRaw")"
+# DISTINCT credentials, on both sides: one can be staged twice (two legacy rows that re-parse to the same line) and sit in the live
+# table more than once (duplicates at rest are normal until the next content-dedup); counting rows made "appended" wrong.
+already="$(ch "SELECT uniqExact(content_key_hash) AS already_present FROM $SCRATCH WHERE content_key_hash IN (SELECT content_key_hash FROM ulp.credentials WHERE content_key_hash IN (SELECT content_key_hash FROM $SCRATCH)) FORMAT TSVRaw")"
 echo "already in ulp.credentials (skipped): ${already:-0}"
 
 echo "Appending..."
 ch "INSERT INTO ulp.credentials (url, email, password, domain, source_file, breach_name, imported_at) SELECT url, email, password, domain, source_file, breach_name, imported_at FROM $SCRATCH WHERE content_key_hash NOT IN (SELECT content_key_hash FROM ulp.credentials WHERE content_key_hash IN (SELECT content_key_hash FROM $SCRATCH)) ORDER BY imported_at LIMIT 1 BY content_key_hash SETTINGS async_insert = 0, max_execution_time = 3600"
 
-present="$(ch "SELECT count() AS keys_present FROM ulp.credentials WHERE content_key_hash IN (SELECT content_key_hash FROM $SCRATCH) FORMAT TSVRaw")"
+present="$(ch "SELECT uniqExact(content_key_hash) AS keys_present FROM ulp.credentials WHERE content_key_hash IN (SELECT content_key_hash FROM $SCRATCH) FORMAT TSVRaw")"
 if [[ "${present:-x}" != "$scratch_keys" ]]; then
   echo "ERROR: ${present:-?} of $scratch_keys repaired credentials are in ulp.credentials: some are missing." >&2
   exit 6
