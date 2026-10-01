@@ -54,6 +54,11 @@ describe('GET /api/search — filter and sort on raw columns, normalize only the
     expect(orderAt).toBeLessThan(sql.indexOf('LIMIT {limit:UInt32}'))
   })
 
+  test('the data query prefers stored columns over NORM_COLS aliases, so the legacy-row corrections apply as designed', async () => {
+    const { data } = await search('q=ledger.com')
+    expect(data!.sql).toContain('prefer_column_name_to_alias = 1')
+  })
+
   test('a keyset cursor is applied to the raw columns inside the inner query', async () => {
     const token = encodeCursor('imported_desc', { imported_at: '2026-01-02 03:04:05', domain: 'a.example', email: 'a@a.example', url: 'https://a.example', password: 'pw' })
     const { data } = await search(`q=ledger.com&sort=imported_desc&cursor=${encodeURIComponent(token)}`)

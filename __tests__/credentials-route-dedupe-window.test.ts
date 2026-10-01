@@ -54,6 +54,11 @@ describe('credentials route — Unique with a non-domain sort de-duplicates insi
     expect(sql.slice(sql.indexOf('FROM ('))).not.toMatch(/\bAS (url|email|password|domain)\b/i)
   })
 
+  test.each(['imported_desc', 'domain_asc'])('%s: both query forms prefer stored columns over NORM_COLS aliases', async sort => {
+    const { sql } = await dataQuery(`sort=${sort}&dedupe=1&exclude_noise=1&limit=200`)
+    expect(sql).toContain('prefer_column_name_to_alias = 1')
+  })
+
   test('the window scales with the page size', async () => {
     const { params } = await dataQuery('sort=email_asc&dedupe=1&limit=50')
     expect(params.windowLimit).toBe(150)

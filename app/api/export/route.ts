@@ -4,7 +4,7 @@ import { validateRequest } from "@/lib/auth"
 import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-search"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
-import { NORM_COLS } from "@/lib/ulp-normalize"
+import { NORM_COLS, NORM_COLS_SETTING } from "@/lib/ulp-normalize"
 import { noiseWhere } from "@/lib/ulp-noise"
 import { dedupeLimitBy } from "@/lib/ulp-dedupe"
 import { exportGroupBySettings, exportSortSettings } from "@/lib/clickhouse-query-limits"
@@ -186,7 +186,7 @@ export async function POST(request: NextRequest) {
          ${dedupeLimitBy(dedupeOn)}
          LIMIT 10000
        ) AS t
-       ${exportSortSettings()}`,
+       ${exportSortSettings()}, ${NORM_COLS_SETTING}`,
       mergedParams
     ) as Array<Record<string, string>>
 

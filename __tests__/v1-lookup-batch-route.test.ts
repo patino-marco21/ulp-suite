@@ -90,6 +90,14 @@ describe('POST /api/v1/lookup/batch — filters on raw columns, normalizes only 
     expect(calls[0].sql).toContain("max_execution_time = 30, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1")
   })
 
+  test.each([
+    ['emails', ['a@b.co']],
+    ['domains', ['b.co']],
+  ])('%s: prefers stored columns over NORM_COLS aliases in the outer select', async (kind, values) => {
+    await post({ [kind]: values })
+    expect(calls[0].sql).toContain('prefer_column_name_to_alias = 1')
+  })
+
   test('emails and domains are two queries, one each', async () => {
     await post({ emails: ['a@b.co'], domains: ['b.co'] })
     expect(calls).toHaveLength(2)

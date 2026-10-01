@@ -4,7 +4,7 @@ import { validateRequest } from "@/lib/auth"
 import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-search"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
-import { NORM_COLS } from "@/lib/ulp-normalize"
+import { NORM_COLS, NORM_COLS_SETTING } from "@/lib/ulp-normalize"
 import { SORT_MAP, type SortKey, encodeCursor, decodeCursor, buildCursorWhere } from "@/lib/cursor-pagination"
 
 export const dynamic = 'force-dynamic'
@@ -148,7 +148,8 @@ export async function GET(request: NextRequest) {
          ) AS t
          SETTINGS max_execution_time = 300,
                   timeout_overflow_mode = 'throw',
-                  http_wait_end_of_query = 1`,
+                  http_wait_end_of_query = 1,
+                  ${NORM_COLS_SETTING}`,
         allParams
       ),
     ])

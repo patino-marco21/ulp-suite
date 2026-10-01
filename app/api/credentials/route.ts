@@ -4,7 +4,7 @@ import { validateRequest } from "@/lib/auth"
 import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-search"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
-import { NORM_COLS } from "@/lib/ulp-normalize"
+import { NORM_COLS, NORM_COLS_SETTING } from "@/lib/ulp-normalize"
 import { NOISE_FILTER } from "@/lib/ulp-noise"
 import { dedupeLimitBy, dedupeCountExpr } from "@/lib/ulp-dedupe"
 import { SORT_MAP, type SortKey, encodeCursor, decodeCursor, buildCursorWhere } from "@/lib/cursor-pagination"
@@ -295,7 +295,8 @@ export async function GET(request: NextRequest) {
          SETTINGS max_execution_time = 300,
                   timeout_overflow_mode = 'throw',
                   http_wait_end_of_query = 1,
-                  max_bytes_before_external_sort = ${SORT_MAX_MEMORY_BYTES}`
+                  max_bytes_before_external_sort = ${SORT_MAX_MEMORY_BYTES},
+                  ${NORM_COLS_SETTING}`
           : `SELECT ${SELECT}
          FROM (
            SELECT ${RAW_COLS}
@@ -308,7 +309,8 @@ export async function GET(request: NextRequest) {
          SETTINGS max_execution_time = 300,
                   timeout_overflow_mode = 'throw',
                   http_wait_end_of_query = 1,
-                  max_bytes_before_external_sort = ${SORT_MAX_MEMORY_BYTES}`,
+                  max_bytes_before_external_sort = ${SORT_MAX_MEMORY_BYTES},
+                  ${NORM_COLS_SETTING}`,
         dedupeInWindow ? { ...allParams, windowLimit: limit * DEDUPE_WINDOW_FACTOR } : allParams
       ) as Promise<unknown[]>
 

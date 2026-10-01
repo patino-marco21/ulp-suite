@@ -17,7 +17,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
 import { executeQuery } from "@/lib/clickhouse"
-import { NORM_COLS } from '@/lib/ulp-normalize'
+import { NORM_COLS, NORM_COLS_SETTING } from '@/lib/ulp-normalize'
 
 export const dynamic = "force-dynamic"
 
@@ -80,7 +80,7 @@ export async function POST(request: NextRequest) {
   const results: Record<string, BatchResult> = {}
 
   try {
-    const SETTINGS = `SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1`
+    const SETTINGS = `SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1, ${NORM_COLS_SETTING}`
 
     // ── Email lookups ────────────────────────────────────────────────────────
     if (emails.length > 0) {

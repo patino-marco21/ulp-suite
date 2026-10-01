@@ -18,9 +18,11 @@
  * route) instead of as "none found". The inner query must stay free of NORM_COLS and of any
  * alias that reuses a column name, or that pruning is lost again.
  *
- * `prefer_column_name_to_alias = 1` would also make the single-level form fast, but it changes
- * what NORM_COLS outputs for the legacy-corrupted rows, so this panel would stop agreeing with
- * the Credentials table; the split keeps the normalization identical to the table's.
+ * `prefer_column_name_to_alias = 1` would also make the single-level form fast, but the split is
+ * what keeps the filter on the stored columns regardless of settings. The outer query DOES carry that
+ * setting (NORM_COLS_SETTING, see lib/ulp-normalize.ts): without it NORM_COLS's own aliases shadow the
+ * columns it reads and the legacy-row corrections come out half-applied. Every route that selects
+ * NORM_COLS carries it, so this panel and the Credentials table agree.
  *
  * WHY ORDER BY domain, email (not imported_at): the split alone fixes rare values (0.9-1.5 s,
  * the bloom filters prune) but not popular ones. Sorting the filtered rows by imported_at is
@@ -37,7 +39,7 @@
  * Params: {email:String}, {domain:String}, {password:String} -- see the route for which
  * bucket binds which.
  */
-import { NORM_COLS } from '@/lib/ulp-normalize'
+import { NORM_COLS, NORM_COLS_SETTING } from '@/lib/ulp-normalize'
 
 /** Rows per bucket. */
 export const RELATED_LIMIT = 25
@@ -63,7 +65,7 @@ function relatedQuery(where: string): string {
        LIMIT ${RELATED_LIMIT}
      ) AS t
      ORDER BY imported_at DESC
-     SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1, use_query_cache = 0`
+     SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1, use_query_cache = 0, ${NORM_COLS_SETTING}`
 }
 
 /** Same login on other rows -- cross-domain reuse of one account. */

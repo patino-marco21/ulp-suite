@@ -45,8 +45,9 @@
  *   at import, so these are historic rows; nothing imported since 2026-08-28.
  *
  * What this means: an exact domain/email filter on the STORED columns cannot see any of these rows (their
- * stored domain is ''), the display repairs only the first group, and lib/monitor-match-resolver.ts's
- * legacy probe (which normalizes with these expressions) can only match that first group too. Repairing
+ * stored domain is ''), the display repairs only the first group (since 2026-10-01; before that it
+ * repaired it only in part -- see NORM_COLS_SETTING), and lib/monitor-match-resolver.ts's legacy probe
+ * (which normalizes with these expressions) can only match that first group too. Repairing
  * them in storage means rewriting url/email/password/domain (and every column derived from them, plus
  * proj_imported_desc) in every part, or insert-then-delete under projections; neither is something to run
  * on a table with no backup. See docs/superpowers/specs/2026-09-30-related-panel-and-domain-rev-design.md.
@@ -123,6 +124,31 @@ const d_pass = `if(position(password,':')>0 AND NOT position(splitByChar(':',pas
  * in any SELECT list.  Alias names match the original column names so callers need
  * not change anything else.
  */
+/**
+ * The query setting EVERY query that selects NORM_COLS must carry: `SETTINGS ..., ${NORM_COLS_SETTING}`.
+ *
+ * NORM_COLS aliases url, email, password and domain to expressions that themselves read url, email,
+ * password and domain. With ClickHouse's default (`prefer_column_name_to_alias = 0`, the analyzer
+ * since 24.3) a reference to `url` inside the `email` expression resolves to the ALIAS `url` -- the
+ * already-normalized value -- not to the stored column the corrections were written against, so the
+ * Case A-D conditions stop matching once another alias has rewritten what they test. Measured
+ * 2026-10-01 on 20,000 well-formed Case D rows (url '', email "host/path", password "login:pass"),
+ * through the exact production form (NORM_COLS in an outer SELECT over a raw-column subquery):
+ *
+ *                       url      email    password   domain     (rows changed, of 20,000)
+ *   default             0        0        13,447     20,000     a half-repaired row: the real domain, the URL
+ *                                                                 still in the email column, and a password
+ *                                                                 stripped of its login
+ *   with this setting   20,000   20,000   19,942     20,000     repaired as designed
+ *
+ * So until 2026-10-01 the Credentials table, search, export and related panel showed Case D rows
+ * garbled, and `email:password` copied from one gave `host/path:password`. Preferring the column makes
+ * every reference mean the stored column, which is what the expressions assume. It changes nothing for
+ * the rows no case matches (the other 99.5% of the table). __tests__/ulp-normalize-setting.test.ts fails
+ * if a module that selects NORM_COLS stops carrying it.
+ */
+export const NORM_COLS_SETTING = 'prefer_column_name_to_alias = 1'
+
 export const NORM_COLS = `
   if(${JS},
     ${strip('password')},
