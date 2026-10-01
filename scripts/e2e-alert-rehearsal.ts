@@ -287,11 +287,14 @@ async function main(): Promise<number> {
     console.log('6. "Newest first" as time windows on proj_imported_desc (lib/newest-first.ts)')
     const newest = await api('GET', '/api/credentials?sort=imported_desc&limit=10&skip_totals=1&exclude_noise=1&dedupe=1')
     check('the Credentials Browser answers a newest-first request', newest.status === 200 && newest.json?.success === true && Array.isArray(newest.json?.results) && newest.json.results.length > 0, `status ${newest.status}`)
+    check('...the response says the windows answered it (plan: "windows")', newest.json?.plan === 'windows', `plan: ${newest.json?.plan}`)
     chQuery('SYSTEM FLUSH LOGS')
-    const windowedRuns = chQuery("SELECT count() FROM system.query_log WHERE type = 'QueryFinish' AND position(query, 'nfwLimit') > 0 AND position(query, 'negate(toUnixTimestamp(imported_at))') > 0")
-    check('...it ran as time windows on the projection key', Number(windowedRuns) >= 1, `windowed queries in system.query_log: ${windowedRuns}`)
-    const onProjection = chQuery("SELECT count() FROM system.query_log WHERE type = 'QueryFinish' AND position(query, 'nfwLimit') > 0 AND has(projections, 'ulp.credentials.proj_imported_desc')")
-    check('...and ClickHouse answered them from proj_imported_desc', Number(onProjection) >= 1, `answered from the projection: ${onProjection}`)
+    // system.query_log holds the query with its {name:Type} parameters already substituted, so the window is recognised by its
+    // predicate on the projection's key expression, which no other query of the app contains.
+    // (Whether ClickHouse answers a window from the projection is NOT checked here: on a table of a handful of rows the planner reads the
+    // base table, as it should. That the projection answers at scale is what the rebuild script's probe and the live parity test verify.)
+    const windowedRuns = chQuery("SELECT count() FROM system.query_log WHERE type = 'QueryFinish' AND position(query, 'negate(toUnixTimestamp(imported_at)) <') > 0 AND position(query, 'system.query_log') = 0")
+    check('...ClickHouse ran windowed queries on the projection key', Number(windowedRuns) >= 1, `windowed queries in system.query_log: ${windowedRuns}`)
   } catch (err) {
     check('the rehearsal ran without an unexpected error', false, err instanceof Error ? err.message.split('\n')[0] : String(err))
   } finally {
