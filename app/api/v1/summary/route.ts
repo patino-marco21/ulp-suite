@@ -1,11 +1,16 @@
 /**
  * Summary API v1 - ULP Stats Endpoint
  * GET /api/v1/summary
+ *
+ * Table-wide totals and the top 20 domains. The numbers come from lib/v1-summary.ts: they are
+ * computed in the background at most every 10 minutes (`as_of` says when), and `unique_domains` /
+ * `unique_emails` are estimates (see `approximate`). Counting them exactly exhausts ClickHouse's
+ * memory cap at this table's size.
  */
 
 import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
-import { executeQuery } from "@/lib/clickhouse"
+import { getSummary, SUMMARY_APPROXIMATE_FIELDS } from "@/lib/v1-summary"
 
 export const dynamic = 'force-dynamic'
 
@@ -18,31 +23,15 @@ export async function GET(request: NextRequest) {
   await logApiRequest(authResult.apiKey!, request, 'v1/summary')
 
   try {
-    const [credStats, sourceStats, topDomains] = await Promise.all([
-      executeQuery(`
-        SELECT count() as total_credentials,
-               countDistinct(domain) as total_domains,
-               countDistinct(email) as unique_emails
-        FROM ulp.credentials
-        SETTINGS optimize_trivial_count_query = 1, max_execution_time = 30
-      `),
-      executeQuery(`SELECT count() as total_sources, sum(line_count) as total_lines FROM ulp.sources`),
-      executeQuery(`
-        SELECT domain, count() as count
-        FROM ulp.credentials GROUP BY domain ORDER BY count DESC LIMIT 20
-        SETTINGS max_execution_time = 30
-      `),
-    ])
+    const { summary, stale } = await getSummary()
 
     const response = NextResponse.json({
       success: true,
-      stats: {
-        credentials: Number(credStats[0]?.total_credentials || 0),
-        unique_domains: Number(credStats[0]?.total_domains || 0),
-        unique_emails: Number(credStats[0]?.unique_emails || 0),
-        sources: Number(sourceStats[0]?.total_sources || 0),
-      },
-      top_domains: topDomains,
+      stats: summary.stats,
+      top_domains: summary.top_domains,
+      as_of: summary.as_of,
+      stale,
+      approximate: SUMMARY_APPROXIMATE_FIELDS,
     })
 
     return addRateLimitHeaders(response, authResult.rateLimit)

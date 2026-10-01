@@ -598,30 +598,14 @@ export default function DocsPage() {
                   <code className="text-lg font-mono text-foreground">/api/v1/summary</code>
                 </div>
                 <CardDescription className="text-muted-foreground mt-2">
-                  Returns dashboard summary data including overall statistics, top 50 TLDs, and country statistics with heatmap data. Useful for integrations and reporting.
+                  Returns table-wide totals and the top 20 domains by credential volume. The figures are computed in the background at most every 10 minutes (see <code>as_of</code>), and <code>unique_domains</code> and <code>unique_emails</code> are estimates (within about 1-2%). Useful for integrations and reporting.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
-                {/* Parameters */}
-                <div>
-                  <h4 className="font-semibold mb-3 text-foreground">Query Parameters</h4>
-                  <ParameterTable params={[
-                    { name: "startDate", type: "string", required: false, description: "Start date filter (YYYY-MM-DD format)", default: "All time" },
-                    { name: "endDate", type: "string", required: false, description: "End date filter (YYYY-MM-DD format)", default: "All time" },
-                  ]} />
-                </div>
-
                 {/* Example Request */}
                 <div>
                   <h4 className="font-semibold mb-3 text-foreground">Example Request</h4>
                   <CodeBlock code={`curl "${baseUrl}/api/v1/summary" \\
-  -H "X-API-Key: bv_your_api_key"`} />
-                </div>
-
-                {/* Example with date filter */}
-                <div>
-                  <h4 className="font-semibold mb-3 text-foreground">Example Request (with Date Filter)</h4>
-                  <CodeBlock code={`curl "${baseUrl}/api/v1/summary?startDate=2024-01-01&endDate=2024-12-31" \\
   -H "X-API-Key: bv_your_api_key"`} />
                 </div>
 
@@ -647,7 +631,10 @@ export default function DocsPage() {
     { "domain": "yahoo.com",   "count": 3100000 },
     { "domain": "hotmail.com", "count": 2800000 }
     // ... up to 20 domains
-  ]
+  ],
+  "as_of": "2026-10-01T00:00:00.000Z",
+  "stale": false,
+  "approximate": ["unique_domains", "unique_emails"]
 }`}
                   />
                 </div>
@@ -663,6 +650,10 @@ export default function DocsPage() {
                     <div className="flex items-center gap-2 text-sm text-muted-foreground">
                       <CheckCircle2 className="h-4 w-4 text-emerald-500" />
                       Top 20 domains by credential volume
+                    </div>
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                      <code>as_of</code> is when the figures were computed; <code>stale</code> is true once they are older than 10 minutes and a refresh is running
                     </div>
                   </div>
                 </div>
