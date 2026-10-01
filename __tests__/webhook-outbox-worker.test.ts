@@ -16,8 +16,18 @@ vi.mock('@/lib/sqlite', () => ({
   dbGet:   vi.fn().mockReturnValue(undefined),
 }))
 
+// Delivery goes through lib/safe-http.ts (no SSRF, no redirects); these tests are about the retry bookkeeping, so the
+// transport is a stub. The guard itself is covered in safe-http.test.ts and webhook-delivery-guard.test.ts.
+vi.mock('@/lib/safe-http', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/safe-http')>()),
+  postJsonSafely: vi.fn(),
+}))
+
 import { enqueueFailedDelivery, runWebhookOutboxTick } from '@/lib/webhook-outbox-worker'
 import { dbRun, dbQuery, dbGet } from '@/lib/sqlite'
+import { postJsonSafely } from '@/lib/safe-http'
+
+const mockPost = vi.mocked(postJsonSafely)
 
 const mockDbRun   = vi.mocked(dbRun)
 const mockDbQuery = vi.mocked(dbQuery)
@@ -83,7 +93,7 @@ describe('runWebhookOutboxTick', () => {
   test('marks row delivered and inserts success alert on 2xx response', async () => {
     mockDbQuery.mockReturnValueOnce([PENDING_ROW])
     mockDbGet.mockReturnValueOnce(WEBHOOK_ROW)
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200 }))
+    mockPost.mockResolvedValue({ status: 200 })
 
     await runWebhookOutboxTick()
 
@@ -95,7 +105,7 @@ describe('runWebhookOutboxTick', () => {
   test('increments attempt_count and sets retrying with backoff on 5xx failure', async () => {
     mockDbQuery.mockReturnValueOnce([PENDING_ROW])
     mockDbGet.mockReturnValueOnce(WEBHOOK_ROW)
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503 }))
+    mockPost.mockResolvedValue({ status: 503 })
 
     await runWebhookOutboxTick()
 
@@ -108,7 +118,7 @@ describe('runWebhookOutboxTick', () => {
   test('dead_letters immediately on 4xx response', async () => {
     mockDbQuery.mockReturnValueOnce([PENDING_ROW])
     mockDbGet.mockReturnValueOnce(WEBHOOK_ROW)
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 400 }))
+    mockPost.mockResolvedValue({ status: 400 })
 
     await runWebhookOutboxTick()
 
@@ -120,7 +130,7 @@ describe('runWebhookOutboxTick', () => {
   test('dead_letters when attempt_count is 4 and retry fails (5th total attempt)', async () => {
     mockDbQuery.mockReturnValueOnce([{ ...PENDING_ROW, attempt_count: 4 }])
     mockDbGet.mockReturnValueOnce(WEBHOOK_ROW)
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500 }))
+    mockPost.mockResolvedValue({ status: 500 })
 
     await runWebhookOutboxTick()
 

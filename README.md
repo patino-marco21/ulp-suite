@@ -33,7 +33,7 @@ ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores 
 - **Scheduled re-scans** — each monitor runs on a configurable interval (1–168 hours)
 - **Dedup mode** — alert only on credentials not previously seen
 - **Digest mode** — alert on all current matches every interval (periodic summary)
-- Webhook delivery to Slack, custom APIs, or any HTTP endpoint
+- Webhook delivery to Slack, custom APIs, or any HTTP endpoint on a public address (localhost, private and cloud-metadata targets are refused and redirects are not followed; `WEBHOOK_ALLOW_PRIVATE_HOSTS=1` allows a receiver on your own network)
 - Alert history and webhook delivery status visible in the UI
 
 ### Self-Service Check Portal

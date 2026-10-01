@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { validateRequest, requireAdminRole } from "@/lib/auth"
 import { createWebhook, listWebhooks } from "@/lib/domain-monitor"
+import { webhookUrlProblem } from "@/lib/safe-http"
 
 export const dynamic = 'force-dynamic'
 
@@ -69,6 +70,11 @@ export async function POST(request: NextRequest) {
         { success: false, error: "Valid webhook URL is required (must start with http/https)" },
         { status: 400 }
       )
+    }
+    // Public addresses only (lib/safe-http.ts): a webhook must not be able to reach this machine or its network.
+    const urlProblem = await webhookUrlProblem(url.trim())
+    if (urlProblem) {
+      return NextResponse.json({ success: false, error: urlProblem }, { status: 400 })
     }
 
     // Validate headers if provided

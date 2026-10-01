@@ -1,5 +1,6 @@
 import { dbQuery, dbGet, dbRun, dbTransaction } from '@/lib/sqlite'
 import { attemptDelivery, enqueueFailedDelivery } from '@/lib/webhook-outbox-worker'
+import { allowPrivateHosts, postJsonSafely } from '@/lib/safe-http'
 import { matchModeToMatchType, credentialFingerprint, type MatchedCredential, type MatchRow } from '@/lib/domain-match'
 import crypto from 'crypto'
 
@@ -465,11 +466,10 @@ export async function testWebhook(webhookId: number): Promise<{ success: boolean
   }
 
   try {
-    const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 15_000)
-    const res = await fetch(webhook.url, { method: 'POST', headers, body: testPayload, signal: ctrl.signal })
-    clearTimeout(t)
-    return { success: res.ok, statusCode: res.status, error: res.ok ? undefined : `HTTP ${res.status}` }
+    // Same guard as every real delivery (lib/safe-http.ts): public addresses only, no redirects.
+    const { status } = await postJsonSafely(webhook.url, { headers, body: testPayload, timeoutMs: 15_000, allowPrivate: allowPrivateHosts() })
+    const ok = status >= 200 && status < 300
+    return { success: ok, statusCode: status, error: ok ? undefined : `HTTP ${status}` }
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
   }

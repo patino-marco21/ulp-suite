@@ -8,6 +8,7 @@
  */
 
 import { dbRun, dbQuery, dbGet } from '@/lib/sqlite'
+import { allowPrivateHosts, postJsonSafely } from '@/lib/safe-http'
 import crypto from 'crypto'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -46,15 +47,16 @@ export async function attemptDelivery(
       .digest('hex')}`
   }
 
-  const ctrl = new AbortController()
-  const t = setTimeout(() => ctrl.abort(), 30_000)
+  // lib/safe-http.ts: only public addresses (unless WEBHOOK_ALLOW_PRIVATE_HOSTS), connection pinned to the validated
+  // address, redirects reported and not followed, 30 s timeout. A refused target comes back as a failure with the reason.
   try {
-    const res = await fetch(target.url, { method: 'POST', headers, body: payloadJson, signal: ctrl.signal })
-    return { ok: res.ok, status: res.status, error: res.ok ? null : `HTTP ${res.status}` }
+    const { status } = await postJsonSafely(target.url, {
+      headers, body: payloadJson, timeoutMs: 30_000, allowPrivate: allowPrivateHosts(),
+    })
+    const ok = status >= 200 && status < 300
+    return { ok, status, error: ok ? null : `HTTP ${status}` }
   } catch (err) {
     return { ok: false, status: null, error: err instanceof Error ? err.message : String(err) }
-  } finally {
-    clearTimeout(t)
   }
 }
 

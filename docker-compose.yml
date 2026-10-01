@@ -122,6 +122,8 @@ services:
       # Reverse proxies in front of the app that APPEND the client address to X-Forwarded-For
       # (lib/client-ip.ts). 0 = none, the default: the app is published on 127.0.0.1 only.
       TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-0}
+      # Webhooks may only reach public addresses (lib/safe-http.ts). 1 also allows a receiver on your own network.
+      WEBHOOK_ALLOW_PRIVATE_HOSTS: ${WEBHOOK_ALLOW_PRIVATE_HOSTS:-}
       # Import filtering — optional, configured in .env. These must be forwarded
       # explicitly because Compose does not inject arbitrary .env keys.
       INGEST_FILTER_HARD_DROP_TIERS: ${INGEST_FILTER_HARD_DROP_TIERS:-T3}

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { validateRequest, requireAdminRole } from "@/lib/auth"
 import { getWebhook, updateWebhook, deleteWebhook } from "@/lib/domain-monitor"
+import { webhookUrlProblem } from "@/lib/safe-http"
 
 export const dynamic = 'force-dynamic'
 
@@ -68,11 +69,15 @@ export async function PUT(
 
     if (body.name !== undefined) updates.name = body.name.trim()
     if (body.url !== undefined) {
-      if (!body.url.startsWith("http")) {
+      if (typeof body.url !== "string" || !body.url.startsWith("http")) {
         return NextResponse.json(
           { success: false, error: "Valid URL is required" },
           { status: 400 }
         )
+      }
+      const urlProblem = await webhookUrlProblem(body.url.trim())
+      if (urlProblem) {
+        return NextResponse.json({ success: false, error: urlProblem }, { status: 400 })
       }
       updates.url = body.url.trim()
     }
