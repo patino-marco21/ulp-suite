@@ -55,8 +55,21 @@ const SELECT = `${NORM_COLS},
 // (tested — extra columns do not help). domain-leading sorts (domain_asc/desc)
 // stay safe and don't need this. Forcing an external (disk-spill) sort past
 // this threshold converts the crash into a slower (~16-30s) but successful
-// query instead.
+// query instead. (At 1.39B rows that stopped being enough -- the sort + LIMIT BY
+// read 1.22B rows and hit the 300 s cap -- so the Unique view now de-duplicates
+// inside a bounded top-N window instead; see DEDUPE_WINDOW_FACTOR below.)
 const SORT_MAX_MEMORY_BYTES = 4_294_967_296 // 4 GiB
+
+// Unique view + a sort whose leading column is NOT `domain`: `ORDER BY ... LIMIT 1 BY
+// content_key_hash LIMIT n` makes ClickHouse sort and de-duplicate the whole filtered set
+// before the final LIMIT (read 1.22B rows, 9.8 GiB, and hit the 300 s cap on the 1.39B-row table,
+// measured 2026-09-30), although the same query without LIMIT BY is a streaming top-N that
+// finishes in ~40 s. So those sorts take the top DEDUPE_WINDOW_FACTOR * n rows first and
+// collapse duplicates inside that window -- the same "dupes are collapsed within each page
+// window" semantics lib/ulp-dedupe.ts documents; ulp.credentials is already de-duplicated at rest
+// by lib/content-dedup.ts, so a window this size yields a full page. (domain-leading sorts read
+// in primary-key order and stay on the plain form.)
+const DEDUPE_WINDOW_FACTOR = 3
 
 /**
  * GET /api/credentials — browse all credentials with pagination, filtering, and sorting.
@@ -125,6 +138,8 @@ export async function GET(request: NextRequest) {
   const dedupe = sp.get('dedupe') === '1'
 
   const orderBy    = SORT_MAP[sortKey as SortKey] ?? SORT_MAP['imported_desc']
+  // See DEDUPE_WINDOW_FACTOR: Unique + a non-domain-leading sort de-duplicates inside a bounded window.
+  const dedupeInWindow = dedupe && !/^domain\b/.test(orderBy)
   const { include: incTiers, exclude: excTiers } = parseTierParams(tierInclude, tierExclude)
   const loginTypes = parseLoginTypeParam(loginType)
   const pwMasks    = pwMaskRaw.split(',').map(m => m.trim()).filter(m => VALID_MASKS.has(m))
@@ -254,7 +269,26 @@ export async function GET(request: NextRequest) {
         // query — see RAW_COLS above for why. The inner query alone is what needs
         // to read in order via proj_imported_desc; wrapping NORM_COLS around it
         // instead of inlining it keeps that projection usable.
-        `SELECT ${SELECT}
+        dedupeInWindow
+          ? `SELECT ${SELECT}
+         FROM (
+           SELECT ${RAW_COLS}
+           FROM (
+             SELECT ${RAW_COLS}, content_key_hash
+             FROM ulp.credentials
+             WHERE ${where}${cursorClause}
+             ORDER BY ${orderBy}
+             LIMIT {windowLimit:UInt32}
+           )
+           ORDER BY ${orderBy}
+           ${dedupeLimitBy(true)}
+           LIMIT {limit:UInt32}
+         ) AS t
+         SETTINGS max_execution_time = 300,
+                  timeout_overflow_mode = 'throw',
+                  http_wait_end_of_query = 1,
+                  max_bytes_before_external_sort = ${SORT_MAX_MEMORY_BYTES}`
+          : `SELECT ${SELECT}
          FROM (
            SELECT ${RAW_COLS}
            FROM ulp.credentials
@@ -267,7 +301,7 @@ export async function GET(request: NextRequest) {
                   timeout_overflow_mode = 'throw',
                   http_wait_end_of_query = 1,
                   max_bytes_before_external_sort = ${SORT_MAX_MEMORY_BYTES}`,
-        allParams
+        dedupeInWindow ? { ...allParams, windowLimit: limit * DEDUPE_WINDOW_FACTOR } : allParams
       ),
     ])
     const query_ms = Date.now() - t0
