@@ -1,0 +1,92 @@
+# Isolated end-to-end rehearsal stack (scripts/e2e-alert-rehearsal.ts).
+#
+# Its own ClickHouse (the SAME docker/clickhouse config and init SQL as production, so a fresh install is exercised),
+# its own app container, and a webhook receiver, on a private network with throwaway named volumes. It shares NOTHING
+# with the real stack: different project, network, container names, volumes and port, and no bind mount of ./data,
+# ./inbox or ./uploads. __tests__/rehearsal-isolation.test.ts fails if that ever stops being true.
+#
+# The app image is the one `docker compose build app` produced (ulp-suite-app:latest); this file never builds it.
+#
+#   npx tsx scripts/e2e-alert-rehearsal.ts            # brings it up, drives it, tears it down
+name: ulp-rehearsal
+
+networks:
+  default:
+    name: ulprehearsal_network
+    driver: bridge
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.3
+    container_name: ulprehearsal_clickhouse
+    environment:
+      CLICKHOUSE_DB: ulp
+      # No CLICKHOUSE_USER / CLICKHOUSE_PASSWORD / CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT here: with any of them the image's
+      # entrypoint WRITES /etc/clickhouse-server/users.d/default-user.xml, and that directory is the repo's, mounted read-only.
+      # docker/clickhouse/users/default-user.xml already is what the entrypoint would generate (empty password, access management).
+    mem_limit: 4g
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - rehearsal_clickhouse:/var/lib/clickhouse
+      - ./docker/clickhouse/init:/docker-entrypoint-initdb.d/:ro
+      - ./docker/clickhouse/config:/etc/clickhouse-server/config.d/:ro
+      - ./docker/clickhouse/users:/etc/clickhouse-server/users.d/:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --tries=1 -O /dev/null http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+      start_interval: 2s
+
+  app:
+    image: ulp-suite-app:latest
+    container_name: ulprehearsal_app
+    ports:
+      - "127.0.0.1:3101:3000"
+    mem_limit: 2g
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: "--max-old-space-size=1536"
+      HOSTNAME: "0.0.0.0"
+      PORT: "3000"
+      CLICKHOUSE_HOST: "http://clickhouse:8123"
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DATABASE: ulp
+      SQLITE_PATH: /app/data/ulp.db
+      # Throwaway secrets for this rehearsal only; the driver generates them per run.
+      JWT_SECRET: ${REHEARSAL_JWT_SECRET:?set by scripts/e2e-alert-rehearsal.ts}
+      NEXTAUTH_URL: http://localhost:3101
+      ADMIN_EMAIL: ${REHEARSAL_ADMIN_EMAIL:?set by scripts/e2e-alert-rehearsal.ts}
+      ADMIN_PASSWORD: ${REHEARSAL_ADMIN_PASSWORD:?set by scripts/e2e-alert-rehearsal.ts}
+      # The receiver is on the Docker network (a private address), which the webhook guard refuses by default.
+      WEBHOOK_ALLOW_PRIVATE_HOSTS: "1"
+      INGEST_FILTER_HARD_DROP_TIERS: "T3"
+      CONTENT_DEDUP_APPLY: "false"
+    volumes:
+      - rehearsal_data:/app/data
+      - rehearsal_inbox:/app/inbox
+      - rehearsal_uploads:/app/uploads
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  receiver:
+    image: ulp-suite-app:latest
+    container_name: ulprehearsal_receiver
+    mem_limit: 256m
+    entrypoint: ["/usr/local/bin/node", "/receiver.js"]
+    environment:
+      WEBHOOK_SECRET: ${REHEARSAL_WEBHOOK_SECRET:?set by scripts/e2e-alert-rehearsal.ts}
+    volumes:
+      - ./docker/rehearsal/receiver.js:/receiver.js:ro
+
+volumes:
+  rehearsal_clickhouse:
+  rehearsal_data:
+  rehearsal_inbox:
+  rehearsal_uploads:
