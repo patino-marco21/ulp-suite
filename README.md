@@ -405,6 +405,13 @@ Reference deployment: 1.39 billion rows, one 32 GB laptop (cold timings, measure
   from DDL v25).
 - **Known data-quality gap.** About 6.3M rows (0.45%) imported by an earlier parser sit in the wrong
   columns, so an exact domain/email filter cannot see them; see the header of `lib/ulp-normalize.ts`.
+  Two shapes. The 3.29M "scheme-split" rows (`url` = `https`, `email` = `//host/path`, `password` = `login|pass`) were
+  repaired on 2026-10-01 by APPENDING corrected copies, never by rewriting a partition
+  (`scripts/repair-scheme-split-rows.sh`: dry run by default, `APPLY=1` appends; it re-parses each original line under the
+  importer's own ingest policy, skips a credential that already exists and any row the importer would drop, keeps the original
+  `imported_at`/`source_file`, and a re-run appends nothing). That run appended 1,009,474 rows; the old rows are left in place
+  (already hidden by Declutter). The other 3.16M ("Case D", blank `url`) are repaired for display by `NORM_COLS` only; fixing
+  them in storage needs a backup first.
 
 ---
 
