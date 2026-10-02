@@ -1,19 +1,18 @@
-import fs from 'fs'
-import { pipeline } from 'stream/promises'
-import { Readable } from 'stream'
 import { type NextRequest, NextResponse } from 'next/server'
-import { validateRequest, requireAdminRole } from '@/lib/auth'
+import { validateRequest, requireAdminRole, type JWTPayload } from '@/lib/auth'
 import { makeRejectionMap, type RejectionReason } from '@/lib/ulp-parser'
 import { matchBreach } from '@/lib/breach-matcher'
 import { runClickHouseMigrations } from '@/lib/clickhouse-migrations'
 import { createJob, getJob, updateJob, pushEvent } from '@/lib/upload-jobs'
 import { uploadQueue, setCurrentJob } from '@/lib/upload-queue'
-import { processTextStream, processZipFile, type ProcessResult } from '@/lib/upload-processor'
+import { processTextFile, processZipFile, type ProcessResult } from '@/lib/upload-processor'
 import { checkLimit, getClientIP } from '@/lib/rate-limiter'
 import { logJob } from '@/lib/processing-log'
-import { capWebStream, MaxBytesExceededError } from '@/lib/size-capped-stream'
 import { settingsManager } from '@/lib/settings'
 import { formatBytes } from '@/lib/utils'
+import { runImportJob } from '@/lib/import-runner'
+import { spoolRequestBody, discardSpool, describeSpoolError, type SpoolResult } from '@/lib/upload-spool'
+import { logUploadAction } from '@/lib/audit-log'
 
 // 60 uploads per IP per 5 minutes — permits batch multi-file uploads while
 // still blocking runaway automation.  Admin-only endpoint; session auth is the
@@ -28,6 +27,12 @@ export const maxDuration = 300
 // Admin-configurable via Settings ("Max File Size") — see lib/settings.ts's
 // getMaxUploadFileSizeBytes() for the clamp range and default (10 GB).
 
+interface Actor { id: number | null; email: string | null }
+
+function actorOf(user: JWTPayload | null): Actor {
+  return { id: user ? Number(user.userId) : null, email: user?.email || null }
+}
+
 // ─── SSE progress wrapper ─────────────────────────────────────────────────────
 
 /**
@@ -37,6 +42,7 @@ export const maxDuration = 300
 async function runWithProgress(
   jobId:    string,
   filename: string,
+  actor:    Actor,
   fn:       () => Promise<ProcessResult>,
 ): Promise<void> {
   const startAt = Date.now()
@@ -65,6 +71,9 @@ async function runWithProgress(
       duration_ms: Date.now() - startAt,
       breach_name: result.breach_name,
     })
+    void logUploadAction('upload.complete', actor, jobId, {
+      filename, imported: result.imported, skipped: result.skipped, duration_ms: Date.now() - startAt,
+    })
   } catch (err) {
     updateJob(jobId, {
       status: 'error',
@@ -81,6 +90,9 @@ async function runWithProgress(
       duration_ms:   Date.now() - startAt,
       error_message: err instanceof Error ? err.message : String(err),
     })
+    void logUploadAction('upload.fail', actor, jobId, {
+      filename, error: err instanceof Error ? err.message : String(err), duration_ms: Date.now() - startAt,
+    })
   } finally {
     clearInterval(interval)
   }
@@ -92,6 +104,7 @@ export async function POST(request: NextRequest) {
   const user = await validateRequest(request)
   const adminError = requireAdminRole(user)
   if (adminError) return adminError
+  const actor = actorOf(user)
 
   // Rate limit: 60 uploads per IP per 5 minutes
   const ip       = getClientIP(request)
@@ -137,34 +150,74 @@ export async function POST(request: NextRequest) {
       { status: 400 },
     )
   }
-  // Content-Length (checked above) is only a client-supplied claim — it can
-  // be omitted entirely (chunked transfer-encoding) or simply not match what
-  // the client actually sends. This enforces the same 10 GB ceiling against
-  // bytes actually observed, for both branches below.
-  const body = capWebStream(request.body, MAX_FILE_SIZE)
 
   const filename = originalFilename.toLowerCase()
+  const isText = filename.endsWith('.txt') || filename.endsWith('.csv')
+  const isZip  = filename.endsWith('.zip')
+  if (!isText && !isZip) {
+    return NextResponse.json(
+      { success: false, error: 'Unsupported file type. Upload a .txt, .csv, or .zip file.' },
+      { status: 400 },
+    )
+  }
 
+  // Receive the WHOLE body before doing anything else, and only then reply. The old route answered first and let the body
+  // trickle into the importer; a stall, a queue wait, the 300 s request timeout or a client disconnect then left a job that
+  // never finished and held its slot of the shared queue (docs/superpowers/specs/2026-10-02-import-reliability-design.md).
+  // The body is also held to the size cap against bytes actually seen, not the client-supplied Content-Length.
+  let spool: SpoolResult
+  try {
+    spool = await spoolRequestBody(request.body, {
+      maxBytes:      MAX_FILE_SIZE,
+      signal:        request.signal,
+      expectedBytes: contentLength ? parseInt(contentLength) : undefined,
+    })
+  } catch (error) {
+    const known = describeSpoolError(error)
+    if (known) return NextResponse.json({ success: false, error: known.message }, { status: known.status })
+    if (request.signal.aborted) {
+      console.warn(`[upload] client disconnected while uploading ${originalFilename}; nothing was imported`)
+      return NextResponse.json({ success: false, error: 'Upload cancelled' }, { status: 400 })
+    }
+    console.error('Upload error:', error)
+    return NextResponse.json(
+      { success: false, error: error instanceof Error ? error.message : 'Upload failed' },
+      { status: 500 },
+    )
+  }
+
+  // For text the queue owns the spool file from here on; for ZIP this handler does until it responds.
+  let handedOff = false
   try {
     // ── Plain text / CSV ──────────────────────────────────────────────────────
-    if (filename.endsWith('.txt') || filename.endsWith('.csv')) {
+    if (isText) {
       const jobId       = crypto.randomUUID()
-      const totalLines  = contentLength ? Math.floor(parseInt(contentLength) / 60) : 0
       const breach_name = matchBreach(originalFilename)
-      createJob(jobId, totalLines, breach_name)
+      createJob(jobId, Math.floor(spool.bytes / 60), breach_name)
+      void logUploadAction(
+        'upload.start', actor, jobId,
+        { filename: originalFilename, bytes: spool.bytes, via: 'ui' },
+        request,
+      )
 
       runWithProgress(
         jobId,
         originalFilename,
+        actor,
         () => uploadQueue(async () => {
           setCurrentJob(originalFilename)
           try {
-            return await processTextStream(body, originalFilename, jobId)
+            return await runImportJob({
+              label: originalFilename,
+              work:  ctx => processTextFile(spool.path, originalFilename, jobId, undefined, ctx),
+            })
           } finally {
             setCurrentJob(null)
+            await discardSpool(spool.path)
           }
         }),
       ).catch(console.error)
+      handedOff = true
 
       return NextResponse.json({
         success:        true,
@@ -175,33 +228,23 @@ export async function POST(request: NextRequest) {
     }
 
     // ── ZIP archive ───────────────────────────────────────────────────────────
-    if (filename.endsWith('.zip')) {
-      const startAt = Date.now()
-      const results: ProcessResult[] = []
+    const startAt = Date.now()
+    const results: ProcessResult[] = []
+    let totalErrors = 0
+    const failedEntries: string[] = []
+    void logUploadAction(
+      'upload.start', actor, null,
+      { filename: originalFilename, bytes: spool.bytes, via: 'ui', kind: 'zip' },
+      request,
+    )
 
-      // Stream the upload body to a temp file on disk before processing.
-      // Peak RAM here stays at ~200 MB (one 500K-row batch at a time)
-      // regardless of archive size — see lib/upload-processor.ts. middleware.ts's
-      // matcher excludes /api, so Next.js no longer clones this request's body
-      // at the middleware layer on top of this (measured 2026-08-16: ~611 MB
-      // real peak vs ~34 MB once that upstream clone was removed, for a
-      // 300 MB upload). body above is also capped independently of
-      // Content-Length, so a lying/absent header can't make this write past
-      // MAX_FILE_SIZE either.
-      const tmpPath = `/tmp/ulp-zip-${crypto.randomUUID()}.zip`
-      let totalErrors = 0
-      const failedEntries: string[] = []
-
-      try {
-        await pipeline(
-          Readable.fromWeb(body as import('stream/web').ReadableStream<Uint8Array>),
-          fs.createWriteStream(tmpPath),
-        )
-
-        await uploadQueue(async () => {
-          setCurrentJob(originalFilename)
-          try {
-            await processZipFile(tmpPath, result => {
+    try {
+      await uploadQueue(async () => {
+        setCurrentJob(originalFilename)
+        try {
+          await runImportJob({
+            label: originalFilename,
+            work:  ctx => processZipFile(spool.path, result => {
               if (result.imported > 0) results.push(result)
               if (result.errors > 0) {
                 totalErrors += result.errors
@@ -209,74 +252,74 @@ export async function POST(request: NextRequest) {
                   result.error_reason ? `${result.filename} (${result.error_reason})` : result.filename
                 )
               }
-            })
-          } finally {
-            setCurrentJob(null)
-          }
-        })
-      } finally {
-        fs.unlink(tmpPath, () => {})
-      }
-
-      const totalBreakdown = makeRejectionMap()
-      let totalImported = 0
-      let totalSkipped  = 0
-      let totalTierDropped = 0
-
-      for (const r of results) {
-        totalImported += r.imported
-        totalSkipped  += r.skipped
-        totalTierDropped += r.tierDropped
-        for (const [k, v] of Object.entries(r.rejection_breakdown)) {
-          totalBreakdown[k as RejectionReason] += v
+            }, ctx),
+          })
+        } finally {
+          setCurrentJob(null)
         }
-      }
-
-      logJob({
-        source:      'http',
-        filename:    originalFilename,
-        status:      'done',
-        imported:    totalImported,
-        skipped:     totalSkipped,
-        duration_ms: Date.now() - startAt,
-        ...(failedEntries.length > 0
-          ? { error_message: `${failedEntries.length} entr${failedEntries.length === 1 ? 'y' : 'ies'} skipped: ${failedEntries.join(', ')}` }
-          : {}),
       })
-
-      const total = totalImported + totalSkipped
-      return NextResponse.json({
-        success:             true,
-        imported:            totalImported,
-        skipped:             totalSkipped,
-        tierDropped:         totalTierDropped,
-        errors:              totalErrors,
-        import_pct:          total > 0 ? Math.round(totalImported / total * 1000) / 10 : 0,
-        rejection_breakdown: totalBreakdown,
-        files:               results.map(r => ({
-          filename:    r.filename,
-          breach_name: r.breach_name,
-          imported:    r.imported,
-        })),
+    } catch (error) {
+      void logUploadAction('upload.fail', actor, null, {
         filename: originalFilename,
+        error: error instanceof Error ? error.message : String(error),
+        duration_ms: Date.now() - startAt,
       })
+      throw error
     }
 
-    return NextResponse.json(
-      { success: false, error: 'Unsupported file type. Upload a .txt, .csv, or .zip file.' },
-      { status: 400 },
-    )
-  } catch (error) {
-    if (error instanceof MaxBytesExceededError) {
-      return NextResponse.json(
-        { success: false, error: `File too large (max ${formatBytes(error.limitBytes)})` },
-        { status: 413 },
-      )
+    const totalBreakdown = makeRejectionMap()
+    let totalImported = 0
+    let totalSkipped  = 0
+    let totalTierDropped = 0
+
+    for (const r of results) {
+      totalImported += r.imported
+      totalSkipped  += r.skipped
+      totalTierDropped += r.tierDropped
+      for (const [k, v] of Object.entries(r.rejection_breakdown)) {
+        totalBreakdown[k as RejectionReason] += v
+      }
     }
+
+    logJob({
+      source:      'http',
+      filename:    originalFilename,
+      status:      'done',
+      imported:    totalImported,
+      skipped:     totalSkipped,
+      duration_ms: Date.now() - startAt,
+      ...(failedEntries.length > 0
+        ? { error_message: `${failedEntries.length} entr${failedEntries.length === 1 ? 'y' : 'ies'} skipped: ${failedEntries.join(', ')}` }
+        : {}),
+    })
+    void logUploadAction('upload.complete', actor, null, {
+      filename: originalFilename, imported: totalImported, skipped: totalSkipped, errors: totalErrors,
+      duration_ms: Date.now() - startAt,
+    })
+
+    const total = totalImported + totalSkipped
+    return NextResponse.json({
+      success:             true,
+      imported:            totalImported,
+      skipped:             totalSkipped,
+      tierDropped:         totalTierDropped,
+      errors:              totalErrors,
+      import_pct:          total > 0 ? Math.round(totalImported / total * 1000) / 10 : 0,
+      rejection_breakdown: totalBreakdown,
+      files:               results.map(r => ({
+        filename:    r.filename,
+        breach_name: r.breach_name,
+        imported:    r.imported,
+      })),
+      filename: originalFilename,
+    })
+  } catch (error) {
     console.error('Upload error:', error)
     return NextResponse.json(
       { success: false, error: error instanceof Error ? error.message : 'Upload failed' },
       { status: 500 },
     )
+  } finally {
+    if (!handedOff) await discardSpool(spool.path)
   }
 }

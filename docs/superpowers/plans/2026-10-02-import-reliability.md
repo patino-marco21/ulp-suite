@@ -2013,7 +2013,7 @@ describe('POST /api/upload: receive first, then reply', () => {
     expect(jobId).toBe(json.jobId)
     expect(onBatch).toBeUndefined()
     expect(hooks).toEqual({ signal: expect.any(AbortSignal), beat: expect.any(Function) })
-    expect(captured.text).toBe(body)
+    await vi.waitFor(() => expect(captured.text).toBe(body)) // the mock reads the spool file after it is called
 
     await vi.waitFor(() => expect(spoolFiles()).toEqual([])) // deleted once the import has finished
     expect(mockAudit).toHaveBeenCalledWith(
