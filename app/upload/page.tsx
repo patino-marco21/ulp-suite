@@ -12,6 +12,8 @@ import { useAuth, isAdmin } from "@/hooks/useAuth"
 import { useToast } from "@/hooks/use-toast"
 import { buildTopRejections } from "@/lib/rejection-report"
 import { IngestHealthPanel } from "@/components/ingest-health-panel"
+import { postFileWithProgress, transferPercent, uploadErrorMessage } from "@/lib/upload-client"
+import { formatBytes } from "@/lib/utils"
 import Link from "next/link"
 
 interface ZipFileEntry {
@@ -53,6 +55,10 @@ export default function UploadPage() {
   const [liveTierDropped, setLiveTierDropped] = useState(0)
   const [livePct, setLivePct]           = useState(0)
   const [elapsedMs, setElapsedMs]       = useState(0)
+  // 'transfer': the browser is still sending the file; 'import': the server holds it and is importing it.
+  const [phase, setPhase]             = useState<'transfer' | 'import'>('transfer')
+  const [sentBytes, setSentBytes]     = useState({ loaded: 0, total: 0 })
+  const [queuedAhead, setQueuedAhead] = useState(0)
   const eventSourceRef                  = useRef<EventSource | null>(null)
 
   // ── Queue state ────────────────────────────────────────────────────────────
@@ -89,17 +95,32 @@ export default function UploadPage() {
       }
 
       setState('uploading')
-      setProgress(20)
+      setPhase('transfer')
+      setProgress(0)
+      setSentBytes({ loaded: 0, total: file.size })
+      setQueuedAhead(0)
       setErrorMsg('')
 
-      fetch(`/api/upload?filename=${encodeURIComponent(file.name)}`, { method: 'POST', body: file })
-        .then(r => r.json())
-        .then((data: any) => {
-          setProgress(90)
+      // The server answers only once it holds the whole file, so the transfer is reported here, by the browser;
+      // the import progress (SSE) starts after the reply.
+      postFileWithProgress(
+        `/api/upload?filename=${encodeURIComponent(file.name)}`,
+        file,
+        (loaded, total) => {
+          setSentBytes({ loaded, total })
+          setProgress(transferPercent(loaded, total))
+          // Every byte is out: what follows is the server's work (for a .zip the reply only comes when it is done).
+          if (total > 0 && loaded >= total) setPhase('import')
+        },
+      )
+        .then(({ json: data }: { json: any }) => {
+          setProgress(100)
+          setPhase('import')
           if (!data.success) throw new Error(data.error || 'Upload failed')
 
           if (data.jobId) {
             // SSE path — resolve when server signals done or error
+            setQueuedAhead(data.queue_position ?? 0)
             setLiveImported(0); setLiveSkipped(0); setLiveTierDropped(0); setLivePct(0); setElapsedMs(0)
             const es = new EventSource(`/api/upload/progress/${data.jobId}`)
             eventSourceRef.current = es
@@ -153,7 +174,7 @@ export default function UploadPage() {
           }
         })
         .catch(err => {
-          const msg = err instanceof Error ? err.message : 'Upload failed'
+          const msg = uploadErrorMessage(err, file.size)
           setErrorMsg(msg)
           toast({ title: `${file.name}: ${msg}`, variant: 'destructive' })
           setProgress(0)
@@ -299,12 +320,19 @@ export default function UploadPage() {
             <div className="flex items-center justify-between text-sm">
               <span className="font-medium flex items-center gap-2">
                 <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                Importing…
+                {phase === 'transfer' ? 'Uploading…' : 'Importing…'}
               </span>
               <span className="text-muted-foreground tabular-nums">
-                {(elapsedMs / 1000).toFixed(0)}s elapsed
+                {phase === 'transfer'
+                  ? `${formatBytes(sentBytes.loaded)} of ${formatBytes(sentBytes.total)}`
+                  : `${(elapsedMs / 1000).toFixed(0)}s elapsed`}
               </span>
             </div>
+            {phase === 'import' && queuedAhead > 0 && liveImported === 0 && (
+              <p className="text-xs text-muted-foreground">
+                Waiting in the import queue: {queuedAhead} ahead of this file.
+              </p>
+            )}
             {livePct > 0 ? (
               <>
                 <Progress value={livePct} className="h-2" />

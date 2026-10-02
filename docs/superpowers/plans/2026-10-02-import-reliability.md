@@ -3491,6 +3491,8 @@ with
         (loaded, total) => {
           setSentBytes({ loaded, total })
           setProgress(transferPercent(loaded, total))
+          // Every byte is out: what follows is the server's work (for a .zip the reply only comes when it is done).
+          if (total > 0 && loaded >= total) setPhase('import')
         },
       )
         .then(({ json: data }: { json: any }) => {
