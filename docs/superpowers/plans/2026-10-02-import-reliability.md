@@ -4152,14 +4152,14 @@ cd /home/cole/ulp-suite && D=$(mktemp -d) && echo '{}' > "$D/config.json" && DOC
 ```
 Expected: `no rehearsal containers` and `no rehearsal volumes`. Close the browser tab.
 
-- [ ] **Step 8: Merge to main and push**
+- [x] **Step 8: Merge to main and push**
 
 ```bash
 cd /home/cole/ulp-suite && git status --short && git switch main && git merge --ff-only feat/import-reliability && git push origin main && git log --oneline -12
 ```
 Expected: only `?? .claude/` in the status; a fast-forward merge; the push succeeds. Then confirm CI: `gh run list --branch main --limit 3` (the newest run is for this push; wait for it to finish and read the result with `gh run view <id>`; CI runs `npm ci`, typecheck, tests and lint).
 
-- [ ] **Step 9: Deploy to the live local stack, only while it is idle**
+- [x] **Step 9: Deploy to the live local stack, only while it is idle**
 
 First prove it is idle (all three must be empty/zero):
 
@@ -4182,7 +4182,7 @@ docker logs --tail 40 ulpsuite_app 2>&1 | grep -E "inbox-watcher|content-dedup|u
 ```
 Expected: the log shows the inbox watcher started and no errors; both POSTs answer `401`, `/upload` answers `307` (login redirect); the row counts are unchanged from before the deploy (1394459025 and 251). Rollback if anything is wrong: `docker tag ulp-suite-app:rollback-<timestamp> ulp-suite-app:latest` and repeat the `up -d app` command.
 
-- [ ] **Step 10: Record the result**
+- [x] **Step 10: Record the result**
 
 Update the project memory notes (the import-verification memory and the ledger: the four defects are fixed and deployed, the commit range, the image rollback tag, what is still open: sub-project 2) and tell the user what to try: upload a small file from the Upload page (it should show "Uploading…" then "Importing…"), and that the inbox remains the right path for very large files. Mark the spec `Status: implemented 2026-10-02` with the merge commit.
 
@@ -4199,3 +4199,5 @@ Executed inline on 2026-10-02 on `feat/import-reliability`. The plan's code was 
 - `scripts/e2e-upload-resilience.ts`: source names are unique per run (the importer skips a filename it has already imported, so a re-run on one stack passed vacuously and the queue-wait scenario failed); `--only=<keys>` and `--only-slow` select scenarios; the queue-wait scenario prints its timings; the throttled client no longer piles up `drain` listeners.
 
 Verified before merging: 135 test files / 1931 tests, `tsc`, lint; the image built; the rehearsal suite 36/36; the resilience scenarios 33/33 (twice; the second time with unique names) plus the 300 s slow-client case 5/5; the real Upload page driven in a browser ("Uploading… 0 Bytes of 15.39 MB", then "Importing…", 200,000 rows imported, audit rows carrying the admin's email); a browser-side abort at 29 MB of a 150 MB body left no spool file and no rows, and the next upload imported.
+
+Released 2026-10-02: fast-forwarded to `main` (`6db72ed..cf29ad1`), pushed, CI green (54 s). The live app was idle (inbox empty, 0 running inserts, no import in the last 6 hours), so only `ulpsuite_app` was recreated, from image `2d6ba2bcf747` (rollback image `ulp-suite-app:rollback-20261002-1813z` = the previous `b1402ea387f2`). After the deploy: healthy, all five crons and the inbox watcher started, `POST /api/upload` and `/api/v1/upload` answer 401 without credentials, `/upload` redirects to login, the data is untouched (1,394,459,025 credentials, 251 sources). The new settings are forwarded empty, so the code defaults apply (20 minute stall timeout, `/tmp/ulp-spool`, 20 GiB free-space floor); `UPLOAD_CONCURRENCY` stays 2. Not exercised live: an authenticated upload (needs the owner's session).

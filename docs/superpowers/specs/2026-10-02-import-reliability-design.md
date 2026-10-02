@@ -1,7 +1,8 @@
 # Import reliability — design (2026-10-02)
 
-Status: **proposed, not implemented.** Sub-project 1 of the 2026-10-02 improvement plan; sub-project 2 is
-`2026-10-02-novelty-aware-ingest-design.md` (build this one first: both touch `lib/upload-processor.ts`).
+Status: **implemented and deployed 2026-10-02** (commits `dcd26e3` to `cf29ad1` on `main`; the executed plan, with what differed from it, is
+`docs/superpowers/plans/2026-10-02-import-reliability.md`). Sub-project 1 of the 2026-10-02 improvement plan; sub-project 2 is
+`2026-10-02-novelty-aware-ingest-design.md` (this one touched `lib/upload-processor.ts` first, as that spec assumes).
 Everything marked *verified* was reproduced on an isolated stack (`docker-compose.rehearsal.yml`, the live app image, a fresh ClickHouse) on
 2026-10-02; nothing was run against the live tables.
 
