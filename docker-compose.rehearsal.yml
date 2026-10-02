@@ -67,6 +67,9 @@ services:
       WEBHOOK_ALLOW_PRIVATE_HOSTS: "1"
       INGEST_FILTER_HARD_DROP_TIERS: "T3"
       CONTENT_DEDUP_APPLY: "false"
+      # lib/import-runner.ts fails an import with no progress for this long. 30 s (the default is 20 minutes) so that
+      # scripts/e2e-upload-resilience.ts can prove the watchdog by freezing ClickHouse for longer than that.
+      IMPORT_STALL_TIMEOUT_MS: "30000"
     volumes:
       - rehearsal_data:/app/data
       - rehearsal_inbox:/app/inbox

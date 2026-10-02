@@ -122,8 +122,9 @@ a stalled or aborted job now ends in a `failed` row with the reason. No schema c
    (spool precedes the queue, the response follows the spool, abort leaves no job and no file, v1 and ZIP use the helper).
 2. A committed e2e script, `scripts/e2e-upload-resilience.ts`, on the isolated stack (the scratch drivers from this investigation are the
    starting point): a browser-like client (raw socket) imports all rows; cut mid-body with FIN and with RST leaves no job, no rows, no spool file
-   and a free slot; a second upload submitted while the first runs completes with all rows (the D1b case); ClickHouse frozen 8 s and 20 s mid-import
-   still completes; frozen longer than a 15 s test stall timeout fails the job with the stall reason and the next upload works after the unfreeze;
+   and a free slot; a second upload submitted while the first runs completes with all rows (the D1b case); ClickHouse frozen 8 s mid-import
+   still completes; frozen 45 s, with the rehearsal stack's 30 s stall timeout, fails the job with the stall reason while ClickHouse is still
+   frozen and the next upload works after the unfreeze;
    a ZIP cut mid-body leaves nothing; `--slow` (about 6 min) proves the 300 s cut is clean.
 3. A real-browser check on the isolated stack through the Upload page (the in-app browser), including a cut (page closed mid-transfer).
 4. The existing suite (1,864 tests) and the rehearsal e2e (36/36) stay green; `next build` already runs in the image build.
