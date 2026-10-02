@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from 'next/server'
 import { validateRequest, requireAdminRole } from '@/lib/auth'
 import { retryFiles, retryAllFailed } from '@/lib/inbox-helpers'
+import { logUploadAction } from '@/lib/audit-log'
 
 export const dynamic = 'force-dynamic'
 
@@ -34,6 +35,14 @@ export async function POST(request: NextRequest) {
       { status: 400 },
     )
   }
+
+  await logUploadAction(
+    'inbox.retry',
+    { id: user ? Number(user.userId) : null, email: user?.email || null },
+    null,
+    { moved, mode: b.all === true ? 'all' : 'one' },
+    request,
+  )
 
   return NextResponse.json({ success: true, moved })
 }

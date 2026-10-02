@@ -33,10 +33,10 @@
 
 import path from 'path'
 import fs from 'fs'
-import { Readable } from 'stream'
 import { uploadQueue, queueSize, setCurrentJob } from '@/lib/upload-queue'
 import { logJob } from '@/lib/processing-log'
-import { processTextStream, processZipFile } from '@/lib/upload-processor'
+import { processTextFile, processZipFile } from '@/lib/upload-processor'
+import { runImportJob } from '@/lib/import-runner'
 import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable } from '@/lib/inbox-claim'
 import { sniffFileKind } from '@/lib/inbox-helpers'
 import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
@@ -297,31 +297,38 @@ async function enqueueFile(filePath: string): Promise<void> {
 
       console.log(`[inbox-watcher] processing: ${filename}`)
       // Capture file size (from the claimed path) for ETA in the status API.
-      const fileSizeBytes = (() => { try { return fs.statSync(procPath!).size } catch { return 0 } })()
+      const claimedPath: string = procPath
+      const fileSizeBytes = (() => { try { return fs.statSync(claimedPath).size } catch { return 0 } })()
       setCurrentProgress({ filename, started_at: startAt, rows_imported: 0, file_size_bytes: fileSizeBytes })
 
+      // runImportJob fails the job, and frees this queue slot, if it stops making progress for IMPORT_STALL_TIMEOUT_MS:
+      // one wedged import can no longer hold the shared queue until an app restart.
       if (ext === '.zip') {
-        await processZipFile(procPath, result => {
-          imported += result.imported
-          skipped  += result.skipped
-          const cp = getCurrentProgress()
-          if (cp) cp.rows_imported = imported
-          if (result.imported > 0) {
-            console.log(
-              `[inbox-watcher]   ${result.filename}: ` +
-              `imported=${result.imported} skipped=${result.skipped}`
-            )
-          } else if (result.errors > 0) {
-            console.warn(`[inbox-watcher]   ${result.filename}: skipped (entry error)`)
-          }
+        await runImportJob({
+          label: filename,
+          work:  ctx => processZipFile(claimedPath, result => {
+            imported += result.imported
+            skipped  += result.skipped
+            const cp = getCurrentProgress()
+            if (cp) cp.rows_imported = imported
+            if (result.imported > 0) {
+              console.log(
+                `[inbox-watcher]   ${result.filename}: ` +
+                `imported=${result.imported} skipped=${result.skipped}`
+              )
+            } else if (result.errors > 0) {
+              console.warn(`[inbox-watcher]   ${result.filename}: skipped (entry error)`)
+            }
+          }, ctx),
         })
       } else {
-        const nodeStream = fs.createReadStream(procPath)
-        const webStream  = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>
-        const result     = await processTextStream(webStream, filename, undefined, n => {
-          // onBatch: update live progress after each 500 K-row batch
-          const cp = getCurrentProgress()
-          if (cp) cp.rows_imported = n
+        const result = await runImportJob({
+          label: filename,
+          work:  ctx => processTextFile(claimedPath, filename, undefined, n => {
+            // onBatch: update live progress after each batch
+            const cp = getCurrentProgress()
+            if (cp) cp.rows_imported = n
+          }, ctx),
         })
         imported = result.imported
         skipped  = result.skipped
