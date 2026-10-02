@@ -6,6 +6,7 @@
  * recording, and parsing logic in one place.
  */
 
+import fs from 'fs'
 import { Readable } from 'stream'
 import { performance } from 'node:perf_hooks'
 import yauzl from 'yauzl'
@@ -29,6 +30,7 @@ import { buildMonitorDomainIndex, matchCredentialsAgainstIndex, type MatchedCred
 import { matchBreach } from '@/lib/breach-matcher'
 import { updateJob } from '@/lib/upload-jobs'
 import { startIngest, recordBatch, finishIngest } from '@/lib/ingest-metrics'
+import type { ImportHooks } from '@/lib/import-runner'
 
 // ─── Public result type ───────────────────────────────────────────────────────
 
@@ -122,10 +124,10 @@ async function querySourceAlreadyImported(filename: string, signal: AbortSignal)
   }
 }
 
-export async function sourceAlreadyImported(filename: string): Promise<boolean> {
+export async function sourceAlreadyImported(filename: string, hooks: ImportHooks = {}): Promise<boolean> {
   const rows = await withClickHouseRetry(
     async signal => querySourceAlreadyImported(filename, signal),
-    { onRetry: makeRetryLogger('source check', filename) }
+    { signal: hooks.signal, onRetry: makeRetryLogger('source check', filename, () => hooks.beat?.()) }
   )
   return rows
 }
@@ -192,7 +194,7 @@ export async function insertBatch(
   )
 }
 
-export async function recordSource(filename: string, lineCount: number): Promise<void> {
+export async function recordSource(filename: string, lineCount: number, hooks: ImportHooks = {}): Promise<void> {
   await withClickHouseRetry(
     async signal => {
       const chClient = getClient()
@@ -214,7 +216,7 @@ export async function recordSource(filename: string, lineCount: number): Promise
         abort_signal: signal,
       })
     },
-    { onRetry: makeRetryLogger('source record', filename) }
+    { signal: hooks.signal, onRetry: makeRetryLogger('source record', filename, () => hooks.beat?.()) }
   )
 }
 
@@ -253,6 +255,10 @@ export interface StreamToTableOptions {
   onBatchMetrics?: (m: { rows: number; parseMs: number; insertMs: number; tierDropped: number }) => void
   /** Called with each batch's actually-inserted credentials, right after insertBatch succeeds. Not passed by the benchmark — keeps that path free of monitor side effects. */
   onBatchCredentials?: (creds: ULPCredential[]) => void
+  /** Aborts the import: no further batch is parsed or inserted, and the insert in flight is cancelled. */
+  signal?: AbortSignal
+  /** Progress heartbeat for the stall watchdog (lib/import-runner.ts): after each batch, on each retry, on each memory-guard poll. */
+  onBeat?: () => void
 }
 
 export interface StreamToTableResult {
@@ -296,6 +302,7 @@ export async function streamCredentialsToTable(
   let pending = gen.next()
   try {
     while (true) {
+      options.signal?.throwIfAborted()
       const tParse = performance.now()
       const { value: batch, done } = await pending
       const batchParseMs = performance.now() - tParse
@@ -317,11 +324,11 @@ export async function streamCredentialsToTable(
           (rejection_breakdown[k as RejectionReason] ?? 0) + v
       }
 
-      const guardController = new AbortController()
-      await waitForHeadroom(guardController.signal)
+      await waitForHeadroom(options.signal ?? new AbortController().signal, { onPoll: options.onBeat })
 
       const tInsert = performance.now()
-      await insertBatch(creds, breach_name, undefined, { table })
+      await insertBatch(creds, breach_name, { signal: options.signal, onRetry: () => options.onBeat?.() }, { table })
+      options.onBeat?.()
       const batchInsertMs = performance.now() - tInsert
       if (timings) timings.insertMs += batchInsertMs
       options.onBatchCredentials?.(creds)
@@ -360,6 +367,8 @@ export async function processTextStream(
   jobId?: string,
   /** Called after each 100K-row batch with the cumulative imported count. */
   onBatch?: (imported: number) => void,
+  /** Abort signal and progress heartbeat from lib/import-runner.ts; both optional. */
+  hooks: ImportHooks = {},
 ): Promise<ProcessResult> {
   const breach_name        = matchBreach(filename)
 
@@ -368,13 +377,14 @@ export async function processTextStream(
   // authoritative, time-unbounded guard against the inbox watcher reprocessing a
   // file or a duplicate re-upload — complementary to ClickHouse's insert-dedup
   // token, which only covers re-inserts within its (1h default) dedup window.
-  if (await sourceAlreadyImported(filename)) {
+  if (await sourceAlreadyImported(filename, hooks)) {
     console.log(`[upload-processor] ${filename} already in ulp.sources — skipping re-import`)
     return {
       imported: 0, skipped: 0, errors: 0, filename, breach_name,
       rejection_breakdown: makeRejectionMap(), alreadyImported: true, tierDropped: 0,
     }
   }
+  hooks.beat?.()
 
   let imported             = 0
   let skipped              = 0
@@ -418,6 +428,8 @@ export async function processTextStream(
       dropPolicy: softPolicy,
       breachName: breach_name,
       shouldHardDrop,
+      signal: hooks.signal,
+      onBeat: hooks.beat,
       onProgress: (imp, skp) => {
         if (jobId)   updateJob(jobId, { imported: imp, skipped: skp })
         if (onBatch) onBatch(imp)
@@ -454,7 +466,7 @@ export async function processTextStream(
   }
 
   if (imported > 0) {
-    await recordSource(filename, imported)
+    await recordSource(filename, imported, hooks)
     if (monitorMatches.length > 0) {
       fireMonitorAlertsFromMatches(filename, monitorMatches, monitorsById).catch(err =>
         console.error('Domain monitor alert error:', err)
@@ -465,6 +477,26 @@ export async function processTextStream(
   }
 
   return { imported, skipped, errors: 0, filename, breach_name, rejection_breakdown, alreadyImported: false, tierDropped }
+}
+
+/**
+ * Import a text file that is already on disk (an inbox file or a spooled upload) through the same pipeline as a stream.
+ * This is the one place a file is turned into a stream, so the inbox and the HTTP routes cannot drift apart.
+ */
+export async function processTextFile(
+  filePath: string,
+  filename: string,
+  jobId?: string,
+  onBatch?: (imported: number) => void,
+  hooks: ImportHooks = {},
+): Promise<ProcessResult> {
+  const nodeStream = fs.createReadStream(filePath)
+  const webStream = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>
+  try {
+    return await processTextStream(webStream, filename, jobId, onBatch, hooks)
+  } finally {
+    nodeStream.destroy()
+  }
 }
 
 // ─── ZIP processor (yauzl — lazy entry streaming) ────────────────────────────
@@ -513,20 +545,31 @@ export const MIN_RATIO_CHECK_BYTES = 10 * 1024 * 1024
 export function processZipEntries(
   zipfile: yauzl.ZipFile,
   onEntry: (result: ProcessResult) => void,
+  hooks: ImportHooks = {},
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     let settled = false
     let entriesSeen = 0
+    const onAbort = () => rejectArchive(hooks.signal?.reason ?? new Error('ZIP import aborted'))
     const rejectArchive = (error: unknown) => {
       if (settled) return
       settled = true
+      hooks.signal?.removeEventListener('abort', onAbort)
       ;(zipfile as yauzl.ZipFile & { close?: () => void }).close?.()
       reject(error)
     }
 
+    if (hooks.signal?.aborted) {
+      onAbort()
+      return
+    }
+    hooks.signal?.addEventListener('abort', onAbort, { once: true })
+
     zipfile.readEntry()
 
     zipfile.on('entry', (entry: yauzl.Entry) => {
+      if (settled) return // aborted or failed meanwhile: do not open another entry
+      hooks.beat?.()
       // Archive-level guard: too many entries is itself the resource cost
       // (central-directory iteration), so this aborts the whole archive
       // rather than skipping one entry — there's no safe way to "continue".
@@ -608,8 +651,8 @@ export function processZipEntries(
           },
         })
 
-        processTextStream(webStream, entryName)
-          .then(result => { onEntry(result); zipfile.readEntry() })
+        processTextStream(webStream, entryName, undefined, undefined, hooks)
+          .then(result => { onEntry(result); hooks.beat?.(); zipfile.readEntry() })
           .catch(error => {
             if (error instanceof ZipEntryStreamError) skipEntry(error.cause)
             else rejectArchive(error)
@@ -620,6 +663,7 @@ export function processZipEntries(
     zipfile.on('end', () => {
       if (settled) return
       settled = true
+      hooks.signal?.removeEventListener('abort', onAbort)
       resolve()
     })
     zipfile.on('error', rejectArchive)
@@ -632,11 +676,12 @@ export function processZipEntries(
 export async function processZipBuffer(
   buffer: Buffer,
   onEntry: (result: ProcessResult) => void,
+  hooks:   ImportHooks = {},
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     yauzl.fromBuffer(buffer, { lazyEntries: true }, (err, zipfile) => {
       if (err) return reject(err)
-      processZipEntries(zipfile, onEntry).then(resolve, reject)
+      processZipEntries(zipfile, onEntry, hooks).then(resolve, reject)
     })
   })
 }
@@ -650,11 +695,12 @@ export async function processZipBuffer(
 export async function processZipFile(
   filepath: string,
   onEntry:  (result: ProcessResult) => void,
+  hooks:    ImportHooks = {},
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     yauzl.open(filepath, { lazyEntries: true }, (err, zipfile) => {
       if (err) return reject(err)
-      processZipEntries(zipfile, onEntry).then(resolve, reject)
+      processZipEntries(zipfile, onEntry, hooks).then(resolve, reject)
     })
   })
 }

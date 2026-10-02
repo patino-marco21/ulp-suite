@@ -1,4 +1,6 @@
-import { readFileSync } from 'fs'
+import fs, { readFileSync } from 'fs'
+import os from 'os'
+import path from 'path'
 import { EventEmitter } from 'events'
 import { Readable } from 'stream'
 import { beforeEach, describe, it, expect, vi } from 'vitest'
@@ -578,5 +580,95 @@ describe('domain-monitor wiring — in-process matching', () => {
       vi.doUnmock('@/lib/domain-monitor')
       vi.resetModules()
     }
+  })
+})
+
+describe('import hooks: abort signal and heartbeat', () => {
+  const oneLine = () =>
+    Readable.toWeb(Readable.from([Buffer.from('https://example.com/login:user@example.com:mypassword\n')])) as ReadableStream<Uint8Array>
+
+  it('rejects with the reason and imports nothing when the signal is already aborted', async () => {
+    const { processTextStream } = await import('@/lib/upload-processor')
+    const controller = new AbortController()
+    const reason = new Error('stalled before start')
+    controller.abort(reason)
+
+    await expect(
+      processTextStream(oneLine(), 'aborted.txt', undefined, undefined, { signal: controller.signal })
+    ).rejects.toBe(reason)
+    expect(h.insert).not.toHaveBeenCalled()
+  })
+
+  it('beats after the source check and after each inserted batch', async () => {
+    const { processTextStream } = await import('@/lib/upload-processor')
+    const beat = vi.fn()
+
+    await processTextStream(oneLine(), 'beats.txt', undefined, undefined, { beat })
+
+    expect(beat.mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('cancels an insert in flight when the signal aborts, and rejects with the reason', async () => {
+    const { processTextStream } = await import('@/lib/upload-processor')
+    const controller = new AbortController()
+    const reason = new Error('import stalled')
+    h.insert.mockImplementationOnce(({ abort_signal }: { abort_signal: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        abort_signal.addEventListener('abort', () => reject(new Error('insert aborted')), { once: true })
+      })
+    )
+
+    const promise = processTextStream(oneLine(), 'hang.txt', undefined, undefined, { signal: controller.signal })
+    const rejection = expect(promise).rejects.toBe(reason)
+    await vi.waitFor(() => expect(h.insert).toHaveBeenCalledTimes(1))
+    controller.abort(reason)
+
+    await rejection
+  })
+})
+
+describe('processTextFile', () => {
+  it('imports a file on disk through the same pipeline as a stream', async () => {
+    const { processTextFile } = await import('@/lib/upload-processor')
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ulp-textfile-'))
+    const file = path.join(dir, 'a.upload')
+    fs.writeFileSync(file, 'https://example.com/login:user@example.com:mypassword\n')
+
+    try {
+      const result = await processTextFile(file, 'a.txt')
+
+      expect(result.imported).toBe(1)
+      expect(result.filename).toBe('a.txt')
+      expect(h.insert).toHaveBeenCalled()
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('processZipFile: abort', () => {
+  it('stops at the next entry and rejects with the reason when the signal aborts', async () => {
+    const yauzl = (await import('yauzl')).default
+    const { processZipFile } = await import('@/lib/upload-processor')
+    const controller = new AbortController()
+    const reason = new Error('import stalled')
+    const fake = new FakeZipFile([
+      { fileName: 'one.txt', contentOrError: 'https://example.com/login:one@example.com:mypassword\n' },
+      { fileName: 'two.txt', contentOrError: 'https://example.com/login:two@example.com:mypassword\n' },
+    ])
+    ;(yauzl.open as any).mockImplementation(
+      (_path: string, _opts: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => {
+        cb(null, fake as unknown as yauzl.ZipFile)
+      }
+    )
+
+    const seen: string[] = []
+    const promise = processZipFile('/spool/x.upload', result => {
+      seen.push(result.filename)
+      controller.abort(reason) // cancel right after the first entry
+    }, { signal: controller.signal })
+
+    await expect(promise).rejects.toBe(reason)
+    expect(seen).toEqual(['one.txt'])
   })
 })

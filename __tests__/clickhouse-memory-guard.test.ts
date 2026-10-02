@@ -157,3 +157,37 @@ describe('waitForHeadroom', () => {
     }
   })
 })
+
+describe('waitForHeadroom: watchdog and abort hooks', () => {
+  it('reports every poll through onPoll', async () => {
+    vi.useFakeTimers()
+    h.query
+      .mockResolvedValueOnce({ json: async () => [{ used: '16000000000', ceiling: '18000000000' }] }) // ~0.89, wait
+      .mockResolvedValueOnce({ json: async () => [{ used: '9000000000', ceiling: '18000000000' }] }) // 0.5, go
+    const onPoll = vi.fn()
+
+    try {
+      const { waitForHeadroom } = await import('@/lib/clickhouse-memory-guard')
+      const promise = waitForHeadroom(new AbortController().signal, {
+        thresholdRatio: 0.75, pollIntervalMs: 5_000, maxWaitMs: 60_000, onPoll,
+      })
+
+      await vi.advanceTimersByTimeAsync(5_000)
+      await promise
+
+      expect(onPoll).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('throws the signal reason, without querying, once the signal is aborted', async () => {
+    const controller = new AbortController()
+    const reason = new Error('import stalled')
+    controller.abort(reason)
+    const { waitForHeadroom } = await import('@/lib/clickhouse-memory-guard')
+
+    await expect(waitForHeadroom(controller.signal)).rejects.toBe(reason)
+    expect(h.query).not.toHaveBeenCalled()
+  })
+})

@@ -57,10 +57,14 @@ export async function checkMemoryPressure(signal: AbortSignal): Promise<MemoryPr
  * pacing layer, not a correctness dependency -- the existing
  * withClickHouseRetry safety net (lib/clickhouse-retry.ts) still covers a
  * batch that fails despite backpressure.
+ *
+ * Reports each poll through opts.onPoll (a waiting import is not a wedged one,
+ * see lib/import-runner.ts) and throws the signal's reason once the signal is
+ * aborted, so a cancelled import stops waiting instead of polling on.
  */
 export async function waitForHeadroom(
   signal: AbortSignal,
-  opts: { thresholdRatio?: number; maxWaitMs?: number; pollIntervalMs?: number } = {},
+  opts: { thresholdRatio?: number; maxWaitMs?: number; pollIntervalMs?: number; onPoll?: () => void } = {},
 ): Promise<void> {
   const thresholdRatio = opts.thresholdRatio ?? DEFAULT_THRESHOLD_RATIO
   const maxWaitMs      = opts.maxWaitMs      ?? DEFAULT_MAX_WAIT_MS
@@ -70,6 +74,11 @@ export async function waitForHeadroom(
   let warned = false
 
   while (true) {
+    // Each poll is progress as far as a stall watchdog is concerned (a waiting job is not a wedged one), and an aborted
+    // import must stop waiting instead of polling on.
+    opts.onPoll?.()
+    signal.throwIfAborted()
+
     let pressure: MemoryPressure
     try {
       pressure = await checkMemoryPressure(signal)
