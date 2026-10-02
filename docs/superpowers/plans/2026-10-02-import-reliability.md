@@ -658,15 +658,15 @@ export interface RunImportOptions<T> {
 }
 
 export async function runImportJob<T>(opts: RunImportOptions<T>): Promise<T> {
+  // Already cancelled: do not even start the work.
+  if (opts.signal?.aborted) throw opts.signal.reason ?? new Error('import aborted')
+
   const stallMs = opts.stallMs ?? parseStallMs(process.env.IMPORT_STALL_TIMEOUT_MS)
   const now = opts.now ?? (() => performance.now())
 
   const controller = new AbortController()
   const onExternalAbort = () => controller.abort(opts.signal?.reason)
-  if (opts.signal) {
-    if (opts.signal.aborted) controller.abort(opts.signal.reason)
-    else opts.signal.addEventListener('abort', onExternalAbort, { once: true })
-  }
+  opts.signal?.addEventListener('abort', onExternalAbort, { once: true })
 
   let lastBeat = now()
   const beat = () => { lastBeat = now() }

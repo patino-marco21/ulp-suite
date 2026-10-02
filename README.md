@@ -181,6 +181,10 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   finishes first. Every file still gets its own row in the job log / Inbox
   Monitor history regardless; this only affects the live in-progress
   indicator.
+- `IMPORT_STALL_TIMEOUT_MS` — an import that makes no progress for this long (no
+  batch inserted, no retry, no memory-guard poll) is failed and its queue slot
+  freed. Time is measured while the machine is awake, so a laptop suspend does
+  not trip it. Default `1200000` (20 minutes).
 
 Batch size stays a fixed 100,000 rows; inserts remain synchronous, in-order, and
 retryable (unchanged from the resilience work).
