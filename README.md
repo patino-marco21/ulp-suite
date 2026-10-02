@@ -162,6 +162,23 @@ CONTENT_DEDUP_APPLY=true npx tsx scripts/run-content-dedup-once.ts
 ```
 ClickHouse's port isn't published to the host, so run it from a throwaway container on the compose network — the exact `docker run` command is in the script's header comment.
 
+### Uploading over HTTP
+
+The Upload page, `POST /api/upload` and `POST /api/v1/upload` receive the whole
+file into a spool directory before they answer, then import from that file. A
+connection that drops mid-upload imports nothing and leaves no file behind, and a
+busy queue only delays the import; it can no longer wedge it. The request must
+finish arriving within five minutes (a Node limit), so files too large for your
+link are better dropped in `inbox/`, which has no such limit. `/api/upload`
+answers as soon as the file is safely on disk and reports progress over SSE;
+`/api/v1/upload` answers when the import has finished.
+
+- `UPLOAD_SPOOL_DIR` — where uploads are received. Default `/tmp/ulp-spool`
+  inside the container.
+- `UPLOAD_SPOOL_MIN_FREE_BYTES` — an upload that would leave less than this free
+  is refused (HTTP 507). Default 20 GiB; the disk is shared with ClickHouse.
+
+
 ### Import throughput tuning
 
 Imports overlap parsing with ClickHouse inserts (pipelining) to cut idle wait

@@ -140,6 +140,10 @@ services:
       # Import watchdog (lib/import-runner.ts) -- optional; forwarded explicitly (see above). An import with no progress for this
       # long (no batch inserted, no retry, no memory-guard poll) is failed and its queue slot freed. Empty = 20 minutes.
       IMPORT_STALL_TIMEOUT_MS: ${IMPORT_STALL_TIMEOUT_MS:-}
+      # Upload spool (lib/upload-spool.ts) -- optional; forwarded explicitly (see above). HTTP uploads are received into this
+      # directory first and imported from the file. Empty = /tmp/ulp-spool and a 20 GiB free-space floor.
+      UPLOAD_SPOOL_DIR: ${UPLOAD_SPOOL_DIR:-}
+      UPLOAD_SPOOL_MIN_FREE_BYTES: ${UPLOAD_SPOOL_MIN_FREE_BYTES:-}
       # Exact-content dedup worker — report-only unless explicitly enabled.
       CONTENT_DEDUP_APPLY: ${CONTENT_DEDUP_APPLY:-false}
       DEDUP_CRON_HOURS: ${DEDUP_CRON_HOURS:-24}

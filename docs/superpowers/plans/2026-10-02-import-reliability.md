@@ -1192,7 +1192,8 @@ export async function sweepSpool(opts: { dir?: string; maxAgeMs: number; now?: (
     if (owned.has(full)) continue
     try {
       const { mtimeMs } = await fs.promises.stat(full)
-      if (now - mtimeMs >= opts.maxAgeMs) {
+      // Clamp: a file written in this very millisecond has an mtime a fraction ahead of Date.now(), i.e. a negative age.
+      if (Math.max(0, now - mtimeMs) >= opts.maxAgeMs) {
         await fs.promises.rm(full, { force: true })
         removed.push(entry.name)
       }

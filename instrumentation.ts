@@ -60,6 +60,14 @@ export async function register() {
         console.error('[instrumentation] Inbox watcher failed to start:', err)
       }
 
+      // Delete spooled uploads a previous process left behind, then hourly any that no running job owns.
+      try {
+        const { startSpoolJanitor } = await import('./lib/upload-spool')
+        startSpoolJanitor()
+      } catch (err) {
+        console.error('[instrumentation] Upload spool janitor failed to start:', err)
+      }
+
       // Scheduled content-dedup (report-only unless CONTENT_DEDUP_APPLY=true).
       try {
         const { startDedupCron } = await import('./lib/dedup-cron')
