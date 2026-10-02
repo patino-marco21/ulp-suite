@@ -3,6 +3,7 @@ const TRANSIENT_CODES = new Set([
   'ECONNRESET',
   'EPIPE',
   'EAI_AGAIN',
+  'ENOTFOUND',
   'ETIMEDOUT',
   'UND_ERR_SOCKET',
   'UND_ERR_CONNECT_TIMEOUT',
@@ -26,7 +27,6 @@ const SEMANTIC_MESSAGES = [
   'syntax error',
   'sql error',
   'parse error',
-  'too many parts',
 ]
 
 /**
@@ -49,6 +49,19 @@ const TRANSIENT_OVERLOAD_MESSAGES = [
   'timeout exceeded while writing to socket',
 ]
 
+/**
+ * Server-side errors that carry a numeric ClickHouse code (so the semantic rule below would call them final) but clear on
+ * their own within seconds. Checked before that rule.
+ *
+ *   242  TABLE_IS_READ_ONLY   a replica loses its Keeper session for about 0.1 s after a laptop suspend/resume
+ *   252  TOO_MANY_PARTS       insert pressure; background merges catch up
+ *   209  SOCKET_TIMEOUT, 210 NETWORK_ERROR   the server could not reach a peer or the client
+ *   999  KEEPER_EXCEPTION     only the session/connection flavours; "No node", "Node exists" and the like stay final
+ */
+const TRANSIENT_SERVER_CODES = new Set(['242', '252', '209', '210'])
+const TRANSIENT_SERVER_PHRASES = ['table is in readonly mode', 'table is in read-only mode', 'too many parts']
+const TRANSIENT_KEEPER_PHRASES = ['session expired', 'connection loss', 'operation timeout']
+
 const DEFAULT_INITIAL_DELAY_MS = 1_000
 const DEFAULT_MAX_DELAY_MS = 30_000
 const DEFAULT_MAX_ELAPSED_MS = 30 * 60 * 1_000
@@ -60,6 +73,11 @@ export interface ClickHouseRetryOptions {
   sleep?: (delayMs: number) => Promise<void>
   now?: () => number
   onRetry?: (event: { attempt: number; delayMs: number; error: unknown }) => void
+  /**
+   * Ends the loop at once when it fires: the attempt in flight is aborted, no further attempt starts, and the promise
+   * rejects with `signal.reason`. An abort is never retried.
+   */
+  signal?: AbortSignal
 }
 
 export class ClickHouseRetryExhaustedError extends Error {
@@ -154,6 +172,19 @@ function hasTransientOverloadMessage(error: unknown): boolean {
   return TRANSIENT_OVERLOAD_MESSAGES.some(phrase => message.includes(phrase))
 }
 
+function hasTransientServerSignal(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false
+  }
+
+  const code = String(getCode(error) ?? '')
+  const message = getMessage(error).toLowerCase()
+
+  if (TRANSIENT_SERVER_CODES.has(code)) return true
+  if (TRANSIENT_SERVER_PHRASES.some(phrase => message.includes(phrase))) return true
+  return code === '999' && TRANSIENT_KEEPER_PHRASES.some(phrase => message.includes(phrase))
+}
+
 export function isTransientClickHouseError(error: unknown): boolean {
   if (!error || (typeof error !== 'object' && typeof error !== 'string')) {
     return false
@@ -162,6 +193,13 @@ export function isTransientClickHouseError(error: unknown): boolean {
   if (
     hasTransientOverloadMessage(error) ||
     hasTransientOverloadMessage((error as { cause?: unknown }).cause)
+  ) {
+    return true
+  }
+
+  if (
+    hasTransientServerSignal(error) ||
+    hasTransientServerSignal((error as { cause?: unknown }).cause)
   ) {
     return true
   }
@@ -204,6 +242,10 @@ function delayForAttempt(attempt: number, initialDelayMs: number, maxDelayMs: nu
   return Math.min(maxDelayMs, nextDelay)
 }
 
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('The operation was aborted', 'AbortError')
+}
+
 export async function withClickHouseRetry<T>(
   operation: (signal: AbortSignal) => Promise<T>,
   options: ClickHouseRetryOptions = {}
@@ -215,6 +257,7 @@ export async function withClickHouseRetry<T>(
     sleep = (delayMs: number) => new Promise<void>(resolve => setTimeout(resolve, delayMs)),
     now = () => Date.now(),
     onRetry,
+    signal,
   } = options
 
   const startedAt = now()
@@ -231,7 +274,22 @@ export async function withClickHouseRetry<T>(
     activeController?.abort(deadlineCause)
   }, Math.max(0, maxElapsedMs))
 
+  // An external abort (the import was cancelled or stalled) ends the loop at once; it is never retried.
+  let rejectAbort!: (reason: unknown) => void
+  const abortPromise = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject
+  })
+  abortPromise.catch(() => {}) // the loop may finish first: that must not become an unhandled rejection
+  const onAbort = () => {
+    if (!signal) return
+    rejectAbort(abortReason(signal))
+    activeController?.abort(signal.reason)
+  }
+  signal?.addEventListener('abort', onAbort, { once: true })
+
   try {
+    if (signal?.aborted) throw abortReason(signal)
+
     while (true) {
       attempts += 1
       activeController = new AbortController()
@@ -240,12 +298,14 @@ export async function withClickHouseRetry<T>(
         const result = await Promise.race([
           operation(activeController.signal),
           deadlinePromise,
+          abortPromise,
         ])
         activeController = undefined
         return result
       } catch (error) {
         activeController = undefined
         if (error instanceof ClickHouseRetryExhaustedError) throw error
+        if (signal?.aborted) throw abortReason(signal)
         lastError = error
 
         if (!isTransientClickHouseError(error)) {
@@ -260,10 +320,11 @@ export async function withClickHouseRetry<T>(
         }
 
         onRetry?.({ attempt: attempts, delayMs, error })
-        await Promise.race([sleep(delayMs), deadlinePromise])
+        await Promise.race([sleep(delayMs), deadlinePromise, abortPromise])
       }
     }
   } finally {
     clearTimeout(deadlineTimer)
+    signal?.removeEventListener('abort', onAbort)
   }
 }

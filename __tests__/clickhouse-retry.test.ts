@@ -247,3 +247,101 @@ describe('withClickHouseRetry', () => {
     expect(error.message).not.toContain('session=alsosecret')
   })
 })
+
+describe('isTransientClickHouseError: server errors that clear on their own', () => {
+  it('retries a read-only replica, a lost Keeper session, part pressure and network errors despite their numeric codes', () => {
+    expect(isTransientClickHouseError({
+      code: '242',
+      message: 'Table is in readonly mode (replica path: /clickhouse/tables/01/ulp/credentials/replicas/r1)',
+    })).toBe(true)
+    expect(isTransientClickHouseError({
+      code: '999',
+      message: 'Session expired (Session expired): while reading from ZooKeeper',
+    })).toBe(true)
+    expect(isTransientClickHouseError({
+      code: '999',
+      message: 'Coordination::Exception: Connection loss',
+    })).toBe(true)
+    expect(isTransientClickHouseError({
+      code: '252',
+      message: "Too many parts (1001 with average size of 4.56 MiB) in table 'ulp.credentials'. Merges are processing significantly slower than inserts",
+    })).toBe(true)
+    expect(isTransientClickHouseError({ code: '210', message: 'Connection refused (peer: 10.0.0.2:9000)' })).toBe(true)
+    expect(isTransientClickHouseError({ code: '209', message: 'Timeout exceeded while reading from socket' })).toBe(true)
+  })
+
+  it('also looks through the error cause', () => {
+    expect(isTransientClickHouseError({
+      message: 'insert failed',
+      cause: { code: '242', message: 'Table is in readonly mode' },
+    })).toBe(true)
+  })
+
+  it('treats a DNS blip as a transport failure', () => {
+    expect(isTransientClickHouseError(Object.assign(new Error('getaddrinfo ENOTFOUND clickhouse'), { code: 'ENOTFOUND' }))).toBe(true)
+  })
+
+  it('keeps Keeper errors that a retry cannot fix final', () => {
+    expect(isTransientClickHouseError({ code: '999', message: 'Coordination::Exception: No node, path: /clickhouse/tables/x' })).toBe(false)
+    expect(isTransientClickHouseError({ code: '999', message: 'Coordination::Exception: Node exists' })).toBe(false)
+  })
+
+  it('keeps a syntax error final even though it carries a numeric code', () => {
+    expect(isTransientClickHouseError({ code: '62', message: 'Syntax error: failed at position 1' })).toBe(false)
+  })
+})
+
+describe('withClickHouseRetry: abort signal', () => {
+  it('throws the reason at once, without calling the operation, when the signal is already aborted', async () => {
+    const controller = new AbortController()
+    const reason = new Error('cancelled before start')
+    controller.abort(reason)
+    const operation = vi.fn(async () => 'never')
+
+    await expect(withClickHouseRetry(operation, { signal: controller.signal })).rejects.toBe(reason)
+    expect(operation).not.toHaveBeenCalled()
+  })
+
+  it('aborts the attempt in flight, does not retry, and rejects with the reason', async () => {
+    const controller = new AbortController()
+    const reason = new Error('stalled')
+    let attempts = 0
+    let seen: AbortSignal | undefined
+
+    const promise = withClickHouseRetry(
+      signal => {
+        attempts += 1
+        seen = signal
+        return new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })), { once: true })
+        })
+      },
+      { signal: controller.signal, sleep: async () => undefined }
+    )
+    controller.abort(reason)
+
+    await expect(promise).rejects.toBe(reason)
+    expect(attempts).toBe(1)
+    expect(seen?.aborted).toBe(true)
+  })
+
+  it('stops waiting between attempts when aborted during the backoff sleep', async () => {
+    const controller = new AbortController()
+    let attempts = 0
+
+    const promise = withClickHouseRetry(
+      async () => {
+        attempts += 1
+        throw Object.assign(new Error('transient'), { code: 'ECONNRESET' })
+      },
+      {
+        signal: controller.signal,
+        sleep: () => new Promise<void>(() => { /* never wakes: only the abort can end this wait */ }),
+        onRetry: () => controller.abort(new Error('cancelled during backoff')),
+      }
+    )
+
+    await expect(promise).rejects.toThrow('cancelled during backoff')
+    expect(attempts).toBe(1)
+  })
+})
