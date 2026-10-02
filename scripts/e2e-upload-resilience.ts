@@ -14,6 +14,7 @@
  *   docker compose build app
  *   npx tsx scripts/e2e-alert-rehearsal.ts --keep    # brings the stack up (about 4 minutes) and leaves it running
  *   npx tsx scripts/e2e-upload-resilience.ts         # about 6 minutes; --slow adds the 300 s slow-client case (+7 minutes)
+ *                                                    # (--only-slow runs just that case)
  *   docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v
  *
  * Needs the `zip` command. Exit 0 when every check passes, 1 when one fails, 2 when the stack is not ready.
@@ -29,6 +30,10 @@ const CH = 'ulprehearsal_clickhouse'
 const HOST = '127.0.0.1'
 const PORT = 3101
 const BASE = `http://${HOST}:${PORT}`
+// --only=queue-wait,cut-fin runs just those scenarios (keys: happy cut-fin cut-rst zip-cut queue-wait freeze-8s freeze-stall slow);
+// --slow adds the 300 s slow-client case to a full run; --only-slow is --only=slow.
+const onlyArg = process.argv.find(a => a.startsWith('--only='))?.slice('--only='.length).split(',')
+const only = process.argv.includes('--only-slow') ? ['slow'] : onlyArg
 const slow = process.argv.includes('--slow')
 
 if (!APP.startsWith('ulprehearsal_') || !CH.startsWith('ulprehearsal_') || PORT !== 3101) {
@@ -43,6 +48,8 @@ function check(label: string, ok: boolean, detail = ''): boolean {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${label}${!ok && detail ? `  (${detail})` : ''}`)
   return ok
 }
+
+const info = (label: string, value: unknown) => console.log(`  INFO  ${label}: ${value}`)
 
 function sh(cmd: string, args: string[]): string {
   try {
@@ -144,6 +151,9 @@ async function expectIdleQueue(label: string): Promise<void> {
 
 // ── fixtures and the raw-socket client ────────────────────────────────────────────────────────────────────────────────────────
 const work = mkdtempSync(join(tmpdir(), 'e2e-upload-'))
+// Source names are unique per run: the importer skips a filename it has already imported, so a re-run on the same stack
+// with fixed names would pass vacuously.
+const RUN = Date.now().toString(36)
 const fixture = (name: string, text: string) => {
   const path = join(work, name)
   writeFileSync(path, text)
@@ -203,13 +213,14 @@ function rawUpload(filename: string, file: string, opts: { bytesPerSec?: number 
   sock.write(head)
   rs.on('data', chunk => {
     up.sent += chunk.length
-    if (!sock.write(chunk)) {
-      rs.pause()
-      sock.once('drain', () => rs.resume())
-    }
+    const accepted = sock.write(chunk)
     if (opts.bytesPerSec) {
+      // Throttled: a short pause between chunks is the whole flow control (the socket buffer never fills at these rates).
       rs.pause()
       setTimeout(() => rs.resume(), 50)
+    } else if (!accepted) {
+      rs.pause()
+      sock.once('drain', () => rs.resume())
     }
   })
   rs.on('error', () => {})
@@ -227,7 +238,7 @@ async function followUpImports(name: string): Promise<boolean> {
 // ── scenarios ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 async function happyPath(): Promise<void> {
   console.log('\n1. A browser-like client uploads 300,000 lines')
-  const name = 'e2e-happy.txt'
+  const name = `e2e-happy-${RUN}.txt`
   const up = rawUpload(name, fixture(name, genLines(300_000, 'hp')))
   const id = await waitFor(() => up.jobId, 120_000)
   check('the server answered with a job id', !!id)
@@ -242,7 +253,7 @@ async function happyPath(): Promise<void> {
 
 async function cutMidBody(how: 'fin' | 'rst'): Promise<void> {
   console.log(`\n2. The client disconnects (${how.toUpperCase()}) while the file is still arriving`)
-  const name = `e2e-cut-${how}.txt`
+  const name = `e2e-cut-${how}-${RUN}.txt`
   const up = rawUpload(name, fixture(name, genLines(250_000, `c${how[0]}`)), { bytesPerSec: 2_000_000 })
   await waitFor(() => up.sent >= up.size * 0.4, 60_000, 100)
   up.cut(how)
@@ -251,13 +262,13 @@ async function cutMidBody(how: 'fin' | 'rst'): Promise<void> {
   check('nothing was imported', rowsFor(name) === 0)
   check('no spool file is left', spoolCount() === 0)
   await expectIdleQueue(`cut ${how}`)
-  check('a following upload imports normally', await followUpImports(`e2e-after-cut-${how}.txt`))
+  check('a following upload imports normally', await followUpImports(`e2e-after-cut-${how}-${RUN}.txt`))
 }
 
 async function zipCutMidBody(): Promise<void> {
   console.log('\n3. The client disconnects while a .zip archive is still arriving')
-  const name = 'e2e-cut.zip'
-  const entry = 'e2e-zip-entry.txt'
+  const name = `e2e-cut-${RUN}.zip`
+  const entry = `e2e-zip-entry-${RUN}.txt`
   fixture(entry, genLines(900_000, 'zc'))
   sh('zip', ['-q', '-j', join(work, name), join(work, entry)])
   const up = rawUpload(name, join(work, name), { bytesPerSec: 1_500_000 })
@@ -271,13 +282,20 @@ async function zipCutMidBody(): Promise<void> {
 
 async function queuedBehindABusySlot(): Promise<void> {
   console.log('\n4. A second upload arrives while the first is importing (the only queue slot is busy)')
-  const a = 'e2e-queue-a.txt'
-  const b = 'e2e-queue-b.txt'
+  const a = `e2e-queue-a-${RUN}.txt`
+  const b = `e2e-queue-b-${RUN}.txt`
+  const fileB = fixture(b, genLines(250_000, 'qb')) // written before A starts, so B's upload begins the moment A is importing
   const upA = rawUpload(a, fixture(a, genLines(700_000, 'qa')))
+  const tA = Date.now()
   await waitFor(() => rowsFor(a) >= 100_000, 120_000)
-  const upB = rawUpload(b, fixture(b, genLines(250_000, 'qb')))
-  const idB = await waitFor(() => upB.jobId, 60_000)
-  check('B was accepted while A was still importing', !!idB && rowsFor(a) < 700_000, `A had ${rowsFor(a)} rows when B was accepted`)
+  info('A reached 100000 rows after', `${Date.now() - tA} ms`)
+  const tB = Date.now()
+  const upB = rawUpload(b, fileB)
+  const idB = await waitFor(() => upB.jobId, 60_000, 100)
+  const replyMs = Date.now() - tB
+  const rowsOfAAtReply = rowsFor(a)
+  info('B was answered after', `${replyMs} ms, when A had ${rowsOfAAtReply} rows`)
+  check('B was accepted while A was still importing', !!idB && rowsOfAAtReply < 700_000, `A had ${rowsOfAAtReply} rows when B was accepted`)
   check('B was told it is queued', (upB.queuePosition ?? 0) >= 1, `queue_position ${upB.queuePosition}`)
   const finalA = upA.jobId ? await waitJob(upA.jobId, 180_000) : null
   const finalB = idB ? await waitJob(idB, 180_000) : null
@@ -315,7 +333,7 @@ async function clickHouseFrozen(o: { name: string; tag: string; freezeSeconds: n
     check('...with the stall reason', /stalled/.test(during?.error ?? ''), during?.error ?? '')
     check('no spool file is left', spoolCount() === 0)
     await expectIdleQueue('after the stall')
-    check('the next upload imports normally', await followUpImports('e2e-after-stall.txt'))
+    check('the next upload imports normally', await followUpImports(`e2e-after-stall-${RUN}.txt`))
   } else {
     const final = id ? await waitJob(id, 180_000) : null
     check(`the import survived a ${freezeSeconds} s freeze (status done)`, final?.status === 'done', JSON.stringify(final))
@@ -327,7 +345,7 @@ async function clickHouseFrozen(o: { name: string; tag: string; freezeSeconds: n
 
 async function slowClient(): Promise<void> {
   console.log('\n7. A client so slow that the body cannot arrive within Node\'s 300 s request timeout (--slow, about 7 minutes)')
-  const name = 'e2e-slow.txt'
+  const name = `e2e-slow-${RUN}.txt`
   const up = rawUpload(name, fixture(name, genLines(300_000, 'sl')), { bytesPerSec: 70_000 })
   const cutByServer = await waitFor(() => up.closed, 420_000, 1000)
   check('the server cut the connection at its request timeout', !!cutByServer)
@@ -371,14 +389,20 @@ async function main(): Promise<number> {
 
   try {
     await login()
-    await happyPath()
-    await cutMidBody('fin')
-    await cutMidBody('rst')
-    await zipCutMidBody()
-    await queuedBehindABusySlot()
-    await clickHouseFrozen({ name: 'e2e-freeze-8s.txt', tag: 'f8', freezeSeconds: 8, expectStall: false })
-    await clickHouseFrozen({ name: 'e2e-freeze-stall.txt', tag: 'fs', freezeSeconds: 45, expectStall: true })
-    if (slow) await slowClient()
+    const scenarios: Array<{ key: string; slowOnly?: boolean; run: () => Promise<void> }> = [
+      { key: 'happy', run: happyPath },
+      { key: 'cut-fin', run: () => cutMidBody('fin') },
+      { key: 'cut-rst', run: () => cutMidBody('rst') },
+      { key: 'zip-cut', run: zipCutMidBody },
+      { key: 'queue-wait', run: queuedBehindABusySlot },
+      { key: 'freeze-8s', run: () => clickHouseFrozen({ name: `e2e-freeze-8s-${RUN}.txt`, tag: 'f8', freezeSeconds: 8, expectStall: false }) },
+      { key: 'freeze-stall', run: () => clickHouseFrozen({ name: `e2e-freeze-stall-${RUN}.txt`, tag: 'fs', freezeSeconds: 45, expectStall: true }) },
+      { key: 'slow', slowOnly: true, run: slowClient },
+    ]
+    for (const scenario of scenarios) {
+      const selected = only ? only.includes(scenario.key) : scenario.slowOnly ? slow : true
+      if (selected) await scenario.run()
+    }
   } catch (err) {
     check('the scenarios ran without an unexpected error', false, err instanceof Error ? err.message : String(err))
   } finally {

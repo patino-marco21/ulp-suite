@@ -61,14 +61,14 @@ These come from the spec and the repository's conventions; every task's requirem
 **Interfaces:**
 - Produces: `ClickHouseRetryOptions.signal?: AbortSignal` (aborting it rejects `withClickHouseRetry` with `signal.reason`, aborts the attempt in flight, and is never retried); `isTransientClickHouseError` returns `true` for the allow-list in the Global Constraints.
 
-- [ ] **Step 0: Create the branch**
+- [x] **Step 0: Create the branch**
 
 ```bash
 cd /home/cole/ulp-suite && git switch -c feat/import-reliability && git status --short
 ```
 Expected: `Switched to a new branch 'feat/import-reliability'`; only `?? .claude/` (and the plan file once it exists) listed.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `__tests__/clickhouse-retry.test.ts` (the imports at the top already provide `describe`, `expect`, `it`, `vi`, `isTransientClickHouseError`, `withClickHouseRetry`):
 
@@ -172,12 +172,12 @@ describe('withClickHouseRetry: abort signal', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/clickhouse-retry.test.ts`
 Expected: FAIL. The classification cases fail (`242`/`252`/`999` return `false` today; `ENOTFOUND` returns `false`) and the three abort cases fail because `signal` is not an option yet (the already-aborted case calls the operation, the others never settle or time out).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `lib/clickhouse-retry.ts` make these edits.
 
@@ -360,12 +360,12 @@ export async function withClickHouseRetry<T>(
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `npx vitest run __tests__/clickhouse-retry.test.ts`
 Expected: PASS, every existing test in the file still green.
 
-- [ ] **Step 5: Typecheck and commit**
+- [x] **Step 5: Typecheck and commit**
 
 ```bash
 npx tsc --noEmit && git add lib/clickhouse-retry.ts __tests__/clickhouse-retry.test.ts docs/superpowers/plans/2026-10-02-import-reliability.md && git commit -m "$(cat <<'EOF'
@@ -402,7 +402,7 @@ Expected: typecheck exits 0; one commit created.
   - `function parseStallMs(raw: string | undefined): number` (default `1_200_000`)
   - `function runImportJob<T>(opts: { label: string; work: (ctx: ImportContext) => Promise<T>; signal?: AbortSignal; stallMs?: number; now?: () => number }): Promise<T>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/import-runner.test.ts`:
 
@@ -594,12 +594,12 @@ describe('import watchdog setting reaches the container', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/import-runner.test.ts __tests__/upload-reliability-config.test.ts`
 Expected: FAIL: `Cannot find module '@/lib/import-runner'` and the config assertion fails (`IMPORT_STALL_TIMEOUT_MS` is not in the compose file).
 
-- [ ] **Step 3: Implement the runner**
+- [x] **Step 3: Implement the runner**
 
 Create `lib/import-runner.ts`:
 
@@ -702,7 +702,7 @@ export async function runImportJob<T>(opts: RunImportOptions<T>): Promise<T> {
 }
 ```
 
-- [ ] **Step 4: Forward and document the setting**
+- [x] **Step 4: Forward and document the setting**
 
 In `docker-compose.yml`, directly after the `UPLOAD_CONCURRENCY: ${UPLOAD_CONCURRENCY:-1}` line, add:
 
@@ -732,12 +732,12 @@ In `README.md`, after the `UPLOAD_CONCURRENCY` bullet (the one ending `indicator
   not trip it. Default `1200000` (20 minutes).
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `npx vitest run __tests__/import-runner.test.ts __tests__/upload-reliability-config.test.ts __tests__/compose-hardening.test.ts`
 Expected: PASS (all three files).
 
-- [ ] **Step 6: Typecheck and commit**
+- [x] **Step 6: Typecheck and commit**
 
 ```bash
 npx tsc --noEmit && git add lib/import-runner.ts __tests__/import-runner.test.ts __tests__/upload-reliability-config.test.ts docker-compose.yml .env.example README.md && git commit -m "$(cat <<'EOF'
@@ -776,7 +776,7 @@ Expected: typecheck exits 0; one commit created.
   - `startSpoolJanitor(): () => void` (returns a stop function; starting twice returns the same one)
   - `describeSpoolError(error: unknown): { status: number; message: string } | null`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/upload-spool.test.ts`:
 
@@ -1007,12 +1007,12 @@ describe('upload spool settings reach the container', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/upload-spool.test.ts __tests__/upload-reliability-config.test.ts`
 Expected: FAIL: `Cannot find module '@/lib/upload-spool'`, and the config assertions fail.
 
-- [ ] **Step 3: Implement the spool**
+- [x] **Step 3: Implement the spool**
 
 Create `lib/upload-spool.ts`:
 
@@ -1245,7 +1245,7 @@ export function describeSpoolError(error: unknown): { status: number; message: s
 }
 ```
 
-- [ ] **Step 4: Start the janitor, forward and document the settings**
+- [x] **Step 4: Start the janitor, forward and document the settings**
 
 In `instrumentation.ts`, directly after the inbox watcher block
 
@@ -1314,12 +1314,12 @@ answers as soon as the file is safely on disk and reports progress over SSE;
 
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `npx vitest run __tests__/upload-spool.test.ts __tests__/upload-reliability-config.test.ts __tests__/compose-hardening.test.ts`
 Expected: PASS (all three files).
 
-- [ ] **Step 6: Typecheck and commit**
+- [x] **Step 6: Typecheck and commit**
 
 ```bash
 npx tsc --noEmit && git add lib/upload-spool.ts __tests__/upload-spool.test.ts __tests__/upload-reliability-config.test.ts instrumentation.ts docker-compose.yml .env.example README.md && git commit -m "$(cat <<'EOF'
@@ -1355,7 +1355,7 @@ Expected: typecheck exits 0; one commit created.
   - `sourceAlreadyImported(filename, hooks?)`, `recordSource(filename, lineCount, hooks?)`, `processTextStream(stream, filename, jobId?, onBatch?, hooks?)`, `processZipEntries(zipfile, onEntry, hooks?)`, `processZipBuffer(buffer, onEntry, hooks?)`, `processZipFile(filepath, onEntry, hooks?)`, all with `hooks: ImportHooks = {}`.
   - `processTextFile(filePath: string, filename: string, jobId?: string, onBatch?: (imported: number) => void, hooks?: ImportHooks): Promise<ProcessResult>`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `__tests__/clickhouse-memory-guard.test.ts` (it already provides `h`, `describe`, `it`, `expect`, `vi`):
 
@@ -1497,12 +1497,12 @@ describe('processZipFile: abort', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/clickhouse-memory-guard.test.ts __tests__/upload-processor.test.ts`
 Expected: FAIL: `onPoll` is never called, the aborted guard resolves instead of throwing, `processTextStream` ignores the fifth argument, `processTextFile` is not exported, and the ZIP abort test imports both entries.
 
-- [ ] **Step 3: Implement the memory-guard hooks**
+- [x] **Step 3: Implement the memory-guard hooks**
 
 In `lib/clickhouse-memory-guard.ts`, replace the `waitForHeadroom` signature and the top of its loop. Old:
 
@@ -1545,7 +1545,7 @@ new:
 
 Also extend the doc comment above `waitForHeadroom` with one sentence: `Reports each poll through opts.onPoll, and throws the signal's reason once the signal is aborted.`
 
-- [ ] **Step 4: Implement the pipeline changes**
+- [x] **Step 4: Implement the pipeline changes**
 
 In `lib/upload-processor.ts`:
 
@@ -1717,12 +1717,12 @@ Replace the `'end'` handler:
 
 Finally add `hooks: ImportHooks = {}` as a third parameter to `processZipBuffer` and `processZipFile` and pass it on: `processZipEntries(zipfile, onEntry, hooks).then(resolve, reject)`.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `npx vitest run __tests__/clickhouse-memory-guard.test.ts __tests__/upload-processor.test.ts __tests__/insert-batch-dedup.test.ts __tests__/upload-skip-imported.test.ts`
 Expected: PASS (all four files; the existing wiring tests are unchanged and still green).
 
-- [ ] **Step 6: Run the whole suite, typecheck, commit**
+- [x] **Step 6: Run the whole suite, typecheck, commit**
 
 ```bash
 npm test 2>&1 | tail -8 && npx tsc --noEmit && git add lib/clickhouse-memory-guard.ts lib/upload-processor.ts __tests__/clickhouse-memory-guard.test.ts __tests__/upload-processor.test.ts && git commit -m "$(cat <<'EOF'
@@ -1752,7 +1752,7 @@ Expected: the suite's last lines show every test file passing with 0 failures; t
 **Interfaces:**
 - Produces: `logUploadAction(action, performedBy, resourceId, details, request?)` where `action` is `'upload.start' | 'upload.complete' | 'upload.fail' | 'upload.api.start' | 'upload.api.complete' | 'upload.api.fail' | 'inbox.retry'`, `performedBy: { id: number | null; email: string | null }`, `resourceId: string | null`, `details: Record<string, unknown>`, `request?: Request`; resolves with the new audit row id (`-1` if the insert failed, as `createAuditLog` does). `AuditAction` gains `'inbox.retry'`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `__tests__/upload-audit.test.ts`:
 
@@ -1809,12 +1809,12 @@ describe('logUploadAction', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `npx vitest run __tests__/upload-audit.test.ts`
 Expected: FAIL: `logUploadAction` is not exported from `@/lib/audit-log`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `lib/audit-log.ts` add `'inbox.retry'` to the union (the `upload.*` members already exist and are currently emitted nowhere):
 
@@ -1860,12 +1860,12 @@ export async function logUploadAction(
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `npx vitest run __tests__/upload-audit.test.ts`
 Expected: PASS (2 tests).
 
-- [ ] **Step 5: Typecheck and commit**
+- [x] **Step 5: Typecheck and commit**
 
 ```bash
 npx tsc --noEmit && git add lib/audit-log.ts __tests__/upload-audit.test.ts && git commit -m "$(cat <<'EOF'
@@ -1894,7 +1894,7 @@ Expected: typecheck exits 0; one commit created.
 - Consumes: `spoolRequestBody`, `discardSpool`, `describeSpoolError`, `SpoolResult` (Task 3); `runImportJob` (Task 2); `processTextFile`, `processZipFile` with `hooks` (Task 4); `logUploadAction` (Task 5).
 - Produces: the same HTTP contract as before for text/CSV (`{ success, jobId, streamUrl, queue_position }`), but sent only after the body is on disk; failures during the receive answer 413 / 400 / 507 with `{ success: false, error }` and create no job; ZIP response unchanged.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/upload-route-spool.test.ts`:
 
@@ -2134,12 +2134,12 @@ describe('POST /api/upload: zip archives', () => {
 
 In `__tests__/upload-route-raw-stream.test.ts`, delete the whole block `describe('POST /api/upload — raw-stream body', () => { ... })` (from that `describe` line through its closing `})`, the line before the blank line that precedes `describe('POST /api/v1/upload — raw-stream body'`), delete the line `import { POST } from '@/app/api/upload/route'`, and delete the constant `mockLogJob` and its `logJob` import if nothing left in the file uses them.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/upload-route-spool.test.ts`
 Expected: FAIL: the route still streams into `processTextStream` (so `processTextFile` is never called, nothing is spooled, `413`/`400` cases answer `200`).
 
-- [ ] **Step 3: Rewrite the route**
+- [x] **Step 3: Rewrite the route**
 
 Replace the whole of `app/api/upload/route.ts` with:
 
@@ -2471,12 +2471,12 @@ export async function POST(request: NextRequest) {
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `npx vitest run __tests__/upload-route-spool.test.ts __tests__/upload-route-raw-stream.test.ts`
 Expected: PASS (both files). If the "shorter than its Content-Length" case answers `200`, this runtime dropped the `content-length` header from the constructed `Request`; build that request with `new NextRequest(url, { method: 'POST', body, headers: new Headers([['content-length', '100']]) })` and re-run.
 
-- [ ] **Step 5: Typecheck, lint the file, commit**
+- [x] **Step 5: Typecheck, lint the file, commit**
 
 ```bash
 npx tsc --noEmit && npx eslint --no-eslintrc -c .eslintrc.json app/api/upload/route.ts lib/upload-spool.ts lib/import-runner.ts && git add app/api/upload/route.ts __tests__/upload-route-spool.test.ts __tests__/upload-route-raw-stream.test.ts && git commit -m "$(cat <<'EOF'
@@ -2510,7 +2510,7 @@ Expected: typecheck exits 0 and ESLint prints nothing; one commit created.
 - Consumes: `spoolRequestBody`, `discardSpool`, `describeSpoolError`, `SpoolResult` (Task 3); `runImportJob` (Task 2); `processTextFile`, `processZipFile` (Task 4); `logUploadAction` (Task 5).
 - Produces: unchanged v1 responses (`{ success, imported, skipped, errors, filename[, files] }`, synchronous), but the body is spooled first so a queue wait or a disconnect can no longer strand the request.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/upload-v1-route-spool.test.ts`:
 
@@ -2696,12 +2696,12 @@ describe('POST /api/v1/upload: spool first, answer when the import has finished'
 
 Delete the superseded file: `git rm __tests__/upload-route-raw-stream.test.ts`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/upload-v1-route-spool.test.ts`
 Expected: FAIL: the v1 route still streams into `processTextStream` (so `processTextFile` is never called, nothing is spooled, no audit rows).
 
-- [ ] **Step 3: Rewrite the route**
+- [x] **Step 3: Rewrite the route**
 
 Replace the whole of `app/api/v1/upload/route.ts` with:
 
@@ -2916,12 +2916,12 @@ export async function POST(request: NextRequest) {
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `npx vitest run __tests__/upload-v1-route-spool.test.ts __tests__/upload-route-spool.test.ts`
 Expected: PASS (both files).
 
-- [ ] **Step 5: Run the whole suite, typecheck, lint, commit**
+- [x] **Step 5: Run the whole suite, typecheck, lint, commit**
 
 ```bash
 npm test 2>&1 | tail -8 && npx tsc --noEmit && npx eslint --no-eslintrc -c .eslintrc.json app/api/v1/upload/route.ts && git add app/api/v1/upload/route.ts __tests__/upload-v1-route-spool.test.ts && git commit -m "$(cat <<'EOF'
@@ -2953,7 +2953,7 @@ Expected: the suite's last lines show every test file passing with 0 failures; t
 
 The existing watcher tests (`inbox-watcher-memory-guard`, `inbox-watcher-stability`, `inbox-content-sniff`, `inbox-watcher-globalthis`) read the watcher's source text and pin the order `uploadQueue(async` → `waitForHeadroom(` → `claimFileForProcessing(filePath, PROC)`. Keep that order.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/inbox-watcher-runner.test.ts`:
 
@@ -3033,12 +3033,12 @@ describe('POST /api/inbox/retry: audit', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/inbox-watcher-runner.test.ts __tests__/inbox-retry-audit.test.ts`
 Expected: FAIL: the watcher still imports `processTextStream` and builds the stream by hand; the Retry route never calls `logUploadAction`.
 
-- [ ] **Step 3: Implement the watcher change**
+- [x] **Step 3: Implement the watcher change**
 
 In `lib/inbox-watcher.ts`, replace the import block
 
@@ -3151,7 +3151,7 @@ with
 
 The lines that follow (`// Move processing/ -> done/ BEFORE logJob ...`) are unchanged.
 
-- [ ] **Step 4: Implement the Retry audit**
+- [x] **Step 4: Implement the Retry audit**
 
 In `app/api/inbox/retry/route.ts` add the import
 
@@ -3179,12 +3179,12 @@ with
   return NextResponse.json({ success: true, moved })
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `npx vitest run __tests__/inbox-watcher-runner.test.ts __tests__/inbox-retry-audit.test.ts __tests__/inbox-watcher-memory-guard.test.ts __tests__/inbox-watcher-stability.test.ts __tests__/inbox-content-sniff.test.ts __tests__/inbox-watcher-globalthis.test.ts`
 Expected: PASS (all six files).
 
-- [ ] **Step 6: Typecheck, lint, commit**
+- [x] **Step 6: Typecheck, lint, commit**
 
 ```bash
 npx tsc --noEmit && npx eslint --no-eslintrc -c .eslintrc.json lib/inbox-watcher.ts app/api/inbox/retry/route.ts && git add lib/inbox-watcher.ts app/api/inbox/retry/route.ts __tests__/inbox-watcher-runner.test.ts __tests__/inbox-retry-audit.test.ts && git commit -m "$(cat <<'EOF'
@@ -3220,7 +3220,7 @@ Expected: typecheck exits 0 and ESLint prints nothing; one commit created.
 
 Why: `fetch` cannot report how many bytes of a request body have been sent; `XMLHttpRequest` can. The server now answers only after it holds the whole file, so without this the page would sit on a static bar for the whole transfer.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/upload-client.test.ts`:
 
@@ -3335,12 +3335,12 @@ describe('the Upload page', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/upload-client.test.ts`
 Expected: FAIL: `Cannot find module '@/lib/upload-client'`.
 
-- [ ] **Step 3: Implement the helper**
+- [x] **Step 3: Implement the helper**
 
 Create `lib/upload-client.ts`:
 
@@ -3430,12 +3430,12 @@ export function uploadErrorMessage(err: unknown, fileSize: number): string {
 }
 ```
 
-- [ ] **Step 4: Run the helper tests to verify they pass**
+- [x] **Step 4: Run the helper tests to verify they pass**
 
 Run: `npx vitest run __tests__/upload-client.test.ts`
 Expected: the helper tests PASS; the last test (`the Upload page`) still FAILS because the page still calls `fetch`.
 
-- [ ] **Step 5: Switch the page to the helper**
+- [x] **Step 5: Switch the page to the helper**
 
 In `app/upload/page.tsx`:
 
@@ -3559,7 +3559,7 @@ with
 
 (The `else` branch `<Progress value={progress} className="h-2" />` is unchanged; it now shows the transfer, then 100% while the import waits for its first batch.)
 
-- [ ] **Step 6: Run the tests, typecheck, lint, commit**
+- [x] **Step 6: Run the tests, typecheck, lint, commit**
 
 ```bash
 npx vitest run __tests__/upload-client.test.ts && npx tsc --noEmit && npx eslint --no-eslintrc -c .eslintrc.json app/upload/page.tsx lib/upload-client.ts && git add lib/upload-client.ts __tests__/upload-client.test.ts app/upload/page.tsx && git commit -m "$(cat <<'EOF'
@@ -3589,7 +3589,7 @@ Expected: all `upload-client` tests PASS (including the page test); typecheck ex
 - Consumes: the running rehearsal stack started by `npx tsx scripts/e2e-alert-rehearsal.ts --keep` (containers `ulprehearsal_app` and `ulprehearsal_clickhouse`, app on `127.0.0.1:3101`), the new image built from this branch, and the `zip` command.
 - Produces: one process exit code (0 when every check passes, 1 when a check fails, 2 when the stack is not ready). It never touches the real stack: it refuses any container name that does not start with `ulprehearsal_`.
 
-- [ ] **Step 1: Give the rehearsal app a short stall timeout**
+- [x] **Step 1: Give the rehearsal app a short stall timeout**
 
 In `docker-compose.rehearsal.yml`, in the `app:` service `environment:` block, directly after `CONTENT_DEDUP_APPLY: "false"` add:
 
@@ -3602,7 +3602,7 @@ In `docker-compose.rehearsal.yml`, in the `app:` service `environment:` block, d
 Run: `npx vitest run __tests__/rehearsal-isolation.test.ts`
 Expected: PASS (the isolation rules are about names, networks, volumes and ports; an env var does not touch them).
 
-- [ ] **Step 2: Write the script**
+- [x] **Step 2: Write the script**
 
 Create `scripts/e2e-upload-resilience.ts`:
 
@@ -3623,6 +3623,7 @@ Create `scripts/e2e-upload-resilience.ts`:
  *   docker compose build app
  *   npx tsx scripts/e2e-alert-rehearsal.ts --keep    # brings the stack up (about 4 minutes) and leaves it running
  *   npx tsx scripts/e2e-upload-resilience.ts         # about 6 minutes; --slow adds the 300 s slow-client case (+7 minutes)
+ *                                                    # (--only-slow runs just that case)
  *   docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v
  *
  * Needs the `zip` command. Exit 0 when every check passes, 1 when one fails, 2 when the stack is not ready.
@@ -3638,6 +3639,10 @@ const CH = 'ulprehearsal_clickhouse'
 const HOST = '127.0.0.1'
 const PORT = 3101
 const BASE = `http://${HOST}:${PORT}`
+// --only=queue-wait,cut-fin runs just those scenarios (keys: happy cut-fin cut-rst zip-cut queue-wait freeze-8s freeze-stall slow);
+// --slow adds the 300 s slow-client case to a full run; --only-slow is --only=slow.
+const onlyArg = process.argv.find(a => a.startsWith('--only='))?.slice('--only='.length).split(',')
+const only = process.argv.includes('--only-slow') ? ['slow'] : onlyArg
 const slow = process.argv.includes('--slow')
 
 if (!APP.startsWith('ulprehearsal_') || !CH.startsWith('ulprehearsal_') || PORT !== 3101) {
@@ -3652,6 +3657,8 @@ function check(label: string, ok: boolean, detail = ''): boolean {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${label}${!ok && detail ? `  (${detail})` : ''}`)
   return ok
 }
+
+const info = (label: string, value: unknown) => console.log(`  INFO  ${label}: ${value}`)
 
 function sh(cmd: string, args: string[]): string {
   try {
@@ -3753,6 +3760,9 @@ async function expectIdleQueue(label: string): Promise<void> {
 
 // ── fixtures and the raw-socket client ────────────────────────────────────────────────────────────────────────────────────────
 const work = mkdtempSync(join(tmpdir(), 'e2e-upload-'))
+// Source names are unique per run: the importer skips a filename it has already imported, so a re-run on the same stack
+// with fixed names would pass vacuously.
+const RUN = Date.now().toString(36)
 const fixture = (name: string, text: string) => {
   const path = join(work, name)
   writeFileSync(path, text)
@@ -3812,13 +3822,14 @@ function rawUpload(filename: string, file: string, opts: { bytesPerSec?: number 
   sock.write(head)
   rs.on('data', chunk => {
     up.sent += chunk.length
-    if (!sock.write(chunk)) {
-      rs.pause()
-      sock.once('drain', () => rs.resume())
-    }
+    const accepted = sock.write(chunk)
     if (opts.bytesPerSec) {
+      // Throttled: a short pause between chunks is the whole flow control (the socket buffer never fills at these rates).
       rs.pause()
       setTimeout(() => rs.resume(), 50)
+    } else if (!accepted) {
+      rs.pause()
+      sock.once('drain', () => rs.resume())
     }
   })
   rs.on('error', () => {})
@@ -3836,7 +3847,7 @@ async function followUpImports(name: string): Promise<boolean> {
 // ── scenarios ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 async function happyPath(): Promise<void> {
   console.log('\n1. A browser-like client uploads 300,000 lines')
-  const name = 'e2e-happy.txt'
+  const name = `e2e-happy-${RUN}.txt`
   const up = rawUpload(name, fixture(name, genLines(300_000, 'hp')))
   const id = await waitFor(() => up.jobId, 120_000)
   check('the server answered with a job id', !!id)
@@ -3851,7 +3862,7 @@ async function happyPath(): Promise<void> {
 
 async function cutMidBody(how: 'fin' | 'rst'): Promise<void> {
   console.log(`\n2. The client disconnects (${how.toUpperCase()}) while the file is still arriving`)
-  const name = `e2e-cut-${how}.txt`
+  const name = `e2e-cut-${how}-${RUN}.txt`
   const up = rawUpload(name, fixture(name, genLines(250_000, `c${how[0]}`)), { bytesPerSec: 2_000_000 })
   await waitFor(() => up.sent >= up.size * 0.4, 60_000, 100)
   up.cut(how)
@@ -3860,13 +3871,13 @@ async function cutMidBody(how: 'fin' | 'rst'): Promise<void> {
   check('nothing was imported', rowsFor(name) === 0)
   check('no spool file is left', spoolCount() === 0)
   await expectIdleQueue(`cut ${how}`)
-  check('a following upload imports normally', await followUpImports(`e2e-after-cut-${how}.txt`))
+  check('a following upload imports normally', await followUpImports(`e2e-after-cut-${how}-${RUN}.txt`))
 }
 
 async function zipCutMidBody(): Promise<void> {
   console.log('\n3. The client disconnects while a .zip archive is still arriving')
-  const name = 'e2e-cut.zip'
-  const entry = 'e2e-zip-entry.txt'
+  const name = `e2e-cut-${RUN}.zip`
+  const entry = `e2e-zip-entry-${RUN}.txt`
   fixture(entry, genLines(900_000, 'zc'))
   sh('zip', ['-q', '-j', join(work, name), join(work, entry)])
   const up = rawUpload(name, join(work, name), { bytesPerSec: 1_500_000 })
@@ -3880,13 +3891,20 @@ async function zipCutMidBody(): Promise<void> {
 
 async function queuedBehindABusySlot(): Promise<void> {
   console.log('\n4. A second upload arrives while the first is importing (the only queue slot is busy)')
-  const a = 'e2e-queue-a.txt'
-  const b = 'e2e-queue-b.txt'
+  const a = `e2e-queue-a-${RUN}.txt`
+  const b = `e2e-queue-b-${RUN}.txt`
+  const fileB = fixture(b, genLines(250_000, 'qb')) // written before A starts, so B's upload begins the moment A is importing
   const upA = rawUpload(a, fixture(a, genLines(700_000, 'qa')))
+  const tA = Date.now()
   await waitFor(() => rowsFor(a) >= 100_000, 120_000)
-  const upB = rawUpload(b, fixture(b, genLines(250_000, 'qb')))
-  const idB = await waitFor(() => upB.jobId, 60_000)
-  check('B was accepted while A was still importing', !!idB && rowsFor(a) < 700_000, `A had ${rowsFor(a)} rows when B was accepted`)
+  info('A reached 100000 rows after', `${Date.now() - tA} ms`)
+  const tB = Date.now()
+  const upB = rawUpload(b, fileB)
+  const idB = await waitFor(() => upB.jobId, 60_000, 100)
+  const replyMs = Date.now() - tB
+  const rowsOfAAtReply = rowsFor(a)
+  info('B was answered after', `${replyMs} ms, when A had ${rowsOfAAtReply} rows`)
+  check('B was accepted while A was still importing', !!idB && rowsOfAAtReply < 700_000, `A had ${rowsOfAAtReply} rows when B was accepted`)
   check('B was told it is queued', (upB.queuePosition ?? 0) >= 1, `queue_position ${upB.queuePosition}`)
   const finalA = upA.jobId ? await waitJob(upA.jobId, 180_000) : null
   const finalB = idB ? await waitJob(idB, 180_000) : null
@@ -3924,7 +3942,7 @@ async function clickHouseFrozen(o: { name: string; tag: string; freezeSeconds: n
     check('...with the stall reason', /stalled/.test(during?.error ?? ''), during?.error ?? '')
     check('no spool file is left', spoolCount() === 0)
     await expectIdleQueue('after the stall')
-    check('the next upload imports normally', await followUpImports('e2e-after-stall.txt'))
+    check('the next upload imports normally', await followUpImports(`e2e-after-stall-${RUN}.txt`))
   } else {
     const final = id ? await waitJob(id, 180_000) : null
     check(`the import survived a ${freezeSeconds} s freeze (status done)`, final?.status === 'done', JSON.stringify(final))
@@ -3936,7 +3954,7 @@ async function clickHouseFrozen(o: { name: string; tag: string; freezeSeconds: n
 
 async function slowClient(): Promise<void> {
   console.log('\n7. A client so slow that the body cannot arrive within Node\'s 300 s request timeout (--slow, about 7 minutes)')
-  const name = 'e2e-slow.txt'
+  const name = `e2e-slow-${RUN}.txt`
   const up = rawUpload(name, fixture(name, genLines(300_000, 'sl')), { bytesPerSec: 70_000 })
   const cutByServer = await waitFor(() => up.closed, 420_000, 1000)
   check('the server cut the connection at its request timeout', !!cutByServer)
@@ -3980,14 +3998,20 @@ async function main(): Promise<number> {
 
   try {
     await login()
-    await happyPath()
-    await cutMidBody('fin')
-    await cutMidBody('rst')
-    await zipCutMidBody()
-    await queuedBehindABusySlot()
-    await clickHouseFrozen({ name: 'e2e-freeze-8s.txt', tag: 'f8', freezeSeconds: 8, expectStall: false })
-    await clickHouseFrozen({ name: 'e2e-freeze-stall.txt', tag: 'fs', freezeSeconds: 45, expectStall: true })
-    if (slow) await slowClient()
+    const scenarios: Array<{ key: string; slowOnly?: boolean; run: () => Promise<void> }> = [
+      { key: 'happy', run: happyPath },
+      { key: 'cut-fin', run: () => cutMidBody('fin') },
+      { key: 'cut-rst', run: () => cutMidBody('rst') },
+      { key: 'zip-cut', run: zipCutMidBody },
+      { key: 'queue-wait', run: queuedBehindABusySlot },
+      { key: 'freeze-8s', run: () => clickHouseFrozen({ name: `e2e-freeze-8s-${RUN}.txt`, tag: 'f8', freezeSeconds: 8, expectStall: false }) },
+      { key: 'freeze-stall', run: () => clickHouseFrozen({ name: `e2e-freeze-stall-${RUN}.txt`, tag: 'fs', freezeSeconds: 45, expectStall: true }) },
+      { key: 'slow', slowOnly: true, run: slowClient },
+    ]
+    for (const scenario of scenarios) {
+      const selected = only ? only.includes(scenario.key) : scenario.slowOnly ? slow : true
+      if (selected) await scenario.run()
+    }
   } catch (err) {
     check('the scenarios ran without an unexpected error', false, err instanceof Error ? err.message : String(err))
   } finally {
@@ -4008,12 +4032,12 @@ main().then(
 )
 ```
 
-- [ ] **Step 3: Smoke-test the script without a stack**
+- [x] **Step 3: Smoke-test the script without a stack**
 
 Run: `npx tsx scripts/e2e-upload-resilience.ts; echo "exit=$?"`
 Expected: it prints `ulprehearsal_app is not running and healthy. Start the rehearsal stack first:` and `exit=2` (this proves the file parses and the preflight works; the scenarios themselves run in Task 11).
 
-- [ ] **Step 4: Make the spec agree with the script**
+- [x] **Step 4: Make the spec agree with the script**
 
 In `docs/superpowers/specs/2026-10-02-import-reliability-design.md`, in the "Verification plan" item 2, replace the clause
 
@@ -4026,7 +4050,7 @@ In `docs/superpowers/specs/2026-10-02-import-reliability-design.md`, in the "Ver
 Then run: `grep -n "20 s mid-import\|15 s test stall" docs/superpowers/specs/2026-10-02-import-reliability-design.md || echo "spec is consistent"`
 Expected: `spec is consistent`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 npx vitest run __tests__/rehearsal-isolation.test.ts && git add scripts/e2e-upload-resilience.ts docker-compose.rehearsal.yml docs/superpowers/specs/2026-10-02-import-reliability-design.md && git commit -m "$(cat <<'EOF'
@@ -4053,42 +4077,42 @@ Expected: the isolation test passes; one commit created.
 
 **Files:** none new. This task runs the whole verification ladder and only then merges and deploys. The live stack is touched only in Steps 8 and 9 and only while it is idle.
 
-- [ ] **Step 1: Full suite, typecheck, lint**
+- [x] **Step 1: Full suite, typecheck, lint**
 
 ```bash
 cd /home/cole/ulp-suite && npm test 2>&1 | tail -8 && npx tsc --noEmit && echo "tsc ok" && npm run lint 2>&1 | tail -6
 ```
 Expected: every test file passes with 0 failures (more tests than the 1864 before this work); `tsc ok`; lint reports no errors.
 
-- [ ] **Step 2: Tag the current image for rollback, then build the new one**
+- [x] **Step 2: Tag the current image for rollback, then build the new one**
 
 ```bash
 cd /home/cole/ulp-suite && docker tag ulp-suite-app:latest "ulp-suite-app:rollback-$(date -u +%Y%m%d-%H%Mz)" && DCFG=$(mktemp -d) && echo '{}' > "$DCFG/config.json" && DOCKER_CONFIG="$DCFG" docker compose build app 2>&1 | tail -12; rm -rf "$DCFG"; docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedSince}}' | grep ulp-suite-app
 ```
 Expected: the build ends with the image written and tagged `ulp-suite-app:latest`; the listing shows the new `latest` created moments ago and a `rollback-<timestamp>` tag on the previous image. (A scoped `DOCKER_CONFIG` is needed because this laptop's global Docker config has a broken credential store. The live container keeps running the old image until it is recreated in Step 9.)
 
-- [ ] **Step 3: Rehearse the existing end-to-end suite on the new image**
+- [x] **Step 3: Rehearse the existing end-to-end suite on the new image**
 
 ```bash
 cd /home/cole/ulp-suite && npx tsx scripts/e2e-alert-rehearsal.ts --keep 2>&1 | tail -15
 ```
 Expected: `36 of 36 checks passed.` and the message that the stack was left running.
 
-- [ ] **Step 4: Run the new resilience scenarios**
+- [x] **Step 4: Run the new resilience scenarios**
 
 ```bash
 cd /home/cole/ulp-suite && npx tsx scripts/e2e-upload-resilience.ts 2>&1 | tail -50
 ```
 Expected: every line `PASS` and a final `N of N checks passed.` (about 6 minutes). If a check fails, stop and diagnose before continuing: the failing check names the scenario; the app log is `docker logs ulprehearsal_app --tail 50`.
 
-- [ ] **Step 5: Optional slow-client case**
+- [x] **Step 5: Optional slow-client case**
 
 ```bash
 cd /home/cole/ulp-suite && npx tsx scripts/e2e-upload-resilience.ts --slow 2>&1 | tail -12
 ```
 Expected: the scenario-7 checks pass (about 7 more minutes). Skip only if time-boxed; say so in the hand-off.
 
-- [ ] **Step 6: Check the real Upload page in a browser**
+- [x] **Step 6: Check the real Upload page in a browser**
 
 Open the in-app browser on `http://127.0.0.1:3101/login` (the rehearsal stack), log in with the throwaway admin (`docker exec ulprehearsal_app printenv ADMIN_EMAIL` / `ADMIN_PASSWORD`), open `/upload`, and drive the page's own file input with a synthetic file (this runs the real component code):
 
@@ -4121,7 +4145,7 @@ Then prove a cut from a real browser: in the same tab run
 
 Expected: after a few seconds `docker exec ulprehearsal_app sh -c 'ls /tmp/ulp-spool 2>/dev/null | wc -l'` prints `0`, `docker exec ulprehearsal_clickhouse clickhouse-client --query "SELECT count() FROM ulp.credentials WHERE source_file='browser-cut.txt'"` prints `0`, and a following small upload through the page still imports (the slot is free).
 
-- [ ] **Step 7: Tear the rehearsal stack down**
+- [x] **Step 7: Tear the rehearsal stack down**
 
 ```bash
 cd /home/cole/ulp-suite && D=$(mktemp -d) && echo '{}' > "$D/config.json" && DOCKER_CONFIG="$D" REHEARSAL_JWT_SECRET=x REHEARSAL_ADMIN_EMAIL=x REHEARSAL_ADMIN_PASSWORD=x REHEARSAL_WEBHOOK_SECRET=x docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v 2>&1 | tail -3; rm -rf "$D"; docker ps -a --format '{{.Names}}' | grep -i rehearsal || echo "no rehearsal containers"; docker volume ls --format '{{.Name}}' | grep -i rehearsal || echo "no rehearsal volumes"
@@ -4161,3 +4185,17 @@ Expected: the log shows the inbox watcher started and no errors; both POSTs answ
 - [ ] **Step 10: Record the result**
 
 Update the project memory notes (the import-verification memory and the ledger: the four defects are fixed and deployed, the commit range, the image rollback tag, what is still open: sub-project 2) and tell the user what to try: upload a small file from the Upload page (it should show "Uploading…" then "Importing…"), and that the inbox remains the right path for very large files. Mark the spec `Status: implemented 2026-10-02` with the merge commit.
+
+---
+
+## Execution notes (what differed from the plan as written)
+
+Executed inline on 2026-10-02 on `feat/import-reliability`. The plan's code was applied as written except for the fixes below. Each was found by a test or a run and is already folded into the code blocks above.
+
+- `runImportJob` refuses to start the work when the external signal is already aborted (the plan's own test showed an instantly-resolving job could win the race against an already-rejected abort promise).
+- `sweepSpool` clamps a negative file age to zero (a file written in the same millisecond has an mtime a fraction ahead of `Date.now()`, so `maxAgeMs: 0` removed nothing).
+- The browser-route test waits for the mock's asynchronous read of the spool file.
+- The Upload page switches its label to "Importing…" once the last byte has been sent: a ZIP is imported before the server replies.
+- `scripts/e2e-upload-resilience.ts`: source names are unique per run (the importer skips a filename it has already imported, so a re-run on one stack passed vacuously and the queue-wait scenario failed); `--only=<keys>` and `--only-slow` select scenarios; the queue-wait scenario prints its timings; the throttled client no longer piles up `drain` listeners.
+
+Verified before merging: 135 test files / 1931 tests, `tsc`, lint; the image built; the rehearsal suite 36/36; the resilience scenarios 33/33 (twice; the second time with unique names) plus the 300 s slow-client case 5/5; the real Upload page driven in a browser ("Uploading… 0 Bytes of 15.39 MB", then "Importing…", 200,000 rows imported, audit rows carrying the admin's email); a browser-side abort at 29 MB of a 150 MB body left no spool file and no rows, and the next upload imported.
