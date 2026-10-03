@@ -16,6 +16,9 @@ import {
   MAX_CREDENTIAL_LIMIT,
 } from "@/lib/credential-browse-defaults"
 import { runNewestFirst, dedupeRows } from "@/lib/newest-first"
+import {
+  dictionaryTermFromQuery, resolveDictionaryCandidates, buildDictionaryRowsSql, buildDictionaryTotalsSql, type DictionaryCandidates,
+} from "@/lib/search-dictionary-plan"
 
 export const dynamic = 'force-dynamic'
 
@@ -103,7 +106,8 @@ const DEDUPE_WINDOW_FACTOR = 3
  *   exclude_noise '1'       hide low-signal rows: IP-host / :port / .php / localhost URLs
  *   dedupe        '1'       collapse exact (url,email,password) duplicates (one row each)
  *   skip_totals   '1'       data query only: total / raw_total come back null
- *   totals_only   '1'       totals only (no rows): { total, raw_total, query_ms, timed_out }
+ *   totals_only   '1'       totals only (no rows): { total, raw_total, query_ms, timed_out, plan }
+ *   dictionary    '0'       run the plain query even when the domain search dictionary could answer (parity tests, scripts)
  */
 export async function GET(request: NextRequest) {
   const user = await validateRequest(request)
@@ -224,6 +228,16 @@ export async function GET(request: NextRequest) {
 
   const allParams = { ...params, ...cursorParams }
 
+  // Domain search dictionary (lib/search-dictionary-plan.ts): a search for exactly one domain-shaped term is answered from two small derived
+  // tables (the same rows, order, cursors and totals, 2-4 s instead of 15-19 s). null = this request keeps today's query. The rows request and the
+  // totals request the page sends together share one lookup.
+  const dictionaryTerm = sp.get('dictionary') === '0' ? null : dictionaryTermFromQuery(q.trim(), regex)
+  let candidatesMemo: Promise<DictionaryCandidates | null> | null = null
+  const getCandidates = (): Promise<DictionaryCandidates | null> => {
+    if (!dictionaryTerm) return Promise.resolve(null)
+    return (candidatesMemo ??= resolveDictionaryCandidates(dictionaryTerm))
+  }
+
   try {
     const t0 = Date.now()
 
@@ -259,9 +273,8 @@ export async function GET(request: NextRequest) {
     // use_query_cache = 0: ClickHouse 26.x throws error 731 when use_query_cache=1
     // (active from the user profile) is combined with timeout_overflow_mode='break'.
     // Partial/timed-out counts must not be cached anyway -- they are not the real count.
-    const totalsPromise: Promise<Array<{ total?: unknown; raw_total?: unknown }> | null> = !wantTotals
-      ? Promise.resolve(null)
-      : executeQuery(
+    type TotalsRows = Array<{ total?: unknown; raw_total?: unknown }>
+    const runPlainTotals = (): Promise<TotalsRows> => executeQuery(
           `SELECT ${dedupeCountExpr(dedupe, hasUserFilter, excludeNoise ? NOISE_FILTER : undefined)} AS total,
                   count() AS raw_total
            FROM ulp.credentials WHERE ${whereRaw}
@@ -271,6 +284,27 @@ export async function GET(request: NextRequest) {
                     use_query_cache = 0${dateFrom || dateTo ? '' : ',\n                    optimize_use_projections = 0'}`,
           params
         )
+    // The same two numbers from the dictionary's candidates: one aggregate per disjoint branch, merged as aggregate states so the figure equals the
+    // single scan's. Any failure falls back to the plain count (which breaks on a timeout instead of throwing, so there is nothing to re-raise).
+    let totalsPlan: 'dictionary' | 'plain' = 'plain'
+    const runTotals = async (): Promise<TotalsRows> => {
+      const candidates = await getCandidates()
+      if (candidates) {
+        if (candidates.empty) { totalsPlan = 'dictionary'; return [{ total: 0, raw_total: 0 }] }
+        const sql = buildDictionaryTotalsSql({ whereRaw, dedupe, hasUserFilter, onlyIf: excludeNoise ? NOISE_FILTER : undefined, candidates })
+        if (sql) {
+          try {
+            const answered: TotalsRows = await executeQuery(sql, params)
+            totalsPlan = 'dictionary'
+            return answered
+          } catch (err) {
+            console.warn('[credentials] dictionary totals failed -- using the plain count:', err instanceof Error ? err.message : String(err))
+          }
+        }
+      }
+      return runPlainTotals()
+    }
+    const totalsPromise: Promise<TotalsRows | null> = !wantTotals ? Promise.resolve(null) : runTotals()
 
     const runPlainDataQuery = (): Promise<unknown[]> => executeQuery(
         // Data query uses throw so a timeout produces a clear error (caught below)
@@ -324,7 +358,33 @@ export async function GET(request: NextRequest) {
     // instead of the projection (0.19 s); they only prune, so the rows are the same. A window that reaches the older partition
     // (no projection there) keeps them: without them its base-table scan took 28 s instead of 17 s. Not ready (projection not rebuilt yet) or a window error that is not a timeout:
     // the plain query answers, as it always did. A timeout is not retried: the plain query would take at least as long.
-    let plan: 'windows' | 'plain' = 'plain'
+    let plan: 'windows' | 'plain' | 'dictionary' = 'plain'
+
+    // The rows from the dictionary's candidates (lib/search-dictionary-plan.ts), or the plain query when the term is not eligible, the dictionary is
+    // not fresh, a cap is exceeded, or the plan fails for any reason but a timeout. A timeout is not retried: the plain query would take at least as long.
+    const runDataQuery = async (): Promise<unknown[]> => {
+      const candidates = await getCandidates()
+      if (candidates) {
+        if (candidates.empty) { plan = 'dictionary'; return [] }
+        const sql = buildDictionaryRowsSql({
+          where, cursorClause, orderBy, dedupe, dedupeInWindow,
+          rawCols: RAW_COLS, selectList: SELECT, sortMaxMemoryBytes: SORT_MAX_MEMORY_BYTES, normColsSetting: NORM_COLS_SETTING, candidates,
+        })
+        if (sql) {
+          try {
+            const answered = await executeQuery(sql, dedupeInWindow ? { ...allParams, windowLimit: limit * DEDUPE_WINDOW_FACTOR } : allParams) as unknown[]
+            plan = 'dictionary'
+            return answered
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            if (msg.includes('TIMEOUT_EXCEEDED') || msg.includes('timeout') || msg.includes('Timeout')) throw err
+            console.warn('[credentials] dictionary plan failed -- using the plain query:', msg)
+          }
+        }
+      }
+      return runPlainDataQuery()
+    }
+
     const runNewestFirstData = async (): Promise<unknown[]> => {
       try {
         const { limit: _plainLimit, ...baseParams } = allParams
@@ -359,12 +419,12 @@ export async function GET(request: NextRequest) {
         if (msg.includes('TIMEOUT_EXCEEDED') || msg.includes('timeout') || msg.includes('Timeout')) throw err
         console.warn('[credentials] newest-first windows failed -- using the plain query:', msg)
       }
-      return runPlainDataQuery()
+      return runDataQuery()
     }
 
     const dataPromise: Promise<unknown[]> = !wantData
       ? Promise.resolve([])
-      : sortKey === 'imported_desc' ? runNewestFirstData() : runPlainDataQuery()
+      : sortKey === 'imported_desc' ? runNewestFirstData() : runDataQuery()
 
     const [totalsResult, rows] = await Promise.all([totalsPromise, dataPromise])
     const query_ms = Date.now() - t0
@@ -374,7 +434,7 @@ export async function GET(request: NextRequest) {
     const timed_out = query_ms > 250_000
 
     if (totalsOnly) {
-      return NextResponse.json({ success: true, total, raw_total, query_ms, timed_out })
+      return NextResponse.json({ success: true, total, raw_total, query_ms, timed_out, plan: totalsPlan })
     }
 
     const nextCursor = rows.length === limit
@@ -390,7 +450,7 @@ export async function GET(request: NextRequest) {
       query_ms,
       timed_out,
       sort:        sortKey,
-      // Which plan answered the rows: 'windows' (lib/newest-first.ts) or 'plain'.
+      // Which plan answered the rows: 'windows' (lib/newest-first.ts), 'dictionary' (lib/search-dictionary-plan.ts) or 'plain'.
       plan,
     })
   } catch (error) {
