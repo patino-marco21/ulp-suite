@@ -78,6 +78,8 @@ the pattern gains `search_`). No n-gram or other index: *measured*, no gain. Com
 
 ### Lookup (the 1.0-1.5 s floor)
 
+E is matched against the projection's key, `reverse(email_domain)`, and ClickHouse's `reverse` is **bytewise** (`reverse('é.com')` is `moc.\xA9\xC3`, not `moc.é`; verified live,
+and 16 non-ASCII email domains turned up in a 5,000-row sample), so E is reversed as UTF-8 bytes and written with `\xHH` escapes, never as a reversed JavaScript string.
 D comes from one scan of the pair table, E from one scan of the email table (0.07-0.17 s); both use the *same LIKE parameters the legacy
 predicate uses* (`domlk`/`domsuf` escaping of `_`), so the semantics are identical. The scan is bound by reading the 85 M strings (a bare
 `sum(length(url_host))` takes as long as the match: 0.75 s), not by matching, so it cannot be tuned much; three single-column scans run in parallel
@@ -92,8 +94,11 @@ Both branches are the legacy SELECT (same `RAW_COLS`, `where`, `cursorClause`, `
 Unique is on, `LIMIT limit`, then the outer `NORM_COLS` select). For the in-window Unique form (a sort not led by `domain`) each branch takes the
 legacy window `limit * 3`, the union is cut to the window, then deduplicated and limited, which is exactly the legacy window semantics. For the
 `domain`-led sorts each branch dedupes inside itself first (`LIMIT 1 BY ... LIMIT limit`); the first `limit` unique rows of the union are inside the
-union of the branches' first `limit` unique rows, so the result is the same. Parameters, not literals: `{dictDomains:Array(String)}` and
-`{dictEmailRev:Array(String)}` (the monitor already passes such arrays), so no query-size limit applies.
+union of the branches' first `limit` unique rows, so the result is the same. The candidate lists are written into the SQL as **escaped
+string literals** (`lib/clickhouse-literals.ts`), not passed as `{name:Array(String)}` parameters. *Amended 2026-10-03, measured while planning:* parameters travel in the
+URL and ClickHouse refuses one above `http_max_field_value_size` (128 KiB): 3,000 domains of 43 characters failed with "HTML Form Exception: Field value too long", 40,000 with "URI too long".
+The SQL travels in the body, where the limit is `max_query_size` (256 KiB, and it cannot be raised from inside the query): three copies of a 3,000-domain list (83 KiB each) fit, six thousand domains do not.
+So the caps below also count bytes (see the caps table), and the escaping is pinned by tests and by a live round trip of 25 awkward strings (quotes, backslashes, `'; DROP TABLE`, NUL, RTL override, 4,000 characters), all returned byte for byte.
 
 Two ClickHouse 26.3 facts found by testing, both pinned in the code comments and the tests:
 
@@ -105,8 +110,10 @@ Two ClickHouse 26.3 facts found by testing, both pinned in the code comments and
 
 ### Totals
 
-`SELECT sum(total), sum(raw_total) FROM (branch-1 aggregate UNION ALL branch-2 aggregate)` with the legacy aggregate expressions
-(`dedupeCountExpr`, `count()`), over the disjoint branches. *Measured:* raw 2,894 / 871 / 1,560 and unique 1,710 / 870 / 1,352, identical to the legacy
+One aggregate per branch over the disjoint branches, combined by **merging aggregate states**, not by adding the numbers (*amended 2026-10-03*): `uniq` is an
+estimate, and the sum of two estimates is not the estimate of the union. Measured on the live table for a term with 1.23M credentials: the legacy single scan gave
+1,234,432 unique, the sum of two disjoint branches 1,234,344, and `uniqIfMerge` over `uniqIfState` of the same two branches **1,234,432, identical**. Counts add exactly.
+`lib/ulp-dedupe.ts` gains `dedupeCountPartial` (the state form of `dedupeCountExpr`). *Measured:* raw 2,894 / 871 / 1,560 and unique 1,710 / 870 / 1,352, identical to the legacy
 query, in 0.17-1.1 s against 5-9 s.
 
 ### Eligibility, caps and fallbacks (every row falls back to the unchanged legacy path)
@@ -117,6 +124,7 @@ query, in 0.17-1.1 s against 5-9 s.
 | Dictionary missing, building, or fingerprint differs from the live table | legacy |
 | `proj_email_domain_rev` is not on every part (`isEmailDomainRevProjectionReady`) | legacy |
 | \|D\| above `SEARCH_DICT_MAX_DOMAINS` (default 3,000) or \|E\| above `SEARCH_DICT_MAX_EMAIL_DOMAINS` (default 300) | legacy |
+| The inlined list of D is above 90,000 bytes or the list of E above 20,000 bytes, or the finished SQL above 240,000 characters (`max_query_size` is 262,144; D appears twice in a query) | legacy |
 | The lookup takes longer than 8 s, or the plan raises a non-timeout ClickHouse error | legacy, one `console.warn` with the reason |
 | A query timeout inside the plan | the same 408 response the legacy path returns |
 | D and E are both empty | an empty page and zero totals without touching the table (today this costs a 9-12 s full scan to find nothing) |
@@ -130,11 +138,16 @@ domain order already helps. The caps are environment-tunable. `/api/credentials?
 
 `fingerprint = hash(uuid of ulp.credentials, per partition (rows, min block, max block), every NON-projection mutation id and command)`, one
 metadata query over `system.parts` and `system.mutations`. Inserts raise rows and the max block; `ATTACH`/`REPLACE PARTITION` raise the max block;
-deletes and content mutations change rows or the mutation list; a table swap changes the uuid; merges change none of them. **Projection-only
+deletes and content mutations change rows or the mutation list; a table swap changes the uuid; merges change none of them. **Projection and index
 mutations are excluded**: `lib/projection-scope-cron.ts` runs `CLEAR PROJECTION` on partition 202607 every day at 05:00Z (verified: mutations on
-2026-10-02 and 2026-10-03), and part versions would otherwise invalidate the dictionary daily. A content mutation still running makes the dictionary
+2026-10-02 and 2026-10-03), and part versions would otherwise invalidate the dictionary daily. *Amended 2026-10-03:* `system.mutations.command` is wrapped in parentheses
+(`(CLEAR PROJECTION proj_imported_desc IN PARTITION '202607')`), so the exclusion is `match(command, '^\\(?(CLEAR|MATERIALIZE|DROP|ADD) (PROJECTION|INDEX)')`; an anchored
+`^CLEAR PROJECTION` would match nothing. Index mutations are excluded too (they cannot change a dictionary column, and the oldest history entries are `DROP INDEX`, which would
+force a spurious rebuild when they age out of the list). Measured on the live table: 18 of the 19 listed mutations are excluded; the one kept is `MATERIALIZE COLUMN country_tier`. A content mutation still running makes the dictionary
 stale. The fingerprint is stored in the `COMMENT` of **both** dictionary tables (JSON with build time and counts) so it travels with the table
-through the swap; the dictionary is fresh only when both comments equal the live fingerprint. The check is cached 15 s.
+through the swap; the dictionary is fresh only when both comments equal the live fingerprint. The check is cached **3 s** (*amended 2026-10-03*; the spec said 15 s): a cached
+`fresh` is the one answer that must not outlive a change to the data, because for that long a search could use candidates that miss a row with a new domain, and the check
+is two metadata queries that cost milliseconds.
 
 ### Build and refresh (`lib/search-dictionary.ts`, `lib/search-dictionary-cron.ts`, `scripts/build-search-dictionary.ts`)
 
@@ -151,7 +164,7 @@ through the swap; the dictionary is fresh only when both comments equal the live
 
 ## Measured: today against the plan (cold, idle server, first page and totals, `domain_asc`)
 
-Terms A and B are the owner's real searches, so their names are withheld (the repository is public); `scripts/benchmark-search.ts` takes terms as arguments.
+Terms A and B are the owner's real searches, so their names are withheld (the repository is public); the live parity test takes terms from `SDP_TERMS`.
 
 | Term | Candidates D / E | Today rows / totals | Plan first page (lookup + rows) / totals | Cold lookup alone |
 |---|---|---|---|---|
@@ -182,8 +195,9 @@ becomes 0.35 s / 0.25 s, `imported_desc` 23.2 s / 37.6 s becomes 0.35 s / 0.27 s
    blank-domain legacy rows and email-domain-only matches; build through the real function; assert API parity with and without `dictionary=0`; import a file
    and see the dictionary go stale (legacy answers) and fresh again after the build; drop the tables (fallback); swap under a concurrent query loop; a 3,000-value
    parameter reaches ClickHouse.
-4. **Live acceptance**: the supervised first build (about 2.5 min, 2.2 GiB), then `scripts/benchmark-search.ts` against the table above, then the
-   parity test on the live table, before the flag is left on. Rollback: `SEARCH_DICTIONARY=0` (no rebuild needed), or the rollback image tag.
+4. **Live acceptance**: the supervised first build (about 2.5 min, 2.2 GiB), then the live parity test, which also prints the timings of the table above (it drives the route itself, so
+   the legacy SQL it compares against cannot drift from the route's; *amended 2026-10-03*: there is no separate `scripts/benchmark-search.ts`), before the flag is left on.
+   Rollback: `SEARCH_DICTIONARY=0` (no rebuild needed), or the rollback image tag.
 
 ## Decisions for the owner (defaults in bold)
 
