@@ -301,6 +301,16 @@ Both are view-only — storage is untouched; toggle off to see everything.
 
 The browser defaults to 200 rows per page, globally ordered Domain A→Z. Page size and sort order remain selectable in the UI and API.
 
+### Domain search dictionary (speed)
+
+A search for one domain, such as `ledger.com`, matches the site, its subdomains, hosts that contain the name, and email domains that contain it. ClickHouse cannot use the primary key for that mix, so it used to read most of the table (15-19 s on the 1.39B-row deployment). Two small derived tables, `ulp.search_host_dict` (distinct domain and host pairs, about 2 GiB) and `ulp.search_emaildomain_dict` (about 150 MiB), let the app look up which domains and email domains can match first and then read only those ranges: the same rows, order, cursors and totals in about 2-4 s. It is used only for a search that is exactly one domain-shaped term; everything else, and any problem, runs the original query.
+
+- The tables are rebuilt automatically after imports (a tick every `SEARCH_DICT_CRON_MINUTES`, once the data has been quiet for `SEARCH_DICT_SETTLE_SECONDS`). While one is stale or missing, searches simply use the slower original query. Ingest Health shows its state.
+- First build, by hand and watched (about 2.5 minutes, 2 GiB; run it before relying on it): `npx tsx scripts/build-search-dictionary.ts` (the header of the script shows the `CLICKHOUSE_HOST` to use from the host).
+- `SEARCH_DICTIONARY=0` switches it off (no rebuild needed). `SEARCH_DICT_MAX_DOMAINS` (3000) and `SEARCH_DICT_MAX_EMAIL_DOMAINS` (300) bound how many candidates one term may have; above them the original query runs (popular terms such as `google.com`).
+- `/api/credentials?...&dictionary=0` forces the original query for one request, and a response says which plan answered in `plan` (`dictionary`, `windows` or `plain`).
+- The tables are derived data: `scripts/clickhouse-backup.sh` leaves them out, and dropping them is always safe.
+
 ### Content deduplication (storage)
 
 `(url,email,password)` duplicates accumulate when the same credential arrives across different combolist files — ignoring URL scheme and a trailing slash, same as the browser's Unique toggle above; email/password stay exact. To remove them from storage:

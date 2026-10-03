@@ -164,6 +164,13 @@ services:
       SQLITE_BACKUP_HOURS: ${SQLITE_BACKUP_HOURS:-}
       SQLITE_BACKUP_KEEP: ${SQLITE_BACKUP_KEEP:-}
       BACKUP_MAX_AGE_HOURS: ${BACKUP_MAX_AGE_HOURS:-}
+      # Domain search dictionary (lib/search-dictionary.ts) -- optional; forwarded explicitly (see above). Empty values use the defaults in code:
+      # on; at most 3000 candidate domains and 300 email domains per search; a rebuild tick every 10 minutes; 120 s of quiet before a rebuild.
+      SEARCH_DICTIONARY: ${SEARCH_DICTIONARY:-}
+      SEARCH_DICT_MAX_DOMAINS: ${SEARCH_DICT_MAX_DOMAINS:-}
+      SEARCH_DICT_MAX_EMAIL_DOMAINS: ${SEARCH_DICT_MAX_EMAIL_DOMAINS:-}
+      SEARCH_DICT_CRON_MINUTES: ${SEARCH_DICT_CRON_MINUTES:-}
+      SEARCH_DICT_SETTLE_SECONDS: ${SEARCH_DICT_SETTLE_SECONDS:-}
     volumes:
       - ./uploads:/app/uploads
       - ./data:/app/data

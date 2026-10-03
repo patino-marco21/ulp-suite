@@ -63,8 +63,8 @@ describe('backup tooling — what it must never do', () => {
   test('never backs up `ulp.*`: that would snapshot and upload the 381 GiB pre-dedup archive', () => {
     expect(script).not.toMatch(/TABLES="ulp\.\*"/)
     expect(script).not.toMatch(/--tables\s+"?ulp\.\*/)
-    // the default list excludes the archive and scratch tables by name
-    expect(script).toContain("NOT match(name, '^(credentials_|zz_)')")
+    // the default list excludes the archive, the scratch tables and the derived search dictionary (and its __new shadow copies) by name
+    expect(script).toContain("NOT match(name, '^(credentials_|zz_|search_)')")
   })
 
   test('every command that snapshots runs the disk-space guard first', () => {

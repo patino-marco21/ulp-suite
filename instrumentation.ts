@@ -101,6 +101,15 @@ export async function register() {
       } catch (err) {
         console.error('[instrumentation] Disk-watch cron failed to start:', err)
       }
+
+      // Domain search dictionary: rebuilds the two derived tables behind the fast domain search when they are stale or missing
+      // (settle wait, mutation and disk checks, backoff inside). See lib/search-dictionary-cron.ts.
+      try {
+        const { startSearchDictionaryCron } = await import('./lib/search-dictionary-cron')
+        startSearchDictionaryCron()
+      } catch (err) {
+        console.error('[instrumentation] Search-dictionary cron failed to start:', err)
+      }
     }
   }
 }

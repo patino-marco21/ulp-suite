@@ -29,9 +29,10 @@
 # and `list local` work without S3.
 #
 # Why tables are listed instead of `ulp.*`: the ulp database also holds the multi-hundred-GiB pre-dedup
-# archive (credentials_predup_auto) and any dedup scratch tables. A wildcard would snapshot them too,
-# pinning their parts (so dropping the archive later would free nothing while the snapshot exists) and
-# trying to upload them.
+# archive (credentials_predup_auto), any dedup scratch tables, and the derived search dictionary
+# (search_host_dict, search_emaildomain_dict and their __new shadow copies; rebuilt by the app, never
+# worth backing up). A wildcard would snapshot them too, pinning their parts (so dropping the archive
+# later would free nothing while the snapshot exists) and trying to upload them.
 #
 # WARNING about local snapshots: they are hardlinks on the SAME disk. They cost nothing until a merge
 # replaces the parts they point at; from then on the old parts stay on disk until the snapshot is
@@ -62,7 +63,7 @@ GIB=$((1024 * 1024 * 1024))
 default_tables() {
   "${CH[@]}" -q "SELECT arrayStringConcat(groupArray(concat('ulp.', name)), ',')
                  FROM system.tables
-                 WHERE database = 'ulp' AND NOT match(name, '^(credentials_|zz_)')" 2>/dev/null || true
+                 WHERE database = 'ulp' AND NOT match(name, '^(credentials_|zz_|search_)')" 2>/dev/null || true
 }
 TABLES="${BACKUP_TABLES:-$(default_tables)}"
 [ -z "$TABLES" ] && TABLES="ulp.credentials,ulp.sources,ulp.domains"
