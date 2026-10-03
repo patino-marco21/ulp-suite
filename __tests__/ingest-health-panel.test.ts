@@ -27,3 +27,25 @@ describe('Ingest Health panel — free disk space and backups', () => {
     expect(panel).toContain('{backup && (')
   })
 })
+
+describe('Ingest Health panel — the search dictionary', () => {
+  test('shows one line for it, amber unless it is fresh or switched off', () => {
+    expect(panel).toContain('data-testid="search-dictionary"')
+    expect(panel).toContain('Search dictionary: fresh')
+    expect(panel).toContain('Search dictionary: stale')
+    expect(panel).toContain('Search dictionary: missing')
+    expect(panel).toContain('Search dictionary: building')
+    expect(panel).toContain('Search dictionary: off (SEARCH_DICTIONARY=0)')
+    expect(panel).toContain('Search dictionary: state unavailable')
+    expect(panel).toMatch(/label\.ok \? "text-muted-foreground" : "text-amber-600 font-medium"/)
+  })
+
+  test('says so when the last build failed', () => {
+    expect(panel).toContain('last build failed')
+  })
+
+  test('the block is optional in the payload, so an older server response still renders', () => {
+    expect(panel).toMatch(/searchDictionary\?: \{/)
+    expect(panel).toContain('{searchDictionary && (')
+  })
+})

@@ -45,6 +45,16 @@ interface IngestHealth {
     freeRatio: number | null
     error?: string
   }
+  // The two derived tables behind the fast domain search (lib/search-dictionary.ts).
+  searchDictionary?: {
+    state: "fresh" | "stale" | "missing" | "building" | "disabled" | "unknown"
+    builtAt: string | null
+    pairRows: number | null
+    emailRows: number | null
+    bytes: number | null
+    lastError: string | null
+    lastBuildMs: number | null
+  }
 }
 
 const fmtRate = (n: number) =>
@@ -53,6 +63,24 @@ const fmtRows = (n: number) =>
   n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(0)}K` : String(n)
 const fmtGB = (b: number) => `${(b / 2 ** 30).toFixed(1)} GB`
 const fmtAge = (h: number) => (h < 1 ? "just now" : h < 48 ? `${Math.round(h)} h ago` : `${Math.round(h / 24)} d ago`)
+
+function dictionaryLabel(d: NonNullable<IngestHealth["searchDictionary"]>): { text: string; ok: boolean } {
+  const ageHours = d.builtAt ? Math.max(0, (Date.now() - Date.parse(d.builtAt)) / 3_600_000) : null
+  switch (d.state) {
+    case "fresh":
+      return { ok: true, text: `Search dictionary: fresh${ageHours !== null && Number.isFinite(ageHours) ? `, built ${fmtAge(ageHours)}` : ""}${d.bytes !== null ? `, ${fmtGB(d.bytes)}` : ""}` }
+    case "building":
+      return { ok: false, text: "Search dictionary: building — domain searches use the slower query until it is done" }
+    case "stale":
+      return { ok: false, text: "Search dictionary: stale — domain searches use the slower query until it is rebuilt" }
+    case "missing":
+      return { ok: false, text: "Search dictionary: missing — domain searches use the slower query (build it: scripts/build-search-dictionary.ts)" }
+    case "disabled":
+      return { ok: true, text: "Search dictionary: off (SEARCH_DICTIONARY=0)" }
+    default:
+      return { ok: false, text: "Search dictionary: state unavailable" }
+  }
+}
 
 export function IngestHealthPanel() {
   const [data, setData] = useState<IngestHealth | null>(null)
@@ -75,7 +103,7 @@ export function IngestHealthPanel() {
   }, [])
 
   if (!data) return null
-  const { app, clickhouse, diskBudget, disk, backup } = data
+  const { app, clickhouse, diskBudget, disk, backup, searchDictionary } = data
   const active = app.filename !== null && Date.now() - app.updatedAt < 5_000
   const partsPct = Math.min(100, Math.round((clickhouse.activeParts / clickhouse.partsThreshold) * 100))
 
@@ -178,6 +206,22 @@ export function IngestHealthPanel() {
             </span>
           </div>
         )}
+        {searchDictionary && (() => {
+          const label = dictionaryLabel(searchDictionary)
+          return (
+            <div className="flex gap-6 flex-wrap text-xs border-t pt-3" data-testid="search-dictionary">
+              <span
+                className={label.ok ? "text-muted-foreground" : "text-amber-600 font-medium"}
+                title="Two small derived tables that make a one-domain search fast; rebuilt automatically after imports (README, Domain search dictionary)"
+              >
+                {label.text}
+              </span>
+              {searchDictionary.lastError && (
+                <span className="text-red-600" title={searchDictionary.lastError}>last build failed</span>
+              )}
+            </div>
+          )
+        })()}
       </CardContent>
     </Card>
   )

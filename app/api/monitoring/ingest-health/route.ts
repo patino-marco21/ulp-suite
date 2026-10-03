@@ -5,6 +5,7 @@ import { getIngestMetrics } from '@/lib/ingest-metrics'
 import { diskBudgetBytes, buildLiveBytesSql, diskBudgetPct } from '@/lib/disk-budget'
 import { readDisk } from '@/lib/disk-watch'
 import { readBackupStatus } from '@/lib/backup-status'
+import { getSearchDictionaryStatus } from '@/lib/search-dictionary'
 
 export const dynamic = 'force-dynamic'
 
@@ -64,5 +65,12 @@ export async function GET(request: NextRequest) {
   // watcher in lib/disk-watch.ts act on) -- diskBudget above is the table's own size against its budget.
   const disk = await readDisk()
 
-  return NextResponse.json({ app: getIngestMetrics(), clickhouse, diskBudget, disk, backup: readBackupStatus() })
+  // The derived tables behind the fast domain search (lib/search-dictionary.ts). Never throws: 'unknown' when ClickHouse cannot say.
+  const dict = await getSearchDictionaryStatus()
+  const searchDictionary = {
+    state: dict.state, builtAt: dict.builtAt, pairRows: dict.pairRows, emailRows: dict.emailRows, bytes: dict.bytes,
+    lastError: dict.lastError, lastBuildMs: dict.lastBuildMs,
+  }
+
+  return NextResponse.json({ app: getIngestMetrics(), clickhouse, diskBudget, disk, backup: readBackupStatus(), searchDictionary })
 }

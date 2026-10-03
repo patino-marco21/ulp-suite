@@ -15,9 +15,11 @@ vi.mock('@/lib/ingest-metrics', () => ({
 
 import { executeQuery } from '@/lib/clickhouse'
 import { GET } from '@/app/api/monitoring/ingest-health/route'
+import { liveStateFromRow, encodeDictionaryComment, resetSearchDictionaryCache } from '@/lib/search-dictionary'
 
 const mockEQ = executeQuery as ReturnType<typeof vi.fn>
 beforeEach(() => {
+  resetSearchDictionaryCache()
   mockEQ.mockReset()
   // Re-arm a default resolved value after reset (matches the pattern used in
   // __tests__/upload-processor.test.ts). A bare mockReset() with no follow-up
@@ -57,5 +59,33 @@ describe('GET /api/monitoring/ingest-health', () => {
     expect(json.diskBudget.usedBytes).toBe(0)
     expect(json.diskBudget.note).toBeTruthy()
     expect(json.app.filename).toBe('x.txt')
+  })
+
+  it('reports the search dictionary: unknown when ClickHouse cannot say', async () => {
+    mockEQ
+      .mockResolvedValueOnce([{ c: 42 }]).mockResolvedValueOnce([{ c: 3 }]).mockResolvedValueOnce([{ v: 1 }]).mockResolvedValueOnce([{ bytes: 1 }])
+    const json = await (await GET({} as any)).json()
+    expect(json.searchDictionary).toMatchObject({ state: 'unknown', builtAt: null, pairRows: null, bytes: null })
+  })
+
+  it('reports a fresh search dictionary with its size and build time', async () => {
+    const liveRow = { table_uuid: 'u1', part_state: '202608:1:0:1', mutation_state: '', mutations_running: '0', builds_running: '0' }
+    const fp = liveStateFromRow(liveRow)!.fingerprint
+    const comment = (rows: number) => encodeDictionaryComment({ v: 1, fp, builtAt: '2026-10-03T12:00:00.000Z', rows })
+    mockEQ
+      .mockResolvedValueOnce([{ c: 42 }]).mockResolvedValueOnce([{ c: 3 }]).mockResolvedValueOnce([{ v: 1 }]).mockResolvedValueOnce([{ bytes: 1 }])
+      .mockImplementation(async (sql: string) => {
+        if (sql.includes('AS table_uuid')) return [liveRow]
+        if (sql.includes("name IN ('search_host_dict'")) {
+          return [
+            { name: 'search_host_dict', comment: comment(85), table_rows: '85', table_bytes: '2000' },
+            { name: 'search_emaildomain_dict', comment: comment(13), table_rows: '13', table_bytes: '100' },
+          ]
+        }
+        return []
+      })
+    const json = await (await GET({} as any)).json()
+    expect(json.searchDictionary).toMatchObject({ state: 'fresh', builtAt: '2026-10-03T12:00:00.000Z', pairRows: 85, emailRows: 13, bytes: 2100 })
+    expect(json.searchDictionary).not.toHaveProperty('fingerprint')
   })
 })
