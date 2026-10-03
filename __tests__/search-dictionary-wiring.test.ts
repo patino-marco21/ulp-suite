@@ -33,4 +33,10 @@ describe('search dictionary wiring', () => {
     expect(script).toContain("NOT match(name, '^(credentials_|zz_|search_)')")
     expect(script).toContain('search_host_dict')
   })
+
+  test('the rehearsal stack runs the cron fast, so scripts/e2e-search-dictionary.ts can watch the dictionary rebuild itself', () => {
+    const compose = read('docker-compose.rehearsal.yml')
+    expect(compose).toContain('SEARCH_DICT_CRON_MINUTES: "1"')
+    expect(compose).toContain('SEARCH_DICT_SETTLE_SECONDS: "5"')
+  })
 })

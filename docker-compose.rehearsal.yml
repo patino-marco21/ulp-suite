@@ -70,6 +70,10 @@ services:
       # lib/import-runner.ts fails an import with no progress for this long. 30 s (the default is 20 minutes) so that
       # scripts/e2e-upload-resilience.ts can prove the watchdog by freezing ClickHouse for longer than that.
       IMPORT_STALL_TIMEOUT_MS: "30000"
+      # lib/search-dictionary-cron.ts: a tick a minute and 5 s of quiet (production: 10 minutes and 120 s), so that
+      # scripts/e2e-search-dictionary.ts can watch the dictionary build and rebuild itself in the production image.
+      SEARCH_DICT_CRON_MINUTES: "1"
+      SEARCH_DICT_SETTLE_SECONDS: "5"
     volumes:
       - rehearsal_data:/app/data
       - rehearsal_inbox:/app/inbox
