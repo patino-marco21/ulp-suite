@@ -1292,7 +1292,8 @@ describe('resolveDictionaryCandidates', () => {
   test('the email domains are reversed as UTF-8 BYTES, like ClickHouse reverse(); a reversed JavaScript string would miss non-ASCII ones', async () => {
     const run = lookupRun({ email: ['é.com', 'ledger.com'] })
     const c = await resolveDictionaryCandidates(TERM, { run, status: async () => freshStatus(), projectionReady: ready })
-    expect(c!.emailRevLiteral).toBe("['moc.\\xa9\\xc3','moc.regdel']")
+    // sorted as JavaScript sorts ('l' is U+006C, 'é' U+00E9), THEN reversed bytewise
+    expect(c!.emailRevLiteral).toBe("['moc.regdel','moc.\\xa9\\xc3']")
   })
 
   test.each(['stale', 'missing', 'building', 'unknown', 'disabled'] as const)('a dictionary that is %s means today\'s query, and no lookup runs', async state => {
@@ -1377,7 +1378,7 @@ describe('resolveDictionaryCandidates', () => {
     })
 
     test('a list of E above 20,000 bytes', async () => {
-      const long = Array.from({ length: 250 }, (_, i) => `${'y'.repeat(60)}${i}.ledger.com`)
+      const long = Array.from({ length: 290 }, (_, i) => `${'y'.repeat(70)}${i}.ledger.com`) // under the 300 count cap, about 26 KB of literal
       const run = lookupRun({ exact: ['ledger.com'], email: long })
       expect(await resolveDictionaryCandidates(TERM, { run, status: async () => freshStatus(), projectionReady: ready })).toBeNull()
     })
