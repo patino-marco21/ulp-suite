@@ -63,3 +63,28 @@ export function dedupeCountExpr(dedupe: boolean, hasUserFilter = true, onlyIf?: 
   if (onlyIf) return distinct ? `uniqIf(${DEDUPE_BY}, ${onlyIf})` : `countIf(${onlyIf})`
   return distinct ? `uniq(${DEDUPE_BY})` : 'count()'
 }
+
+export interface DedupeCountPartial {
+  /** The aggregate one scan computes. For the distinct forms it is an aggregate STATE; for the count forms a plain count. */
+  partial: string
+  /** Turns a column holding the partials of several DISJOINT scans into the final tally. */
+  combine: (column: string) => string
+}
+
+/**
+ * dedupeCountExpr split in two, so that several disjoint scans of the search predicate (lib/search-dictionary-plan.ts runs two) add up EXACTLY.
+ * `uniq` is an estimate and the sum of two estimates is not the estimate of the union: measured on the live table for a term with 1.23M
+ * credentials, one scan gave 1,234,432, the SUM of two disjoint halves 1,234,344, and `uniqIfMerge` over the halves' `uniqIfState`s 1,234,432
+ * -- identical to the single scan. Counts add exactly. The branch of each form is the same one dedupeCountExpr picks.
+ */
+export function dedupeCountPartial(dedupe: boolean, hasUserFilter = true, onlyIf?: string): DedupeCountPartial {
+  const distinct = dedupe && hasUserFilter
+  if (distinct) {
+    return onlyIf
+      ? { partial: `uniqIfState(${DEDUPE_BY}, ${onlyIf})`, combine: column => `uniqIfMerge(${column})` }
+      : { partial: `uniqState(${DEDUPE_BY})`, combine: column => `uniqMerge(${column})` }
+  }
+  return onlyIf
+    ? { partial: `countIf(${onlyIf})`, combine: column => `sum(${column})` }
+    : { partial: 'count()', combine: column => `sum(${column})` }
+}
