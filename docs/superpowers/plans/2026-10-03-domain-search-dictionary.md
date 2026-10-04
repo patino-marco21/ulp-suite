@@ -1,6 +1,6 @@
 # Domain Search Dictionary Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** A search for one domain-shaped term on the Credentials page returns exactly today's rows, order, cursors and totals, in about 2-4 s instead of 15-19 s, by resolving the substring branches against two small derived dictionary tables so the primary key can prune again.
 
@@ -74,7 +74,7 @@ The plan and the spec's amendments are already committed on `main`. `git status`
   - `chReversedLiteral(value: string): string`  (the literal of `reverse(value)` as ClickHouse computes it: the UTF-8 bytes in reverse order)
   - `chReversedArrayLiteral(values: readonly string[]): string`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `__tests__/clickhouse-literals.test.ts`:
 
@@ -185,12 +185,12 @@ describe('array literals', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `npx vitest run __tests__/clickhouse-literals.test.ts`
 Expected: FAIL, "Failed to resolve import "@/lib/clickhouse-literals"".
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `lib/clickhouse-literals.ts`:
 
@@ -249,12 +249,12 @@ export function chReversedArrayLiteral(values: readonly string[]): string {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `npx vitest run __tests__/clickhouse-literals.test.ts`
 Expected: PASS (all tests in the file; about 40 including the `test.each` cases).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/clickhouse-literals.ts __tests__/clickhouse-literals.test.ts
@@ -277,7 +277,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 - Consumes: `DEDUPE_BY` from the same file.
 - Produces (used by Task 4): `dedupeCountPartial(dedupe: boolean, hasUserFilter?: boolean, onlyIf?: string): { partial: string; combine: (column: string) => string }`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `__tests__/ulp-dedupe.test.ts` change line 2 to:
 
@@ -327,12 +327,12 @@ and insert, just before the final `})` of the outer `describe('ulp-dedupe', ...)
   })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/ulp-dedupe.test.ts`
 Expected: FAIL, `dedupeCountPartial is not a function` (the four new tests fail; the older ones pass).
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `lib/ulp-dedupe.ts`:
 
@@ -364,12 +364,12 @@ export function dedupeCountPartial(dedupe: boolean, hasUserFilter = true, onlyIf
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `npx vitest run __tests__/ulp-dedupe.test.ts`
 Expected: PASS (all tests, including the four new ones).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/ulp-dedupe.ts __tests__/ulp-dedupe.test.ts
@@ -401,7 +401,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
   - `recordBuildOutcome(patch)`, `readBuildRecord()`
   - `class DictionaryHeadroomError extends Error`, `buildSearchDictionary(opts?): Promise<{ pairRows; emailRows; ms; fingerprint }>` with `BuildOptions = { client?; run?; now?; log?; skipHeadroomCheck? }`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `__tests__/search-dictionary.test.ts`:
 
@@ -767,12 +767,12 @@ describe('buildSearchDictionary', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `npx vitest run __tests__/search-dictionary.test.ts`
 Expected: FAIL, "Failed to resolve import "@/lib/search-dictionary"".
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `lib/search-dictionary.ts`:
 
@@ -1155,7 +1155,7 @@ export async function buildSearchDictionary(opts: BuildOptions = {}): Promise<Bu
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `npx vitest run __tests__/search-dictionary.test.ts`
 Expected: PASS (all tests in the file).
@@ -1163,7 +1163,7 @@ Expected: PASS (all tests in the file).
 Run: `npx tsc --noEmit`
 Expected: no output (no type errors).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/search-dictionary.ts __tests__/search-dictionary.test.ts
@@ -1197,7 +1197,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
   - `buildDictionaryTotalsSql(a: TotalsSqlInput): string | null`
   - constants `DOMAINS_LITERAL_MAX_BYTES = 90_000`, `EMAIL_LITERAL_MAX_BYTES = 20_000`, `DICTIONARY_SQL_MAX_CHARS = 240_000`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `__tests__/search-dictionary-plan.test.ts`:
 
@@ -1573,12 +1573,12 @@ describe('buildDictionaryTotalsSql', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `npx vitest run __tests__/search-dictionary-plan.test.ts`
 Expected: FAIL, "Failed to resolve import "@/lib/search-dictionary-plan"".
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `lib/search-dictionary-plan.ts`:
 
@@ -1875,7 +1875,7 @@ SETTINGS optimize_trivial_count_query = 1,
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `npx vitest run __tests__/search-dictionary-plan.test.ts`
 Expected: PASS (all tests in the file).
@@ -1883,7 +1883,7 @@ Expected: PASS (all tests in the file).
 Run: `npx tsc --noEmit`
 Expected: no output.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/search-dictionary-plan.ts __tests__/search-dictionary-plan.test.ts
@@ -1906,7 +1906,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 - Consumes: `dictionaryTermFromQuery`, `resolveDictionaryCandidates`, `buildDictionaryRowsSql`, `buildDictionaryTotalsSql`, `DictionaryCandidates` (Task 4).
 - Produces: unchanged API contract plus `plan: 'dictionary'` on a rows response the plan answered, `plan: 'dictionary' | 'plain'` on a `totals_only` response, and `?dictionary=0` to force today's query for one request.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `__tests__/credentials-route-dictionary.test.ts`:
 
@@ -2128,12 +2128,12 @@ describe('GET /api/credentials — everything else is today\'s query, untouched'
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `npx vitest run __tests__/credentials-route-dictionary.test.ts`
 Expected: FAIL. The first test sees `plan: 'plain'` (the route does not use the plan yet) and no lookups.
 
-- [ ] **Step 3: Edit the route**
+- [x] **Step 3: Edit the route**
 
 All edits are in `app/api/credentials/route.ts`.
 
@@ -2345,7 +2345,7 @@ with
       plan,
 ```
 
-- [ ] **Step 4: Run the new test, the neighbouring route tests, and the type check**
+- [x] **Step 4: Run the new test, the neighbouring route tests, and the type check**
 
 Run: `npx vitest run __tests__/credentials-route-dictionary.test.ts __tests__/credentials-route-totals.test.ts __tests__/credentials-route-newest-first.test.ts __tests__/credentials-route.test.ts __tests__/credentials-route-dedupe-window.test.ts`
 Expected: PASS for every file. The older files use `q=binance.com`, which is now eligible: their mock answers the dictionary's status queries with the totals row, which reads as `unknown`, so they take the plain path and their query counts are unchanged (the status and lookup SQL carry neither `) AS t` nor `AS raw_total`).
@@ -2353,12 +2353,12 @@ Expected: PASS for every file. The older files use `q=binance.com`, which is now
 Run: `npx tsc --noEmit`
 Expected: no output.
 
-- [ ] **Step 5: Run the whole suite**
+- [x] **Step 5: Run the whole suite**
 
 Run: `npx vitest run`
 Expected: PASS (every file; the count is the previous total plus the new test files). If a test outside the route fails because it asserts the exact list of `executeQuery` calls for a domain-shaped `q`, update that assertion to ignore the dictionary's status queries (they are the ones whose SQL contains `search_host_dict` or `AS table_uuid`), not the route.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/api/credentials/route.ts __tests__/credentials-route-dictionary.test.ts
@@ -2382,7 +2382,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 - Consumes (Task 3): `buildSearchDictionary`, `DictionaryHeadroomError`, `getSearchDictionaryStatus`, `readLiveState`, `resetSearchDictionaryCache`, `recordBuildOutcome`, `searchDictCronMinutes`, `searchDictSettleSeconds`, `searchDictionaryEnabled`, `DictionaryStatus`, `LiveState`, `BuildResult`.
 - Produces: `type TickOutcome = 'disabled' | 'fresh' | 'unknown' | 'building' | 'settling' | 'mutating' | 'backoff' | 'no-headroom' | 'built' | 'failed'`; `runSearchDictionaryTick(overrides?: Partial<TickDeps>): Promise<TickOutcome>`; `startSearchDictionaryCron(): void`; `resetCronState(): void`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/search-dictionary-cron.test.ts`:
 
@@ -2583,12 +2583,12 @@ describe('search dictionary wiring', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/search-dictionary-cron.test.ts __tests__/search-dictionary-wiring.test.ts`
 Expected: FAIL (the cron module does not exist; the wiring pins fail).
 
-- [ ] **Step 3: Write the cron**
+- [x] **Step 3: Write the cron**
 
 Create `lib/search-dictionary-cron.ts`:
 
@@ -2704,7 +2704,7 @@ export function startSearchDictionaryCron(): void {
 }
 ```
 
-- [ ] **Step 4: Wire it in**
+- [x] **Step 4: Wire it in**
 
 4a. `instrumentation.ts`: replace
 
@@ -2817,7 +2817,7 @@ with
                  WHERE database = 'ulp' AND NOT match(name, '^(credentials_|zz_|search_)')" 2>/dev/null || true
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `npx vitest run __tests__/search-dictionary-cron.test.ts __tests__/search-dictionary-wiring.test.ts`
 Expected: PASS.
@@ -2825,7 +2825,7 @@ Expected: PASS.
 Run: `npx tsc --noEmit && npx vitest run`
 Expected: no type errors; the whole suite passes.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/search-dictionary-cron.ts instrumentation.ts docker-compose.yml .env.example README.md scripts/clickhouse-backup.sh __tests__/search-dictionary-cron.test.ts __tests__/search-dictionary-wiring.test.ts
@@ -2848,7 +2848,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 - Consumes: `getSearchDictionaryStatus` (Task 3).
 - Produces: `GET /api/monitoring/ingest-health` gains `searchDictionary: { state, builtAt, pairRows, emailRows, bytes, lastError, lastBuildMs }`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `__tests__/ingest-health-route.test.ts`, add to the imports (below the existing `import { GET } ...`):
 
@@ -2915,12 +2915,12 @@ describe('Ingest Health panel — the search dictionary', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run __tests__/ingest-health-route.test.ts __tests__/ingest-health-panel.test.ts`
 Expected: FAIL (`searchDictionary` is undefined in the route's answer; the panel has no such text).
 
-- [ ] **Step 3: Write the route change**
+- [x] **Step 3: Write the route change**
 
 In `app/api/monitoring/ingest-health/route.ts` add below `import { readBackupStatus } from '@/lib/backup-status'`:
 
@@ -2951,7 +2951,7 @@ with
   return NextResponse.json({ app: getIngestMetrics(), clickhouse, diskBudget, disk, backup: readBackupStatus(), searchDictionary })
 ```
 
-- [ ] **Step 4: Write the panel change**
+- [x] **Step 4: Write the panel change**
 
 In `components/ingest-health-panel.tsx`:
 
@@ -3019,7 +3019,7 @@ function dictionaryLabel(d: NonNullable<IngestHealth["searchDictionary"]>): { te
         })()}
 ```
 
-- [ ] **Step 5: Run the tests and the type check**
+- [x] **Step 5: Run the tests and the type check**
 
 Run: `npx vitest run __tests__/ingest-health-route.test.ts __tests__/ingest-health-panel.test.ts`
 Expected: PASS.
@@ -3027,7 +3027,7 @@ Expected: PASS.
 Run: `npx tsc --noEmit && npx eslint --no-eslintrc -c .eslintrc.json components/ingest-health-panel.tsx app/api/monitoring/ingest-health/route.ts lib/search-dictionary.ts lib/search-dictionary-plan.ts lib/search-dictionary-cron.ts lib/clickhouse-literals.ts`
 Expected: no output from either.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/api/monitoring/ingest-health/route.ts components/ingest-health-panel.tsx __tests__/ingest-health-route.test.ts __tests__/ingest-health-panel.test.ts
@@ -3049,7 +3049,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 - Consumes: `buildSearchDictionary`, `getSearchDictionaryStatus`, `resetSearchDictionaryCache` (Task 3); the route's `GET` (Task 5).
 - Produces: `npx tsx scripts/build-search-dictionary.ts [--status] [--force] [--skip-headroom-check]` (exit 0 fresh, 1 error, 3 built but already stale); the live test `SDP_PARITY=1 npx vitest run __tests__/search-dictionary-parity.live.test.ts` with `SDP_TERMS`, `SDP_SORTS`, `SDP_DEDUPES`, `SDP_PAGES`, `SDP_LEGACY_TERMS`, `SDP_TIMING_ONLY`.
 
-- [ ] **Step 1: Write the failing pin test for the script**
+- [x] **Step 1: Write the failing pin test for the script**
 
 Create `__tests__/search-dictionary-script.test.ts`:
 
@@ -3080,12 +3080,12 @@ describe('scripts/build-search-dictionary.ts', () => {
 })
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `npx vitest run __tests__/search-dictionary-script.test.ts`
 Expected: FAIL (ENOENT: no such file `scripts/build-search-dictionary.ts`).
 
-- [ ] **Step 3: Write the script**
+- [x] **Step 3: Write the script**
 
 Create `scripts/build-search-dictionary.ts`:
 
@@ -3151,7 +3151,7 @@ if (pathToFileURL(process.argv[1] ?? '').href === import.meta.url) {
 }
 ```
 
-- [ ] **Step 4: Write the live parity test**
+- [x] **Step 4: Write the live parity test**
 
 Create `__tests__/search-dictionary-parity.live.test.ts`:
 
@@ -3300,7 +3300,7 @@ describe.skipIf(!LIVE)('candidate lists written as literals reach the live Click
 })
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `npx vitest run __tests__/search-dictionary-script.test.ts __tests__/search-dictionary-parity.live.test.ts`
 Expected: the script pins PASS; the live file is skipped (`describe.skipIf`), which Vitest reports as skipped, not failed.
@@ -3308,7 +3308,7 @@ Expected: the script pins PASS; the live file is skipped (`describe.skipIf`), wh
 Run: `npx tsc --noEmit`
 Expected: no output. (`scripts/` and `__tests__/` are outside tsconfig's `include`; the tsx run in Task 10 type-strips them.)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add scripts/build-search-dictionary.ts __tests__/search-dictionary-script.test.ts __tests__/search-dictionary-parity.live.test.ts
@@ -3334,7 +3334,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 
 What it proves that unit tests cannot: the production image starts the cron, the cron builds the dictionary on a FRESH install (init SQL, Atomic database), the route's answers equal the plain query's for every sort and Unique setting, rows are found that only the email-domain branch (including a non-ASCII domain and a blank-domain row) or a path-text host can reach, the caps and the byte cap fall back, a 76 KB inlined candidate list is accepted by ClickHouse, an import makes the dictionary stale and searches step aside without missing the new row, a dropped table falls back, and queries during the rebuild and swap never fail or return a different total.
 
-- [ ] **Step 1: Write the failing pin**
+- [x] **Step 1: Write the failing pin**
 
 Append to the `describe` in `__tests__/search-dictionary-wiring.test.ts` (before its final `})`):
 
@@ -3350,7 +3350,7 @@ Append to the `describe` in `__tests__/search-dictionary-wiring.test.ts` (before
 Run: `npx vitest run __tests__/search-dictionary-wiring.test.ts`
 Expected: FAIL on the new test.
 
-- [ ] **Step 2: Add the rehearsal environment**
+- [x] **Step 2: Add the rehearsal environment**
 
 In `docker-compose.rehearsal.yml`, replace
 
@@ -3371,7 +3371,7 @@ with
 Run: `npx vitest run __tests__/search-dictionary-wiring.test.ts __tests__/rehearsal-isolation.test.ts`
 Expected: PASS (the isolation test still passes: no mount, name, network, volume or port changed).
 
-- [ ] **Step 3: Write the rehearsal driver**
+- [x] **Step 3: Write the rehearsal driver**
 
 Create `scripts/e2e-search-dictionary.ts`:
 
@@ -3605,7 +3605,7 @@ async function main(): Promise<number> {
 main().then(code => process.exit(code)).catch(err => { console.error(err); process.exit(1) })
 ```
 
-- [ ] **Step 4: Check it parses and the isolation guard still holds**
+- [x] **Step 4: Check it parses and the isolation guard still holds**
 
 Run: `npx esbuild scripts/e2e-search-dictionary.ts --log-level=error > /dev/null && echo parses`
 Expected: `parses` (esbuild only strips the types; it never runs the script, which would start driving the stack).
@@ -3613,7 +3613,7 @@ Expected: `parses` (esbuild only strips the types; it never runs the script, whi
 Run: `npx vitest run __tests__/rehearsal-isolation.test.ts __tests__/search-dictionary-wiring.test.ts`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add docker-compose.rehearsal.yml scripts/e2e-search-dictionary.ts __tests__/search-dictionary-wiring.test.ts
@@ -3634,7 +3634,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 
 Standing permissions apply (build and create freely; the deploy is local-only on this laptop; merge to main and push once verified). Do NOT run an unscoped `docker prune`: this Docker daemon also runs another project's stack. Docker's global config is broken on this machine (`credsStore`), so every `docker compose build` and `up` below uses a scoped `DOCKER_CONFIG`.
 
-- [ ] **Step 1: Full verification on the branch**
+- [x] **Step 1: Full verification on the branch**
 
 ```bash
 cd /home/cole/ulp-suite
@@ -3642,7 +3642,7 @@ npx tsc --noEmit && npm run lint && npx vitest run
 ```
 Expected: no type errors; lint clean; every test file passes (the live files are skipped).
 
-- [ ] **Step 2: Tag the running image as the rollback, then build the new one**
+- [x] **Step 2: Tag the running image as the rollback, then build the new one**
 
 ```bash
 cd /home/cole/ulp-suite
@@ -3654,7 +3654,7 @@ DOCKER_CONFIG=$SCR/dockercfg docker compose build app 2>&1 | tail -15
 ```
 Expected: the rollback tag lists the OLD image id (it was `2d6ba2bcf747`); the build ends with the app image tagged `ulp-suite-app:latest` and a NEW id; the running container is untouched.
 
-- [ ] **Step 3: The three rehearsals on the isolated stack (the live app is not involved)**
+- [x] **Step 3: The three rehearsals on the isolated stack (the live app is not involved)**
 
 ```bash
 cd /home/cole/ulp-suite
@@ -3665,7 +3665,7 @@ docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v
 ```
 Expected: all three exit 0. If a check in `e2e-search-dictionary.ts` fails, STOP: fix the cause (do not weaken the check), rebuild the image (Step 2) and re-run from the failed script. Run each in the background with a log file if the tool's time limit is short, and wait for a final-line sentinel rather than polling for a process name.
 
-- [ ] **Step 4: The supervised first build on the LIVE ClickHouse (before the deploy)**
+- [x] **Step 4: The supervised first build on the LIVE ClickHouse (before the deploy)**
 
 Pick a quiet moment: `docker exec ulpsuite_clickhouse clickhouse-client -q "SELECT count() FROM system.processes WHERE query_kind = 'Insert'"` should be 0 and the dedup/projection ticks (04:00Z, 05:00Z) should not be near. The old app image does not know the dictionary, so building it first has no effect on searches.
 
@@ -3680,7 +3680,7 @@ tail -5 $SCR/first-build.log
 ```
 Expected: the log ends with `result: {"pairRows":~85000000,"emailRows":~13000000,...}`, `status after the build: fresh`, `exit 0`. Then confirm on the server: `docker exec ulpsuite_clickhouse clickhouse-client -q "SELECT name, total_rows, formatReadableSize(total_bytes), substring(comment, 1, 80) FROM system.tables WHERE database='ulp' AND name LIKE 'search_%'"` shows exactly the two tables (no `__new` leftovers), about 2 GiB and 150 MiB, and `docker exec ulpsuite_clickhouse clickhouse-client -q "SELECT count() FROM system.tables WHERE database='ulp' AND name LIKE 'zz_%'"` is 0.
 
-- [ ] **Step 5: Live parity and the timings of the design**
+- [x] **Step 5: Live parity and the timings of the design**
 
 ```bash
 cd /home/cole/ulp-suite
@@ -3695,7 +3695,7 @@ Expected: PASS with `plain` as the plan (158,010 candidate domains are far over 
 
 If the timings are well off the spec's table for a term within the caps, try the one alternative the measurements left open before accepting: add `optimize_use_projections = 0` to the outer SETTINGS of `buildDictionaryTotalsSql` (the offset sub-select keeps its own `= 1`), re-run the totals part, keep whichever is faster, and update the unit test that pins the choice.
 
-- [ ] **Step 6: Deploy locally, behind the rollback tag**
+- [x] **Step 6: Deploy locally, behind the rollback tag**
 
 ```bash
 cd /home/cole/ulp-suite
@@ -3707,7 +3707,7 @@ docker logs ulpsuite_app 2>&1 | grep -E 'search-dictionary|error|warn' | head
 ```
 Expected: only `ulpsuite_app` was recreated (the ClickHouse container's uptime is unchanged); it is healthy; `check-users 200`; the log shows `[search-dictionary] cron started — first tick in 120s, then every 10m` and no error or warn line. Wait three minutes, then `docker logs ulpsuite_app 2>&1 | grep search-dictionary` still shows no build line (the dictionary was fresh at the first tick) and `docker exec ulpsuite_clickhouse clickhouse-client -q "SELECT count() FROM system.processes WHERE Settings['log_comment'] = 'search_dict_build'"` is 0. Rollback if anything is off: `docker tag ulp-suite-app:rollback-<stamp> ulp-suite-app:latest && DOCKER_CONFIG=$SCR/dockercfg docker compose up -d --no-deps app`, or set `SEARCH_DICTIONARY=0` in `.env` and recreate.
 
-- [ ] **Step 7: Record it and merge**
+- [x] **Step 7: Record it and merge**
 
 Tick every box of this plan (`sed -i 's/- \[ \]/- [x]/g' docs/superpowers/plans/2026-10-03-domain-search-dictionary.md`), change the spec's `Status: **designed, not built.**` line to `Status: **implemented and deployed locally 2026-10-03** (image <new id>, rollback tag ulp-suite-app:rollback-<stamp>; plan docs/superpowers/plans/2026-10-03-domain-search-dictionary.md)`, append a short "Release" paragraph with the measured parity and the first-page and totals timings from Step 5, then:
 

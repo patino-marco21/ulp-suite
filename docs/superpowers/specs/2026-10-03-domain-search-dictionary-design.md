@@ -1,6 +1,6 @@
 # Domain search dictionary — design (2026-10-03)
 
-Status: **designed, not built.** Companion: `2026-10-03-hardening-bundle-design.md`. Sub-project 3 of the 2026-10-02 improvement plan ("search
+Status: **implemented and deployed locally 2026-10-04** (image `0b49178e2916`, built from `d72ed7d`; rollback tag `ulp-suite-app:rollback-20261003-1629z`; plan `docs/superpowers/plans/2026-10-03-domain-search-dictionary.md`; the Release section at the end records what was measured). Companion: `2026-10-03-hardening-bundle-design.md`. Sub-project 3 of the 2026-10-02 improvement plan ("search
 dictionaries"), reshaped by what the live query log showed on 2026-10-03. Everything marked *measured* was run on the live ClickHouse
 (1,394,459,025 rows, 26.3.17.4) on an otherwise idle server with `use_query_cache = 0, use_query_condition_cache = 0` (the condition cache
 makes a repeat of the same WHERE look about 10x faster, so cold figures only). The scratch tables used (`ulp.zz_pairs`, `ulp.zz_emd`) were
@@ -216,3 +216,46 @@ becomes 0.35 s / 0.25 s, `imported_desc` 23.2 s / 37.6 s becomes 0.35 s / 0.27 s
   maintenance (a full rebuild takes 2.5 minutes and imports are rare; revisit if imports become daily), a materialized view feeding the dictionary
   (it would miss `ATTACH`/`REPLACE PARTITION`; the fingerprint covers every path).
 - Raising the lookup floor below 1 s: the scan is bound by reading 85 M strings; the next lever would be a smaller haystack, not a faster scan.
+
+## Release (2026-10-04)
+
+Built by the plan's Tasks 1-9 and released by Task 10: first build 05:41Z, deploy 06:11Z. Image `0b49178e2916` (built from `d72ed7d`); the rollback tag
+`ulp-suite-app:rollback-20261003-1629z` is the previous image `2d6ba2bcf747`. Only `ulpsuite_app` was recreated: the ClickHouse container and
+`ulp.credentials` (1,394,459,025 rows) were untouched, and the data, uploads and inbox mounts were checked to still point at the main checkout.
+
+**What the isolated-stack rehearsal found that the unit tests could not** (both fixed in `d72ed7d`):
+
+1. `system.processes` has no `log_comment` column on 26.3 (it is a column of `system.query_log`). The live-state query failed, the status stayed `unknown` and
+   the cron never built. The build tag is read as `Settings['log_comment']`.
+2. The offset branch's `query_plan_optimize_lazy_materialization = 0` does not prevent "Not found column _part_offset in block"; `optimize_move_to_prewhere = 0`
+   does (reproduced by hand on 26.3.17 for sorts led by `domain`, `email` and `length(password)`). Before the fix 5 of the 41 rehearsal checks failed: the plan
+   fell back to the plain query with identical rows, so nothing was wrong, only slow.
+
+**Rehearsals on the released image (isolated stack):** alert 36/36, upload resilience 33/33, search dictionary 41/41. Unit tests: 2,116 passed; typecheck and lint clean.
+
+**First build on the live server** (idle, nothing else running): 178 s wall; `ulp.search_host_dict` 85,232,652 rows, 1.99 GiB; `ulp.search_emaildomain_dict` 13,203,601
+rows, 151.9 MiB; the larger insert read 55.9 GiB and peaked at 2.9 GiB of memory; no `__new` or `zz_` table left behind.
+
+**Live parity** (`__tests__/search-dictionary-parity.live.test.ts`, 27/27): rows, cursors and totals identical to the plain query for 4 terms (three public brands and
+one that matches nothing) x 3 sorts x Unique on and off x 2 pages; a popular term (`google.com`, 158,010 candidate domains) is answered by the plain query, as designed.
+Timings, plain -> dictionary, in ms (cold: query cache and condition cache off before every call):
+
+| term | scenario | plain | dictionary |
+| --- | --- | --- | --- |
+| trezor.io | domain_asc page 1 / totals | 6,305 / 4,252 | 1,415 / 1,343 |
+| trezor.io | email_asc page 1 / page 2 | 19,152 / 35,437 | 1,464 / 1,518 |
+| ledger.com (1,352 rows) | email_asc page 1 / page 2 / totals | 23,521 / 40,176 / 8,015 | 3,031 / 3,058 / 2,006 |
+| kraken.com (104,523 rows) | domain_asc page 1 / totals | 6,391 / 7,178 | 2,337 / 2,086 |
+| kraken.com | email_asc page 1 / page 2 | 37,586 / 46,273 | 2,736 / 2,968 |
+| matches nothing | domain_asc page 1 / totals | 4,716 / 3,256 | 1,215 / 1,113 |
+
+Against the design: first pages are inside the targets (about 2 s for a few dozen candidates, under 4 s for hundreds). Totals are 1.1-2.2 s, a little above the
+"under 1 s" and "under 2 s" figures; the term that matches nothing, which runs no row query at all, still takes 1.1-1.2 s, so about a second of each figure is the
+candidate lookup (the floor measured in the design). Not pursued: the one alternative the plan left open (`optimize_use_projections = 0` on the totals), because a
+page waits on its rows, not its totals.
+
+**After the deploy:** healthy, `check-users` 200, both fixes present in the running container's compiled code, and the cron started ("first tick in 120s, then every
+10m"); its first tick found the dictionary fresh (no build line, no build running).
+
+**Follow-ups:** after the 05:00Z projection-clearing mutation of 2026-10-05, `scripts/build-search-dictionary.ts --status` must still say `fresh` (it proves the
+mutation exclusion on the live server). Single-word terms, `@email`, multi-term and negated searches still use the plain query ("Deliberately NOT done").
