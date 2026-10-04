@@ -1,6 +1,6 @@
 # Domain Search Dictionary Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A search for one domain-shaped term on the Credentials page returns exactly today's rows, order, cursors and totals, in about 2-4 s instead of 15-19 s, by resolving the substring branches against two small derived dictionary tables so the primary key can prune again.
 
