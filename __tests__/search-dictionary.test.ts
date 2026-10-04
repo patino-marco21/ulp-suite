@@ -66,7 +66,8 @@ describe('buildLiveStateSql', () => {
 
   test('also reports running content mutations and running dictionary builds', () => {
     expect(sql).toContain('AND NOT is_done AND NOT match(command')
-    expect(sql).toContain("FROM system.processes WHERE log_comment = 'search_dict_build'")
+    // system.processes has no log_comment column (26.3: UNKNOWN_IDENTIFIER, found by the isolated-stack rehearsal); a query's changed settings are in the Settings map
+    expect(sql).toContain("FROM system.processes WHERE Settings['log_comment'] = 'search_dict_build'")
   })
 
   test('never goes through the query cache, and stays out of the older route tests\' query-count patterns', () => {

@@ -24,7 +24,7 @@ Every task's requirements implicitly include these (values copied from the spec,
 - **Lookup**: the same LIKE parameters the legacy predicate builds (`dom0`, `domsuf0`, `domlk0` from `buildULPWhere`); cached per `(fingerprint, term)` for 10 minutes, at most 200 terms, sharing the in-flight promise so the page's rows request and totals request resolve once; a failed lookup is cached 60 s.
 - **Candidate lists are SQL literals, not parameters** (ClickHouse refuses a URL parameter above 128 KiB). Strings are escaped by `chStringLiteral`; E is reversed as UTF-8 BYTES (`reverse()` is bytewise), never as a reversed JavaScript string.
 - **Totals**: merge aggregate states (`uniqIfState`/`uniqIfMerge`, `uniqState`/`uniqMerge`; counts `sum`), never add two `uniq` estimates (measured: 1,234,344 summed against 1,234,432 for the single scan; the merge gave 1,234,432).
-- **Two ClickHouse 26.3 facts pinned in code comments and tests**: `query_plan_optimize_lazy_materialization = 0` on the offset branch (otherwise "Not found column _part_offset in block" for sorts not led by `domain`), and the offset sub-select keeps projections ON (`optimize_use_projections = 1, preferred_optimize_projection_name = 'proj_email_domain_rev'`; turning them off took 9-16 s instead of 0.3-1 s).
+- **Two ClickHouse 26.3 facts pinned in code comments and tests** (CORRECTED in Task 10: the isolated-stack rehearsal showed the first one needs `optimize_move_to_prewhere = 0` on the offset branch, `query_plan_optimize_lazy_materialization = 0` alone does not fix it; and `system.processes` has no `log_comment` column, the build tag is read as `Settings['log_comment']`; the code blocks below were updated to match): `optimize_move_to_prewhere = 0` on the offset branch (otherwise "Not found column _part_offset in block"), and the offset sub-select keeps projections ON (`optimize_use_projections = 1, preferred_optimize_projection_name = 'proj_email_domain_rev'`; turning them off took 9-16 s instead of 0.3-1 s).
 - **Cron**: `SEARCH_DICT_CRON_MINUTES` default **10** (`0` disables); rebuild only when stale or missing, the fingerprint unchanged across a settle wait (`SEARCH_DICT_SETTLE_SECONDS` default **120**), no content mutation running, no build running, disk headroom for about **3 GiB** above the disk guard's floor; **3 failures in a row wait an hour**. Production only (`instrumentation.ts`).
 - **Observability**: the response's `plan` says `'dictionary'` when the plan answered the rows (the `totals_only` response gains `plan` too); `/api/monitoring/ingest-health` gains `searchDictionary` and the panel one line.
 - **Rollback**: `SEARCH_DICTIONARY=0` (no rebuild needed) or the rollback image tag. `/api/credentials?dictionary=0` forces the legacy query for one request (parity tests, scripts); there is no UI for it.
@@ -474,7 +474,7 @@ describe('buildLiveStateSql', () => {
 
   test('also reports running content mutations and running dictionary builds', () => {
     expect(sql).toContain('AND NOT is_done AND NOT match(command')
-    expect(sql).toContain("FROM system.processes WHERE log_comment = 'search_dict_build'")
+    expect(sql).toContain("FROM system.processes WHERE Settings['log_comment'] = 'search_dict_build'")
   })
 
   test('never goes through the query cache, and stays out of the older route tests\' query-count patterns', () => {
@@ -850,7 +850,7 @@ export function buildLiveStateSql(): string {
      FROM system.mutations WHERE database = 'ulp' AND table = 'credentials' AND NOT ${NON_CONTENT_MUTATION}) AS mutation_state,
   (SELECT count() FROM system.mutations
      WHERE database = 'ulp' AND table = 'credentials' AND NOT is_done AND NOT ${NON_CONTENT_MUTATION}) AS mutations_running,
-  (SELECT count() FROM system.processes WHERE log_comment = '${DICT_BUILD_LOG_COMMENT}') AS builds_running
+  (SELECT count() FROM system.processes WHERE Settings['log_comment'] = '${DICT_BUILD_LOG_COMMENT}') AS builds_running
 SETTINGS use_query_cache = 0`
 }
 
@@ -1455,7 +1455,7 @@ describe('buildDictionaryRowsSql', () => {
     expect(count(sql, /query_plan_optimize_lazy_materialization = 0/g)).toBe(1)
     const [branch1, branch2] = sql.split('UNION ALL')
     expect(branch1).not.toContain('query_plan_optimize_lazy_materialization')
-    expect(branch2).toContain('LIMIT {limit:UInt32} SETTINGS query_plan_optimize_lazy_materialization = 0')
+    expect(branch2).toContain('LIMIT {limit:UInt32} SETTINGS optimize_move_to_prewhere = 0, query_plan_optimize_lazy_materialization = 0')
     expect(sql).toContain("SETTINGS optimize_use_projections = 1, preferred_optimize_projection_name = 'proj_email_domain_rev')")
     expect(sql).not.toContain('optimize_use_projections = 0')
   })
@@ -1770,7 +1770,7 @@ function branchesFor(c: DictionaryCandidates): Branch[] {
   if (c.emailDomains.length > 0) {
     out.push({
       conjunct: `${hasDomains ? ` AND domain NOT IN ${c.domainsLiteral}` : ''} AND ${offsetFilter(c)}`,
-      settings: ' SETTINGS query_plan_optimize_lazy_materialization = 0',
+      settings: ' SETTINGS optimize_move_to_prewhere = 0, query_plan_optimize_lazy_materialization = 0',
     })
   }
   return out
@@ -3705,7 +3705,7 @@ docker ps --format '{{.Names}} {{.Image}} {{.Status}}' | grep ulpsuite_app
 curl -s -o /dev/null -w 'check-users %{http_code}\n' http://127.0.0.1:3000/api/auth/check-users
 docker logs ulpsuite_app 2>&1 | grep -E 'search-dictionary|error|warn' | head
 ```
-Expected: only `ulpsuite_app` was recreated (the ClickHouse container's uptime is unchanged); it is healthy; `check-users 200`; the log shows `[search-dictionary] cron started — first tick in 120s, then every 10m` and no error or warn line. Wait three minutes, then `docker logs ulpsuite_app 2>&1 | grep search-dictionary` still shows no build line (the dictionary was fresh at the first tick) and `docker exec ulpsuite_clickhouse clickhouse-client -q "SELECT count() FROM system.processes WHERE log_comment = 'search_dict_build'"` is 0. Rollback if anything is off: `docker tag ulp-suite-app:rollback-<stamp> ulp-suite-app:latest && DOCKER_CONFIG=$SCR/dockercfg docker compose up -d --no-deps app`, or set `SEARCH_DICTIONARY=0` in `.env` and recreate.
+Expected: only `ulpsuite_app` was recreated (the ClickHouse container's uptime is unchanged); it is healthy; `check-users 200`; the log shows `[search-dictionary] cron started — first tick in 120s, then every 10m` and no error or warn line. Wait three minutes, then `docker logs ulpsuite_app 2>&1 | grep search-dictionary` still shows no build line (the dictionary was fresh at the first tick) and `docker exec ulpsuite_clickhouse clickhouse-client -q "SELECT count() FROM system.processes WHERE Settings['log_comment'] = 'search_dict_build'"` is 0. Rollback if anything is off: `docker tag ulp-suite-app:rollback-<stamp> ulp-suite-app:latest && DOCKER_CONFIG=$SCR/dockercfg docker compose up -d --no-deps app`, or set `SEARCH_DICTIONARY=0` in `.env` and recreate.
 
 - [ ] **Step 7: Record it and merge**
 

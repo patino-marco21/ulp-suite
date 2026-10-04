@@ -243,15 +243,18 @@ describe('buildDictionaryRowsSql', () => {
     expect(count(sql, /UNION ALL/g)).toBe(1)
   })
 
-  // ClickHouse 26.3: with a _part_offset filter, lazy materialization fails ("Not found column _part_offset in block") for every sort not
-  // led by `domain`; turning it off for THAT branch fixes it. And `optimize_use_projections = 0` there destroys the pruning (9-16 s instead of
-  // 0.3-1 s), so the offset sub-select pins projections ON and names the projection.
-  test('pins the two ClickHouse 26.3 facts: lazy materialization off on the offset branch only, projections on inside its sub-select', () => {
+  // ClickHouse 26.3.17: with a _part_offset filter the predicate is moved to PREWHERE and the query fails ("Not found column _part_offset in
+  // block") for sorts led by domain, email and length(password) alike (found by the isolated-stack rehearsal, reproduced by hand);
+  // `optimize_move_to_prewhere = 0` on THAT branch fixes it, `query_plan_optimize_lazy_materialization = 0` alone does not. And
+  // `optimize_use_projections = 0` there destroys the pruning (9-16 s instead of 0.3-1 s), so the offset sub-select pins projections ON.
+  test('pins the ClickHouse 26.3 facts: PREWHERE move off on the offset branch only, projections on inside its sub-select', () => {
     const sql = buildDictionaryRowsSql(rowsInput())!
+    expect(count(sql, /optimize_move_to_prewhere = 0/g)).toBe(1)
     expect(count(sql, /query_plan_optimize_lazy_materialization = 0/g)).toBe(1)
     const [branch1, branch2] = sql.split('UNION ALL')
+    expect(branch1).not.toContain('optimize_move_to_prewhere')
     expect(branch1).not.toContain('query_plan_optimize_lazy_materialization')
-    expect(branch2).toContain('LIMIT {limit:UInt32} SETTINGS query_plan_optimize_lazy_materialization = 0')
+    expect(branch2).toContain('LIMIT {limit:UInt32} SETTINGS optimize_move_to_prewhere = 0, query_plan_optimize_lazy_materialization = 0')
     expect(sql).toContain("SETTINGS optimize_use_projections = 1, preferred_optimize_projection_name = 'proj_email_domain_rev')")
     expect(sql).not.toContain('optimize_use_projections = 0')
   })
@@ -282,6 +285,7 @@ describe('buildDictionaryRowsSql', () => {
     expect(sql).not.toContain('_part_offset')
     expect(sql).not.toContain('NOT IN')
     expect(sql).not.toContain('lazy_materialization')
+    expect(sql).not.toContain('optimize_move_to_prewhere')
     expect(sql).toContain("AND domain IN ['ledger.com','app.ledger.com']")
   })
 
@@ -290,6 +294,7 @@ describe('buildDictionaryRowsSql', () => {
     expect(sql).not.toContain('UNION ALL')
     expect(sql).not.toMatch(/domain (NOT )?IN \[/)
     expect(sql).toContain(OFFSET)
+    expect(sql).toContain('optimize_move_to_prewhere = 0')
     expect(sql).toContain('lazy_materialization = 0')
   })
 
@@ -351,6 +356,7 @@ describe('buildDictionaryTotalsSql', () => {
     const sql = buildDictionaryTotalsSql(totalsInput())!
     expect(sql).toMatch(/SETTINGS optimize_trivial_count_query = 1,\s+max_execution_time = 300,\s+timeout_overflow_mode = 'break',\s+use_query_cache = 0$/)
     expect(sql).not.toContain('LIMIT')
+    expect(count(sql, /optimize_move_to_prewhere = 0/g)).toBe(1)
     expect(count(sql, /query_plan_optimize_lazy_materialization = 0/g)).toBe(1)
     expect(sql).not.toContain('optimize_use_projections = 0')
   })

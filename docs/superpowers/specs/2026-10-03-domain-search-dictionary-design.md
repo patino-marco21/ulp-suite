@@ -102,9 +102,11 @@ So the caps below also count bytes (see the caps table), and the escaping is pin
 
 Two ClickHouse 26.3 facts found by testing, both pinned in the code comments and the tests:
 
-- With a `_part_offset` filter, **lazy materialization breaks** ("Not found column _part_offset in block", reproduced for every sort not led by
-  `domain` when more columns than the sort keys are selected). `query_plan_optimize_lazy_materialization = 0` on the offset branch fixes it
-  (also `optimize_move_to_prewhere = 0`; the legacy analyzer too). A future ClickHouse may change this, which is why any plan error falls back.
+- With a `_part_offset` filter, **the predicate is moved to PREWHERE and the query fails** ("Not found column _part_offset in block"). Corrected
+  on 2026-10-04 by the isolated-stack rehearsal and a hand reproduction on 26.3.17: it fails for sorts led by `domain`, `email` and `length(password)`
+  alike, `optimize_move_to_prewhere = 0` on the offset branch fixes all three (and `query_plan_optimize_lazy_materialization = 0` alone does NOT, on
+  the branch or at the top level; the earlier note here said it did, from a simpler query shape; it stays in as a second guard). A future ClickHouse
+  may change this, which is why any plan error falls back.
 - **`optimize_use_projections = 0` on the offset branch destroys its pruning** (the totals took 9-16 s instead of 0.3-1 s). Projections stay at the
   default there; branch 1 and the totals keep the legacy settings otherwise.
 

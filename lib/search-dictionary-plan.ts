@@ -13,8 +13,10 @@
  * candidate set is never too SMALL.
  *
  * Two ClickHouse 26.3 facts found by testing (each pinned by a test):
- *  - with a `_part_offset` filter, lazy materialization breaks ("Not found column _part_offset in block") for every sort not led by `domain`
- *    once more than the sort-key columns are selected; `query_plan_optimize_lazy_materialization = 0` on THAT branch fixes it;
+ *  - with a `_part_offset` filter, the predicate is moved to PREWHERE, where the column does not exist ("Not found column _part_offset in
+ *    block"); verified on 26.3.17 for sorts led by `domain`, `email` and `length(password)`: `optimize_move_to_prewhere = 0` on THAT branch
+ *    fixes it, while `query_plan_optimize_lazy_materialization = 0` alone does not, on the branch or at the top level (the first live
+ *    rehearsal showed it; the latter stays in as a second guard);
  *  - `optimize_use_projections = 0` around the offset sub-select destroys its pruning (9-16 s instead of 0.3-1 s), so the sub-select pins
  *    projections on and names the projection.
  *
@@ -185,7 +187,7 @@ function branchesFor(c: DictionaryCandidates): Branch[] {
   if (c.emailDomains.length > 0) {
     out.push({
       conjunct: `${hasDomains ? ` AND domain NOT IN ${c.domainsLiteral}` : ''} AND ${offsetFilter(c)}`,
-      settings: ' SETTINGS query_plan_optimize_lazy_materialization = 0',
+      settings: ' SETTINGS optimize_move_to_prewhere = 0, query_plan_optimize_lazy_materialization = 0',
     })
   }
   return out

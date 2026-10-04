@@ -71,7 +71,7 @@ export function buildLiveStateSql(): string {
      FROM system.mutations WHERE database = 'ulp' AND table = 'credentials' AND NOT ${NON_CONTENT_MUTATION}) AS mutation_state,
   (SELECT count() FROM system.mutations
      WHERE database = 'ulp' AND table = 'credentials' AND NOT is_done AND NOT ${NON_CONTENT_MUTATION}) AS mutations_running,
-  (SELECT count() FROM system.processes WHERE log_comment = '${DICT_BUILD_LOG_COMMENT}') AS builds_running
+  (SELECT count() FROM system.processes WHERE Settings['log_comment'] = '${DICT_BUILD_LOG_COMMENT}') AS builds_running
 SETTINGS use_query_cache = 0`
 }
 
