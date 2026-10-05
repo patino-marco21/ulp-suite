@@ -55,7 +55,7 @@
  *                → LIKE '%value%' full scan (unavoidable; rare in practice)
  */
 
-interface ParsedToken {
+export interface ParsedToken {
   negate: boolean
   type: 'token' | 'domain' | 'email_full' | 'email_dom' | 'like'
   value: string
@@ -110,11 +110,33 @@ export function parseULPQuery(raw: string): ParsedToken[] {
     .filter(t => t.value.length > 0)
 }
 
-export function buildULPWhere(tokens: ParsedToken[]): { clause: string; params: Record<string, unknown> } {
+/**
+ * True when the search means the same thing whichever of the table's physical copies a query reads (the base table, or a projection
+ * such as proj_imported_desc). Word tokens do not: `hasToken(col, tok)` on the base table is answered from the text index, whose
+ * preprocessor is `lower(col)` (case-INSENSITIVE), but a projection part has no text index, so there it runs as the plain function on the
+ * stored text (case-SENSITIVE) and silently drops mixed-case matches. LIKE-fallback tokens and regexes are not vouched for either.
+ * Domain, email and @domain terms compare whole columns, and no query at all has nothing to differ on.
+ */
+export function isIndexNeutralSearch(tokens: ParsedToken[], regexMode = false): boolean {
+  if (tokens.length === 0) return true
+  if (regexMode) return false
+  return tokens.every(t => t.type === 'domain' || t.type === 'email_full' || t.type === 'email_dom')
+}
+
+export interface BuildULPWhereOptions {
+  /**
+   * Write word-token predicates over the lowercased column (`hasToken(lower(url), tok)`): the same case-insensitive match the text index's
+   * own preprocessor gives on the base table, for a query that reads a projection (which has no text index). Everything else is unchanged.
+   */
+  caseInsensitiveTokens?: boolean
+}
+
+export function buildULPWhere(tokens: ParsedToken[], opts: BuildULPWhereOptions = {}): { clause: string; params: Record<string, unknown> } {
   if (tokens.length === 0) return { clause: '1=1', params: {} }
 
   const conditions: string[] = []
   const params: Record<string, unknown> = {}
+  const col = (name: string) => (opts.caseInsensitiveTokens ? `lower(${name})` : name)
 
   tokens.forEach((token, i) => {
     let match: string
@@ -164,7 +186,7 @@ export function buildULPWhere(tokens: ParsedToken[]): { clause: string; params: 
       const lower = token.value.toLowerCase()
       params[p] = lower
       params[lp] = `%${lower.replace(/_/g, '\\_')}%`
-      match = `(hasToken(url, {${p}:String}) OR hasToken(email, {${p}:String}) OR hasToken(password, {${p}:String}) OR url_host LIKE {${lp}:String} OR email_domain LIKE {${lp}:String})`
+      match = `(hasToken(${col('url')}, {${p}:String}) OR hasToken(${col('email')}, {${p}:String}) OR hasToken(${col('password')}, {${p}:String}) OR url_host LIKE {${lp}:String} OR email_domain LIKE {${lp}:String})`
 
     } else if (token.type === 'domain') {
       // Domain-shaped (e.g. "ledger.com"): matches the canonical site column

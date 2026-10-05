@@ -8,7 +8,7 @@
  */
 
 import { describe, test, expect } from 'vitest'
-import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from '@/lib/ulp-search'
+import { parseULPQuery, buildULPWhere, buildULPWhereRegex, isIndexNeutralSearch } from '@/lib/ulp-search'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // § 1  parseULPQuery — token type detection
@@ -540,5 +540,75 @@ describe('parseULPQuery + buildULPWhere integration', () => {
     expect(paramValues).toContain('ledger')
     expect(paramValues).toContain('%ledger%')
     expect(paramValues).not.toContain('Ledger')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// § 9  caseInsensitiveTokens + isIndexNeutralSearch (imported-after filter, step 0)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('buildULPWhere — caseInsensitiveTokens (for queries that read a projection, which has no text index)', () => {
+  test('a word token writes hasToken over the lowercased column, in all three columns', () => {
+    const { clause } = buildULPWhere(parseULPQuery('hunter2'), { caseInsensitiveTokens: true })
+    expect(clause).toContain('hasToken(lower(url), {tok0:String})')
+    expect(clause).toContain('hasToken(lower(email), {tok0:String})')
+    expect(clause).toContain('hasToken(lower(password), {tok0:String})')
+    expect(clause).not.toContain('hasToken(url,')
+  })
+
+  test('without the option the clause is exactly what it always was', () => {
+    const { clause } = buildULPWhere(parseULPQuery('hunter2'))
+    expect(clause).toContain('hasToken(url, {tok0:String})')
+    expect(clause).not.toContain('lower(url)')
+    expect(buildULPWhere(parseULPQuery('hunter2'), {}).clause).toBe(clause)
+  })
+
+  test('only the hasToken calls change: params, the url_host / email_domain LIKEs and the clause shape are the same', () => {
+    const plain = buildULPWhere(parseULPQuery('hunter2'))
+    const lowered = buildULPWhere(parseULPQuery('hunter2'), { caseInsensitiveTokens: true })
+    expect(lowered.params).toEqual(plain.params)
+    expect(lowered.clause).toBe(plain.clause.replace(/hasToken\((url|email|password),/g, 'hasToken(lower($1),'))
+    expect(lowered.clause).toContain('url_host LIKE {tlk0:String} OR email_domain LIKE {tlk0:String}')
+  })
+
+  test.each(['ledger.com', 'john@gmail.com', '@gmail.com', 'a+b'])('%s: the other token types are unaffected by the option', q => {
+    expect(buildULPWhere(parseULPQuery(q), { caseInsensitiveTokens: true })).toEqual(buildULPWhere(parseULPQuery(q)))
+  })
+
+  test('a negated word token keeps its NOT', () => {
+    const { clause } = buildULPWhere(parseULPQuery('-hunter2'), { caseInsensitiveTokens: true })
+    expect(clause.startsWith('NOT (hasToken(lower(url), {tok0:String})')).toBe(true)
+  })
+})
+
+describe('isIndexNeutralSearch — which searches mean the same on the table and on a projection', () => {
+  const neutral = (q: string, regex = false) => isIndexNeutralSearch(parseULPQuery(q), regex)
+
+  test('no query at all', () => {
+    expect(neutral('')).toBe(true)
+    expect(neutral('   ')).toBe(true)
+    expect(neutral('', true)).toBe(true)
+  })
+
+  test('domain, full email and @domain terms, alone or together, negated or not', () => {
+    expect(neutral('ledger.com')).toBe(true)
+    expect(neutral('john@gmail.com')).toBe(true)
+    expect(neutral('@gmail.com')).toBe(true)
+    expect(neutral('ledger.com,-@gmail.com,john@gmail.com')).toBe(true)
+  })
+
+  test('a word token is not (hasToken is answered from the text index only on the table)', () => {
+    expect(neutral('hunter2')).toBe(false)
+    expect(neutral('ledger.com,hunter2')).toBe(false)
+  })
+
+  test('a LIKE-fallback token is not', () => {
+    expect(neutral('a+b')).toBe(false)
+    expect(neutral('ledger.com/login')).toBe(false)
+  })
+
+  test('regex mode is not, however the terms look', () => {
+    expect(neutral('^admin@', true)).toBe(false)
+    expect(neutral('ledger.com', true)).toBe(false)
   })
 })
