@@ -100,6 +100,24 @@ The imported-after browse view runs on those windows, so the gap would be inheri
 Acceptance: a new live parity scenario (a word term, cursor on a case-only row) passes, and the existing 13 scenarios stay identical. The owner
 may strike P0; the imported-after browse view then inherits the gap for word terms and the docs say so.
 
+**Result (2026-10-05, P0-a chosen by proof).** Over the newest 15 minutes of data, for eight common words, the lowercased spelling read without
+skip indexes equals the table plan exactly, while the plain spelling (what the windows ran) misses a lot more than the first single-word
+measurement suggested:
+
+| word | table plan | lowercased spelling, skip indexes off | plain spelling, skip indexes off (the old window) |
+|---|---|---|---|
+| a | 2,552,268 | 2,552,268 | 2,411,277 (-5.5%) |
+| b | 141,713 | 141,713 | 133,688 (-5.7%) |
+| c | 1,388,320 | 1,388,320 | 1,339,140 (-3.5%) |
+| d | 75,034 | 75,034 | 74,439 (-0.8%) |
+| e | 250,333 | 250,333 | 249,887 (-0.2%) |
+| f | 42,874 | 42,874 | 42,228 (-1.5%) |
+| g | 190,591 | 190,591 | 168,161 (-11.8%) |
+| h | 24,990 | 24,990 | 23,792 (-4.8%) |
+
+End to end through the real handler, with a cursor placed on a case-only match: the original route fails the test (the windowed page differs
+from the plain page) and the fixed route passes it (65 s and 108 s for the two live tests).
+
 ## Where it applies
 
 | Surface | Change |
@@ -108,7 +126,8 @@ may strike P0; the imported-after browse view then inherits the gap for word ter
 | `POST /api/export` | every format, including `spray` and `wordlist` (wordlist gets the date bound only; its other behavior is unchanged); the breach-page export sends it too |
 | `GET /api/search` | the helper replaces its two lines (legacy, no UI caller) |
 | `POST /api/lookup/batch`, `POST /api/v1/lookup/batch` | body keys; plain bound beside `email IN (...)` / `domain IN (...)` (the key already narrows the read) |
-| `GET /api/v1/search/credentials`, `/search/domain`, `/lookup` | query params; the first two are fixed `imported_at DESC`, so they get the projection-aware form whenever the search is index-neutral (a domain search always is); JSON responses echo the normalized bounds when given |
+| `GET /api/v1/search/credentials` | query params; fixed `imported_at DESC`, so the rows get the projection-aware form and the count the aggregate form whenever the search is index-neutral; JSON responses echo the effective bounds when given |
+| `GET /api/v1/search/domain`, `GET /api/v1/lookup` | query params, plain bound: `domain = X` / `email = X` already narrows the read by the key (measured 2026-10-05: 18-175 ms for a popular domain, base table either way, with or without the key predicate); JSON responses echo the effective bounds when given |
 
 `app/docs/page.tsx` documents the params for the four v1 endpoints.
 
@@ -146,6 +165,10 @@ Export shape (`ORDER BY imported_at DESC, domain ASC LIMIT 10000`), delta = the 
 | term B (word) | 11.3 s, base table, 22.9 GiB | 8.6 s, base table (no gain) |
 
 Same shape, delta = the whole 143.3M-row newest burst: term A 15.7 s -> 4.3 s; term B 14.2 s -> 12.3 s; no query 1.8 s -> 1.7 s.
+
+The v1 domain shape (`WHERE domain = 'term A' AND imported_at > T ORDER BY imported_at DESC LIMIT 100`, and its count), delta 2.2M and 6.4M rows: 18-175 ms
+in every variant, reading 0.8-1.5M rows from the base table, with or without the key predicate. The primary key already narrows the read, so
+`/search/domain` and `/lookup` get the plain bound only.
 
 Browse totals (`uniq(content_key_hash)` + `count()`), same delta: term A 12.6 s -> **0.23 s**, identical counts (94,345 / 93,856); term B 8.6 s ->
 7.7 s, identical (27,285); term C 7.1 s -> 7.5 s, identical (1). Four very common words: identical counts with and without the key predicate
