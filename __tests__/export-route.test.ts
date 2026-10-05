@@ -47,10 +47,12 @@ describe('export route — POST main query avoids inlining NORM_COLS with ORDER 
     expect(inner).toContain('RAW_COLS')
     expect(inner).not.toContain('NORM_COLS')
     expect(inner).toContain('ORDER BY')
-    expect(inner).toContain('LIMIT 10000')
+    // One row more than the cap, so a cut export can say so (X-Export-Truncated); the route trims it back to EXPORT_ROW_CAP.
+    expect(inner).toContain('LIMIT ${EXPORT_ROW_CAP + 1}')
+    expect(source).toContain('const EXPORT_ROW_CAP = 10_000')
 
     // NORM_COLS must appear in the outer SELECT (before the inner subquery starts),
-    // applied only to the already-bounded LIMIT 10000 result — not evaluated
+    // applied only to the already-bounded (LIMIT cap + 1) result — not evaluated
     // per-scanned-row alongside the sort/limit like the pre-fix version did.
     const outer = postFn.slice(0, innerStart)
     expect(outer).toContain('NORM_COLS')

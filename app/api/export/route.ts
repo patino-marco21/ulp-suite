@@ -1,13 +1,17 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { executeQuery, getClient } from "@/lib/clickhouse"
 import { validateRequest } from "@/lib/auth"
-import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-search"
+import { parseULPQuery, buildULPWhere, buildULPWhereRegex, isIndexNeutralSearch } from "@/lib/ulp-search"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS, NORM_COLS_SETTING } from "@/lib/ulp-normalize"
 import { noiseWhere } from "@/lib/ulp-noise"
 import { dedupeLimitBy } from "@/lib/ulp-dedupe"
 import { exportGroupBySettings, exportSortSettings } from "@/lib/clickhouse-query-limits"
+import {
+  importedRangeFromSearchParams, parseImportedRange, planImportedRange, importedRangeAndSql,
+  importedWindowHeaders, importedWindowTag, type ImportedRange,
+} from "@/lib/imported-range"
 
 export const dynamic = 'force-dynamic'
 
@@ -65,6 +69,14 @@ const SELECT = `${NORM_COLS},
   url_scheme, is_corporate_email, email_domain,
   url_host, password_entropy_band, imported_at`
 
+// The non-streaming formats (csv, json, ndjson, ulp, userpass) return at most this many rows. The query asks for ONE MORE, so an export that
+// was cut can say so (X-Export-Truncated) instead of looking complete: an incremental workflow that moves its imported-after cutoff past a
+// silently cut export loses the rows in between.
+const EXPORT_ROW_CAP = 10_000
+
+/** Metadata-only queries (the imported-range planner's readiness check). */
+const runMeta = (sql: string) => executeQuery(sql) as Promise<Array<Record<string, unknown>>>
+
 // GET /api/export?format=wordlist&tier_include=T1
 export async function GET(request: NextRequest) {
   const user = await validateRequest(request)
@@ -79,9 +91,11 @@ export async function GET(request: NextRequest) {
 
   const { include: incTiers, exclude: excTiers } = parseTierParams(tierInclude, tierExclude)
   const loginTypes = parseLoginTypeParam(loginType)
+  const parsedRange = importedRangeFromSearchParams(sp)
+  if (!parsedRange.ok) return NextResponse.json({ success: false, error: parsedRange.error }, { status: 400 })
 
-  if (format === 'wordlist') return streamWordlist(incTiers, excTiers, loginTypes)
-  if (format === 'spray')    return streamSprayList('', domain, '', incTiers, excTiers, loginTypes)
+  if (format === 'wordlist') return streamWordlist(incTiers, excTiers, loginTypes, parsedRange.range)
+  if (format === 'spray')    return streamSprayList('', domain, '', incTiers, excTiers, loginTypes, parsedRange.range)
 
   return NextResponse.json({ success: false, error: "Use POST for other formats" }, { status: 400 })
 }
@@ -107,6 +121,8 @@ export async function POST(request: NextRequest) {
     pw_len_max   = null,
     date_from    = '',
     date_to      = '',
+    imported_after  = '',
+    imported_before = '',
     email_domain = '',
     source_file  = '',
     sort         = 'imported_desc',
@@ -118,9 +134,13 @@ export async function POST(request: NextRequest) {
 
   const { include: incTiers, exclude: excTiers } = parseTierParams(tier_include, tier_exclude)
   const loginTypes = parseLoginTypeParam(login_type)
+  // imported_after / imported_before (and the old date_from / date_to): lib/imported-range.ts. An invalid bound is a 400 before anything runs.
+  const parsedRange = parseImportedRange({ imported_after, imported_before, date_from, date_to })
+  if (!parsedRange.ok) return NextResponse.json({ success: false, error: parsedRange.error }, { status: 400 })
+  const importedRange = parsedRange.range
 
-  if (format === 'wordlist') return streamWordlist(incTiers, excTiers, loginTypes)
-  if (format === 'spray')    return streamSprayList(query, domain, breach_name, incTiers, excTiers, loginTypes, { pw_mask, url_scheme, is_corporate, pw_len_min, pw_len_max, date_from, date_to, email_domain, regex_mode })
+  if (format === 'wordlist') return streamWordlist(incTiers, excTiers, loginTypes, importedRange)
+  if (format === 'spray')    return streamSprayList(query, domain, breach_name, incTiers, excTiers, loginTypes, importedRange)
 
   // Build WHERE for non-streaming formats
   const tokens = parseULPQuery(query)
@@ -144,12 +164,18 @@ export async function POST(request: NextRequest) {
   const pwLenMaxNum = pw_len_max !== null && pw_len_max !== '' ? parseInt(String(pw_len_max), 10) : null
   if (pwLenMinNum !== null && !isNaN(pwLenMinNum)) { extras.push(' AND password_length >= {pwLenMin:UInt8}'); mergedParams.pwLenMin = pwLenMinNum }
   if (pwLenMaxNum !== null && !isNaN(pwLenMaxNum)) { extras.push(' AND password_length <= {pwLenMax:UInt8}'); mergedParams.pwLenMax = pwLenMaxNum }
-  if (date_from) { extras.push(' AND imported_at >= {dateFrom:DateTime}'); mergedParams.dateFrom = `${date_from} 00:00:00` }
-  if (date_to)   { extras.push(' AND imported_at <= {dateTo:DateTime}');   mergedParams.dateTo   = `${date_to} 23:59:59` }
   if (pw_mask) {
     const masks = String(pw_mask).split(',').map(m => `'${m.trim()}'`).filter(Boolean)
     if (masks.length) extras.push(` AND password_mask IN (${masks.join(',')})`)
   }
+
+  // The imported-range bound. The projection form (a predicate on proj_imported_desc's key) is only for a time-ordered or aggregate query over
+  // an index-neutral search; everything else gets the plain bound. See lib/imported-range.ts (planImportedRange).
+  const orderBy = SORT_MAP[sort] ?? SORT_MAP['imported_desc']
+  const shape = format === 'hcmask' || format === 'emails' || format === 'domains' ? 'aggregate' : /^imported_at\b/.test(orderBy) ? 'time' : 'other'
+  const rangeSql = await planImportedRange(importedRange, { shape, indexNeutral: isIndexNeutralSearch(tokens, Boolean(regex_mode)), run: runMeta })
+  Object.assign(mergedParams, rangeSql.params)
+  extras.push(importedRangeAndSql(rangeSql))
 
   const tierExtra      = tierWhereMulti(incTiers, excTiers)
   const loginTypeExtra = loginTypeWhere(loginTypes)
@@ -160,20 +186,19 @@ export async function POST(request: NextRequest) {
 
   // For hcmask, we only need passwords — handled specially
   if (format === 'hcmask') {
-    return exportHcmask(clause, allExtras, mergedParams, breach_name, domain, incTiers, excTiers, loginTypes)
+    return exportHcmask(clause, allExtras, mergedParams, breach_name, domain, incTiers, excTiers, loginTypes, importedRange)
   }
 
   // For emails-only and domains-only — dedicated streaming-friendly queries
   if (format === 'emails') {
-    return streamUniqueList('email', clause, allExtras, mergedParams, breach_name, domain, incTiers, excTiers, loginTypes)
+    return streamUniqueList('email', clause, allExtras, mergedParams, breach_name, domain, incTiers, excTiers, loginTypes, importedRange)
   }
   if (format === 'domains') {
-    return streamUniqueList('domain', clause, allExtras, mergedParams, breach_name, domain, incTiers, excTiers, loginTypes)
+    return streamUniqueList('domain', clause, allExtras, mergedParams, breach_name, domain, incTiers, excTiers, loginTypes, importedRange)
   }
 
   try {
-    const orderBy = SORT_MAP[sort] ?? SORT_MAP['imported_desc']
-    const rows = await executeQuery(
+    const fetched = await executeQuery(
       // Split into an inner (raw columns, ORDER BY, LIMIT) and outer (NORM_COLS)
       // query — see RAW_COLS above for why. exportSortSettings() covers the
       // dedupe + non-domain-sort case — see the comment above SORT_MAP.
@@ -184,11 +209,14 @@ export async function POST(request: NextRequest) {
          WHERE ${clause}${allExtras}
          ORDER BY ${orderBy}
          ${dedupeLimitBy(dedupeOn)}
-         LIMIT 10000
+         LIMIT ${EXPORT_ROW_CAP + 1}
        ) AS t
        ${exportSortSettings()}, ${NORM_COLS_SETTING}`,
       mergedParams
     ) as Array<Record<string, string>>
+    // One row more than the cap came back: the export was cut. Hand over the cap and say so.
+    const truncated = fetched.length > EXPORT_ROW_CAP
+    const rows = truncated ? fetched.slice(0, EXPORT_ROW_CAP) : fetched
 
     let content: string
     let contentType: string
@@ -228,7 +256,10 @@ export async function POST(request: NextRequest) {
     return new NextResponse(content, {
       headers: {
         'Content-Type': `${contentType}; charset=utf-8`,
-        'Content-Disposition': `attachment; filename="${base}.${ext}"`,
+        'Content-Disposition': `attachment; filename="${base}${importedWindowTag(importedRange)}.${ext}"`,
+        'X-Export-Rows': String(rows.length),
+        'X-Export-Truncated': truncated ? '1' : '0',
+        ...importedWindowHeaders(importedRange),
       },
     })
   } catch (error) {
@@ -252,7 +283,7 @@ function toHcMask(password: string): string {
 
 async function exportHcmask(
   clause: string, allExtras: string, mergedParams: Record<string, unknown>,
-  breach_name: string, domain: string, incTiers: string[], excTiers: string[], loginTypes: string[],
+  breach_name: string, domain: string, incTiers: string[], excTiers: string[], loginTypes: string[], range: ImportedRange,
 ): Promise<NextResponse> {
   try {
     const rows = await executeQuery(
@@ -289,7 +320,8 @@ async function exportHcmask(
     return new NextResponse(lines.join('\n'), {
       headers: {
         'Content-Type': 'text/plain; charset=utf-8',
-        'Content-Disposition': `attachment; filename="${base}.hcmask"`,
+        'Content-Disposition': `attachment; filename="${base}${importedWindowTag(range)}.hcmask"`,
+        ...importedWindowHeaders(range),
       },
     })
   } catch (_error) {
@@ -304,7 +336,7 @@ async function exportHcmask(
 function streamUniqueList(
   field: 'email' | 'domain',
   clause: string, allExtras: string, mergedParams: Record<string, unknown>,
-  breach_name: string, domain: string, incTiers: string[], excTiers: string[], loginTypes: string[],
+  breach_name: string, domain: string, incTiers: string[], excTiers: string[], loginTypes: string[], range: ImportedRange,
 ): NextResponse {
   const encoder = new TextEncoder()
   const readable = new ReadableStream({
@@ -338,7 +370,8 @@ function streamUniqueList(
   return new NextResponse(readable, {
     headers: {
       'Content-Type': 'text/plain; charset=utf-8',
-      'Content-Disposition': `attachment; filename="${base}-${field}s.txt"`,
+      'Content-Disposition': `attachment; filename="${base}-${field}s${importedWindowTag(range)}.txt"`,
+      ...importedWindowHeaders(range),
     },
   })
 }
@@ -347,20 +380,22 @@ function streamUniqueList(
 // Stream: password wordlist (sorted by frequency)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function streamWordlist(incTiers: string[], excTiers: string[], loginTypes: string[]): NextResponse {
+function streamWordlist(incTiers: string[], excTiers: string[], loginTypes: string[], range: ImportedRange): NextResponse {
   const encoder        = new TextEncoder()
   const tierExtra      = tierWhereMulti(incTiers, excTiers)
   const loginTypeExtra = loginTypeWhere(loginTypes)
-  const where          = tierExtra || loginTypeExtra
-    ? `WHERE 1=1${tierExtra}${loginTypeExtra}`
-    : ''
 
   const readable = new ReadableStream({
     async start(controller) {
       try {
+        // The wordlist has no search of its own, so it is always index-neutral; the date bound is the only thing it adds.
+        const rangeSql = await planImportedRange(range, { shape: 'aggregate', indexNeutral: true, run: runMeta })
+        const rangeExtra = importedRangeAndSql(rangeSql)
+        const where = tierExtra || loginTypeExtra || rangeExtra ? `WHERE 1=1${tierExtra}${loginTypeExtra}${rangeExtra}` : ''
         const chClient = getClient()
         const resultSet = await chClient.query({
           query: `SELECT password, count() AS freq FROM ulp.credentials ${where} GROUP BY password ORDER BY freq DESC LIMIT 5000000 ${exportGroupBySettings(120)}`,
+          query_params: rangeSql.params,
           format: 'JSONEachRow',
         })
         const stream = resultSet.stream<{ password: string; freq: string }>()
@@ -379,7 +414,8 @@ function streamWordlist(incTiers: string[], excTiers: string[], loginTypes: stri
   return new NextResponse(readable, {
     headers: {
       'Content-Type': 'text/plain; charset=utf-8',
-      'Content-Disposition': `attachment; filename="wordlist${suffix}.txt"`,
+      'Content-Disposition': `attachment; filename="wordlist${suffix}${importedWindowTag(range)}.txt"`,
+      ...importedWindowHeaders(range),
     },
   })
 }
@@ -391,7 +427,7 @@ function streamWordlist(incTiers: string[], excTiers: string[], loginTypes: stri
 function streamSprayList(
   query: string, domain: string, breach_name: string,
   incTiers: string[], excTiers: string[], loginTypes: string[],
-  _extra: Record<string, unknown> = {},
+  range: ImportedRange,
 ): NextResponse {
   const encoder        = new TextEncoder()
   const tokens         = parseULPQuery(query)
@@ -409,14 +445,15 @@ function streamSprayList(
   const readable = new ReadableStream({
     async start(controller) {
       try {
+        const rangeSql = await planImportedRange(range, { shape: 'aggregate', indexNeutral: isIndexNeutralSearch(tokens), run: runMeta })
         const chClient = getClient()
         const resultSet = await chClient.query({
           query: `SELECT DISTINCT arrayElement(splitByChar('@', email), 1) AS username
                   FROM ulp.credentials
-                  WHERE ${clause}${domainExtra}${breachExtra}${tierExtra}${loginTypeExtra}
+                  WHERE ${clause}${domainExtra}${breachExtra}${tierExtra}${loginTypeExtra}${importedRangeAndSql(rangeSql)}
                   ORDER BY username
                   SETTINGS max_execution_time = 120`,
-          query_params: mergedParams,
+          query_params: { ...mergedParams, ...rangeSql.params },
           format: 'JSONEachRow',
         })
         const stream = resultSet.stream<{ username: string }>()
@@ -432,11 +469,13 @@ function streamSprayList(
   })
 
   const base = buildFilenameBase(breach_name, domain, incTiers, excTiers, loginTypes)
-  const filename = domain ? `spray-${base}.txt` : `spray-list${base.replace('ulp-export', '')}.txt`
+  const tag = importedWindowTag(range)
+  const filename = domain ? `spray-${base}${tag}.txt` : `spray-list${base.replace('ulp-export', '')}${tag}.txt`
   return new NextResponse(readable, {
     headers: {
       'Content-Type': 'text/plain; charset=utf-8',
       'Content-Disposition': `attachment; filename="${filename}"`,
+      ...importedWindowHeaders(range),
     },
   })
 }
