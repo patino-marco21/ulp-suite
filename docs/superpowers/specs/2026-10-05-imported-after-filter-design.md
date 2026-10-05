@@ -1,8 +1,9 @@
 # Imported-after filter — design (2026-10-05)
 
-Status: **design approved in chat on 2026-10-05; this written spec awaits the owner's read; not implemented.** One rule changed after approval,
+Status: **implemented on 2026-10-05 (plan `docs/superpowers/plans/2026-10-05-imported-after-filter.md`).** One rule changed after the design was approved,
 because a measurement disproved it: the helper never switches skip indexes off (see "The plan rule" and "Measurements"), and a prerequisite fix
-(P0) was added. Reference table: `ulp.credentials`, 1,394,459,025 rows in
+(P0) shipped first. `__tests__/imported-range-parity.live.test.ts` returns row for row what the plain bound returns for every scenario it carries, and
+`__tests__/newest-first-parity.live.test.ts` carries the two case-parity tests. Reference table: `ulp.credentials`, 1,394,459,025 rows in
 partitions 202607 (897.7M) and 202608 (496.7M), `imported_at DateTime` (second precision, server and column time zone UTC), 2026-07-03 to
 2026-08-28. Every timing below is READ-ONLY, taken on the live server on 2026-10-05 with the query, condition and mark caches dropped before each
 run (the OS page cache stays warm), 4 threads, 4 GB memory cap. Search terms are labelled, not named: term A = a popular domain, term B = a
