@@ -6,13 +6,15 @@
  * Accepts up to 100 emails and/or domains, returns a results map keyed
  * by the original query string.
  *
- * Body: { emails?: string[], domains?: string[], mode?: "email"|"domain"|"both" }
+ * Body: { emails?: string[], domains?: string[], mode?: "email"|"domain"|"both", imported_after?: string, imported_before?: string }
+ *   imported_after / imported_before (UTC; exclusive / inclusive; see lib/imported-range.ts) keep only rows imported in that window.
  * Response: { success, queried, found, results: { [query]: { found, count, results[] } } }
  */
 
 import { NextRequest, NextResponse } from "next/server"
 import { validateRequest } from "@/lib/auth"
 import { executeQuery } from "@/lib/clickhouse"
+import { parseImportedRange, importedRangeEchoIfSet, importedRangePlain, importedRangeAndSql } from "@/lib/imported-range"
 export const dynamic = "force-dynamic"
 
 const MAX_QUERIES  = 100
@@ -30,12 +32,21 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
   }
 
-  let body: { emails?: unknown; domains?: unknown }
+  let body: { emails?: unknown; domains?: unknown; imported_after?: unknown; imported_before?: unknown }
   try {
     body = await request.json()
   } catch {
     return NextResponse.json({ success: false, error: "Invalid JSON body" }, { status: 400 })
   }
+
+  // An exact email or domain list is narrowed by the key and the bloom filter, so the plain bound is all it needs.
+  const parsedRange = parseImportedRange({ imported_after: body.imported_after, imported_before: body.imported_before })
+  if (!parsedRange.ok) {
+    return NextResponse.json({ success: false, error: parsedRange.error }, { status: 400 })
+  }
+  const importedRange = parsedRange.range
+  const rangeSql = importedRangePlain(importedRange)
+  const rangeAnd = importedRangeAndSql(rangeSql)
 
   const emails  = Array.isArray(body.emails)
     ? (body.emails  as unknown[]).filter(e => typeof e === "string" && e.trim()) as string[]
@@ -76,11 +87,11 @@ export async function POST(request: NextRequest) {
       const rows = await executeQuery(
         `SELECT email, password, url, domain, source_file, breach_name, imported_at
          FROM ulp.credentials
-         WHERE email IN (${emailList})
+         WHERE email IN (${emailList})${rangeAnd}
          ORDER BY email ASC, imported_at DESC
          LIMIT {cap:UInt32} BY email
          ${SETTINGS}`,
-        { ...emailParams, cap: RESULTS_CAP }
+        { ...emailParams, ...rangeSql.params, cap: RESULTS_CAP }
       ) as Array<{
         email: string; password: string; url: string; domain: string
         source_file: string; breach_name: string; imported_at: string
@@ -104,11 +115,11 @@ export async function POST(request: NextRequest) {
       const rows = await executeQuery(
         `SELECT domain, email, password, url, source_file, breach_name, imported_at
          FROM ulp.credentials
-         WHERE domain IN (${domainList})
+         WHERE domain IN (${domainList})${rangeAnd}
          ORDER BY domain ASC, imported_at DESC
          LIMIT {cap:UInt32} BY domain
          ${SETTINGS}`,
-        { ...domainParams, cap: RESULTS_CAP }
+        { ...domainParams, ...rangeSql.params, cap: RESULTS_CAP }
       ) as Array<{
         domain: string; email: string; password: string; url: string
         source_file: string; breach_name: string; imported_at: string
@@ -126,6 +137,7 @@ export async function POST(request: NextRequest) {
       queried: totalQueries,
       found:   Object.values(results).filter(r => r.found).length,
       results,
+      ...importedRangeEchoIfSet(importedRange),
     })
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)

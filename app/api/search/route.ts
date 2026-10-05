@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server"
 import { executeQuery } from "@/lib/clickhouse"
 import { validateRequest } from "@/lib/auth"
 import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-search"
+import { importedRangeFromSearchParams, hasImportedRange, importedRangePlain, importedRangeAndSql } from "@/lib/imported-range"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS, NORM_COLS_SETTING } from "@/lib/ulp-normalize"
@@ -55,8 +56,9 @@ export async function GET(request: NextRequest) {
   const isCorporate = searchParams.get('is_corporate') || ''
   const pwLenMin    = searchParams.get('pw_len_min') ? parseInt(searchParams.get('pw_len_min')!) : null
   const pwLenMax    = searchParams.get('pw_len_max') ? parseInt(searchParams.get('pw_len_max')!) : null
-  const dateFrom    = searchParams.get('date_from') || ''
-  const dateTo      = searchParams.get('date_to')   || ''
+  const parsedRange = importedRangeFromSearchParams(searchParams)
+  if (!parsedRange.ok) return NextResponse.json({ success: false, error: parsedRange.error }, { status: 400 })
+  const importedRange = parsedRange.range
   const emailDomain = searchParams.get('email_domain') || ''
   const sourceFile  = searchParams.get('source_file')  || ''
   const regexMode   = searchParams.get('regex') === '1'
@@ -74,7 +76,7 @@ export async function GET(request: NextRequest) {
   // Require at least one filter
   const hasFilter = q.trim() || breach || tierInclude || tierExclude || loginType ||
                     pwMasks.length || urlScheme || isCorporate || pwLenMin !== null ||
-                    pwLenMax !== null || dateFrom || dateTo || emailDomain || sourceFile
+                    pwLenMax !== null || hasImportedRange(importedRange) || emailDomain || sourceFile
   if (!hasFilter) {
     return NextResponse.json({ success: true, results: [], total: 0, next_cursor: null, query: '' })
   }
@@ -99,8 +101,10 @@ export async function GET(request: NextRequest) {
   if (isCorporate === '1') extras.push(' AND is_corporate_email = 1')
   if (pwLenMin !== null) { extras.push(' AND password_length >= {pwLenMin:UInt8}'); mergedParams.pwLenMin = pwLenMin }
   if (pwLenMax !== null) { extras.push(' AND password_length <= {pwLenMax:UInt8}'); mergedParams.pwLenMax = pwLenMax }
-  if (dateFrom) { extras.push(' AND imported_at >= {dateFrom:DateTime}'); mergedParams.dateFrom = `${dateFrom} 00:00:00` }
-  if (dateTo)   { extras.push(' AND imported_at <= {dateTo:DateTime}');   mergedParams.dateTo   = `${dateTo} 23:59:59` }
+  // imported_after / imported_before (and the old date_from / date_to): lib/imported-range.ts. This legacy route has no UI caller and gets the plain bound.
+  const rangeSql = importedRangePlain(importedRange)
+  Object.assign(mergedParams, rangeSql.params)
+  extras.push(importedRangeAndSql(rangeSql))
 
   // Password mask: already sanitised to known values — safe to interpolate
   if (pwMasks.length) {

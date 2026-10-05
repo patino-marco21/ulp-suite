@@ -2,12 +2,15 @@
  * Search API v1 - ULP Credentials Search
  * GET /api/v1/search/credentials?q=<query>&page=1&limit=100
  * GET /api/v1/search/credentials?q=<query>&cursor=<token>&limit=100  (keyset pagination — recommended for deep paging; see next_cursor in the response)
+ * Optional: &imported_after=<instant>&imported_before=<instant> (UTC; exclusive / inclusive; a date, a date-time or ISO-8601 with an offset), so a
+ * caller that polls with the last window's imported_before only ever sees what arrived since. The response echoes the effective window.
  */
 
 import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
 import { executeQuery } from "@/lib/clickhouse"
-import { parseULPQuery, buildULPWhere } from "@/lib/ulp-search"
+import { parseULPQuery, buildULPWhere, isIndexNeutralSearch } from "@/lib/ulp-search"
+import { importedRangeFromSearchParams, importedRangeEchoIfSet, planImportedRange, importedRangeAndSql } from "@/lib/imported-range"
 import { decodeCursor, buildCursorWhere, encodeCursor } from "@/lib/cursor-pagination"
 
 export const dynamic = 'force-dynamic'
@@ -33,13 +36,26 @@ export async function GET(request: NextRequest) {
   const offset = (page - 1) * limit
   const cursorToken = searchParams.get('cursor') || ''
 
+  const parsedRange = importedRangeFromSearchParams(searchParams)
+  if (!parsedRange.ok) {
+    return addRateLimitHeaders(NextResponse.json({ success: false, error: parsedRange.error }, { status: 400 }), authResult.rateLimit)
+  }
+  const importedRange = parsedRange.range
+
   if (!q.trim()) {
     const response = NextResponse.json({ success: true, results: [], total: 0, page: 1, pages: 0, next_cursor: null })
     return addRateLimitHeaders(response, authResult.rateLimit)
   }
 
   try {
-    const { clause, params } = buildULPWhere(parseULPQuery(q))
+    const tokens = parseULPQuery(q)
+    const { clause, params } = buildULPWhere(tokens)
+    // The rows are ORDER BY imported_at DESC (a time-ordered query) and the count is an aggregate: both may use proj_imported_desc, but
+    // only for a search whose predicates mean the same on a projection (lib/imported-range.ts, planImportedRange).
+    const indexNeutral = isIndexNeutralSearch(tokens)
+    const runMeta = (sql: string) => executeQuery(sql) as Promise<Array<Record<string, unknown>>>
+    const rowsRange = await planImportedRange(importedRange, { shape: 'time', indexNeutral, run: runMeta })
+    const totalRange = await planImportedRange(importedRange, { shape: 'aggregate', indexNeutral, run: runMeta })
 
     // Keyset pagination: reuses the same tested primitive the internal
     // Credentials Browser already uses (lib/cursor-pagination.ts). An
@@ -65,24 +81,24 @@ export async function GET(request: NextRequest) {
       usingCursor
         ? Promise.resolve(null)
         : executeQuery(
-            `SELECT count() as total FROM ulp.credentials WHERE ${clause}
+            `SELECT count() as total FROM ulp.credentials WHERE ${clause}${importedRangeAndSql(totalRange)}
              SETTINGS optimize_trivial_count_query = 1,
                       max_execution_time = 300,
                       timeout_overflow_mode = 'break',
                       use_query_cache = 0`,
-            params
+            { ...params, ...totalRange.params }
           ),
       // Data: throw mode on timeout so we return a 408 instead of silent 0 rows
       // (timeout_overflow_mode=break with ORDER BY does not flush sort buffer —
       // ClickHouse issue #52234).
       executeQuery(
         `SELECT url, email, password, domain, source_file, imported_at
-         FROM ulp.credentials WHERE ${clause}${cursorClause}
+         FROM ulp.credentials WHERE ${clause}${cursorClause}${importedRangeAndSql(rowsRange)}
          ORDER BY imported_at DESC LIMIT {limit:UInt32}${usingCursor ? '' : ' OFFSET {offset:UInt32}'}
          SETTINGS max_execution_time = 300,
                   timeout_overflow_mode = 'throw',
                   http_wait_end_of_query = 1`,
-        { ...params, ...cursorParams, limit, ...(usingCursor ? {} : { offset }) }
+        { ...params, ...cursorParams, ...rowsRange.params, limit, ...(usingCursor ? {} : { offset }) }
       ),
     ])
 
@@ -100,6 +116,7 @@ export async function GET(request: NextRequest) {
       pages: usingCursor ? null : Math.ceil((total ?? 0) / limit),
       next_cursor: nextCursor,
       query: q,
+      ...importedRangeEchoIfSet(importedRange),
     })
     return addRateLimitHeaders(response, authResult.rateLimit)
   } catch (error) {

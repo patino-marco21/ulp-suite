@@ -6,7 +6,8 @@
  * Returns a result map keyed by the original query string.
  *
  * Body (JSON):
- *   { emails?: string[], domains?: string[] }
+ *   { emails?: string[], domains?: string[], imported_after?: string, imported_before?: string }
+ *   imported_after / imported_before (UTC; exclusive / inclusive; see lib/imported-range.ts) keep only rows imported in that window.
  *
  * Each email lookup: exact email match (bloom-filter accelerated)
  * Each domain lookup: exact domain match
@@ -18,6 +19,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
 import { executeQuery } from "@/lib/clickhouse"
 import { NORM_COLS, NORM_COLS_SETTING } from '@/lib/ulp-normalize'
+import { parseImportedRange, importedRangeEchoIfSet, importedRangePlain, importedRangeAndSql } from "@/lib/imported-range"
 
 export const dynamic = "force-dynamic"
 
@@ -53,12 +55,21 @@ export async function POST(request: NextRequest) {
 
   await logApiRequest(authResult.apiKey!, request, "v1/lookup/batch")
 
-  let body: { emails?: unknown; domains?: unknown }
+  let body: { emails?: unknown; domains?: unknown; imported_after?: unknown; imported_before?: unknown }
   try {
     body = await request.json()
   } catch {
     return NextResponse.json({ success: false, error: "Invalid JSON body" }, { status: 400 })
   }
+
+  // An exact email or domain list is narrowed by the key and the bloom filter, so the plain bound is all it needs.
+  const parsedRange = parseImportedRange({ imported_after: body.imported_after, imported_before: body.imported_before })
+  if (!parsedRange.ok) {
+    return NextResponse.json({ success: false, error: parsedRange.error }, { status: 400 })
+  }
+  const importedRange = parsedRange.range
+  const rangeSql = importedRangePlain(importedRange)
+  const rangeAnd = importedRangeAndSql(rangeSql)
 
   const emails  = Array.isArray(body.emails)  ? (body.emails  as unknown[]).filter(e => typeof e === "string" && e.trim()) as string[] : []
   const domains = Array.isArray(body.domains) ? (body.domains as unknown[]).filter(d => typeof d === "string" && d.trim()) as string[] : []
@@ -96,13 +107,13 @@ export async function POST(request: NextRequest) {
          FROM (
            SELECT ${RAW_COLS}
            FROM ulp.credentials
-           WHERE email IN (${emailList})
+           WHERE email IN (${emailList})${rangeAnd}
            ORDER BY email ASC, imported_at DESC
            LIMIT {cap:UInt32} BY email
          ) AS t
          ORDER BY t.email ASC, t.imported_at DESC
          ${SETTINGS}`,
-        { ...emailParams, cap: RESULTS_CAP }
+        { ...emailParams, ...rangeSql.params, cap: RESULTS_CAP }
       ) as Array<{ email: string; url: string; password: string; domain: string; source_file: string; breach_name: string; imported_at: string }>
 
       for (const email of emails) {
@@ -123,13 +134,13 @@ export async function POST(request: NextRequest) {
          FROM (
            SELECT ${RAW_COLS}
            FROM ulp.credentials
-           WHERE domain IN (${domainList})
+           WHERE domain IN (${domainList})${rangeAnd}
            ORDER BY domain ASC, imported_at DESC
            LIMIT {cap:UInt32} BY domain
          ) AS t
          ORDER BY t.domain ASC, t.imported_at DESC
          ${SETTINGS}`,
-        { ...domainParams, cap: RESULTS_CAP }
+        { ...domainParams, ...rangeSql.params, cap: RESULTS_CAP }
       ) as Array<{ email: string; url: string; password: string; domain: string; source_file: string; breach_name: string; imported_at: string }>
 
       for (const domain of domains) {
@@ -144,6 +155,7 @@ export async function POST(request: NextRequest) {
       queried: totalQueries,
       found:   Object.values(results).filter(r => r.found).length,
       results,
+      ...importedRangeEchoIfSet(importedRange),
     })
     return addRateLimitHeaders(response, authResult.rateLimit)
   } catch (error) {
