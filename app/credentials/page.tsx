@@ -27,6 +27,10 @@ import {
 } from "@/lib/credential-browse-defaults"
 import type { SortKey } from "@/lib/cursor-pagination"
 import { parseTotals, recordsLabel, resultsLabel, totalsParams, withPendingTotals, withTotals } from "@/lib/credential-totals"
+import {
+  IMPORTED_PRESETS, epochSecondsToIso, localInputToUtcIso, utcEpochToLocalInput, utcIsoToDisplay,
+  searchFingerprint, readMark, writeMark, markStorageKey, sinceLastExportWindow, markAfterExport, type ExportMark,
+} from "@/lib/imported-range-client"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -126,6 +130,14 @@ const EXPORT_FORMATS = [
 ]
 
 const PAGE_SIZES = [25, 50, 100, 200]
+
+/** A datetime-local value (the browser's local time) as the UTC instant the API takes; null when empty or not a real time. */
+const localToUtcIso = (value: string): string | null => (value ? localInputToUtcIso(value, new Date(value).getTimezoneOffset()) : null)
+
+/** localStorage can be blocked (private windows, site data cleared): the "since last export" memory is a convenience, so null is fine. */
+const browserStorage = (): Storage | null => {
+  try { return window.localStorage } catch { return null }
+}
 
 // ─── CopyButton ───────────────────────────────────────────────────────────────
 
@@ -472,7 +484,7 @@ function CredentialDetailSheet({
                 <Clock className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
                 <div className="flex-1 min-w-0">
                   <p className="text-xs text-muted-foreground">Imported</p>
-                  <p className="text-xs font-mono">{cred.imported_at}</p>
+                  <p className="text-xs font-mono">{cred.imported_at} UTC</p>
                 </div>
               </div>
             )}
@@ -662,8 +674,11 @@ export default function CredentialsPage() {
 
   // Advanced filters (hidden behind toggle)
   const [advOpen, setAdvOpen]               = useState(false)
-  const [dateFrom, setDateFrom]             = useState('')
-  const [dateTo, setDateTo]                 = useState('')
+  // Imported window: <input type="datetime-local"> values in the browser's LOCAL time; the API takes UTC instants (localToUtcIso).
+  const [importedAfter, setImportedAfter]   = useState('')
+  const [importedBefore, setImportedBefore] = useState('')
+  // The cut of the last complete export of THIS search, kept in the browser (lib/imported-range-client.ts).
+  const [exportMark, setExportMark]         = useState<ExportMark | null>(null)
   const [pwLenMin, setPwLenMin]             = useState('')
   const [pwLenMax, setPwLenMax]             = useState('')
   const [emailDomainFilter, setEmailDomainFilter] = useState('')
@@ -699,8 +714,10 @@ export default function CredentialsPage() {
     if (effectiveExcludeNoise) ps.set('exclude_noise', '1')
     if (effectiveDedupe)       ps.set('dedupe', '1')
     // Advanced
-    if (dateFrom)           ps.set('date_from', dateFrom)
-    if (dateTo)             ps.set('date_to', dateTo)
+    const afterIso  = localToUtcIso(importedAfter)
+    const beforeIso = localToUtcIso(importedBefore)
+    if (afterIso)           ps.set('imported_after', afterIso)
+    if (beforeIso)          ps.set('imported_before', beforeIso)
     if (pwLenMin)           ps.set('pw_len_min', pwLenMin)
     if (pwLenMax)           ps.set('pw_len_max', pwLenMax)
     if (emailDomainFilter)  ps.set('email_domain', emailDomainFilter)
@@ -710,7 +727,7 @@ export default function CredentialsPage() {
     return ps
   }, [
     q, domain, breach, loginType, pwMask, isCorporate, urlScheme, tierInclude, tierExclude, excludeNoise, dedupe,
-    dateFrom, dateTo, pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode,
+    importedAfter, importedBefore, pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode,
     sortKey, limit,
   ])
 
@@ -784,7 +801,7 @@ export default function CredentialsPage() {
   const clearAll = () => {
     setQ(''); setDomain(''); setBreach(''); setLoginType(''); setPwMask([])
     setIsCorporate(false); setUrlScheme(''); setTierInclude([]); setTierExclude([])
-    setDateFrom(''); setDateTo(''); setPwLenMin(''); setPwLenMax('')
+    setImportedAfter(''); setImportedBefore(''); setPwLenMin(''); setPwLenMax('')
     setEmailDomainFilter(''); setSourceFileFilter(''); setUrlHostFilter('')
     setRegexMode(false)
     setExcludeNoise(true)
@@ -845,9 +862,48 @@ export default function CredentialsPage() {
     return <ArrowUpDown className="h-3.5 w-3.5 ml-0.5 shrink-0 opacity-20 group-hover/th:opacity-60 transition-opacity" />
   }
 
+  // "The same search" for the since-last-export memory: every field that narrows the rows, none of date, sort, format or page size.
+  const markKey = markStorageKey(searchFingerprint({
+    q, domain, breach, loginType, pwMask, isCorporate, urlScheme, tierInclude, tierExclude, pwLenMin, pwLenMax,
+    emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode, excludeNoise, dedupe,
+  }))
+  useEffect(() => { setExportMark(readMark(browserStorage(), markKey)) }, [markKey])
+
+  const importedAfterIso  = localToUtcIso(importedAfter)
+  const importedBeforeIso = localToUtcIso(importedBefore)
+
+  /** A lower bound makes the time-ordered plan the right one (the fast path), so switch to Newest first unless a time sort is already on. */
+  const ensureTimeSort = () => { if (sortKey !== 'imported_desc' && sortKey !== 'imported_asc') setSortKey('imported_desc') }
+
+  /** "Last 24 h" / "Last 7 days": fills the lower bound with now minus that many seconds. Press Search to apply. */
+  const applyPreset = (seconds: number) => {
+    const epoch = Math.floor(Date.now() / 1000) - seconds
+    setImportedAfter(utcEpochToLocalInput(epoch, new Date(epoch * 1000).getTimezoneOffset()))
+    setImportedBefore('')
+    ensureTimeSort()
+  }
+
+  /** Fills the window with (the last complete export's cut, now minus the lag]. Press Export (or Search) to use it. */
+  const fillSinceLastExport = () => {
+    const w = sinceLastExportWindow(exportMark, Date.now())
+    if (!w.ok) {
+      toast(w.reason === 'no-mark'
+        ? { title: 'No earlier export of this search is remembered yet', description: 'Run an export first; the next one can then start where it ended.' }
+        : { title: 'Exported moments ago', description: 'Give it a couple of minutes: rows are stamped a little before they become visible.' })
+      return
+    }
+    const after = Date.parse(w.after) / 1000
+    const before = Date.parse(w.before) / 1000
+    setImportedAfter(utcEpochToLocalInput(after, new Date(after * 1000).getTimezoneOffset()))
+    setImportedBefore(utcEpochToLocalInput(before, new Date(before * 1000).getTimezoneOffset()))
+    ensureTimeSort()
+  }
+
   const doExport = useCallback(async () => {
     setExportLoading(true)
     try {
+      const afterIso  = localToUtcIso(importedAfter)
+      const beforeIso = localToUtcIso(importedBefore)
       const res = await fetch('/api/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -863,8 +919,8 @@ export default function CredentialsPage() {
           url_scheme:    urlScheme,
           is_corporate:  isCorporate ? '1' : '',
           sort:          sortKey,
-          date_from:     dateFrom,
-          date_to:       dateTo,
+          imported_after:  afterIso ?? '',
+          imported_before: beforeIso ?? '',
           pw_len_min:    pwLenMin !== '' ? parseInt(pwLenMin, 10) : null,
           pw_len_max:    pwLenMax !== '' ? parseInt(pwLenMax, 10) : null,
           email_domain:  emailDomainFilter,
@@ -887,14 +943,35 @@ export default function CredentialsPage() {
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
-      toast({ title: 'Export started' })
+
+      // Remember how far this search has been exported, but only when that keeps the chain gap-free (markAfterExport), and say so when the
+      // 10,000-row cap cut the file: the rows between its last row and the window's end are not in it.
+      const truncated = res.headers.get('X-Export-Truncated') === '1'
+      const rows = Number(res.headers.get('X-Export-Rows') ?? 0) || 0
+      const next = markAfterExport(
+        exportMark,
+        { lower: afterIso ? Date.parse(afterIso) / 1000 : null, upper: beforeIso ? Date.parse(beforeIso) / 1000 : null },
+        { truncated, rows },
+        Date.now(),
+      )
+      if (next) { writeMark(browserStorage(), markKey, next); setExportMark(next) }
+      if (truncated) {
+        toast({
+          title: 'Export stopped at 10,000 rows',
+          description: 'Narrow the imported window (or the search) to get the rest. "Since last export" was not moved.',
+          variant: 'destructive',
+        })
+      } else {
+        toast({ title: 'Export started' })
+      }
     } catch {
       toast({ title: 'Export failed', variant: 'destructive' })
     } finally {
       setExportLoading(false)
     }
   }, [q, domain, breach, tierInclude, tierExclude, loginType, pwMask, urlScheme, isCorporate, sortKey, exportFmt,
-      dateFrom, dateTo, pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode, excludeNoise, dedupe,
+      importedAfter, importedBefore, exportMark, markKey,
+      pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode, excludeNoise, dedupe,
       toast])
 
   const tierBadgeClass = (t: string) =>
@@ -903,11 +980,12 @@ export default function CredentialsPage() {
     t === 'T3' ? 'bg-amber-500/10 text-amber-600 border-amber-500/20' : ''
 
   const hasBasicFilters = !!(q || domain || breach || loginType || pwMask.length || isCorporate || urlScheme || tierInclude.length || tierExclude.length)
-  const hasAdvFilters   = !!(dateFrom || dateTo || pwLenMin || pwLenMax || emailDomainFilter || sourceFileFilter || urlHostFilter || regexMode)
+  const hasAdvFilters   = !!(importedAfter || importedBefore || pwLenMin || pwLenMax || emailDomainFilter || sourceFileFilter || urlHostFilter || regexMode)
   const hasFilters      = hasBasicFilters || hasAdvFilters
 
   const selectCls = "h-8 text-xs border border-border rounded-md bg-background px-2 text-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 cursor-pointer"
   const advInputCls = "h-7 text-xs font-mono"
+  const presetCls   = "rounded-full border border-border bg-muted/40 px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted"
 
   return (
     <div className="flex h-full flex-col">
@@ -1225,24 +1303,30 @@ export default function CredentialsPage() {
             </p>
 
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              {/* Date range */}
+              {/* Imported window: your local time here, UTC on the server (shown under each field) */}
               <div className="space-y-1">
-                <label className="text-[10px] uppercase tracking-wider text-muted-foreground">From date</label>
+                <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Imported after</label>
                 <Input
-                  type="date"
-                  value={dateFrom}
-                  onChange={e => setDateFrom(e.target.value)}
+                  type="datetime-local"
+                  step={1}
+                  value={importedAfter}
+                  onChange={e => { setImportedAfter(e.target.value); if (e.target.value) ensureTimeSort() }}
+                  onKeyDown={e => e.key === 'Enter' && applyFilters()}
                   className={advInputCls}
                 />
+                {importedAfterIso && <p className="text-[10px] font-mono text-muted-foreground">= {utcIsoToDisplay(importedAfterIso)}</p>}
               </div>
               <div className="space-y-1">
-                <label className="text-[10px] uppercase tracking-wider text-muted-foreground">To date</label>
+                <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Imported before</label>
                 <Input
-                  type="date"
-                  value={dateTo}
-                  onChange={e => setDateTo(e.target.value)}
+                  type="datetime-local"
+                  step={1}
+                  value={importedBefore}
+                  onChange={e => setImportedBefore(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && applyFilters()}
                   className={advInputCls}
                 />
+                {importedBeforeIso && <p className="text-[10px] font-mono text-muted-foreground">= {utcIsoToDisplay(importedBeforeIso)}</p>}
               </div>
 
               {/* Password length range */}
@@ -1270,6 +1354,37 @@ export default function CredentialsPage() {
                   className={advInputCls}
                 />
               </div>
+            </div>
+
+            {/* Imported presets and the since-last-export memory */}
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Imported</span>
+                {IMPORTED_PRESETS.map(p => (
+                  <button key={p.key} onClick={() => applyPreset(p.seconds)} className={presetCls}>{p.label}</button>
+                ))}
+                <button onClick={fillSinceLastExport} className={presetCls} title="Start where the last complete export of this search ended">
+                  Since last export
+                </button>
+                {(importedAfter || importedBefore) && (
+                  <button
+                    onClick={() => { setImportedAfter(''); setImportedBefore('') }}
+                    className="text-[10px] text-muted-foreground underline hover:text-foreground"
+                  >
+                    clear
+                  </button>
+                )}
+                {exportMark && (
+                  <span className="text-[10px] text-muted-foreground">
+                    last export of this search ended {utcIsoToDisplay(epochSecondsToIso(exportMark.through))}
+                    {exportMark.rows ? ` · ${exportMark.rows.toLocaleString()} rows` : ''}
+                  </span>
+                )}
+              </div>
+              <p className="text-[10px] text-muted-foreground">
+                Matches rows added to the database after this time; a credential imported again later counts as added. These fields are your
+                local time; the server works in UTC (shown under each field).
+              </p>
             </div>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
