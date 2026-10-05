@@ -1,7 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { executeQuery } from "@/lib/clickhouse"
 import { validateRequest } from "@/lib/auth"
-import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-search"
+import { parseULPQuery, buildULPWhere, buildULPWhereRegex, isIndexNeutralSearch } from "@/lib/ulp-search"
+import { importedRangeFromSearchParams, hasImportedRange, importedRangePlain, planImportedRange } from "@/lib/imported-range"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS, NORM_COLS_SETTING } from "@/lib/ulp-normalize"
@@ -101,8 +102,10 @@ const DEDUPE_WINDOW_FACTOR = 3
  *   tier_exclude  string    comma-separated tiers to exclude
  *   pw_len_min    number    minimum password length
  *   pw_len_max    number    maximum password length
- *   date_from     string    ISO date e.g. 2024-01-01
- *   date_to       string    ISO date e.g. 2024-12-31
+ *   imported_after   string  only rows imported AFTER this instant (exclusive; UTC): a date (2026-10-05, the whole day), a date-time
+ *                            (2026-10-05 14:37:00) or ISO-8601 with an offset (2026-10-05T14:37:00-05:00); anything else is a 400
+ *   imported_before  string  only rows imported up to and INCLUDING this instant; same forms (lib/imported-range.ts)
+ *   date_from, date_to       the old names of the two above; a bare date means the whole UTC day
  *   exclude_noise '1'       hide low-signal rows: IP-host / :port / .php / localhost URLs
  *   dedupe        '1'       collapse exact (url,email,password) duplicates (one row each)
  *   skip_totals   '1'       data query only: total / raw_total come back null
@@ -136,8 +139,9 @@ export async function GET(request: NextRequest) {
   const isCorporate = sp.get('is_corporate')  || ''
   const pwLenMin    = sp.get('pw_len_min')  ? parseInt(sp.get('pw_len_min')!) : null
   const pwLenMax    = sp.get('pw_len_max')  ? parseInt(sp.get('pw_len_max')!) : null
-  const dateFrom    = sp.get('date_from')     || ''
-  const dateTo      = sp.get('date_to')       || ''
+  const parsedRange = importedRangeFromSearchParams(sp)
+  if (!parsedRange.ok) return NextResponse.json({ success: false, error: parsedRange.error }, { status: 400 })
+  const importedRange = parsedRange.range
   const tierInclude = sp.get('tier_include')  || ''
   const tierExclude = sp.get('tier_exclude')  || ''
   // Declutter: hide low-signal rows (IP-host / :port / .php / localhost URLs).
@@ -170,13 +174,13 @@ export async function GET(request: NextRequest) {
   // proj_imported_desc: a projection has no text index, so hasToken(url, ...) there is a case-SENSITIVE function, while on the
   // table the text index (preprocessor lower(col)) answers it case-insensitively. See lib/ulp-search.ts (isIndexNeutralSearch).
   let projectionQClause = ''
+  const searchTokens = q.trim() ? parseULPQuery(q.trim()) : []
   if (q.trim()) {
-    const tokens = parseULPQuery(q.trim())
-    const built = regex ? buildULPWhereRegex(tokens) : buildULPWhere(tokens)
+    const built = regex ? buildULPWhereRegex(searchTokens) : buildULPWhere(searchTokens)
     qClause = built.clause
     conditions.push(`(${qClause})`)
     Object.assign(params, built.params)
-    projectionQClause = regex ? qClause : buildULPWhere(tokens, { caseInsensitiveTokens: true }).clause
+    projectionQClause = regex ? qClause : buildULPWhere(searchTokens, { caseInsensitiveTokens: true }).clause
   }
 
   // Raw column: mutations done, all domain/email values are corrected.
@@ -190,15 +194,38 @@ export async function GET(request: NextRequest) {
   if (isCorporate === '1') conditions.push('is_corporate_email = 1')
   if (pwLenMin !== null) { conditions.push('password_length >= {pwLenMin:UInt8}'); params.pwLenMin = pwLenMin }
   if (pwLenMax !== null) { conditions.push('password_length <= {pwLenMax:UInt8}'); params.pwLenMax = pwLenMax }
-  if (dateFrom) { conditions.push('imported_at >= {dateFrom:DateTime}'); params.dateFrom = `${dateFrom} 00:00:00` }
-  if (dateTo)   { conditions.push('imported_at <= {dateTo:DateTime}');   params.dateTo   = `${dateTo} 23:59:59` }
   if (pwMasks.length) {
     conditions.push(`password_mask IN (${pwMasks.map(m => `'${m}'`).join(',')})`)
   }
+  // Which queries this request runs.
+  // The total only changes when the result SET changes (new filters/sort), not
+  // when paging through it. The first page is always cursor-less, so the totals run
+  // there; on deeper cursor pages we skip them entirely (total = null) and the client
+  // carries the page-1 total forward. At billions of rows a filtered search can
+  // match tens of millions, and counting them has no LIMIT -- re-counting all of them on
+  // every page turn is the single most expensive avoidable part of the request.
+  const wantData   = !totalsOnly
+  const wantTotals = totalsOnly || (!cursorToken && !skipTotals)
+
+  // The imported-range bound (lib/imported-range.ts), in the form that suits each query, planned only for the queries this request runs: the
+  // rows query is time-ordered only for the imported_* sorts, the totals are an aggregate. The projection form (a predicate on
+  // proj_imported_desc's key) is used only for an index-neutral search and a projection that is ready; with no lower bound this costs
+  // nothing (no readiness query).
+  const runMeta = (sql: string) => executeQuery(sql) as Promise<Array<Record<string, unknown>>>
+  const indexNeutral = isIndexNeutralSearch(searchTokens, regex)
+  const rowsRange = wantData
+    ? await planImportedRange(importedRange, { shape: /^imported_at\b/.test(orderBy) ? 'time' : 'other', indexNeutral, run: runMeta })
+    : importedRangePlain(importedRange)
+  const totalsRange = wantTotals
+    ? await planImportedRange(importedRange, { shape: 'aggregate', indexNeutral, run: runMeta })
+    : importedRangePlain(importedRange)
+  Object.assign(params, rowsRange.params, totalsRange.params)
+
   // Captured before the noise filter below, so whereRaw (raw_total) reflects
   // "how many rows match your search" without the Declutter/Unique view-only
   // restrictions — see raw_total below.
-  const conditionsRaw = [...conditions]
+  const conditionsRaw = [...conditions, ...totalsRange.conditions]
+  conditions.push(...rowsRange.conditions)
 
   // Non-destructive: hides the row from this result set, never deletes it.
   // Filters the precomputed is_noise column (cheap UInt8 → PREWHERE), NOT a
@@ -248,15 +275,6 @@ export async function GET(request: NextRequest) {
   try {
     const t0 = Date.now()
 
-    // The total only changes when the result SET changes (new filters/sort), not
-    // when paging through it. The first page is always cursor-less, so the totals run
-    // there; on deeper cursor pages we skip them entirely (total = null) and the client
-    // carries the page-1 total forward. At billions of rows a filtered search can
-    // match tens of millions, and counting them has no LIMIT -- re-counting all of them on
-    // every page turn is the single most expensive avoidable part of the request.
-    const wantData   = !totalsOnly
-    const wantTotals = totalsOnly || (!cursorToken && !skipTotals)
-
     // BOTH totals in ONE scan of the search predicate: `total` (the Declutter/Unique view) and `raw_total`
     // (the same search without those view-only restrictions, so the header can say "X of Y total imported"
     // instead of a bare filtered number that looks like missing data). They used to be two separate
@@ -269,7 +287,7 @@ export async function GET(request: NextRequest) {
     // total = distinct credentials via uniq() (HLL); with no filter it is a plain count() -- storage is
     // deduped at rest (see dedupeCountExpr for the measured cost and error bound).
     //
-    // optimize_use_projections = 0 unless the search is bounded by a date range: otherwise the planner
+    // optimize_use_projections = 0 unless the search is bounded by an imported range: otherwise the planner
     // takes proj_imported_desc as a "thin covering copy" and scans all of it -- 32.6 s against 11.0 s on
     // the base table, whose domain / url_host / email_domain columns are sorted and compress far better.
     // A date range is the one predicate that projection genuinely prunes, so it keeps the planner's choice.
@@ -288,7 +306,7 @@ export async function GET(request: NextRequest) {
            SETTINGS optimize_trivial_count_query = 1,
                     max_execution_time = 300,
                     timeout_overflow_mode = 'break',
-                    use_query_cache = 0${dateFrom || dateTo ? '' : ',\n                    optimize_use_projections = 0'}`,
+                    use_query_cache = 0${hasImportedRange(importedRange) ? '' : ',\n                    optimize_use_projections = 0'}`,
           params
         )
     // The same two numbers from the dictionary's candidates: one aggregate per disjoint branch, merged as aggregate states so the figure equals the
@@ -403,8 +421,9 @@ export async function GET(request: NextRequest) {
           baseParams,
           want: dedupe ? limit * DEDUPE_WINDOW_FACTOR : limit,
           cursorImportedAt,
-          dateFrom: dateFrom ? `${dateFrom} 00:00:00` : null,
-          dateTo: dateTo ? `${dateTo} 23:59:59` : null,
+          // The windows stop at the range: the oldest second wanted is one past the exclusive lower bound, the newest is the inclusive upper one.
+          floorTs: importedRange.lower === null ? null : importedRange.lower + 1,
+          ceilTs: importedRange.upper,
           buildWindowSql: (windowSql, budgetSeconds, { projected }) => `SELECT ${SELECT}${dedupe ? ', content_key_hash AS _c_hash' : ''}
          FROM (
            SELECT ${RAW_COLS}${dedupe ? ', content_key_hash' : ''}

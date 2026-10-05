@@ -272,16 +272,18 @@ describe('readAnchors', () => {
     expect(params).toEqual({ nfwCursor: '2026-08-16 20:40:54' })
   })
 
-  test('date_from becomes a floor and date_to a ceiling; the upper bound is the smaller of the ceiling and the cursor', async () => {
-    const run = vi.fn(async () => [{ newest: 100, oldest: 1, cursor_ts: 60, date_from_ts: 20, date_to_ts: 80 }])
-    const a = await readAnchors(run, { cursorImportedAt: 'c', dateFrom: '2026-08-01 00:00:00', dateTo: '2026-08-20 23:59:59' })
+  test('the floor and the ceiling arrive as epoch seconds and cost no SQL; the upper bound is the smaller of the ceiling and the cursor', async () => {
+    const run = vi.fn(async () => [{ newest: 100, oldest: 1, cursor_ts: 60 }])
+    const a = await readAnchors(run, { cursorImportedAt: 'c', floorTs: 20, ceilTs: 80 })
     expect(a).toEqual({ newest: 100, oldest: 1, upperTs: 60, floorTs: 20 })
     const [sql, params] = run.mock.calls[0] as unknown as [string, Record<string, unknown>]
-    expect(sql).toMatch(/\{nfwDateFrom:String\}/)
-    expect(sql).toMatch(/\{nfwDateTo:String\}/)
-    expect(params).toEqual({ nfwCursor: 'c', nfwDateFrom: '2026-08-01 00:00:00', nfwDateTo: '2026-08-20 23:59:59' })
-    const b = await readAnchors(async () => [{ newest: 100, oldest: 1, date_to_ts: 80 }], { dateTo: 'x' })
+    expect(sql).not.toMatch(/nfwDate/)
+    expect(params).toEqual({ nfwCursor: 'c' })
+    const b = await readAnchors(async () => [{ newest: 100, oldest: 1 }], { ceilTs: 80 })
     expect(b!.upperTs).toBe(80)
+    expect(b!.floorTs).toBeNull()
+    const c = await readAnchors(async () => [{ newest: 100, oldest: 1 }], { floorTs: 20, ceilTs: Number.NaN })
+    expect(c).toEqual({ newest: 100, oldest: 1, upperTs: null, floorTs: 20 })
   })
 
   test('numbers that come back as strings are converted', async () => {
@@ -321,7 +323,7 @@ describe('isNewestFirstReady', () => {
 
   test('the answer is cached, so the check does not run on every request', async () => {
     const run = vi.fn(async () => [ready])
-    let now = 1_000
+    const now = 1_000
     await isNewestFirstReady(run, () => now)
     await isNewestFirstReady(run, () => now + 30_000)
     expect(run).toHaveBeenCalledTimes(1)
@@ -407,12 +409,9 @@ describe('runNewestFirst', () => {
     expect(first.params).toMatchObject({ nfwKeyLo: -1_787_000_000, nfwKeyHi: -(1_787_000_000 - 60) })
   })
 
-  test('a date range bounds the windows: nothing newer than date_to, nothing older than date_from is ever scanned', async () => {
-    const { run, log } = fakeRun({
-      anchors: { ...ANCHORS, date_from_ts: 1_786_000_000, date_to_ts: 1_787_000_000 },
-      windowAnswers: [[], [], [], [], [], []],
-    })
-    await runNewestFirst({ run, buildWindowSql: build, baseParams: {}, want: 5, dateFrom: '2026-08-01 00:00:00', dateTo: '2026-08-20 23:59:59' })
+  test('a floor and a ceiling bound the windows: nothing newer than the ceiling, nothing older than the floor is ever scanned', async () => {
+    const { run, log } = fakeRun({ windowAnswers: [[], [], [], [], [], []] })
+    await runNewestFirst({ run, buildWindowSql: build, baseParams: {}, want: 5, floorTs: 1_786_000_000, ceilTs: 1_787_000_000 })
     const windowCalls = log.filter(c => c.sql.startsWith('SELECT 1'))
     expect(windowCalls[0].params.nfwKeyLo).toBe(-1_787_000_000)
     const last = windowCalls[windowCalls.length - 1]
@@ -435,8 +434,8 @@ describe('runNewestFirst', () => {
   })
 
   test('a range that lies wholly older than the projection\'s coverage is not tried at all: null, and no window query runs', async () => {
-    const { run, log } = fakeRun({ anchors: { ...ANCHORS, date_to_ts: 1_784_000_000 } })
-    const out = await runNewestFirst({ run, buildWindowSql: build, baseParams: {}, want: 5, dateTo: '2026-07-10 23:59:59' })
+    const { run, log } = fakeRun()
+    const out = await runNewestFirst({ run, buildWindowSql: build, baseParams: {}, want: 5, ceilTs: 1_784_000_000 })
     expect(out).toBeNull()
     expect(log.filter(c => c.sql.startsWith('SELECT 1'))).toHaveLength(0)
   })

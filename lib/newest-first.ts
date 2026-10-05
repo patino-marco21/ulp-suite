@@ -54,8 +54,8 @@ type Row = Record<string, unknown>
 
 /**
  * The windows to try, newest first. `upTo` is where the range tops out when something bounds it -- the cursor's second when
- * paging, a date_to ceiling -- and is INCLUSIVE (rows of the same second that sort after the cursor row are still wanted; the
- * route's own keyset clause removes the rest); null leaves the top open. `floor` is a date_from: no row older than it can match,
+ * paging, an imported-range ceiling -- and is INCLUSIVE (rows of the same second that sort after the cursor row are still wanted; the
+ * route's own keyset clause removes the rest); null leaves the top open. `floor` is the imported-range floor (INCLUSIVE): no row older than it can match,
  * so the last window closes just above it instead of staying open. Without a floor the last window is open below, so nothing
  * older than `oldest` is ever skipped.
  */
@@ -152,14 +152,15 @@ type Run = (sql: string, params: Record<string, unknown>) => Promise<Array<Recor
 
 /**
  * Where the data starts and ends, in epoch seconds, from the partitions' min/max (answered from metadata, milliseconds), plus
- * the cursor's second when paging and the date range's ends. Converting them in ClickHouse keeps the table's own time zone out
- * of this file, and parses the date strings exactly as the route's own `imported_at >= {dateFrom:DateTime}` does.
- * `upperTs` is the smaller of the cursor and the date_to ceiling; `floorTs` is date_from. null when there is nothing usable
+ * the cursor's second when paging. Converting the cursor in ClickHouse keeps the table's own time zone out of this file, and parses
+ * it exactly as the route's own `imported_at < {c_ia:DateTime}` does. The imported-range bound arrives already as epoch seconds
+ * (lib/imported-range.ts): `ceilTs` is the newest second wanted and `floorTs` the oldest, both INCLUSIVE.
+ * `upperTs` is the smaller of the cursor and the ceiling; `floorTs` is passed through. null when there is nothing usable
  * (empty table, junk answer): the caller runs the plain query.
  */
 export async function readAnchors(
   run: Run,
-  opts: { cursorImportedAt?: string | null; dateFrom?: string | null; dateTo?: string | null } = {},
+  opts: { cursorImportedAt?: string | null; floorTs?: number | null; ceilTs?: number | null } = {},
 ): Promise<{ newest: number; oldest: number; upperTs: number | null; floorTs: number | null } | null> {
   const given = (v: string | null | undefined): v is string => typeof v === 'string' && v !== ''
   const params: Record<string, unknown> = {}
@@ -167,14 +168,6 @@ export async function readAnchors(
   if (given(opts.cursorImportedAt)) {
     sql += `, toUnixTimestamp(toDateTime({nfwCursor:String})) AS cursor_ts`
     params.nfwCursor = opts.cursorImportedAt
-  }
-  if (given(opts.dateFrom)) {
-    sql += `, toUnixTimestamp(toDateTime({nfwDateFrom:String})) AS date_from_ts`
-    params.nfwDateFrom = opts.dateFrom
-  }
-  if (given(opts.dateTo)) {
-    sql += `, toUnixTimestamp(toDateTime({nfwDateTo:String})) AS date_to_ts`
-    params.nfwDateTo = opts.dateTo
   }
   sql += ` FROM ulp.credentials`
 
@@ -185,12 +178,11 @@ export async function readAnchors(
   if (newest === null || oldest === null) return null
 
   const cursorTs = given(opts.cursorImportedAt) ? num(row?.cursor_ts) : null
-  const dateToTs = given(opts.dateTo) ? num(row?.date_to_ts) : null
-  const floorTs = given(opts.dateFrom) ? num(row?.date_from_ts) : null
-  if ((given(opts.cursorImportedAt) && cursorTs === null) || (given(opts.dateTo) && dateToTs === null) || (given(opts.dateFrom) && floorTs === null)) return null
+  if (given(opts.cursorImportedAt) && cursorTs === null) return null
+  const bound = (v: number | null | undefined) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
 
-  const uppers = [cursorTs, dateToTs].filter((v): v is number => v !== null)
-  return { newest, oldest, upperTs: uppers.length ? Math.min(...uppers) : null, floorTs }
+  const uppers = [cursorTs, bound(opts.ceilTs)].filter((v): v is number => v !== null)
+  return { newest, oldest, upperTs: uppers.length ? Math.min(...uppers) : null, floorTs: bound(opts.floorTs) }
 }
 
 /** What a route needs to run its query newest-first: everything else (readiness, anchors, windows, the time budget) is here. */
@@ -204,9 +196,9 @@ export async function runNewestFirst(a: {
   want: number
   /** The cursor's imported_at when paging. */
   cursorImportedAt?: string | null
-  /** The route's date_from / date_to as it passes them to ClickHouse ("YYYY-MM-DD HH:MM:SS"); they bound the windows. */
-  dateFrom?: string | null
-  dateTo?: string | null
+  /** The imported-range bound as epoch seconds (lib/imported-range.ts): the oldest and the newest second wanted, both INCLUSIVE. They bound the windows. */
+  floorTs?: number | null
+  ceilTs?: number | null
   /** Hard limit for every window together (their max_execution_time); default 280 s, like the plain query's 300 s. */
   deadlineMs?: number
   /** Soft limit: when the windows are predicted to run past it, give up and return null (default HANDOFF_MS). */
@@ -217,10 +209,10 @@ export async function runNewestFirst(a: {
   const status = await getNewestFirstStatus(sql => a.run(sql))
   if (!status.ready) return null
   const anchors = await readAnchors((sql, params) => a.run(sql, params), {
-    cursorImportedAt: a.cursorImportedAt, dateFrom: a.dateFrom, dateTo: a.dateTo,
+    cursorImportedAt: a.cursorImportedAt, floorTs: a.floorTs, ceilTs: a.ceilTs,
   })
   if (!anchors) return null
-  // A range that lies wholly older than the projection (a date_to in July, say) is the plain query's: every window would run on the
+  // A range that lies wholly older than the projection (a ceiling in July, say) is the plain query's: every window would run on the
   // base table, with nothing to prune them but the minmax index, and then hand off anyway.
   if (anchors.upperTs !== null && status.coveredFrom !== null && anchors.upperTs < status.coveredFrom) return null
 
