@@ -62,7 +62,7 @@ Two small additions to `lib/ulp-search.ts`: the rule for which searches mean the
 **Interfaces:**
 - Produces: `export interface ParsedToken`; `export function isIndexNeutralSearch(tokens: ParsedToken[], regexMode?: boolean): boolean`; `export interface BuildULPWhereOptions { caseInsensitiveTokens?: boolean }`; `buildULPWhere(tokens, opts?: BuildULPWhereOptions)`. With `caseInsensitiveTokens: true` a word token is written `hasToken(lower(url), {tok0:String}) OR hasToken(lower(email), ...) OR hasToken(lower(password), ...)`; params and every other token type are unchanged.
 
-- [ ] **Step 1: Add the tests**
+- [x] **Step 1: Add the tests**
 
 Apply this diff to `__tests__/ulp-search.test.ts`:
 
@@ -156,12 +156,12 @@ index 37a75ac..bf57293 100644
 +})
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `npx vitest run __tests__/ulp-search.test.ts`
 Expected: FAIL. The `isIndexNeutralSearch` tests fail with `isIndexNeutralSearch is not a function`, and the `caseInsensitiveTokens` tests fail on `hasToken(lower(url), ...)` not being in the clause. The pre-existing tests still pass.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Apply this diff to `lib/ulp-search.ts`:
 
@@ -225,12 +225,12 @@ index 9e23eaf..54e76b0 100644
        // Domain-shaped (e.g. "ledger.com"): matches the canonical site column
 ```
 
-- [ ] **Step 4: Run the tests to see them pass**
+- [x] **Step 4: Run the tests to see them pass**
 
 Run: `npx vitest run __tests__/ulp-search.test.ts`
 Expected: PASS, 79 tests.
 
-- [ ] **Step 5: Type-check, lint, commit**
+- [x] **Step 5: Type-check, lint, commit**
 
 ```bash
 npx tsc --noEmit
@@ -264,7 +264,7 @@ Newest-first runs a word search as windows over `proj_imported_desc` with `use_s
 - Consumes: `buildULPWhere(tokens, { caseInsensitiveTokens: true })` from Task 1.
 - Produces: in the route, `whereProjection` (the route's `where` with the search clause replaced by its lowercased spelling; identical when the search has no word token), used by every window whose `projected` flag is true.
 
-- [ ] **Step 1: Update the unit tests**
+- [x] **Step 1: Update the unit tests**
 
 Apply this diff to `__tests__/credentials-route-newest-first.test.ts`:
 
@@ -333,12 +333,12 @@ index 9162754..14fd7d0 100644
    test('the outer select still hands back the stored columns under _c_ aliases, so the cursor is built from stored values', async () => {
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `npx vitest run __tests__/credentials-route-newest-first.test.ts`
 Expected: FAIL in the three tests that mention `hasToken(lower(url), ...)` (the window still uses `hasToken(url, ...)`).
 
-- [ ] **Step 3: Add the live tests**
+- [x] **Step 3: Add the live tests**
 
 Apply this diff to `__tests__/newest-first-parity.live.test.ts` (it appends a second `describe`; the first one is untouched):
 
@@ -461,14 +461,14 @@ index 4057841..fcfe1d0 100644
 +})
 ```
 
-- [ ] **Step 4: RED - the end-to-end live test fails on the unfixed route**
+- [x] **Step 4: RED - the end-to-end live test fails on the unfixed route**
 
 ClickHouse must be running (`docker ps`). This is read-only; it takes about two minutes (the plain plan answers a word query with a cursor in ~100 s).
 
 Run: `NFW_PARITY=1 npx vitest run __tests__/newest-first-parity.live.test.ts -t "end to end"`
 Expected: FAIL with `word "login": expected [ ...(20) ] to deeply equal [ ...(20) ]`: the windowed page and the plain page differ by a row that only matches case-insensitively. If it PASSES, the route already has the fix (or the table holds no case-only match in its newest 15 minutes: set `NFW_CASE_WINDOW_SECONDS=3600`); do not continue until you understand which.
 
-- [ ] **Step 4b: the term-set test (it does not depend on the route, only on Task 1)**
+- [x] **Step 4b: the term-set test (it does not depend on the route, only on Task 1)**
 
 Run: `NFW_PARITY=1 npx vitest run __tests__/newest-first-parity.live.test.ts -t "term set"`
 Expected: PASS (about 65 s), printing a table like this one (counts move with the data; the shape must not):
@@ -487,7 +487,7 @@ test | 24990 | 24990 | 23792
 
 GATE: the second and third columns must be equal for every word, and at least one word must have a smaller fourth column. If any word's lowercased count differs from the table plan's, STOP and report the table to the controller: the lowercased spelling is then not equivalent to the text index for some tokenization case, and the design falls back to "windows never disable skip indexes when the search has a word token", which changes this task and Task 4's tests. Do not weaken the test.
 
-- [ ] **Step 5: Implement the fix**
+- [x] **Step 5: Implement the fix**
 
 Apply this diff to `app/api/credentials/route.ts`:
 
@@ -551,17 +551,17 @@ index 7022225..54d9358 100644
           ) AS t
 ```
 
-- [ ] **Step 6: Run the unit tests**
+- [x] **Step 6: Run the unit tests**
 
 Run: `npx vitest run __tests__/credentials-route-newest-first.test.ts __tests__/credentials-route.test.ts __tests__/credentials-route-totals.test.ts __tests__/credentials-route-dictionary.test.ts __tests__/credentials-route-dedupe-window.test.ts`
 Expected: PASS, 79 tests in 5 files.
 
-- [ ] **Step 7: GREEN - both live tests pass on the fixed route**
+- [x] **Step 7: GREEN - both live tests pass on the fixed route**
 
 Run: `NFW_PARITY=1 npx vitest run __tests__/newest-first-parity.live.test.ts -t "case parity"`
 Expected: PASS, 2 tests (about 65 s and 108 s).
 
-- [ ] **Step 8: Type-check, lint, commit**
+- [x] **Step 8: Type-check, lint, commit**
 
 ```bash
 npx tsc --noEmit
@@ -603,7 +603,7 @@ The one parser and SQL builder every route will call. Pure except for the readin
   - `interface ImportedRangeSql { conditions: string[]; params: Record<string, number> }`; `importedRangePlain(range)`, `importedRangeProjection(range)`, `importedRangeAndSql(sql): string` (` AND a AND b`)
   - `type ImportedRangeShape = 'time' | 'aggregate' | 'other'`; `planImportedRange(range, { shape, indexNeutral, run }): Promise<ImportedRangeSql>`
 
-- [ ] **Step 1: Write the tests**
+- [x] **Step 1: Write the tests**
 
 Create `__tests__/imported-range.test.ts` with exactly this content:
 
@@ -898,12 +898,12 @@ describe('planImportedRange — the projection form only where it is safe and us
 })
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `npx vitest run __tests__/imported-range.test.ts`
 Expected: FAIL: `Failed to resolve import "@/lib/imported-range"`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Create `lib/imported-range.ts` with exactly this content:
 
@@ -1149,12 +1149,12 @@ export async function planImportedRange(range: ImportedRange, ctx: ImportedRange
 }
 ```
 
-- [ ] **Step 4: Run the tests to see them pass**
+- [x] **Step 4: Run the tests to see them pass**
 
 Run: `npx vitest run __tests__/imported-range.test.ts`
 Expected: PASS, 62 tests.
 
-- [ ] **Step 5: Type-check, lint, commit**
+- [x] **Step 5: Type-check, lint, commit**
 
 ```bash
 npx tsc --noEmit
@@ -1190,7 +1190,7 @@ EOF
 - Consumes: from Task 3 `importedRangeFromSearchParams`, `importedRangePlain`, `hasImportedRange`, `planImportedRange`; from Task 1 `isIndexNeutralSearch`.
 - Produces: `readAnchors(run, { cursorImportedAt?, floorTs?, ceilTs? })` where `floorTs` is the oldest second wanted and `ceilTs` the newest, both INCLUSIVE and passed straight through (no SQL for them); `runNewestFirst({ ..., floorTs?, ceilTs? })`. The route passes `floorTs = lower + 1` and `ceilTs = upper`.
 
-- [ ] **Step 1: Move the Newest-first tests to the new arguments**
+- [x] **Step 1: Move the Newest-first tests to the new arguments**
 
 Apply this diff to `__tests__/newest-first.test.ts`:
 
@@ -1254,7 +1254,7 @@ index 50a9a76..6cbd5c4 100644
    })
 ```
 
-- [ ] **Step 2: Write the browse-route tests**
+- [x] **Step 2: Write the browse-route tests**
 
 Create `__tests__/credentials-route-imported-range.test.ts` with exactly this content:
 
@@ -1462,12 +1462,12 @@ describe('GET /api/credentials — no bound is a no-op', () => {
 })
 ```
 
-- [ ] **Step 3: Run them to see them fail**
+- [x] **Step 3: Run them to see them fail**
 
 Run: `npx vitest run __tests__/newest-first.test.ts __tests__/credentials-route-imported-range.test.ts`
 Expected: FAIL. The Newest-first tests that now pass `floorTs` / `ceilTs` fail (the old code ignores them), and most of the route tests fail (no 400, no `imported_at > toDateTime(...)` in the SQL).
 
-- [ ] **Step 4: Implement the library change**
+- [x] **Step 4: Implement the library change**
 
 Apply this diff to `lib/newest-first.ts`:
 
@@ -1567,7 +1567,7 @@ index f8566d7..55af473 100644
  
 ```
 
-- [ ] **Step 5: Implement the route change**
+- [x] **Step 5: Implement the route change**
 
 Apply this diff to `app/api/credentials/route.ts` (it applies on top of Task 2's change):
 
@@ -1716,12 +1716,12 @@ Apply this diff to `app/api/credentials/route.ts` (it applies on top of Task 2's
             SELECT ${RAW_COLS}${dedupe ? ', content_key_hash' : ''}
 ```
 
-- [ ] **Step 6: Run the tests to see them pass**
+- [x] **Step 6: Run the tests to see them pass**
 
 Run: `npx vitest run __tests__/newest-first.test.ts __tests__/credentials-route-imported-range.test.ts __tests__/credentials-route-newest-first.test.ts __tests__/credentials-route.test.ts __tests__/credentials-route-totals.test.ts __tests__/credentials-route-dictionary.test.ts __tests__/credentials-route-dedupe-window.test.ts`
 Expected: PASS, 150 tests in 7 files (54 + 17 + 79 across the five existing route files).
 
-- [ ] **Step 7: Type-check, lint, commit**
+- [x] **Step 7: Type-check, lint, commit**
 
 ```bash
 npx tsc --noEmit
@@ -1755,7 +1755,7 @@ Every export format honors the bound (spray and wordlist stop ignoring it), a cu
 - Consumes: from Task 3 `importedRangeFromSearchParams`, `parseImportedRange`, `planImportedRange`, `importedRangeAndSql`, `importedWindowHeaders`, `importedWindowTag`, `ImportedRange`; from Task 1 `isIndexNeutralSearch`.
 - Produces: `POST /api/export` body keys `imported_after` / `imported_before` (the old `date_from` / `date_to` still work); `GET /api/export?format=wordlist|spray` query params of the same names. Response headers `X-Export-Rows`, `X-Export-Truncated` (the five non-streaming formats), `X-Export-Imported-After`, `X-Export-Imported-Before` (when set, every format). `streamSprayList(..., range)` and `streamWordlist(..., range)` take an `ImportedRange` (spray's old unused `_extra` argument is gone).
 
-- [ ] **Step 1: Update the source-slice test and write the behavior tests**
+- [x] **Step 1: Update the source-slice test and write the behavior tests**
 
 Apply this diff to `__tests__/export-route.test.ts`:
 
@@ -2053,12 +2053,12 @@ describe('the streaming formats honor the bound too', () => {
 })
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `npx vitest run __tests__/export-route.test.ts __tests__/export-route-imported-range.test.ts`
 Expected: FAIL (the route has no bound, no cap flag, no headers).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Apply this diff to `app/api/export/route.ts`:
 
@@ -2334,12 +2334,12 @@ index b780e3a..9232e23 100644
  }
 ```
 
-- [ ] **Step 4: Run the tests to see them pass**
+- [x] **Step 4: Run the tests to see them pass**
 
 Run: `npx vitest run __tests__/export-route.test.ts __tests__/export-route-imported-range.test.ts`
 Expected: PASS, 35 tests (8 + 27).
 
-- [ ] **Step 5: Type-check, lint, commit**
+- [x] **Step 5: Type-check, lint, commit**
 
 ```bash
 npx tsc --noEmit
@@ -2373,7 +2373,7 @@ EOF
 - Consumes: from Task 3 `importedRangeFromSearchParams`, `parseImportedRange`, `importedRangePlain`, `planImportedRange`, `importedRangeAndSql`, `importedRangeEchoIfSet`; from Task 1 `isIndexNeutralSearch`.
 - Produces: query params `imported_after` / `imported_before` on the four GET routes (the old `date_from` / `date_to` too); body keys of the same two names on the two batch routes (they never had the old names). Responses echo the effective window (`imported_after`, `imported_before`) only when a bound was given, so existing response shapes do not change. Only `/api/v1/search/credentials` uses the projection form (rows: `time`, count: `aggregate`); the others use the plain bound, because `domain = X`, `email = X` and `... IN (...)` are already narrowed by the key (measured 18-175 ms with or without the key predicate).
 
-- [ ] **Step 1: Write the tests**
+- [x] **Step 1: Write the tests**
 
 Create `__tests__/lookup-routes-imported-range.test.ts` with exactly this content:
 
@@ -2611,12 +2611,12 @@ describe('GET /api/search (legacy, no UI caller) — imported_after / imported_b
 })
 ```
 
-- [ ] **Step 2: Run it to see it fail**
+- [x] **Step 2: Run it to see it fail**
 
 Run: `npx vitest run __tests__/lookup-routes-imported-range.test.ts`
 Expected: FAIL (no route reads the new parameters yet).
 
-- [ ] **Step 3: Implement the six routes**
+- [x] **Step 3: Implement the six routes**
 
 Apply these six diffs.
 
@@ -3075,12 +3075,12 @@ index 22793c7..af2092d 100644
      const msg = error instanceof Error ? error.message : String(error)
 ```
 
-- [ ] **Step 4: Run the tests to see them pass**
+- [x] **Step 4: Run the tests to see them pass**
 
 Run: `npx vitest run __tests__/lookup-routes-imported-range.test.ts __tests__/v1-lookup-batch-route.test.ts __tests__/search-route-split.test.ts __tests__/v1-credentials-cursor-pagination.test.ts`
 Expected: PASS, 59 tests in 4 files (24 + 13 + 14 + 8).
 
-- [ ] **Step 5: Type-check, lint, commit**
+- [x] **Step 5: Type-check, lint, commit**
 
 ```bash
 npx tsc --noEmit
@@ -3111,7 +3111,7 @@ Pure functions for the pages: local date-time inputs to UTC instants, the "since
 **Interfaces:**
 - Produces: `EXPORT_CUT_LAG_SECONDS = 120`; `epochSecondsToIso(epoch)`; `localInputToUtcIso(value, offsetMinutes): string | null` (`offsetMinutes` is `new Date(value).getTimezoneOffset()`, 300 for UTC-5); `utcEpochToLocalInput(epochSeconds, offsetMinutes): string`; `utcIsoToDisplay(iso)`; `searchFingerprint(fields): string`; `interface ExportMark { through: number; rows: number; at: number }`; `markStorageKey(fingerprint)`; `readMark(storage, key): ExportMark | null`; `writeMark(storage, key, mark)` (both swallow storage errors); `sinceLastExportWindow(mark, nowMs): { ok: true; after: string; before: string } | { ok: false; reason: 'no-mark' | 'too-soon' }`; `markAfterExport(prev, sent: { lower, upper }, outcome: { truncated, rows }, nowMs): ExportMark | null`; `IMPORTED_PRESETS` (`last-24h`, `last-7d`).
 
-- [ ] **Step 1: Write the tests**
+- [x] **Step 1: Write the tests**
 
 Create `__tests__/imported-range-client.test.ts` with exactly this content:
 
@@ -3284,12 +3284,12 @@ describe('presets', () => {
 })
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `npx vitest run __tests__/imported-range-client.test.ts`
 Expected: FAIL: `Failed to resolve import "@/lib/imported-range-client"`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Create `lib/imported-range-client.ts` with exactly this content:
 
@@ -3433,12 +3433,12 @@ export const IMPORTED_PRESETS = [
 ] as const
 ```
 
-- [ ] **Step 4: Run the tests to see them pass**
+- [x] **Step 4: Run the tests to see them pass**
 
 Run: `npx vitest run __tests__/imported-range-client.test.ts`
 Expected: PASS, 34 tests.
 
-- [ ] **Step 5: Type-check, lint, commit**
+- [x] **Step 5: Type-check, lint, commit**
 
 ```bash
 npx tsc --noEmit
@@ -3471,7 +3471,7 @@ Replace the two date-only pickers with date-time inputs in local time (the UTC i
 - Consumes: everything from Task 7; the `imported_after` / `imported_before` parameters of Task 4 and Task 5; the `X-Export-Truncated` / `X-Export-Rows` headers of Task 5.
 - Produces: state `importedAfter` / `importedBefore` (`datetime-local` values), `exportMark`; helper `localToUtcIso`; the "Imported after" / "Imported before" inputs, the presets row and the since-last-export button in the Advanced Filters panel.
 
-- [ ] **Step 1: Write the guard tests**
+- [x] **Step 1: Write the guard tests**
 
 Create `__tests__/imported-range-credentials-page.test.ts` with exactly this content:
 
@@ -3537,12 +3537,12 @@ describe('Credentials page — the imported window', () => {
 })
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `npx vitest run __tests__/imported-range-credentials-page.test.ts`
 Expected: FAIL (the page still has "From date" / `type="date"` and sends `date_from`).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Apply this diff to `app/credentials/page.tsx`:
 
@@ -3823,12 +3823,12 @@ index febc41c..5e01804 100644
                <div className="space-y-1">
 ```
 
-- [ ] **Step 4: Run the tests to see them pass**
+- [x] **Step 4: Run the tests to see them pass**
 
 Run: `npx vitest run __tests__/imported-range-credentials-page.test.ts`
 Expected: PASS, 8 tests.
 
-- [ ] **Step 5: Type-check, lint, commit**
+- [x] **Step 5: Type-check, lint, commit**
 
 ```bash
 npx tsc --noEmit
@@ -3862,7 +3862,7 @@ One optional "Only imported after" input on the Lookup page and on the breach-pa
 **Interfaces:**
 - Consumes: `localInputToUtcIso`, `utcIsoToDisplay` from Task 7; the batch route's `imported_after` body key (Task 6) and the export route's (Task 5) and its `Content-Disposition` / `X-Export-Truncated` headers.
 
-- [ ] **Step 1: Write the guard tests**
+- [x] **Step 1: Write the guard tests**
 
 Create `__tests__/imported-range-lookup-pages.test.ts` with exactly this content:
 
@@ -3899,12 +3899,12 @@ describe('API docs — the new parameters are documented on all four v1 lookups'
 })
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `npx vitest run __tests__/imported-range-lookup-pages.test.ts`
 Expected: FAIL (3 tests).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Apply these three diffs.
 
@@ -4091,12 +4091,12 @@ index e01c1f8..1544a59 100644
  
 ```
 
-- [ ] **Step 4: Run the tests to see them pass**
+- [x] **Step 4: Run the tests to see them pass**
 
 Run: `npx vitest run __tests__/imported-range-lookup-pages.test.ts`
 Expected: PASS, 3 tests.
 
-- [ ] **Step 5: Type-check, lint, commit**
+- [x] **Step 5: Type-check, lint, commit**
 
 ```bash
 npx tsc --noEmit
@@ -4123,7 +4123,7 @@ Prove on the real table that the helper's plan returns row for row what the plai
 - Create: `__tests__/imported-range-parity.live.test.ts`
 - Modify: `docs/superpowers/specs/2026-10-05-imported-after-filter-design.md` (status line and a "Result" note)
 
-- [ ] **Step 1: Add the live parity test**
+- [x] **Step 1: Add the live parity test**
 
 Create `__tests__/imported-range-parity.live.test.ts` with exactly this content:
 
@@ -4253,7 +4253,7 @@ describe.skipIf(!LIVE)(`imported-range parity on ${TABLE}`, () => {
 })
 ```
 
-- [ ] **Step 2: Run the key scenarios (read-only, about 15 minutes in all)**
+- [x] **Step 2: Run the key scenarios (read-only, about 15 minutes in all)**
 
 ClickHouse must be running. Each command drives the real `GET /api/credentials` handler twice per page (helper plan, then forced-plain plan) and compares rows and totals.
 
@@ -4290,12 +4290,12 @@ Only a lower bound speeds a search up; an upper-bound-only range is the plain qu
 
 A failure is a real difference between the two plans: STOP, keep the printed scenario, and report it; do not loosen the comparison.
 
-- [ ] **Step 3: Run the Newest-first live parity file once (the spec's acceptance for P0; 30-60 minutes)**
+- [x] **Step 3: Run the Newest-first live parity file once (the spec's acceptance for P0; 30-60 minutes)**
 
 Run: `NFW_PARITY=1 npx vitest run __tests__/newest-first-parity.live.test.ts`
 Expected: PASS, 15 tests (the 13 original scenarios plus the two case-parity tests).
 
-- [ ] **Step 4: Run everything once**
+- [x] **Step 4: Run everything once**
 
 ```bash
 npx vitest run
@@ -4306,7 +4306,7 @@ npm run build
 
 Expected: every test file passes (the three `*.live.test.ts` files are skipped; on the pristine dry-run of this plan the summary was `Test Files  149 passed | 3 skipped (152)` and `Tests  2306 passed | 57 skipped (2363)`), `tsc` and `eslint` print nothing, `next build` finishes without errors (a "multiple lockfiles" warning from a nested worktree is benign). `next build` needs about 6 GB of heap: check `free -m` first (this laptop's swap is often full) and close anything heavy before running it.
 
-- [ ] **Step 5: Record the result in the spec**
+- [x] **Step 5: Record the result in the spec**
 
 In `docs/superpowers/specs/2026-10-05-imported-after-filter-design.md` replace exactly this text (the start of the first paragraph):
 
@@ -4341,11 +4341,16 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 EOF
 ```
 
-- [ ] **Step 6: Merge and push (the owner's standing permission, once Steps 2-4 are green)**
+- [x] **Step 6: Merge and push (the owner's standing permission, once Steps 2-4 are green)**
 
 Use `superpowers:finishing-a-development-branch` and choose "merge locally", then push `origin main` without asking again (the owner granted this once work is verified). If you worked directly on `main`, just `git push origin main`. Do not push if any step above failed.
 
 - [ ] **Step 7: Deploy locally and look at it (controller only, from the MAIN checkout)**
+
+> **Status (2026-10-05):** deployed locally from `d6aaa06` (image `defbce7a277e`; rollback tag `ulp-suite-app:rollback-20261005-2326z` = the previous image
+> `0b49178e2916`). The infrastructure checks passed: both services healthy, the JWT secret set, mounts under `/home/cole/ulp-suite`, `imported_after` present in
+> the shipped build and the new UI strings in the credentials-page bundle, a clean startup log, and the new routes still answer 401 without a session. The four
+> Browser-pane checks below were NOT run: the pane was not signed in, and only the owner can sign in. Tick this box once they have been.
 
 The app and ClickHouse run in Docker on this laptop; deploying here is covered by the owner's standing permission, anything beyond this laptop is not. This global Docker config is broken (`credsStore`), so scope around it per command and never edit it. The previous image gets a rollback tag first, because the old image is gone after the rebuild.
 
@@ -4377,7 +4382,7 @@ Then in the Browser pane open `http://localhost:3000/credentials` (the compose f
 
 If anything is wrong, roll back with `docker tag ulp-suite-app:rollback-<stamp> ulp-suite-app:latest` and the same `up -d --no-deps app`.
 
-- [ ] **Step 8: Report**
+- [x] **Step 8: Report**
 
 Tell the owner, in a few lines: what shipped; the Newest-first fix and how big the gap was (0.2% to 11.8% of the matches for eight common words); that "imported after" means rows ADDED after the cutoff, so a credential re-imported later counts until a dedup pass or the novelty-aware importer (decision D1); and the known limits below.
 

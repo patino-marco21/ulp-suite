@@ -236,3 +236,40 @@ import "imported after" and "new content" part ways until a dedup pass or novelt
 Novelty-aware ingest and the anti-join (D1), a server-side export ledger, spray's other filters, raising or removing the 10,000-row cap, a
 `since:` token in the search box (it would count as a second term and switch off the one-domain dictionary path, and it never reaches the lookup
 routes), `/api/check`, `/api/related`, monitors, any schema or projection change.
+
+## Release and live result (2026-10-05)
+
+Merged to `main` (commits `e102501` .. `d6aaa06`) and deployed locally the same day: `ulp-suite-app:latest` is image `defbce7a277e`; the image it replaced
+(`0b49178e2916`, the search-dictionary release) is tagged `ulp-suite-app:rollback-20261005-2326z`. No schema, projection, index or data change, so the
+rollback is the previous image. Unit and route tests: 149 files, 2,306 tests pass (the 3 live files skipped); `tsc`, `eslint` and `next build` are clean.
+
+**Live parity, read-only, 1.39B-row table, query cache dropped before every call.** All 15 scenarios of `__tests__/imported-range-parity.live.test.ts` return
+identical rows, cursors and totals for the helper's plan and the forced-plain plan. Milliseconds, plain plan to helper plan (totals / first page of 50):
+
+| scenario | totals | first page |
+|---|---|---|
+| no query, newest rows | 171 to 68 | 423 to 69 (windows) |
+| no query, the whole 143M-row burst | 1,027 to 1,089 | 8,403 to 87 (windows) |
+| domain term, newest rows | 11,066 to 189 | 10,683 to 276 (windows) |
+| domain term, the whole burst | 14,012 to 5,485 | 18,466 to 1,058 (windows) |
+| domain term, oldest first | 12,850 to 5,143 | 16,810 to 9,602 (plain) |
+| domain term, closed window | 12,278 to 2,539 | 14,101 to 133 (windows) |
+| domain term, range across both partitions | 28,678 to 33,400 | 51,584 to 1,062 (windows) |
+| domain term, upper bound only | 29,770 to 26,858 | 51,163 to 47,800 (no gain, as designed) |
+| domain term, default sort (plain bound) | 21,088 to 19,183 | 2,589 to 2,251 |
+| `@domain` term | 7,586 to 121 | 7,598 to 92 (windows) |
+| one domain term + a bound, dictionary | 16,368 to 260 | 6,739 to 160 (dictionary) |
+| word with mixed-case matches | 4,943 to 4,966 | 17,879 to 181 (windows) |
+| word, plain bound | 7,059 to 7,056 | 8,731 to 9,718 (no gain, as designed) |
+| regex | 17,321 to 17,793 | 18,114 to 329 (windows) |
+| old `date_from` (one UTC day) | 1,018 to 1,105 | 8,727 to 82 (windows) |
+
+**The Newest-first parity file** (the acceptance for P0): 13 of its 15 tests passed in the full 41-minute run, both case-parity tests among them. The other two
+failed on "which plan answered", never on rows. `no match at all` is a one-domain term, which the search dictionary (2026-10-04) now answers after the windows
+hand off, so its expectation became `dictionary`. `binance.com, Declutter + Unique` was answered by the plain plan once: the windows hand off when the next
+window is predicted to pass 2.5 s, and the first window had run on a cold page cache right after scenarios that scan the whole table. Run alone, the same
+scenario passed on all three pages with the windows plan (first page 988 ms against 47 s). The test header now says so.
+
+**Not verified.** The Browser-pane walk-through of `/credentials` (the inputs, the presets, "Since last export", the export headers) was not done: the pane was not
+signed in, and only the owner can sign in. What was checked on the deployed app is the build itself: both services healthy, `imported_after` in the server
+build, every new UI string in the credentials-page bundle, a clean startup log, and the new routes still answering 401 without a session.
