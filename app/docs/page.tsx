@@ -317,6 +317,8 @@ export default function DocsPage() {
                     { name: "page", type: "number", required: false, description: "Page number for pagination", default: "1" },
                     { name: "limit", type: "number", required: false, description: "Number of results per page (max 1000)", default: "100" },
                     { name: "cursor", type: "string", required: false, description: "Keyset pagination token from a previous response's next_cursor (recommended for deep paging)" },
+                    { name: "imported_after", type: "string", required: false, description: "Only rows imported after this UTC instant (exclusive). A date (2026-10-05, the whole day), a date-time (2026-10-05 14:37:00, read as UTC) or ISO-8601 with an offset (2026-10-05T14:37:00-05:00). Anything else is a 400. The response echoes the effective window." },
+                    { name: "imported_before", type: "string", required: false, description: "Only rows imported up to and including this UTC instant (inclusive); same forms. Poll without gaps or overlap by passing the previous response's imported_before as the next imported_after." },
                   ]} />
                 </div>
 
@@ -426,6 +428,8 @@ export default function DocsPage() {
                     { name: "domain", type: "string", required: true, description: "The domain to search for (e.g., example.com)" },
                     { name: "page", type: "number", required: false, description: "Page number for pagination", default: "1" },
                     { name: "limit", type: "number", required: false, description: "Number of results per page (max 1000)", default: "100" },
+                    { name: "imported_after", type: "string", required: false, description: "Only rows imported after this UTC instant (exclusive). A date (2026-10-05, the whole day), a date-time (2026-10-05 14:37:00, read as UTC) or ISO-8601 with an offset (2026-10-05T14:37:00-05:00). Anything else is a 400. The response echoes the effective window." },
+                    { name: "imported_before", type: "string", required: false, description: "Only rows imported up to and including this UTC instant (inclusive); same forms. Poll without gaps or overlap by passing the previous response's imported_before as the next imported_after." },
                   ]} />
                 </div>
 
@@ -526,6 +530,8 @@ export default function DocsPage() {
                   <ParameterTable params={[
                     { name: "email", type: "string", required: false, description: "Email address to lookup (use this OR domain)" },
                     { name: "domain", type: "string", required: false, description: "Domain to lookup (use this OR email)" },
+                    { name: "imported_after", type: "string", required: false, description: "Only rows imported after this UTC instant (exclusive). A date (2026-10-05, the whole day), a date-time (2026-10-05 14:37:00, read as UTC) or ISO-8601 with an offset (2026-10-05T14:37:00-05:00). Anything else is a 400. The response echoes the effective window." },
+                    { name: "imported_before", type: "string", required: false, description: "Only rows imported up to and including this UTC instant (inclusive); same forms. Poll without gaps or overlap by passing the previous response's imported_before as the next imported_after." },
                   ]} />
                   <p className="text-sm text-amber-500 mt-3 flex items-center gap-2">
                     <AlertCircle className="h-4 w-4" />
@@ -682,6 +688,8 @@ export default function DocsPage() {
                   <ParameterTable params={[
                     { name: "emails", type: "string[]", required: false, description: "Array of email addresses to look up (exact match). Max 100 total queries." },
                     { name: "domains", type: "string[]", required: false, description: "Array of domains to look up (exact match). Max 100 total queries." },
+                    { name: "imported_after", type: "string", required: false, description: "Only rows imported after this UTC instant (exclusive). A date (2026-10-05, the whole day), a date-time (2026-10-05 14:37:00, read as UTC) or ISO-8601 with an offset (2026-10-05T14:37:00-05:00). Anything else is a 400. The response echoes the effective window." },
+                    { name: "imported_before", type: "string", required: false, description: "Only rows imported up to and including this UTC instant (inclusive); same forms. Poll without gaps or overlap by passing the previous response's imported_before as the next imported_after." },
                   ]} />
                 </div>
 

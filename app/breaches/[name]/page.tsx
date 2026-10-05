@@ -9,10 +9,12 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { useToast } from "@/hooks/use-toast"
 import { useAuth, isAdmin } from "@/hooks/useAuth"
 import Link from "next/link"
+import { localInputToUtcIso, utcIsoToDisplay } from "@/lib/imported-range-client"
 
 interface BreachRecord {
   breach_name: string
@@ -58,6 +60,9 @@ export default function BreachDetailPage() {
   const [retagFile, setRetagFile] = useState('')
   const [retagging, setRetagging] = useState(false)
   const [exporting, setExporting] = useState(false)
+  // Optional: export only what was imported after this time (local time here; the API takes the UTC instant shown beneath the field).
+  const [importedAfter, setImportedAfter] = useState('')
+  const importedAfterIso = importedAfter ? localInputToUtcIso(importedAfter, new Date(importedAfter).getTimezoneOffset()) : null
 
   const userIsAdmin = user ? isAdmin(user) : false
 
@@ -88,16 +93,21 @@ export default function BreachDetailPage() {
       const res = await fetch('/api/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ format, query: '', domain: '', breach_name: breachName }),
+        body: JSON.stringify({ format, query: '', domain: '', breach_name: breachName, imported_after: importedAfterIso ?? '' }),
       })
       if (!res.ok) throw new Error('Export failed')
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `breach-${breachName}.${format === 'csv' ? 'csv' : 'txt'}`
+      // The server's file name records the imported window; fall back to the plain name.
+      const named = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)
+      a.download = named?.[1] || `breach-${breachName}.${format === 'csv' ? 'csv' : 'txt'}`
       a.click()
       URL.revokeObjectURL(url)
+      if (res.headers.get('X-Export-Truncated') === '1') {
+        toast({ title: 'Export stopped at 10,000 rows', description: 'Set "Only imported after" to a later time to get the rest.', variant: 'destructive' })
+      }
     } catch {
       toast({ title: "Export failed", variant: "destructive" })
     } finally {
@@ -336,7 +346,18 @@ export default function BreachDetailPage() {
             <p className="text-sm text-muted-foreground">
               Export <strong className="text-foreground">{stats.credential_count.toLocaleString()}</strong> credentials from this breach
             </p>
-            <div className="flex gap-2">
+            <div className="flex items-end gap-2">
+              <div className="space-y-1">
+                <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Only imported after (optional)</label>
+                <Input
+                  type="datetime-local"
+                  step={1}
+                  value={importedAfter}
+                  onChange={e => setImportedAfter(e.target.value)}
+                  className="h-8 text-xs font-mono"
+                />
+                {importedAfterIso && <p className="text-[10px] font-mono text-muted-foreground">= {utcIsoToDisplay(importedAfterIso)}</p>}
+              </div>
               <Button size="sm" variant="outline" onClick={() => exportBreachCredentials('csv')} disabled={exporting}>
                 <Download className="mr-1 h-3 w-3" />CSV
               </Button>

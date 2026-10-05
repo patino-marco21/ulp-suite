@@ -8,9 +8,11 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { useToast } from "@/hooks/use-toast"
 import { useAuth } from "@/hooks/useAuth"
+import { localInputToUtcIso, utcIsoToDisplay } from "@/lib/imported-range-client"
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -155,15 +157,19 @@ export default function LookupPage() {
 
   const queries = parseLines(rawInput)
   const overLimit = queries.length > 100
+  // Optional: only matches imported after this time. The field is local time; the API takes the UTC instant shown beneath it.
+  const [importedAfter, setImportedAfter] = useState("")
+  const importedAfterIso = importedAfter ? localInputToUtcIso(importedAfter, new Date(importedAfter).getTimezoneOffset()) : null
 
   async function runLookup() {
     if (queries.length === 0 || loading) return
     setLoading(true)
     setResponse(null)
     try {
+      const bound = importedAfterIso ? { imported_after: importedAfterIso } : {}
       const body = mode === "email"
-        ? { emails: queries }
-        : { domains: queries }
+        ? { emails: queries, ...bound }
+        : { domains: queries, ...bound }
 
       const res  = await fetch("/api/lookup/batch", {
         method: "POST",
@@ -299,6 +305,18 @@ export default function LookupPage() {
                 </button>
               )}
             </div>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Only imported after (optional)</label>
+            <Input
+              type="datetime-local"
+              step={1}
+              value={importedAfter}
+              onChange={e => setImportedAfter(e.target.value)}
+              className="h-8 text-xs font-mono"
+            />
+            {importedAfterIso && <p className="text-[10px] font-mono text-muted-foreground">= {utcIsoToDisplay(importedAfterIso)}</p>}
           </div>
 
           {overLimit && (
