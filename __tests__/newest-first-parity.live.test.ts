@@ -16,6 +16,11 @@ import { describe, expect, test, vi, afterAll } from 'vitest'
  *
  *   NFW_TIMING_ONLY=1 ...   page 1 only, windowed only: how long the default view takes now, and whether windows or the plain
  *                           query answered (no parity comparison; the plain query takes 15-90 s per call on the live table)
+ *
+ * The `plan` expectations are PERFORMANCE expectations, not correctness ones: the rows are always compared first. The windows hand off to
+ * the plain query when the next window is predicted to run past 2.5 s (lib/newest-first.ts, HANDOFF_MS), and a first window that runs on a
+ * cold OS page cache (it follows scenarios that scan the whole table) can cross that line. A "which plan answered" failure with identical
+ * rows: re-run that scenario alone (-t "<name>") before suspecting the code.
  */
 
 const LIVE = process.env.NFW_PARITY === '1'
@@ -53,7 +58,9 @@ const scenarios: Array<{ name: string; qs: string; plan?: 'windows' | 'plain' }>
   { name: 'binance.com, no Declutter, no Unique', qs: 'q=binance.com', plan: 'windows' },
   { name: 'word token: ledger', qs: 'q=ledger&exclude_noise=1&dedupe=1' },
   { name: 'rare domain: trezor.io', qs: 'q=trezor.io&exclude_noise=1&dedupe=1' },
-  { name: 'no match at all', qs: 'q=zzqxnonexistent.example&exclude_noise=1&dedupe=1', plan: 'plain' },
+  // Since the search dictionary (2026-10-04) a one-domain term with no match is answered by it, after the windows hand off: the rows are
+  // still the plain plan's (none), only the plan that answered changed from 'plain' to 'dictionary'.
+  { name: 'no match at all', qs: 'q=zzqxnonexistent.example&exclude_noise=1&dedupe=1', plan: 'dictionary' },
   { name: 'accounts.google.com (many matches)', qs: 'q=accounts.google.com&exclude_noise=1&dedupe=1', plan: 'windows' },
   { name: 'tier T1 + corporate', qs: 'tier_include=T1&is_corporate=1&exclude_noise=1&dedupe=1' },
   { name: 'date range inside the newest burst', qs: 'date_from=2026-08-28&date_to=2026-08-28&exclude_noise=1&dedupe=1' },
