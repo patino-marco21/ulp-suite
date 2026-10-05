@@ -165,13 +165,18 @@ export async function GET(request: NextRequest) {
   const params: Record<string, unknown> = { limit }
 
   // Text search: uses hasToken() / bloom-filter indexes — NOT a LIKE full scan
+  let qClause = ''
+  // The same search with its word tokens written over the lowercased column, for the "Newest first" windows that read
+  // proj_imported_desc: a projection has no text index, so hasToken(url, ...) there is a case-SENSITIVE function, while on the
+  // table the text index (preprocessor lower(col)) answers it case-insensitively. See lib/ulp-search.ts (isIndexNeutralSearch).
+  let projectionQClause = ''
   if (q.trim()) {
     const tokens = parseULPQuery(q.trim())
-    const { clause: qClause, params: qParams } = regex
-      ? buildULPWhereRegex(tokens)
-      : buildULPWhere(tokens)
+    const built = regex ? buildULPWhereRegex(tokens) : buildULPWhere(tokens)
+    qClause = built.clause
     conditions.push(`(${qClause})`)
-    Object.assign(params, qParams)
+    Object.assign(params, built.params)
+    projectionQClause = regex ? qClause : buildULPWhere(tokens, { caseInsensitiveTokens: true }).clause
   }
 
   // Raw column: mutations done, all domain/email values are corrected.
@@ -204,6 +209,8 @@ export async function GET(request: NextRequest) {
   const loginTypeExtra = loginTypeWhere(loginTypes)
   const where    = conditions.join(' AND ') + tierExtra + loginTypeExtra
   const whereRaw = conditionsRaw.join(' AND ') + tierExtra + loginTypeExtra
+  // `where` for the windows that read the projection: the same text except for the word tokens' spelling (identical when there is none).
+  const whereProjection = projectionQClause !== qClause ? where.replace(`(${qClause})`, () => `(${projectionQClause})`) : where
 
   // Anything that narrows the result set. Declutter/Unique/sort/limit/cursor do not.
   // With no filter the Unique tally is a plain count() — see dedupeCountExpr.
@@ -355,7 +362,10 @@ export async function GET(request: NextRequest) {
     // term that is not rare). The same filters, ordering, cursor and de-duplication as the plain query; only a predicate on the
     // projection's key is added per window, and skip indexes are switched off for a window that lies inside the projection's
     // coverage: with them on, ClickHouse plans a word-token window on the base table (202M rows for the newest minute, 1.96 s)
-    // instead of the projection (0.19 s); they only prune, so the rows are the same. A window that reaches the older partition
+    // instead of the projection (0.19 s). Skip indexes only prune, BUT the text index also ANSWERS hasToken (case-insensitively,
+    // through its lower() preprocessor), which a projection part cannot: so a projected window spells its word tokens over the
+    // lowercased column (whereProjection) and returns the same rows as the table plan (2026-10-05: 27,285 matches on the table,
+    // 27,263 from the projection with the plain spelling). A window that reaches the older partition
     // (no projection there) keeps them: without them its base-table scan took 28 s instead of 17 s. Not ready (projection not rebuilt yet) or a window error that is not a timeout:
     // the plain query answers, as it always did. A timeout is not retried: the plain query would take at least as long.
     let plan: 'windows' | 'plain' | 'dictionary' = 'plain'
@@ -399,7 +409,7 @@ export async function GET(request: NextRequest) {
          FROM (
            SELECT ${RAW_COLS}${dedupe ? ', content_key_hash' : ''}
            FROM ulp.credentials
-           WHERE ${where}${cursorClause}${windowSql}
+           WHERE ${projected ? whereProjection : where}${cursorClause}${windowSql}
            ORDER BY ${orderBy}
            LIMIT {nfwLimit:UInt32}
          ) AS t

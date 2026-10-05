@@ -88,18 +88,54 @@ describe('GET /api/credentials — "Newest first" runs as time windows over proj
 
   // Measured on the live table 2026-10-01 for a word token ('ledger'): ClickHouse planned the windows on the BASE table (the text
   // and ngram skip indexes made it look cheaper), reading 202M rows for the newest minute (1.96 s) and 500M for the next 15 minutes
-  // (5.23 s). With the skip indexes off it uses the projection and its key range: 0.19 s and 0.93 s. Skip indexes only ever prune, so
-  // the rows are the same; the plain fallback keeps them on.
-  test('the windows turn skip indexes off, so word-token queries are answered from the projection too; the plain query keeps them', async () => {
+  // (5.23 s). With the skip indexes off it uses the projection and its key range: 0.19 s and 0.93 s. Skip indexes do more than prune,
+  // though: the text index ANSWERS hasToken case-insensitively (its preprocessor is lower(col)), and a projection part has no text
+  // index, so there hasToken runs as the plain case-sensitive function. Measured 2026-10-05 on the newest 2.2M rows for a common word:
+  // 27,285 matches from the table, 27,263 from the projection (22 rows holding the word capitalised or in capitals). So a projected
+  // window spells its word tokens over the lowercased column, which is the index's own preprocessor, and returns the table's rows.
+  test('the windows turn skip indexes off and spell word tokens over the lowercased column; the plain query keeps the text index\'s own answer', async () => {
     windowAnswers = [[row(1)]]
     await get('sort=imported_desc&limit=1&q=ledger&skip_totals=1')
     expect(windowCalls()[0].sql).toContain('use_skip_indexes = 0')
+    expect(windowCalls()[0].sql).toContain('hasToken(lower(url), {tok0:String})')
+    expect(windowCalls()[0].sql).toContain('hasToken(lower(email), {tok0:String})')
+    expect(windowCalls()[0].sql).toContain('hasToken(lower(password), {tok0:String})')
+    expect(windowCalls()[0].sql).not.toContain('hasToken(url,')
+    expect(windowCalls()[0].params).toMatchObject({ tok0: 'ledger' })
     readiness = [{ defined: 0, parts: 1, with_projection: 0 }]
     resetNewestFirstReadyCache()
     calls.length = 0
     legacyRows = [row(1)]
     await get('sort=imported_desc&limit=1&q=ledger&skip_totals=1')
     expect(legacyDataCalls()[0].sql).not.toContain('use_skip_indexes')
+    expect(legacyDataCalls()[0].sql).toContain('hasToken(url, {tok0:String})')
+    expect(legacyDataCalls()[0].sql).not.toContain('lower(url)')
+  })
+
+  test('only the word tokens change spelling: a domain search, a regex and the other filters are the same text in the window and in the plain query', async () => {
+    windowAnswers = [[row(1)]]
+    await get('sort=imported_desc&limit=1&q=binance.com&exclude_noise=1&skip_totals=1')
+    const domainWindow = windowCalls()[0].sql
+    expect(domainWindow).toContain('domain = {dom0:String}')
+    expect(domainWindow).not.toContain('lower(url)')
+    calls.length = 0
+    windowAnswers = [[row(1)]]
+    await get(`sort=imported_desc&limit=1&q=${encodeURIComponent('^admin@')}&regex=1&skip_totals=1`)
+    expect(windowCalls()[0].sql).toContain('match(url, {rp0:String})')
+    expect(windowCalls()[0].sql).not.toContain('lower(url)')
+  })
+
+  test('a window that reaches outside the projection\'s coverage keeps skip indexes on and the plain spelling (the table answers it)', async () => {
+    windowAnswers = [[], [], [], [], [], [row(1)]]
+    await get('sort=imported_desc&limit=1&q=ledger&skip_totals=1')
+    const all = windowCalls()
+    expect(all.length).toBe(6)
+    expect(all[0].sql).toContain('use_skip_indexes = 0')
+    expect(all[0].sql).toContain('hasToken(lower(url), {tok0:String})')
+    const last = all[all.length - 1].sql
+    expect(last).not.toContain('use_skip_indexes')
+    expect(last).toContain('hasToken(url, {tok0:String})')
+    expect(last).not.toContain('lower(url)')
   })
 
   test('the outer select still hands back the stored columns under _c_ aliases, so the cursor is built from stored values', async () => {
