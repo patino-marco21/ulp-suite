@@ -16,6 +16,7 @@
  */
 
 import { hasGarbageIdentity, hasMojibakeSignature, hasEdgeWhitespace } from '@/lib/ulp-garbage'
+import { hasTelegramLink, stripTelegramTag } from '@/lib/ulp-telegram-tag'
 
 export interface ULPCredential {
   url:         string
@@ -188,10 +189,15 @@ function isSentinelPassword(password: string): boolean {
  * token glue (==@com.), and AES/hex decryption failures ([Wrong padding]).
  * Note: legit "android://HASH==@com.pkg" carries "==@com." in the URL field,
  * which is never passed here — only login/password are checked.
+ *
+ * A Telegram link left in a login or password is junk too: a trailing channel tag is cut off before the fields are split
+ * (lib/ulp-telegram-tag.ts), so a link that is still there is a banner or watermark ("🔥 DAILY https://t.me/+x 🔥") that a field
+ * split took for the login or the password.
  */
 function hasJunkMarker(s: string): boolean {
   return s.includes('gmail_ps=') || s.includes('gmail=')
       || s.includes('==@com.')   || s.includes('[Wrong padding]')
+      || hasTelegramLink(s)
 }
 
 /**
@@ -554,7 +560,7 @@ export function parseLine(
   sourceFile: string,
   shouldHardDrop?: (email: string, url: string) => boolean,
 ): { credential: ULPCredential | null; reason: RejectionReason | null } {
-  const trimmed = line.trim()
+  let trimmed = line.trim()
 
   // Rule 1: blank / comment / section header / // prefix
   // NOTE: android:// lines are intentionally NOT filtered here.  Android app
@@ -567,6 +573,10 @@ export function parseLine(
       trimmed.startsWith('//')) {
     return { credential: null, reason: 'blank' }
   }
+
+  // Telegram channels that repost a combo list append their link (and sometimes an advert) to every line. Cut it off so the
+  // credential in front of it parses as itself instead of being rejected or storing the tag in the password.
+  trimmed = stripTelegramTag(trimmed)
 
   // Pipe separator detection:
   // If the line already uses tab or semicolon as its primary separator, pipe is
@@ -865,7 +875,7 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
       const fp = `${credential.url}\0${credential.email}\0${credential.password}`
       if (seen.has(fp)) { skipped++; breakdown.dedup++ }
       else { addSeen(fp, sourceFile); credentials.push(credential) }
-    } else if (reason === 'no_fields' && trimmed.startsWith('http')) {
+    } else if (reason === 'no_fields' && trimmed.startsWith('http') && !hasTelegramLink(trimmed)) {
       // Bare URL line → enter positional mode; next line is login, line after is password.
       // Not counted as skipped — will be consumed by positional collection or discarded at separator/EOF.
       positionalUrl   = trimmed
@@ -1035,7 +1045,7 @@ export async function* parseULPStream(
       const fp = `${credential.url}\0${credential.email}\0${credential.password}`
       if (streamSeenCheck(fp)) { batchRejected++; batchBreakdown.dedup++ }
       else                     { batch.push(credential) }
-    } else if (reason === 'no_fields' && trimmed.startsWith('http')) {
+    } else if (reason === 'no_fields' && trimmed.startsWith('http') && !hasTelegramLink(trimmed)) {
       // Bare URL → enter positional mode
       positionalUrl   = trimmed
       positionalLogin = ''
