@@ -13,7 +13,7 @@ const reading = (status: DiskReading['status'], freeGiB: number | null): DiskRea
   checkedAt: 0,
 })
 const gate = (over: Partial<IngestDiskGateState> = {}): IngestDiskGateState => ({
-  paused: false, since: null, waiters: 0, freeBytes: null, floorBytes: 50 * GiB, resumeBytes: 55 * GiB, checkedAt: null, ...over,
+  enabled: true, paused: false, since: null, waiters: 0, freeBytes: null, floorBytes: 50 * GiB, resumeBytes: 55 * GiB, checkedAt: null, ...over,
 })
 
 describe('describeDiskBanner', () => {
@@ -41,6 +41,13 @@ describe('describeDiskBanner', () => {
     expect(describeDiskBanner(reading('critical', 121.5), null)?.message).toBe(
       'Disk critical: 121.5 GiB free of 936.8 GiB (13%). Dedup and projection jobs are blocked below 140.5 GiB.',
     )
+  })
+
+  it('does not claim that imports pause when the gate is switched off', () => {
+    expect(describeDiskBanner(reading('critical', 121.5), gate({ enabled: false }))?.message).toBe(
+      'Disk critical: 121.5 GiB free of 936.8 GiB (13%). Dedup and projection jobs are blocked below 140.5 GiB.',
+    )
+    expect(describeDiskBanner(reading('warn', 150), gate({ enabled: false }))?.message).not.toContain('imports pause')
   })
 
   it('paused beats critical: imports are the thing the operator is waiting for', () => {

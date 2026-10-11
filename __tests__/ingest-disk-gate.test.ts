@@ -53,9 +53,16 @@ describe('ingestDiskGateConfig', () => {
 describe('getIngestDiskGate', () => {
   it('reports the configured floor and resume level before any import has asked', () => {
     expect(getIngestDiskGate(env({ INGEST_MIN_FREE_BYTES: String(20 * GiB) }))).toEqual({
-      paused: false, since: null, waiters: 0, freeBytes: null,
+      enabled: true, paused: false, since: null, waiters: 0, freeBytes: null,
       floorBytes: 20 * GiB, resumeBytes: 22 * GiB, checkedAt: null,
     })
+  })
+})
+
+describe('getIngestDiskGate — switched off', () => {
+  it('says so, so that the banner does not claim imports pause', () => {
+    expect(getIngestDiskGate(env({ INGEST_DISK_GATE: 'off' })).enabled).toBe(false)
+    expect(getIngestDiskGate(env()).enabled).toBe(true)
   })
 })
 

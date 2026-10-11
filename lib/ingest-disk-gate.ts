@@ -34,6 +34,8 @@ export interface IngestDiskGateConfig {
 }
 
 export interface IngestDiskGateState {
+  /** False when INGEST_DISK_GATE switches the gate off: nothing pauses, and the banner must not say that imports do. */
+  enabled: boolean
   /** True while at least one import is waiting. */
   paused: boolean
   /** When the first current waiter began waiting (epoch ms), or null. */
@@ -82,6 +84,7 @@ export function getIngestDiskGate(env: NodeJS.ProcessEnv = process.env): IngestD
   const s = store()
   const cfg = ingestDiskGateConfig(env)
   return {
+    enabled: cfg.enabled,
     paused: s.waiters > 0,
     since: s.waiters > 0 ? s.since : null,
     waiters: s.waiters,

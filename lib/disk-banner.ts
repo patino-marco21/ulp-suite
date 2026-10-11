@@ -42,7 +42,7 @@ export function describeDiskBanner(disk: DiskReading | null, gate: IngestDiskGat
 
   const space = `${gib(disk.freeBytes)} free of ${gib(disk.totalBytes)} (${Math.round(disk.freeRatio * 100)}%)`
   const jobs = `Dedup and projection jobs ${disk.status === 'critical' ? 'are blocked' : 'stop'} below ${gib(disk.thresholds.criticalBytes)}`
-  const imports = gate ? `; imports pause below ${gib(gate.floorBytes)}` : ''
+  const imports = gate?.enabled ? `; imports pause below ${gib(gate.floorBytes)}` : ''
   return disk.status === 'critical'
     ? { level: 'critical', message: `Disk critical: ${space}. ${jobs}${imports}.` }
     : { level: 'warn', message: `Disk is getting low: ${space}. ${jobs}${imports}.` }
