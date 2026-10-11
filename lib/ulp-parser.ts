@@ -433,6 +433,24 @@ export async function* parseBlockStream(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * "alice:Secret1:https://shop.example.test/login": the layout login:password:url, the url comes last (some stealer exports and combo tools).
+ * Only http(s), only when the fields stand in front of the scheme, only when the url holds no colon but an optional port (so a line that
+ * parses as url:login:password is never read this way), and only when the login is not a path or a url. Returns [url, login, password].
+ */
+function splitLoginPasswordUrl(line: string, schemeIdx: number): [string, string, string] | null {
+  const head      = line.slice(0, schemeIdx)             // "alice:Secret1:https"
+  const lastColon = head.lastIndexOf(':')
+  if (lastColon <= 0 || !/^https?$/i.test(head.slice(lastColon + 1))) return null
+  if (!/^[^/:\s]+(?::\d{1,5})?(?:\/[^:\s]*)?$/.test(line.slice(schemeIdx + 3))) return null
+  const fields     = head.slice(0, lastColon)            // "alice:Secret1"
+  const firstColon = fields.indexOf(':')
+  if (firstColon <= 0 || firstColon === fields.length - 1) return null
+  const login = fields.slice(0, firstColon)
+  if (/[\s/]/.test(login)) return null
+  return [line.slice(lastColon + 1), login, fields.slice(firstColon + 1)]
+}
+
+/**
  * Split a colon-delimited ULP line into [url, login, password].
  *
  * RFC 3986 rules applied:
@@ -444,6 +462,8 @@ export async function* parseBlockStream(
 function colonSplit(line: string): [string, string, string] | null {
   const schemeIdx = line.indexOf('://')
   if (schemeIdx !== -1) {
+    const urlLast = splitLoginPasswordUrl(line, schemeIdx)
+    if (urlLast) return urlLast
     // Find first slash after "://"
     const afterScheme = schemeIdx + 3
     const slashIdx    = line.indexOf('/', afterScheme)

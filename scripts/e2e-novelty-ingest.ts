@@ -9,7 +9,8 @@
  *               and a watermark line are skipped, and a banner that starts with http does not swallow the lines after it
  *   positional  a credential line the field split rejects does not take the two lines after it for a login and a password (no merged
  *               row, nothing lost), a genuine label-free URL / login / password record still imports, and "https://e-mail:password"
- *               (a stray scheme, no url) is kept as an e-mail:password pair
+ *               (a stray scheme, no url) is kept as an e-mail:password pair, and "login:password:https://url" (the url last) is read
+ *               in that order
  *   monitor     a monitor alerts for rows that are new to the database, not for a row the database already held
  *   big         2.5M distinct lines + 100k repeats of early lines (past the old 2M in-file cap): exact, in 5 slabs, phases visible
  *   kill        the app is killed in the middle of the commit; after the restart the orphan stage tables are gone and a retry
@@ -346,6 +347,8 @@ async function telegramTags(): Promise<void> {
     `https://shop6.example-store.test/login:tgF${RUN}@probe-mail.test:${pw('F')}`,
     // a password that is an e-mail address, the tag glued on after it: only the tag is cut off
     `shop10.example-store.test/login:tgK${RUN}@probe-mail.test:${mailPw}t.me/SomeChannel`,
+    // a scheme glued on and an advert that carries a second link: the colon of its "https://" is not a field separator
+    `shop11.example-store.test/login:tgL${RUN}@probe-mail.test:${pw('L')}://t.me/SomeChannel|NAME;@NAME|https://t.me/+AbC123`,
     // a banner that starts with http: it must not take the next two lines for a login and a password
     'https://t.me/+AbC123',
     `shop8.example-store.test/:tgH${RUN}:${pw('H')}`,
@@ -354,12 +357,12 @@ async function telegramTags(): Promise<void> {
     `android://hash${RUN}@com.example.app:DAILY PREMIUM https://https://t.me/+AbC123 LINES:${pw('J')}`,
   ]
   const t = await importLines(T, ls)
-  check('a file with channel tags: the 9 real credentials are new, none known', t.status === 'done' && t.imported === 9 && t.known === 0, brief(t))
-  check('...the banner and the watermark line are skipped, only the 9 are stored', (t.skipped ?? 0) >= 2 && rowsFor(T) === 9, `skipped ${t.skipped}, rows ${rowsFor(T)}`)
+  check('a file with channel tags: the 10 real credentials are new, none known', t.status === 'done' && t.imported === 10 && t.known === 0, brief(t))
+  check('...the banner and the watermark line are skipped, only the 10 are stored', (t.skipped ?? 0) >= 2 && rowsFor(T) === 10, `skipped ${t.skipped}, rows ${rowsFor(T)}`)
   const linked = Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${T}' AND (position(password, 't.me') > 0 OR position(email, 't.me') > 0)`))
   check('...no stored email or password holds a Telegram link', linked === 0, `rows with a link: ${linked}`)
   const stored = chQuery(`SELECT arrayStringConcat(arraySort(groupArray(password)), ',') FROM ulp.credentials WHERE source_file = '${T}'`)
-  const expected = [...['A', 'B', 'C', 'D', 'E', 'F', 'H', 'I'].map(pw), mailPw].sort().join(',')
+  const expected = [...['A', 'B', 'C', 'D', 'E', 'F', 'H', 'I', 'L'].map(pw), mailPw].sort().join(',')
   check('...every stored password is the clean one: the tag and the advert are cut off (an e-mail address as a password keeps its domain)', stored === expected, `${stored} vs ${expected}`)
 }
 
@@ -379,15 +382,19 @@ async function positionalRecords(): Promise<void> {
     `https://shop5.example-store.test:posE${RUN}:${pw('E')}`,
     // a stray scheme in front of an e-mail login, no url: an e-mail:password pair
     `https://posF${RUN}@probe-mail.test:${pw('F')}`,
+    // the layout login:password:url, the url last
+    `posG${RUN}:${pw('G')}:https://shop7.example-store.test/login`,
   ]
   const p = await importLines(P, ls)
-  check('a file with a rejected URL line, a genuine block record and a stray-scheme pair: 5 credentials are new, none known', p.status === 'done' && p.imported === 5 && p.known === 0, brief(p))
-  check('...the rejected line is the only one skipped, 5 rows are stored', p.skipped === 1 && rowsFor(P) === 5, `skipped ${p.skipped}, rows ${rowsFor(P)}`)
+  check('a file with a rejected URL line, a genuine block record, a stray-scheme pair and a url-last line: 6 credentials are new, none known', p.status === 'done' && p.imported === 6 && p.known === 0, brief(p))
+  check('...the rejected line is the only one skipped, 6 rows are stored', p.skipped === 1 && rowsFor(P) === 6, `skipped ${p.skipped}, rows ${rowsFor(P)}`)
   const stored = chQuery(`SELECT arrayStringConcat(arraySort(groupArray(email)), ',') FROM ulp.credentials WHERE source_file = '${P}'`)
-  const expected = [`posB${RUN}`, `posC${RUN}`, `posD${RUN}@probe-mail.test`, `posE${RUN}`, `posF${RUN}@probe-mail.test`].sort().join(',')
+  const expected = [`posB${RUN}`, `posC${RUN}`, `posD${RUN}@probe-mail.test`, `posE${RUN}`, `posF${RUN}@probe-mail.test`, `posG${RUN}`].sort().join(',')
   check('...the two lines after the rejected one are their own credentials, the block record is one, the pair keeps its e-mail: no merged row', stored === expected, `${stored} vs ${expected}`)
   const noUrl = Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND email = 'posF${RUN}@probe-mail.test' AND url = '' AND domain = 'probe-mail.test'`))
   check('...the stray-scheme pair is stored with no url and its e-mail domain', noUrl === 1, `rows ${noUrl}`)
+  const urlLast = Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND email = 'posG${RUN}' AND url = 'https://shop7.example-store.test/login' AND domain = 'shop7.example-store.test'`))
+  check('...the url-last line is stored with its url, its login and its domain', urlLast === 1, `rows ${urlLast}`)
   const merged = Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND position(email, '://') > 0`))
   check('...no stored login holds a whole line', merged === 0, `rows ${merged}`)
 }

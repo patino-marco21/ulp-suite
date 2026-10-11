@@ -1,10 +1,11 @@
-# Parser: the positional fallback swallowed real lines, and `https://e-mail:password` was dropped — design (2026-10-11)
+# Parser: the positional fallback swallowed real lines, and three line layouts were dropped — design (2026-10-11)
 
 Status: **implemented on 2026-10-11** (`lib/ulp-parser.ts`: `canBeLoginLine`, two small edits in the line loops of `parseULPContent` and
-`parseULPStream`, and one branch in `colonSplit`; tests `__tests__/ulp-parser-positional-guard.test.ts` and
-`__tests__/ulp-parser-scheme-email-pair.test.ts`; rehearsal scenario `positional` in `scripts/e2e-novelty-ingest.ts`). Found while
-chasing seven stored rows that an offline re-parse of one pile file did not reproduce. No source file names appear here on purpose: the
-repository is public.
+`parseULPStream`, one branch and one helper (`splitLoginPasswordUrl`) in `colonSplit`; `lib/ulp-telegram-tag.ts`: one condition; tests
+`__tests__/ulp-parser-positional-guard.test.ts`, `__tests__/ulp-parser-scheme-email-pair.test.ts`, `__tests__/ulp-parser-login-password-url.test.ts` and
+two cases in `__tests__/ulp-parser-telegram-tags.test.ts`; rehearsal scenario `positional` and two cases of `tags` in
+`scripts/e2e-novelty-ingest.ts`). Found while chasing seven stored rows that an offline re-parse of one pile file did not reproduce, and then by a
+survey of what the parser still rejects (45 random pile files, 21M lines). No source file names appear here on purpose: the repository is public.
 
 ## What was wrong
 
@@ -26,6 +27,13 @@ line `no_fields`; that cause was fixed, the mechanism was not).
 **2. `https://alice@mail.test:Secret1` was rejected.** A stray scheme in front of an e-mail address, no url (the url field was empty when the
 list was made). The field split found two fields after the scheme where it needs three, so the line was `no_fields`, which also opened the
 positional trap above. The parser already salvages an e-mail:password pair elsewhere (a junk host with a real e-mail login drops the url).
+
+**3. `alice:Secret1:https://shop.example.test/login` was rejected.** The layout login:password:url (the url last). Any line that holds `://` was
+read as url-first, so the field split found the wrong fields and returned "no fields". A survey of the pile counted 2.98M such lines in 170
+files; in one 5M-line file 438k of them (and 42% of the lines of its first 600k) were rejected.
+
+**4. A Telegram tag with a second link was not cut.** `...:Secret1://t.me/Channel|NAME;@NAME|https://t.me/+AbC123`: the tag stripper
+left the line alone because the text after the first link holds a `:` (the one of the advert's own `https://`), so the line was rejected.
 
 Measured with `://` in both the stored url and the stored login (the junk row's signature) and with the app's own parser:
 
@@ -51,11 +59,18 @@ So an import with this parser lost about two real credential lines and stored on
    scheme with no path). Only when the text after the scheme is a strict e-mail address (`name@host.tld`, no `/`, `:` or white space), the
    rest is not a port number (`https://user@host:8080`), and the scheme is http or https (`android://hash@com.app:x` is not a pair). Nothing
    that parsed before changes: this branch used to return "no fields".
+3. **`login:password:http(s)://url` is read in that order** (`splitLoginPasswordUrl`, tried first when the line holds `://`). Only http(s); the
+   fields must stand in front of the scheme; the url may hold no colon but an optional port (so a line that parses as url:login:password is
+   never read this way); the login holds no white space and no `/`; both login and password are non-empty. A Telegram tag after the pair is cut
+   first, so `alice:Secret1:https://t.me/Channel` is a pair with no url. The rare line `host:alice:https://other/` (a password that is a url)
+   is now read as login `host`, password `alice`, url `https://other/` where it used to be rejected.
+4. **The colon of a `scheme://` in the advert after the link no longer counts as a field separator** (`stripTelegramTag`). A real credential
+   whose url is a t.me link (`https://t.me/Channel:alice:Secret1`, or a password that is a url) is still left alone.
 
 ## Verification (before anything was deployed)
 
-- 36 new unit tests (synthetic fixtures); the 7 parser test files (512 tests) and the full suite (2,646 tests) are green. Against the parser
-  without these two changes 19 of the 36 fail (red), then all pass; the 17 that pass either way guard what must not change.
+- 36 new unit tests for rules 1 and 2 and 24 + 3 for rules 3 and 4 (synthetic fixtures); the full suite (2,673 tests) is green. Against the parser
+  without rules 1 and 2, 19 of the 36 fail (red), then all pass; the others guard what must not change.
 - **Whole files through `parseULPStream`, the deployed parser against this one** (multiset of credentials, repeats kept):
 
   | file (size) | old accepted / rejected | new accepted / rejected | only the old parser | only the new parser |
@@ -69,10 +84,13 @@ So an import with this parser lost about two real credential lines and stored on
 
   "Junk rows" are rows with a whole line, or a credential line, in the login field. Nothing the old parser produced from a well-formed line was
   lost except through the shifted alignment described below. Files past 16.7M credentials do not fit the comparison's Map; those were not compared.
-- **What is still rejected** on a heavy file after both changes: 1.3% of its lines (was 7.8%), of which 0.5% have a `/` in the password behind a
-  host and a login, most of them truncated hosts (`https://g:com:...`) that are not credentials; the rest have no login at all.
-- The `positional` scenario of `scripts/e2e-novelty-ingest.ts` runs the same cases through a real upload on the production image
-  (rehearsal 2026-10-11: alert 36/36, novelty `basic,tags,positional` 32/32).
+- **Rules 3 and 4, the version deployed on 2026-10-11 against this one:** a 5M-line file in the login:password:url layout 4,450,653 accepted /
+  553,570 rejected -> 4,888,386 / 115,837, **0 rows only the old parser produced**, 437,733 only the new one; the heavy file of the table above and a
+  32 MB file: identical; an e-mail list: 197 more rows (the tag tail).
+- **What is still rejected** across the 45-file survey after all four rules: 0.56% of the lines (1.87% before rules 3 and 4). More than half of a
+  random sample of the remaining rejected lines are banner, watermark or invite lines (correctly rejected); by shape, 0.12% of all lines are bare
+  urls, 0.07% have a `/` in the password, 0.01% are `url login:password` with a space, and the rest are oddities.
+- The `positional` and `tags` scenarios of `scripts/e2e-novelty-ingest.ts` run the same cases through a real upload on the production image.
 
 A residual that is left on purpose: a rejected `http` line, then a rejected line that is not a URL and has no credential shape (for example
 `any.do/x::y`), then a credential line. The second line still counts as a lone login and the third as the password, so one junk row is built and
@@ -89,6 +107,10 @@ with this parser; the files are untouched on disk. The older partitions keep the
 ## Not done
 
 - A password with a `/` in it behind a host and a login (`https://host:alice:pa/ss`): the field split takes the first `/` for the start of a
-  path and rejects the line (0.5% of the lines of a heavy file). Not fixed: a heuristic for "the `/` belongs to the password" needs its own
-  measurement.
+  path and rejects the line (0.07% of the survey, 0.5% of one heavy file, most of the samples are truncated hosts that are not credentials). Not
+  fixed: a heuristic for "the `/` belongs to the password" needs its own measurement.
+- `url login:password` with a single space between the url and the pair (0.01% of the survey, 1.7% of one file): not recognised.
+- `email:password | Label: value`: the pipe rule takes the pipe for the field separator and stores `email:password` as the login (171 lines in the small
+  pile files; 1.65M stored rows of the older partitions have a colon in the login without a scheme).
 - Lines with a url and a single value (`https://host/path:value`, no login) are not credentials and stay rejected.
+- Policy, not parsing: a login equal to the password is rejected (about 1% of the lines of one heavy file), a login with a space (phone numbers) is garbage.

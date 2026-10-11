@@ -33,6 +33,8 @@ describe('stripTelegramTag — what is cut', () => {
     ['the same on a line with a url', 'https://shop.example.test/login:alice:bob@yahoo.comt.me/SomeChannel', 'https://shop.example.test/login:alice:bob@yahoo.com'],
     ['the same with a scheme glued on', 'alice@mail.test:bob@yahoo.comhttps://t.me/SomeChannel', 'alice@mail.test:bob@yahoo.com'],
     ['a line ending in CRLF', 'shop.example.test/:alice:Secret1 https://t.me/SomeChannel\r', 'shop.example.test/:alice:Secret1'],
+    ['a scheme glued on and an advert with a second link', 'shop.example.test/login:alice@mail.test:Secret1://t.me/SomeChannel|NAME;@NAME|https://t.me/+AbC123', 'shop.example.test/login:alice@mail.test:Secret1'],
+    ['the same on a line with a url', 'https://shop.example.test/login:alice:Secret1://t.me/SomeChannel|NAME;@NAME|https://t.me/+AbC123', 'https://shop.example.test/login:alice:Secret1'],
   ])('%s', (_label, input, expected) => {
     expect(stripTelegramTag(input)).toBe(expected)
   })
@@ -45,6 +47,7 @@ describe('stripTelegramTag — what is left alone', () => {
     ['a bare link without a scheme', 't.me/SomeChannel'],
     ['a URL with user info whose host name merely ends in t', 'https://alice:Secret1@payment.me/x'],
     ['a path that contains t.me/ with fields after it', 'shop.example.test/post.me/x:alice:Secret1'],
+    ['the link is the url field and a password holds a url', 'https://t.me/SomeChannel:alice:https://other.example.test/x'],
     ['no tag', 'shop.example.test/:alice:Secret1'],
     ['an empty line', ''],
   ])('%s', (_label, input) => {
