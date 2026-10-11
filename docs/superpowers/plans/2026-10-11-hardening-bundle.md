@@ -1119,15 +1119,18 @@ cd /home/cole/ulp-suite && NEXT_TELEMETRY_DISABLED=1 npm run build 2>&1 | tail -
 
 Expected: `TSC-OK`; vitest `Test Files  177 passed` and `0 failed` (the baseline was 171 files / 2,518 tests; this plan adds 6 test files and extends 2); lint "No ESLint warnings or errors"; the build ends with the route table and exit 0. Any failure: fix it before going on.
 
-- [ ] **Step 3: Build the image**
+- [ ] **Step 3: Tag the RUNNING image as the rollback, THEN build the new one**
+
+The order matters (found the hard way on 2026-10-11): with Docker's containerd image store, moving `:latest` to the new build garbage-collects the old, now untagged image, even though its container keeps running, and the rollback target is gone for good. Tag first.
 
 ```bash
+cd /home/cole/ulp-suite && TAG=ulp-suite-app:rollback-$(date -u +%Y%m%d-%H%Mz) && docker tag "$(docker inspect -f '{{.Image}}' ulpsuite_app)" "$TAG" && echo "rollback tag: $TAG -> $(docker image inspect $TAG --format '{{.Id}}' | cut -c8-19)"
 mkdir -p /tmp/claude-1000/dockercfg && echo '{}' > /tmp/claude-1000/dockercfg/config.json
 cd /home/cole/ulp-suite && DOCKER_CONFIG=/tmp/claude-1000/dockercfg docker compose build app 2>&1 | tail -15
-docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedSince}}' | grep '^ulp-suite-app:latest'
+docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedSince}}' | grep '^ulp-suite-app:'
 ```
 
-Expected: the build ends with `naming to docker.io/library/ulp-suite-app:latest` and the image is "seconds ago". WARNING: `:latest` now points at the new, undeployed image; if the session dies here, a plain `docker compose up` of `app` would deploy it. The tested running image keeps its rollback tag from Step 6.
+Expected: the tag line names the id the container runs; the build ends with `naming to docker.io/library/ulp-suite-app:latest`; both the new `:latest` ("seconds ago") and the rollback tag are listed. WARNING: `:latest` now points at the new, undeployed image; if the session dies here, a plain `docker compose up` of `app` would deploy it. If the rollback image was lost anyway, rebuild it from the deployed commit: `git archive <commit> | DOCKER_CONFIG=/tmp/claude-1000/dockercfg docker build -t ulp-suite-app:rollback-<commit> -`.
 
 - [ ] **Step 4: Rehearsals on that image**
 
@@ -1168,10 +1171,10 @@ cd /home/cole/ulp-suite && git switch main && git merge --ff-only hardening-bund
 
 Expected: fast-forward, push accepted. Watch the CI run to success (`gh run watch <id> --exit-status`); it now includes the build step.
 
-- [ ] **Step 7: Tag, deploy, verify**
+- [ ] **Step 7: Deploy, verify**
 
 ```bash
-cd /home/cole/ulp-suite && TAG=ulp-suite-app:rollback-$(date -u +%Y%m%d-%H%Mz) && RUNNING=$(docker inspect -f '{{.Image}}' ulpsuite_app | sed 's/sha256://' | cut -c1-12) && docker tag "$RUNNING" "$TAG" && echo "rollback tag: $TAG -> $RUNNING"
+docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep '^ulp-suite-app:rollback' | head -2   # the rollback tag from Step 3 must be listed
 cd /home/cole/ulp-suite && DOCKER_CONFIG=/tmp/claude-1000/dockercfg docker compose up -d --no-deps app 2>&1 | tail -4
 until [ "$(docker inspect -f '{{.State.Health.Status}}' ulpsuite_app)" = healthy ]; do sleep 2; done; echo healthy
 curl -sI http://127.0.0.1:3000/login | grep -i -E '^(x-powered-by|content-security-policy)' || true
