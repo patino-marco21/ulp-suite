@@ -254,6 +254,9 @@ async function run(): Promise<number> {
   fillDisk(fillerBytes)
   const low = await waitFor('free space under the floor', () => freeBytes() < floor, 60_000, 500)
   check('free space is now under the floor', !!low, `free ${freeBytes()} floor ${floor}`)
+  // The gate reuses a free-space reading younger than 5 s (a batch every few seconds would otherwise cost a query each). Wait that
+  // out, or the next job's first batch could be waved through on the reading taken before the filler existed.
+  await sleep(6_000)
   const nameB = `e2e-gate-b-${RUN}.txt`
   const b = upload(nameB, genLines(30_000, 'gb'))
   check('the upload was accepted (the file is received into the spool first)', b.status === 200 && !!b.jobId, `HTTP ${b.status}`)
