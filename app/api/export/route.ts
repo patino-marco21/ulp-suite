@@ -6,6 +6,7 @@ import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS, NORM_COLS_SETTING } from "@/lib/ulp-normalize"
 import { noiseWhere } from "@/lib/ulp-noise"
+import { csvCell } from "@/lib/csv-safe"
 import { dedupeLimitBy } from "@/lib/ulp-dedupe"
 import { exportGroupBySettings, exportSortSettings } from "@/lib/clickhouse-query-limits"
 import {
@@ -129,6 +130,7 @@ export async function POST(request: NextRequest) {
     regex_mode   = false,
     exclude_noise = '',
     dedupe        = '',
+    csv_guard     = true,
   } = await request.json()
   const dedupeOn = dedupe === '1' || dedupe === true
 
@@ -231,14 +233,14 @@ export async function POST(request: NextRequest) {
       contentType = 'application/x-ndjson'
       ext = 'ndjson'
     } else if (format === 'csv') {
-      const csvEscape = (s: string) => `"${String(s).replace(/"/g, '""')}"`
+      const guard = csv_guard !== false
       content = 'url,email,password,domain,source_file,breach_name,country_tier,login_type,password_length,password_mask,url_scheme,is_corporate_email,email_domain,url_host,password_entropy_band,imported_at\n' +
         rows.map(r => [
           r.url, r.email, r.password, r.domain, r.source_file, r.breach_name,
           r.country_tier, r.login_type, r.password_length, r.password_mask,
           r.url_scheme, r.is_corporate_email, r.email_domain,
           r.url_host, r.password_entropy_band, r.imported_at,
-        ].map(csvEscape).join(',')).join('\n')
+        ].map(value => csvCell(value, guard)).join(',')).join('\n')
       contentType = 'text/csv'
       ext = 'csv'
     } else if (format === 'userpass') {
