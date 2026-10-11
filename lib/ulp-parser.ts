@@ -889,11 +889,20 @@ export interface StreamBatch {
   breakdown:   Record<RejectionReason, number>
 }
 
+export interface ParseStreamOptions {
+  /**
+   * Drop a line that repeats an earlier line of the same file (default true). Novelty-aware ingest turns it off: its stage table
+   * removes in-file repeats exactly, for a file of any size, where this per-file Set stops at STREAM_SEEN_CAP entries.
+   */
+  dedupInFile?: boolean
+}
+
 export async function* parseULPStream(
   stream: ReadableStream<Uint8Array>,
   filename: string,
   batchSize: number,
   shouldHardDrop?: (email: string, url: string) => boolean,
+  options: ParseStreamOptions = {},
 ): AsyncGenerator<StreamBatch> {
   const reader  = stream.getReader()
   // Use Buffer.from(chunk).toString('latin1') — NOT TextDecoder.
@@ -933,6 +942,7 @@ export async function* parseULPStream(
   // Cap-aware seen check for parseULPStream
   function streamSeenCheck(fp: string): boolean {
     // Returns true if credential should be skipped (duplicate)
+    if (options.dedupInFile === false) return false
     if (seen.size >= STREAM_SEEN_CAP) {
       if (!streamSeenCapWarned) {
         streamSeenCapWarned = true

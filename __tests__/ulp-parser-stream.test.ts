@@ -208,3 +208,27 @@ describe('parseULPStream ≡ parseULPContent (dual-implementation consistency)',
     })
   }
 })
+
+describe('parseULPStream: dedupInFile option', () => {
+  const line = 'https://dup.example.test:user1@dup.example.test:pass1\n'
+
+  async function run(options?: { dedupInFile?: boolean }) {
+    let rows = 0
+    let dedup = 0
+    for await (const batch of parseULPStream(streamFromChunks([line + line + line]), FILE, 10, undefined, options)) {
+      rows += batch.credentials.length
+      dedup += batch.breakdown.dedup
+    }
+    return { rows, dedup }
+  }
+
+  test('keeps the in-file dedup by default', async () => {
+    expect(await run()).toEqual({ rows: 1, dedup: 2 })
+    expect(await run({})).toEqual({ rows: 1, dedup: 2 })
+    expect(await run({ dedupInFile: true })).toEqual({ rows: 1, dedup: 2 })
+  })
+
+  test('dedupInFile: false lets repeated lines through and counts none as dedup', async () => {
+    expect(await run({ dedupInFile: false })).toEqual({ rows: 3, dedup: 0 })
+  })
+})
