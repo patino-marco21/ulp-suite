@@ -5101,30 +5101,30 @@ Skip when there was nothing to fix.
 - Modify: `/home/cole/ulp-suite/docs/superpowers/specs/2026-10-02-novelty-aware-ingest-design.md`
 - Modify: `/home/cole/ulp-suite/docs/superpowers/plans/2026-10-11-novelty-aware-ingest.md` (tick the steps that were done; note what the build changed)
 
-- [ ] **Step 1: Bring the spec up to what was built**
+- [x] **Step 1: Bring the spec up to what was built**
 
 In the spec: change the `Status:` line to `**implemented 2026-10-11**`; replace the two paragraphs of "Pieces" that no longer match with the real file list (`lib/ingest-novelty-config.ts`, `lib/ingest-stage.ts`, `lib/ingest-novelty.ts`, `lib/inbox-progress.ts`, `lib/import-summary.ts`, `scripts/e2e-novelty-ingest.ts`); in "Verification plan" item 3 replace "must equal what the 2026-10-11 probe computes for the same rows" with "must equal an independent natural-key lookup on a 5,000-row sample (the probe's own script was not kept)"; add the rehearsal's results (counts of checks, anything it found) as a short "What the rehearsal found" paragraph. Keep every number aggregate: no file names, no values.
 
-- [ ] **Step 2: Tick the plan and note the deltas**
+- [x] **Step 2: Tick the plan and note the deltas**
 
 ```bash
 cd /home/cole/ulp-suite && sed -i 's/^- \[ \] \*\*Step/- [x] **Step/' docs/superpowers/plans/2026-10-11-novelty-aware-ingest.md && grep -c '^- \[ \]' docs/superpowers/plans/2026-10-11-novelty-aware-ingest.md
 ```
 Expected: `0`, or only the steps of Tasks 17-18 that are still to be done (tick those as they finish). Add a short "What the build changed" section at the end of the plan listing every place where the code differs from the blocks above (as the disk-safety plan did).
 
-- [ ] **Step 3: Last full gate**
+- [x] **Step 3: Last full gate**
 
 Run: `cd /home/cole/ulp-suite && npx tsc --noEmit && npx next lint 2>&1 | tail -5 && npx vitest run 2>&1 | tail -6`
 Expected: tsc 0, lint clean, every test file passes.
 
-- [ ] **Step 4: Commit, fast-forward main, push**
+- [x] **Step 4: Commit, fast-forward main, push**
 
 ```bash
 cd /home/cole/ulp-suite && git add -A && git commit -m "docs: mark novelty-aware ingest implemented and record what the build and the rehearsal found" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" && git switch main && git merge --ff-only sp2-novelty-aware-ingest && git push origin main && git log --oneline -3
 ```
 Expected: the fast-forward succeeds and the push is accepted. If `origin/main` moved meanwhile, stop and merge it into the branch first.
 
-- [ ] **Step 5: CI**
+- [x] **Step 5: CI**
 
 Run: `cd /home/cole/ulp-suite && sleep 90 && gh run list --limit 2`
 Expected: the latest run for this push is `completed` and `success`. If it is still running, check again after a minute; if it fails, read it with `gh run view --log-failed`.
@@ -5139,28 +5139,28 @@ Expected: the latest run for this push is `completed` and `success`. If it is st
 
 Deploying is local-only on this laptop and was part of the approval ("build, rehearse and deploy it inline"). Do not import the download pile as part of this task: that is a separate step the operator decides.
 
-- [ ] **Step 1: Pre-flight**
+- [x] **Step 1: Pre-flight**
 
 ```bash
 cd /home/cole/ulp-suite && git status -sb && git log --oneline -1 && df -h / | tail -1 && docker ps --format '{{.Names}} {{.Status}}' | grep ulpsuite && grep -n '^CONTENT_DEDUP_APPLY=' .env && docker images ulp-suite-app --format '{{.Tag}} {{.ID}}'
 ```
 Expected: clean `main` at the merged commit; at least 100 GiB free; both `ulpsuite_*` containers healthy; `.env` shows `CONTENT_DEDUP_APPLY=true` (the value to change); the images list shows `latest`, the rollback tag from Task 16 and the older ones.
 
-- [ ] **Step 2: Rebuild so that the image is exactly `main`**
+- [x] **Step 2: Rebuild so that the image is exactly `main`**
 
 ```bash
 cd /home/cole/ulp-suite && DOCKER_CONFIG="$SCRATCH/docker-cfg" docker compose build app 2>&1 | tail -6 && docker images ulp-suite-app:latest --format '{{.ID}} {{.CreatedSince}}'
 ```
 Expected: a successful build (cached layers make it quick when nothing changed since Task 16).
 
-- [ ] **Step 3: Decision D6, then recreate only the app**
+- [x] **Step 3: Decision D6, then recreate only the app**
 
 ```bash
 cd /home/cole/ulp-suite && sed -i 's/^CONTENT_DEDUP_APPLY=.*/CONTENT_DEDUP_APPLY=false/' .env && grep -n '^CONTENT_DEDUP_APPLY=' .env && DOCKER_CONFIG="$SCRATCH/docker-cfg" docker compose up -d --no-deps app 2>&1 | tail -5
 ```
 Expected: `CONTENT_DEDUP_APPLY=false` (it was `true`), and only `ulpsuite_app` is recreated (ClickHouse untouched).
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 ```bash
 sleep 45; docker ps --format '{{.Names}} {{.Status}}' | grep ulpsuite; docker exec ulpsuite_app printenv CONTENT_DEDUP_APPLY INGEST_NOVELTY_CHECK INGEST_NOVELTY_SLAB_ROWS; docker logs ulpsuite_app 2>&1 | grep -E "ingest-stage|ingest-novelty|inbox-watcher\] started|content-dedup\] cron|Error|error" | head -20
@@ -5172,15 +5172,15 @@ docker exec ulpsuite_clickhouse clickhouse-client --query "SELECT count() FROM s
 ```
 Expected: `0`, and `1394459025` (or whatever it was before: nothing in this task writes to it).
 
-- [ ] **Step 5: Check the browser pane**
+- [x] **Step 5: Check the browser pane**
 
 Open `http://localhost:3000/upload` in the built-in browser. The page needs the operator's session: if it shows the login page, say so and stop there (never type a password). If the operator is already signed in to that origin, confirm that the Upload and Inbox pages render and the Ingest Health panel is intact.
 
-- [ ] **Step 6: Record it**
+- [x] **Step 6: Record it**
 
 Update the project memory (`project_disk_full_incident_2026_10_10.md` and `project_open_items_2026_09_30.md`, and add `project_novelty_aware_ingest_2026_10_11.md`): SP2 shipped, the commit, the image id and rollback tag, D6 applied (`CONTENT_DEDUP_APPLY=false` in `.env`, was `true`), what the spike and the rehearsal found, the settings and how to turn the feature off (`INGEST_NOVELTY_CHECK=off` in `.env`, then recreate `app`), what is still open (the pile import is the operator's call and now costs about +62 GiB of new rows, so move or delete the raw files as each one finishes; no off-disk backup; the 381 GiB archive drop is still the operator's), and the check due on 2026-10-12 after 05:00Z (the two cron lines from SP1 plus the report-only dedup tick).
 
-- [ ] **Step 7: Tick the last plan steps and push the note**
+- [x] **Step 7: Tick the last plan steps and push the note**
 
 ```bash
 cd /home/cole/ulp-suite && sed -i 's/^- \[ \] \*\*Step/- [x] **Step/' docs/superpowers/plans/2026-10-11-novelty-aware-ingest.md && git add docs/superpowers/plans/2026-10-11-novelty-aware-ingest.md && git commit -m "docs: record the novelty-aware ingest release" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" && git push origin main
@@ -5198,4 +5198,5 @@ Where the code differs from the blocks above (all of it found by running the tes
 - **Task 14:** the parity script as written (a) had a mis-escaped apostrophe in a message, (b) used `sleepEachRow` with a block ClickHouse refuses (3 s per block: now `max_block_size = 1, max_threads = 1`), (c) let `matchBreach` open the application's SQLite file (it is read-only on this host, which is what stopped it: `breachName` is passed and `SQLITE_PATH` points at a scratch file), and (d) twice probed with `x IN (SELECT content_key_hash FROM ulp.credentials)` (checks A and D), which builds a set of the whole table and which ClickHouse stopped at 24 GiB. Both now probe the live table with the small set, and the script's read queries carry `max_memory_usage = 4 GB`.
 - **Task 15:** the content of every fixture carries the run id; the scenarios that read "the commit is under way" use the table's rows, the ones that read "the file is being read" use the job's staged rows; the receiver preflight uses `State.Running` (the app image's health check always calls the receiver unhealthy); a scenario was added: ClickHouse frozen for 45 s in the middle of the commit.
 - **Task 16:** `e2e-upload-resilience.ts` and `e2e-disk-gate.ts` assumed that a second copy of the same content is stored again and that an import's rows are visible in ClickHouse while it runs; with novelty-aware ingest the copy is "already known" and rows appear at the commit, so their content carries the run id, `followUpImports` uses content of its own, and the queue-wait and freeze scenarios read progress from the job. The teardown command the scripts print needs the `REHEARSAL_*` variables set (the compose file interpolates them even for `down`).
+- **Task 17-18:** the image that the rehearsals ran on (`fdeec290cb3d`) was deployed as it is: `git diff` showed no application source, config or Dockerfile change between the commit it was built from and the merged `main`, so Task 18 Step 2's rebuild was skipped (deploying exactly the tested image is the stronger guarantee). The browser look at production (Step 5) was not possible without the operator's session, and no authenticated import was run on production for the same reason.
 - **Tooling:** the plan's code blocks were written to the files by a small extractor (`planx.py`, kept in the session scratchpad, not in the repository), which refuses a replace whose old block does not match exactly once.
