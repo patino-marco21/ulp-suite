@@ -418,9 +418,12 @@ Reference deployment: 1.39 billion rows, one 32 GB laptop (cold timings, measure
 
 - **Disk space.** The app checks free space on the ClickHouse data disk every 10 minutes
   (`lib/disk-watch.ts`), logs a warning when it gets low, and shows it in the Ingest Health panel
-  (Upload and Inbox pages). Optional: `DISK_ALERT_WEBHOOK_URL` also POSTs each alert to a
+  (Upload and Inbox pages) and, for admins, in a banner under the header of every page (amber when low, red when critical or
+  when imports are paused). Optional: `DISK_ALERT_WEBHOOK_URL` also POSTs each alert to a
   Slack-compatible webhook; nothing is sent anywhere unless you set it. Heavy jobs (dedup, projection
-  restores) refuse to start below the same floor.
+  restores) refuse to start below the same floor. **Imports pause, and resume by themselves,** while free space is under
+  `INGEST_MIN_FREE_BYTES` (default 50 GiB; they resume above 1.1x that); a paused import never fails and has no timeout, and
+  `INGEST_DISK_GATE=off` switches the gate off (`lib/ingest-disk-gate.ts`).
 - **Backups.** The app snapshots its own SQLite (users, API keys, monitors) into `./data/backups` daily.
   ClickHouse backups are taken with `./scripts/clickhouse-backup.sh` and need an S3-compatible
   destination (`S3_*` in `.env`); until one exists the panel says "No ClickHouse backup recorded".

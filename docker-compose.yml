@@ -144,6 +144,11 @@ services:
       # directory first and imported from the file. Empty = /tmp/ulp-spool and a 20 GiB free-space floor.
       UPLOAD_SPOOL_DIR: ${UPLOAD_SPOOL_DIR:-}
       UPLOAD_SPOOL_MIN_FREE_BYTES: ${UPLOAD_SPOOL_MIN_FREE_BYTES:-}
+      # Ingest disk gate (lib/ingest-disk-gate.ts) -- optional; forwarded explicitly (see above). An import pauses, and resumes by
+      # itself, while free space on the ClickHouse data disk is under INGEST_MIN_FREE_BYTES (empty = 50 GiB). INGEST_DISK_GATE=off
+      # switches the gate off.
+      INGEST_MIN_FREE_BYTES: ${INGEST_MIN_FREE_BYTES:-}
+      INGEST_DISK_GATE: ${INGEST_DISK_GATE:-}
       # Exact-content dedup worker — report-only unless explicitly enabled.
       CONTENT_DEDUP_APPLY: ${CONTENT_DEDUP_APPLY:-false}
       DEDUP_CRON_HOURS: ${DEDUP_CRON_HOURS:-24}
