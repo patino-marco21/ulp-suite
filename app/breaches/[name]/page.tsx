@@ -15,6 +15,7 @@ import { useToast } from "@/hooks/use-toast"
 import { useAuth, isAdmin } from "@/hooks/useAuth"
 import Link from "next/link"
 import { localInputToUtcIso, utcIsoToDisplay } from "@/lib/imported-range-client"
+import { SafeDescription } from "@/components/safe-description"
 
 interface BreachRecord {
   breach_name: string
@@ -243,10 +244,7 @@ export default function BreachDetailPage() {
             {breach.description && (
               <div>
                 <p className="text-xs text-muted-foreground uppercase tracking-wider mb-1.5 font-medium">Description</p>
-                <p
-                  className="text-sm leading-relaxed text-muted-foreground"
-                  dangerouslySetInnerHTML={{ __html: breach.description }}
-                />
+                <SafeDescription html={breach.description} className="text-sm leading-relaxed text-muted-foreground" />
               </div>
             )}
             {breach.data_classes.length > 0 && (
