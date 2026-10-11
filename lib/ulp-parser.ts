@@ -459,7 +459,7 @@ function splitLoginPasswordUrl(line: string, schemeIdx: number): [string, string
  *  - If no scheme, treat first two colons as separators; remainder is password.
  *    For 2-field lines (email:pass), the url slot is set to '' to signal no URL.
  */
-function colonSplit(line: string): [string, string, string] | null {
+function colonSplitFields(line: string): [string, string, string] | null {
   const schemeIdx = line.indexOf('://')
   if (schemeIdx !== -1) {
     const urlLast = splitLoginPasswordUrl(line, schemeIdx)
@@ -581,6 +581,19 @@ function colonSplit(line: string): [string, string, string] | null {
     }
   }
   return [left, line.slice(c1 + 1, c2), line.slice(c2 + 1)]
+}
+
+/**
+ * "http://shop.example.test/login alice:Secret1": a url, one space, then login:password. Only a fallback, tried after the field split found
+ * no fields, so every line that parsed before parses the same. The login holds no "/" (that would be a path or a port written after the host).
+ */
+function splitUrlSpacePair(line: string): [string, string, string] | null {
+  const m = /^(https?:\/\/\S+) +([^\s:/]+):(\S+)$/i.exec(line)
+  return m && !hasTelegramLink(m[1]) ? [m[1], m[2], m[3]] : null   // a banner ("https://t.me/Channel Daily:Updates") is not a url
+}
+
+function colonSplit(line: string): [string, string, string] | null {
+  return colonSplitFields(line) ?? splitUrlSpacePair(line)
 }
 
 // ── Core parse function ───────────────────────────────────────────────────────
