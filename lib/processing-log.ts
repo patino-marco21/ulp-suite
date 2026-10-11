@@ -11,19 +11,22 @@ export interface JobLogEntry {
   source:         'http' | 'inbox'
   filename:       string
   status:         'done' | 'failed'
+  /** Rows written. With novelty-aware ingest, NEW rows only. */
   imported:       number
   skipped:        number
   duration_ms:    number
   error_message?: string
   breach_name?:   string
+  /** Distinct credentials of the file that the table already held (novelty-aware ingest). */
+  known?:         number
 }
 
 export function logJob(entry: JobLogEntry): void {
   try {
     dbRun(
       `INSERT INTO processing_jobs
-         (source, filename, status, imported, skipped, duration_ms, error_message, breach_name)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (source, filename, status, imported, skipped, duration_ms, error_message, breach_name, known)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         entry.source,
         entry.filename,
@@ -33,6 +36,7 @@ export function logJob(entry: JobLogEntry): void {
         entry.duration_ms,
         entry.error_message ?? null,
         entry.breach_name   ?? null,
+        entry.known         ?? 0,
       ],
     )
   } catch {

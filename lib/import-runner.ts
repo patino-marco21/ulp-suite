@@ -38,8 +38,28 @@ export interface ImportContext {
   beat: () => void
 }
 
-/** What the pipeline functions accept: both parts optional, so existing callers and tests need no change. */
-export type ImportHooks = Partial<ImportContext>
+/** Where an import is, for the progress lines of the Upload page and the Inbox (novelty-aware ingest). */
+export type ImportPhase = 'parsing' | 'checking' | 'inserting'
+
+export interface ImportProgressEvent {
+  phase: ImportPhase
+  /** Rows the parser has kept and put on the stage so far. */
+  staged: number
+  /** Lines the parser has rejected so far. */
+  skipped: number
+  /** Distinct credentials found already in the table, over the slabs finished so far. */
+  known: number
+  /** New rows written, over the slabs finished so far. */
+  inserted: number
+  slab?: number
+  slabs?: number
+}
+
+/** What the pipeline functions accept: every part optional, so existing callers and tests need no change. */
+export type ImportHooks = Partial<ImportContext> & {
+  /** Novelty-aware ingest reports where it is: parsing, checking against the table, inserting. */
+  onImportProgress?: (event: ImportProgressEvent) => void
+}
 
 export interface RunImportOptions<T> {
   label: string

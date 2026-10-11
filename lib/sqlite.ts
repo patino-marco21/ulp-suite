@@ -295,6 +295,10 @@ function initSchema(db: Database.Database): void {
       ON processing_jobs (id DESC)
   `)
 
+  // Novelty-aware ingest: distinct credentials of a file that the table already held. Additive, so older rows read 0
+  // (idempotent -- the catch swallows "duplicate column", like the ALTERs below).
+  try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN known INTEGER NOT NULL DEFAULT 0`) } catch {}
+
   // Add rescan columns to existing databases (idempotent — catch swallows "duplicate column" errors)
   try { db.exec(`ALTER TABLE domain_monitors ADD COLUMN rescan_mode TEXT NOT NULL DEFAULT 'dedup' CHECK(rescan_mode IN ('dedup','digest'))`) } catch {}
   try { db.exec(`ALTER TABLE domain_monitors ADD COLUMN rescan_interval_hours INTEGER NOT NULL DEFAULT 24`) } catch {}

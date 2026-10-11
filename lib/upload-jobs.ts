@@ -8,15 +8,27 @@
  */
 
 import { makeRejectionMap } from '@/lib/ulp-parser'
+import type { ImportPhase } from '@/lib/import-runner'
 
 export type JobStatus = 'running' | 'done' | 'error'
 
 export interface UploadJob {
   id:          string
   status:      JobStatus
+  /** Rows written. With novelty-aware ingest (lib/ingest-novelty.ts) this is NEW rows only, and stays 0 until a slab is committed. */
   imported:    number
   skipped:     number
   tierDropped: number      // rows dropped pre-insert by the ingest tier filter
+  /** Distinct credentials of the file that the table already held (novelty-aware ingest; 0 on the direct path). */
+  known:            number
+  /** Rows that repeat an earlier row of the same file (novelty-aware ingest; the direct path counts them in `skipped`). */
+  inFileDuplicates: number
+  /** Rows parsed and staged so far (novelty-aware ingest). */
+  staged:      number
+  /** Set while novelty-aware ingest is working; cleared when the job ends. Absent on the direct path. */
+  phase?:      ImportPhase
+  slab?:       number
+  slabs?:      number
   total_lines: number      // estimated from file size / 60 bytes per line
   breach_name: string
   started_at:  number      // Date.now()
@@ -36,6 +48,9 @@ export function createJob(id: string, totalLines: number, breachName: string): U
     imported:    0,
     skipped:     0,
     tierDropped: 0,
+    known:            0,
+    inFileDuplicates: 0,
+    staged:      0,
     total_lines: totalLines,
     breach_name: breachName,
     started_at:  Date.now(),
@@ -57,14 +72,22 @@ export function updateJob(id: string, patch: Partial<UploadJob>): void {
 /** Push an SSE event to the job's connected browser, if any. */
 export async function pushEvent(job: UploadJob): Promise<void> {
   if (!job.writer) return
+  // While novelty-aware ingest is working, progress is the rows read and staged; on the direct path it is the rows inserted.
+  const rowsDone = job.phase ? job.staged : job.imported
   const pct     = job.total_lines > 0
-    ? Math.min(100, Math.round((job.imported / job.total_lines) * 100))
+    ? Math.min(100, Math.round((rowsDone / job.total_lines) * 100))
     : 0
   const elapsed = Date.now() - job.started_at
   const payload = JSON.stringify({
     imported:            job.imported,
     skipped:             job.skipped,
     tierDropped:         job.tierDropped,
+    known:               job.known,
+    inFileDuplicates:    job.inFileDuplicates,
+    staged:              job.staged,
+    phase:               job.phase,
+    slab:                job.slab,
+    slabs:               job.slabs,
     pct,
     elapsed_ms:          elapsed,
     status:              job.status,
