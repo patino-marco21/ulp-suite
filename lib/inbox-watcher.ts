@@ -25,7 +25,8 @@
  *    inFlight Set cannot guarantee — it dies on restart, leaving a file still
  *    in inbox/ to be re-imported.
  *  - Startup sweep: anything left in processing/ (interrupted mid-import) is
- *    moved to failed/ for review, never silently re-imported.
+ *    moved to failed/ for review, never silently re-imported (with novelty-aware ingest a Retry is safe: rows already imported
+ *    count as known).
  *  - Reconciliation loop (every 30 s) re-queues any files still in inbox/ but
  *    not in inFlight — catches files chokidar missed (large batch drops, host
  *    FS races, watcher startup gaps).
@@ -41,6 +42,9 @@ import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable } fro
 import { sniffFileKind } from '@/lib/inbox-helpers'
 import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 import { waitForDiskSpace } from '@/lib/ingest-disk-gate'
+import { noveltyConfig } from '@/lib/ingest-novelty-config'
+import { applyImportProgress } from '@/lib/inbox-progress'
+import type { ImportPhase, ImportProgressEvent } from '@/lib/import-runner'
 
 const INBOX = path.resolve('./inbox')
 const DONE  = path.resolve('./inbox/done')
@@ -67,8 +71,14 @@ const STABILITY_CHECK_WAIT_MS = 1_000                        // gap between size
 export interface InboxJobProgress {
   filename:        string
   started_at:      number   // Date.now() when processing began
-  rows_imported:   number   // rows successfully inserted so far
+  rows_imported:   number   // rows successfully written so far (NEW rows with novelty-aware ingest)
   file_size_bytes: number   // from fs.statSync before processing
+  /** Novelty-aware ingest only: where the import is, and the rows staged / already known so far. */
+  phase?:          ImportPhase
+  rows_staged?:    number
+  rows_known?:     number
+  slab?:           number
+  slabs?:          number
 }
 
 // globalThis-backed singletons -----------------------------------------------
@@ -280,6 +290,7 @@ async function enqueueFile(filePath: string): Promise<void> {
     setCurrentJob(filename)
 
     let imported = 0
+    let known    = 0
     let skipped  = 0
     let procPath: string | null = null
     try {
@@ -304,6 +315,13 @@ async function enqueueFile(filePath: string): Promise<void> {
       const fileSizeBytes = (() => { try { return fs.statSync(claimedPath).size } catch { return 0 } })()
       setCurrentProgress({ filename, started_at: startAt, rows_imported: 0, file_size_bytes: fileSizeBytes })
 
+      // The live line follows novelty-aware ingest: reading the file, checking it against the table, writing the new rows. For an
+      // archive, `imported` / `known` hold the entries that already finished, so the entry in flight adds to them.
+      const onImportProgress = (e: ImportProgressEvent) => {
+        const cp = getCurrentProgress()
+        if (cp) applyImportProgress(cp, e, { imported, known })
+      }
+
       // runImportJob fails the job, and frees this queue slot, if it stops making progress for IMPORT_STALL_TIMEOUT_MS:
       // one wedged import can no longer hold the shared queue until an app restart.
       if (ext === '.zip') {
@@ -311,33 +329,35 @@ async function enqueueFile(filePath: string): Promise<void> {
           label: filename,
           work:  ctx => processZipFile(claimedPath, result => {
             imported += result.imported
+            known    += result.known
             skipped  += result.skipped
             const cp = getCurrentProgress()
-            if (cp) cp.rows_imported = imported
-            if (result.imported > 0) {
+            if (cp) { cp.rows_imported = imported; cp.rows_known = known }
+            if (result.imported > 0 || result.known > 0) {
               console.log(
                 `[inbox-watcher]   ${result.filename}: ` +
-                `imported=${result.imported} skipped=${result.skipped}`
+                `imported=${result.imported} known=${result.known} skipped=${result.skipped}`
               )
             } else if (result.errors > 0) {
               console.warn(`[inbox-watcher]   ${result.filename}: skipped (entry error)`)
             }
-          }, ctx),
+          }, { ...ctx, onImportProgress }),
         })
       } else {
         const result = await runImportJob({
           label: filename,
           work:  ctx => processTextFile(claimedPath, filename, undefined, n => {
-            // onBatch: update live progress after each batch
+            // onBatch: update live progress after each batch (each slab with novelty-aware ingest)
             const cp = getCurrentProgress()
             if (cp) cp.rows_imported = n
-          }, ctx),
+          }, { ...ctx, onImportProgress }),
         })
         imported = result.imported
+        known    = result.known
         skipped  = result.skipped
         console.log(
           `[inbox-watcher] done: ${filename} ` +
-          `imported=${result.imported} skipped=${result.skipped}`
+          `imported=${result.imported} known=${result.known} skipped=${result.skipped}`
         )
       }
       // Move processing/ -> done/ BEFORE logJob so a crash here still leaves the
@@ -349,6 +369,7 @@ async function enqueueFile(filePath: string): Promise<void> {
         filename,
         status:      'done',
         imported,
+        known,
         skipped,
         duration_ms: Date.now() - startAt,
       })
@@ -359,6 +380,7 @@ async function enqueueFile(filePath: string): Promise<void> {
         filename,
         status:        'failed',
         imported,
+        known,
         skipped,
         duration_ms:   Date.now() - startAt,
         error_message: err instanceof Error ? err.message : String(err),
@@ -427,7 +449,9 @@ export function startInboxWatcher(): void {
       imported:      0,
       skipped:       0,
       duration_ms:   0,
-      error_message: 'Interrupted mid-import (app restart) — may be partially imported; review before re-adding.',
+      error_message: noveltyConfig().enabled
+        ? 'Interrupted mid-import (app restart). Safe to Retry: rows already imported are skipped.'
+        : 'Interrupted mid-import (app restart) — may be partially imported; review before re-adding.',
     })
   }
 
