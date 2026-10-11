@@ -4,6 +4,8 @@ import path from 'path'
 const isDev = process.env.NODE_ENV === 'development'
 
 const nextConfig = {
+  // Do not announce the framework in an `X-Powered-By: Next.js` header.
+  poweredByHeader: false,
   // Tell Next.js not to bundle better-sqlite3 (native addon — must be required at runtime)
   serverExternalPackages: ['better-sqlite3'],
   // Exclude large data folders from output file tracing (fixes slow builds)
@@ -94,7 +96,9 @@ const nextConfig = {
           // SECURITY: Add Content-Security-Policy (MED-18)
           {
             key: 'Content-Security-Policy',
-            value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net; frame-ancestors 'none';",
+            // 'unsafe-inline' stays: Next injects inline bootstrap scripts, and a nonce-based policy needs dynamic rendering for every page
+            // (a separate project). 'unsafe-eval' and the CDN are gone: a production build needs neither (checked page by page in a real browser).
+            value: "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none';",
           },
           // SECURITY: Add Permissions-Policy header (MED-18)
           {
