@@ -9,6 +9,8 @@
  *   big         2.5M distinct lines + 100k repeats of early lines (past the old 2M in-file cap): exact, in 5 slabs, phases visible
  *   kill        the app is killed in the middle of the commit; after the restart the orphan stage tables are gone and a retry
  *               adds exactly the rows that were missing (no duplicates)
+ *   freeze      ClickHouse is frozen for 45 s in the middle of the commit (longer than the 30 s stall timeout): the watchdog fails
+ *               the job, nothing of the failed import is left running on the server, the queue is free, and a retry adds only the rest
  *   concurrent  UPLOAD_CONCURRENCY=2, two files that share 30,000 rows: written once
  *   gate        free disk under the ingest floor while staging: the import waits (its stage exists), resumes, writes each row once
  *   off         INGEST_NOVELTY_CHECK=off: the direct path, no stage tables, rows stored again as before
@@ -99,7 +101,8 @@ const work = mkdtempSync(join(tmpdir(), 'e2e-novelty-'))
 const dockerCfg = mkdtempSync(join(tmpdir(), 'e2e-novelty-docker-'))
 writeFileSync(join(dockerCfg, 'config.json'), '{}') // this laptop's global Docker config has a broken credsStore
 
-const line = (tag: string, i: number) => `https://shop${i % 500}.example-store.test/login:${tag}${i}@probe-mail.test:Pw-${tag}${i}-Xy!`
+// The content carries the run id, so that a second run on the same stack does not find every row already known.
+const line = (tag: string, i: number) => `https://shop${i % 500}.example-store.test/login:${tag}${RUN}x${i}@probe-mail.test:Pw-${tag}${RUN}x${i}-Xy!`
 const lines = (tag: string, from: number, to: number) => Array.from({ length: to - from }, (_, k) => line(tag, from + k))
 const text = (ls: string[]) => ls.join('\n') + '\n'
 const fixture = (name: string, ls: string[]) => {
@@ -256,6 +259,14 @@ async function importPath(name: string, path: string, timeoutMs = 300_000, onEve
 const importLines = (name: string, ls: string[], timeoutMs?: number) => importPath(name, fixture(name, ls), timeoutMs)
 const brief = (e: JobEvent) => JSON.stringify({ status: e.status, imported: e.imported, known: e.known, dup: e.inFileDuplicates, skipped: e.skipped, error: e.error })
 
+async function expectIdleQueue(label: string): Promise<void> {
+  const idle = await waitFor(async () => {
+    const q = (await api('GET', '/api/upload/queue-status')).json?.queue
+    return q?.active === 0 && q?.pending === 0
+  }, 60_000, 500)
+  check(`${label}: the queue slot is free again`, !!idle)
+}
+
 // ── scenarios ───────────────────────────────────────────────────────────────────────────────────
 async function basic(): Promise<void> {
   console.log('\n1. Files through the HTTP upload and the inbox')
@@ -388,8 +399,45 @@ async function killMidCommit(): Promise<void> {
   check('now the file is remembered, with the rows the retry added', sourceLine(name) === String(120_000 - before), `[${sourceLine(name)}]`)
 }
 
+async function freezeDuringCommit(): Promise<void> {
+  console.log('\n5. ClickHouse is frozen for 45 s in the middle of the commit (longer than the 30 s stall timeout)')
+  scanLog('before the freeze scenario')
+  if (!check('the rehearsal app restarted with 1000-row slabs', await recreateApp({ slab: '1000' }))) return
+  const name = `e2e-nov-freeze-${RUN}.txt`
+  const path = fixture(name, lines('F', 0, 60_000))
+  const up = upload(name, path)
+  check('the upload was accepted', up.status === 200 && !!up.jobId, `HTTP ${up.status}`)
+  const midway = await waitFor(() => { const n = rowsFor(name); return n >= 2_000 && n < 50_000 ? n : 0 }, 240_000, 300)
+  check('the commit was under way: some rows written, not all', !!midway, `rows ${rowsFor(name)}`)
+
+  sh('docker', ['pause', CH])
+  let during: JobEvent | null = null
+  try {
+    await sleep(40_000)
+    during = up.jobId ? await jobSnapshot(up.jobId) : null // ClickHouse is still frozen here
+    await sleep(8_000) // the kill had a bounded wait of its own (15 s) while the server was frozen
+  } finally {
+    sh('docker', ['unpause', CH])
+  }
+  await waitFor(() => chQuery('SELECT 1') === '1', 60_000, 1000)
+
+  check('the watchdog failed the job while ClickHouse was frozen, with the stall reason', during?.status === 'error' && /stalled/.test(during.error ?? ''), JSON.stringify(during))
+  await expectIdleQueue('after the stall')
+  const quiet = await waitFor(() => chQuery("SELECT count() FROM system.processes WHERE query_id LIKE 'novelty-%'") === '0', 90_000, 1000)
+  check('after the thaw no statement of the failed import is still running on the server', !!quiet, `running ${chQuery("SELECT count() FROM system.processes WHERE query_id LIKE 'novelty-%'")}`)
+  const gone = await waitFor(() => stageTableCount() === 0, 90_000, 1000)
+  check('...and its stage tables were dropped once the server answered again', !!gone, `tables ${stageTableCount()}`)
+  const before = rowsFor(name)
+  info('rows written before the stall settled', before)
+  check('the file is not remembered as imported', sourceLine(name) === '', `[${sourceLine(name)}]`)
+
+  const again = await importPath(name, path)
+  check('a retry adds exactly the rows that were missing and counts the written ones as known', again.status === 'done' && again.known === before && again.imported === 60_000 - before, `${brief(again)} (before ${before})`)
+  check('every row is there exactly once', rowsFor(name) === 60_000 && distinctFor(name) === 60_000, `rows ${rowsFor(name)}, distinct ${distinctFor(name)}`)
+}
+
 async function concurrentFiles(): Promise<void> {
-  console.log('\n5. Two files at once (UPLOAD_CONCURRENCY=2) that share 30,000 rows')
+  console.log('\n6. Two files at once (UPLOAD_CONCURRENCY=2) that share 30,000 rows')
   scanLog('before the concurrent scenario')
   if (!check('the rehearsal app restarted with concurrency 2', await recreateApp({ concurrency: '2' }))) return
   const shared = lines('S', 0, 30_000)
@@ -405,7 +453,7 @@ async function concurrentFiles(): Promise<void> {
 }
 
 async function gateScenario(): Promise<boolean> {
-  console.log('\n6. Free disk under the ingest floor while staging')
+  console.log('\n7. Free disk under the ingest floor while staging')
   scanLog('before the gate scenario')
   const start = freeBytes()
   const floor = Math.floor(((start - 2 * GiB) * 10) / 11) // the resume level (floor x 1.1) sits 2 GiB under the free space now
@@ -455,7 +503,7 @@ async function gateScenario(): Promise<boolean> {
 }
 
 async function directPath(): Promise<void> {
-  console.log('\n7. INGEST_NOVELTY_CHECK=off keeps the direct path')
+  console.log('\n8. INGEST_NOVELTY_CHECK=off keeps the direct path')
   scanLog('before the direct-path scenario')
   if (!check('the rehearsal app restarted with the novelty check off', await recreateApp({ novelty: 'off' }))) return
   const X = `e2e-nov-off-x-${RUN}.txt`
@@ -469,15 +517,22 @@ async function directPath(): Promise<void> {
 
 // ── main ────────────────────────────────────────────────────────────────────────────────────────
 async function run(): Promise<number> {
-  for (const container of [APP, CH, RECEIVER]) {
+  // The receiver runs the app image's node with its own entrypoint, so the image's health check (port 3000) always calls it
+  // unhealthy: for it, running is what matters.
+  const ready: Array<[string, string, string]> = [
+    [APP, '{{.State.Health.Status}}', 'healthy'],
+    [CH, '{{.State.Health.Status}}', 'healthy'],
+    [RECEIVER, '{{.State.Running}}', 'true'],
+  ]
+  for (const [container, format, want] of ready) {
     let state = ''
     try {
-      state = sh('docker', ['inspect', '-f', '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}', container])
+      state = sh('docker', ['inspect', '-f', format, container])
     } catch {
       /* missing */
     }
-    if (state !== 'healthy' && state !== 'running') {
-      console.error(`${container} is not running. Start the rehearsal stack first:\n  npx tsx scripts/e2e-alert-rehearsal.ts --keep`)
+    if (state !== want) {
+      console.error(`${container} is not ready (${state || 'missing'}). Start the rehearsal stack first:\n  npx tsx scripts/e2e-alert-rehearsal.ts --keep`)
       return 2
     }
   }
@@ -495,6 +550,7 @@ async function run(): Promise<number> {
   if (want('monitor')) await monitorScenario()
   if (want('big')) await bigFile()
   if (want('kill')) await killMidCommit()
+  if (want('freeze')) await freezeDuringCommit()
   if (want('concurrent')) await concurrentFiles()
   if (want('gate') && !skipGate && !(await gateScenario())) return 2
   if (want('off')) await directPath()

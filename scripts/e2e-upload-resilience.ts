@@ -101,7 +101,7 @@ async function queue(): Promise<{ active: number; pending: number; current_file:
   return ((await res.json()) as { queue: { active: number; pending: number; current_file: string | null } }).queue
 }
 
-type JobEvent = { status: string; imported?: number; error?: string }
+type JobEvent = { status: string; imported?: number; staged?: number; phase?: string; error?: string }
 
 /** One SSE frame for the job (a finished job answers at once; a running one pushes a frame every 2 s). */
 async function jobSnapshot(jobId: string, waitMs = 4500): Promise<JobEvent> {
@@ -159,8 +159,10 @@ const fixture = (name: string, text: string) => {
   writeFileSync(path, text)
   return path
 }
+// The content carries the run id: novelty-aware ingest writes only what the table does not hold yet, so a second run on the same
+// stack with the same content would (rightly) find every row already known and these checks would fail for the wrong reason.
 const genLines = (n: number, tag: string) =>
-  Array.from({ length: n }, (_, i) => `https://shop${i % 500}.example-store.test/login:${tag}${i}@probe-mail.test:Pw-${tag}${i}-Xy!`).join('\n') + '\n'
+  Array.from({ length: n }, (_, i) => `https://shop${i % 500}.example-store.test/login:${tag}${RUN}x${i}@probe-mail.test:Pw-${tag}${RUN}x${i}-Xy!`).join('\n') + '\n'
 
 interface RawUpload {
   readonly size: number
@@ -227,8 +229,12 @@ function rawUpload(filename: string, file: string, opts: { bytesPerSec?: number 
   return up
 }
 
+// Every follow-up needs content of its own: novelty-aware ingest (rightly) reports a second copy of content the table already
+// holds as "already known" and writes nothing, which would make these checks fail for the wrong reason.
+let followUps = 0
+
 async function followUpImports(name: string): Promise<boolean> {
-  const up = rawUpload(name, fixture(name, genLines(50, 'fu')))
+  const up = rawUpload(name, fixture(name, genLines(50, `fu${++followUps}x`)))
   const id = await waitFor(() => up.jobId, 30_000)
   const final = id ? await waitJob(id, 30_000) : null
   up.cut('fin')
@@ -287,8 +293,11 @@ async function queuedBehindABusySlot(): Promise<void> {
   const fileB = fixture(b, genLines(250_000, 'qb')) // written before A starts, so B's upload begins the moment A is importing
   const upA = rawUpload(a, fixture(a, genLines(700_000, 'qa')))
   const tA = Date.now()
-  await waitFor(() => rowsFor(a) >= 100_000, 120_000)
-  info('A reached 100000 rows after', `${Date.now() - tA} ms`)
+  // With novelty-aware ingest the rows reach ClickHouse only when the file is committed, so "A is importing" is read from A's own
+  // job: the rows it has read and staged so far (100000 is about a seventh of the file).
+  const idA = await waitFor(() => upA.jobId, 120_000, 100)
+  await waitFor(async () => ((await jobSnapshot(idA ?? '')).staged ?? 0) >= 100_000, 120_000, 500)
+  info('A had staged 100000 rows after', `${Date.now() - tA} ms`)
   const tB = Date.now()
   const upB = rawUpload(b, fileB)
   const idB = await waitFor(() => upB.jobId, 60_000, 100)
@@ -311,7 +320,8 @@ async function clickHouseFrozen(o: { name: string; tag: string; freezeSeconds: n
   console.log(`\n${expectStall ? '6' : '5'}. ClickHouse is frozen for ${freezeSeconds} s in the middle of an import${expectStall ? ' (longer than the 30 s stall timeout)' : ''}`)
   const up = rawUpload(name, fixture(name, genLines(600_000, tag)))
   const id = await waitFor(() => up.jobId, 60_000)
-  await waitFor(() => rowsFor(name) >= 100_000, 120_000)
+  // Mid-import = while the file is being read and staged: with novelty-aware ingest its rows reach ulp.credentials only at the commit.
+  await waitFor(async () => ((await jobSnapshot(id ?? '')).staged ?? 0) >= 100_000, 120_000, 500)
   sh('docker', ['pause', CH])
   let during: JobEvent | null = null
   try {

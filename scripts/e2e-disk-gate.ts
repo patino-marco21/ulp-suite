@@ -86,8 +86,10 @@ const work = mkdtempSync(join(tmpdir(), 'e2e-diskgate-'))
 const dockerCfg = mkdtempSync(join(tmpdir(), 'e2e-diskgate-docker-'))
 writeFileSync(join(dockerCfg, 'config.json'), '{}') // this laptop's global Docker config has a broken credsStore
 
+// The content carries the run id: novelty-aware ingest writes only what the table does not hold yet, so a second run on the same
+// stack with the same content would (rightly) find every row already known and these checks would fail for the wrong reason.
 const genLines = (n: number, tag: string) =>
-  Array.from({ length: n }, (_, i) => `https://shop${i % 500}.example-store.test/login:${tag}${i}@probe-mail.test:Pw-${tag}${i}-Xy!`).join('\n') + '\n'
+  Array.from({ length: n }, (_, i) => `https://shop${i % 500}.example-store.test/login:${tag}${RUN}x${i}@probe-mail.test:Pw-${tag}${RUN}x${i}-Xy!`).join('\n') + '\n'
 
 // ── the filler ──────────────────────────────────────────────────────────────────────────────
 function fillDisk(bytes: number): void {
