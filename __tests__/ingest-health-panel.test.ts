@@ -49,3 +49,16 @@ describe('Ingest Health panel — the search dictionary', () => {
     expect(panel).toContain('{searchDictionary && (')
   })
 })
+
+describe('Ingest Health panel — imports paused for lack of disk space', () => {
+  test('shows a red line while the ingest disk gate is holding imports back', () => {
+    expect(panel).toContain('data-testid="ingest-paused"')
+    expect(panel).toContain('Imports paused: waiting for disk space')
+    expect(panel).toContain('free space unreadable')
+  })
+
+  test('the block is optional in the payload, so an older server response still renders', () => {
+    expect(panel).toMatch(/ingestGate\?: \{/)
+    expect(panel).toContain('{ingestGate?.paused && (')
+  })
+})

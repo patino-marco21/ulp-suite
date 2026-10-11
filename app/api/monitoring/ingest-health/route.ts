@@ -4,6 +4,7 @@ import { executeQuery } from '@/lib/clickhouse'
 import { getIngestMetrics } from '@/lib/ingest-metrics'
 import { diskBudgetBytes, buildLiveBytesSql, diskBudgetPct } from '@/lib/disk-budget'
 import { readDisk } from '@/lib/disk-watch'
+import { getIngestDiskGate } from '@/lib/ingest-disk-gate'
 import { readBackupStatus } from '@/lib/backup-status'
 import { getSearchDictionaryStatus } from '@/lib/search-dictionary'
 
@@ -72,5 +73,7 @@ export async function GET(request: NextRequest) {
     lastError: dict.lastError, lastBuildMs: dict.lastBuildMs,
   }
 
-  return NextResponse.json({ app: getIngestMetrics(), clickhouse, diskBudget, disk, backup: readBackupStatus(), searchDictionary })
+  return NextResponse.json({
+    app: getIngestMetrics(), clickhouse, diskBudget, disk, ingestGate: getIngestDiskGate(), backup: readBackupStatus(), searchDictionary,
+  })
 }

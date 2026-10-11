@@ -45,6 +45,14 @@ interface IngestHealth {
     freeRatio: number | null
     error?: string
   }
+  // Imports waiting for disk space (lib/ingest-disk-gate.ts).
+  ingestGate?: {
+    paused: boolean
+    freeBytes: number | null
+    floorBytes: number
+    resumeBytes: number
+    error?: string
+  }
   // The two derived tables behind the fast domain search (lib/search-dictionary.ts).
   searchDictionary?: {
     state: "fresh" | "stale" | "missing" | "building" | "disabled" | "unknown"
@@ -103,7 +111,7 @@ export function IngestHealthPanel() {
   }, [])
 
   if (!data) return null
-  const { app, clickhouse, diskBudget, disk, backup, searchDictionary } = data
+  const { app, clickhouse, diskBudget, disk, ingestGate, backup, searchDictionary } = data
   const active = app.filename !== null && Date.now() - app.updatedAt < 5_000
   const partsPct = Math.min(100, Math.round((clickhouse.activeParts / clickhouse.partsThreshold) * 100))
 
@@ -186,6 +194,14 @@ export function IngestHealthPanel() {
           )}
           {clickhouse.note && <span className="text-xs text-muted-foreground">({clickhouse.note})</span>}
         </div>
+        {ingestGate?.paused && (
+          <div className="text-xs border-t pt-3 text-red-600 font-medium" data-testid="ingest-paused" role="status">
+            Imports paused: waiting for disk space
+            {ingestGate.freeBytes === null
+              ? ` (free space unreadable${ingestGate.error ? `: ${ingestGate.error}` : ""})`
+              : ` (${fmtGB(ingestGate.freeBytes)} free, floor ${fmtGB(ingestGate.floorBytes)})`}
+          </div>
+        )}
         {backup && (
           <div className="flex gap-6 flex-wrap text-xs border-t pt-3" data-testid="backup-status">
             <span

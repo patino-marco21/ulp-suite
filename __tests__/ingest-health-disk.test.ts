@@ -44,4 +44,9 @@ describe('GET /api/monitoring/ingest-health — free space on the data disk', ()
     expect(json.disk).toMatchObject({ status: 'unknown', freeBytes: null })
     expect(json.clickhouse.activeParts).toBe(8)
   })
+
+  test('reports whether imports are paused for lack of disk space', async () => {
+    const json = await (await get()).json()
+    expect(json.ingestGate).toMatchObject({ paused: false, waiters: 0, floorBytes: 50 * GiB })
+  })
 })
