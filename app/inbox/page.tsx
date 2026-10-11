@@ -13,6 +13,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { useAuth, isAdmin } from "@/hooks/useAuth"
 import { useToast } from "@/hooks/use-toast"
 import { IngestHealthPanel } from "@/components/ingest-health-panel"
+import { newKnownLabel, phaseLine } from "@/lib/import-summary"
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -27,6 +28,7 @@ interface DoneEntry {
   filename:      string
   status:        'done' | 'failed'
   imported:      number
+  known?:        number
   skipped:       number
   duration_ms:   number
   error_message: string | null
@@ -43,6 +45,12 @@ interface CurrentProgress {
   est_total_rows:  number | null
   pct:             number | null
   eta_ms:          number | null
+  /** Novelty-aware ingest only. */
+  phase?:          'parsing' | 'checking' | 'inserting' | null
+  rows_staged?:    number
+  rows_known?:     number
+  slab?:           number | null
+  slabs?:          number | null
 }
 
 interface InboxStatus {
@@ -304,7 +312,11 @@ export default function InboxPage() {
             {data.current_progress.pct !== null && (
               <div>
                 <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
-                  <span>{fmtRows(data.current_progress.rows_imported)} rows imported</span>
+                  <span>
+                    {data.current_progress.phase
+                      ? `${fmtRows(data.current_progress.rows_staged ?? 0)} rows read`
+                      : `${fmtRows(data.current_progress.rows_imported)} rows imported`}
+                  </span>
                   <span className="font-medium text-foreground">{data.current_progress.pct}%</span>
                   {data.current_progress.est_total_rows && (
                     <span>est. {fmtRows(data.current_progress.est_total_rows)} total</span>
@@ -320,8 +332,22 @@ export default function InboxPage() {
             )}
             {data.current_progress.pct === null && (
               <p className="text-xs text-muted-foreground">
-                {fmtRows(data.current_progress.rows_imported)} rows imported
-                {data.current_progress.rows_imported === 0 && ' — parsing first batch…'}
+                {data.current_progress.phase
+                  ? `${fmtRows(data.current_progress.rows_staged ?? 0)} rows read`
+                  : `${fmtRows(data.current_progress.rows_imported)} rows imported`}
+                {(data.current_progress.phase ? (data.current_progress.rows_staged ?? 0) : data.current_progress.rows_imported) === 0 && ' — parsing first batch…'}
+              </p>
+            )}
+            {data.current_progress.phase && (
+              <p className="text-xs text-muted-foreground">
+                {phaseLine({
+                  phase:    data.current_progress.phase,
+                  staged:   data.current_progress.rows_staged,
+                  imported: data.current_progress.rows_imported,
+                  known:    data.current_progress.rows_known,
+                  slab:     data.current_progress.slab,
+                  slabs:    data.current_progress.slabs,
+                })}
               </p>
             )}
             <div className="flex gap-4 text-xs text-muted-foreground flex-wrap">
@@ -448,7 +474,7 @@ export default function InboxPage() {
                   </span>
                   {job.status === 'done' ? (
                     <>
-                      <span className="tabular-nums shrink-0">{fmtRows(job.imported)} rows</span>
+                      <span className="tabular-nums shrink-0">{newKnownLabel(job.imported, job.known, fmtRows)}</span>
                       <span className="text-muted-foreground shrink-0 flex items-center gap-0.5">
                         <Timer className="h-2.5 w-2.5" />{fmtDuration(job.duration_ms)}
                       </span>

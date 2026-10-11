@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge"
 import { useAuth, isAdmin } from "@/hooks/useAuth"
 import { useToast } from "@/hooks/use-toast"
 import { buildTopRejections } from "@/lib/rejection-report"
+import { importRatePct, keptRows, newKnownLabel, phaseLine } from "@/lib/import-summary"
 import { IngestHealthPanel } from "@/components/ingest-health-panel"
 import { postFileWithProgress, transferPercent, uploadErrorMessage } from "@/lib/upload-client"
 import { formatBytes } from "@/lib/utils"
@@ -20,10 +21,17 @@ interface ZipFileEntry {
   filename: string
   breach_name: string
   imported: number
+  /** Distinct credentials of the file that were already in the database. */
+  known?: number
 }
 
 interface UploadResult {
+  /** New rows written to the database. */
   imported: number
+  /** Distinct credentials of the file that were already in the database. */
+  known?: number
+  /** Rows that repeat an earlier row of the same file. */
+  inFileDuplicates?: number
   skipped: number
   /** Rows dropped pre-insert by the ingest tier filter (0 unless configured). */
   tierDropped?: number
@@ -53,6 +61,10 @@ export default function UploadPage() {
   const [liveImported, setLiveImported] = useState(0)
   const [liveSkipped, setLiveSkipped]   = useState(0)
   const [liveTierDropped, setLiveTierDropped] = useState(0)
+  // Novelty-aware ingest: where the server is (reading the file, checking it against the database, writing the new rows).
+  const [liveProgress, setLiveProgress] = useState<{
+    phase: 'parsing' | 'checking' | 'inserting'; staged: number; imported: number; known: number; slab?: number; slabs?: number
+  } | null>(null)
   const [livePct, setLivePct]           = useState(0)
   const [elapsedMs, setElapsedMs]       = useState(0)
   // 'transfer': the browser is still sending the file; 'import': the server holds it and is importing it.
@@ -121,7 +133,7 @@ export default function UploadPage() {
           if (data.jobId) {
             // SSE path — resolve when server signals done or error
             setQueuedAhead(data.queue_position ?? 0)
-            setLiveImported(0); setLiveSkipped(0); setLiveTierDropped(0); setLivePct(0); setElapsedMs(0)
+            setLiveImported(0); setLiveSkipped(0); setLiveTierDropped(0); setLiveProgress(null); setLivePct(0); setElapsedMs(0)
             const es = new EventSource(`/api/upload/progress/${data.jobId}`)
             eventSourceRef.current = es
 
@@ -140,6 +152,9 @@ export default function UploadPage() {
               setLiveImported(d.imported ?? 0)
               setLiveSkipped(d.skipped   ?? 0)
               setLiveTierDropped(d.tierDropped ?? 0)
+              setLiveProgress(d.phase
+                ? { phase: d.phase, staged: d.staged ?? 0, imported: d.imported ?? 0, known: d.known ?? 0, slab: d.slab, slabs: d.slabs }
+                : null)
               setLivePct(d.pct           ?? 0)
               setElapsedMs(d.elapsed_ms  ?? 0)
 
@@ -148,6 +163,8 @@ export default function UploadPage() {
                   imported:            d.imported,
                   skipped:             d.skipped,
                   tierDropped:         d.tierDropped ?? 0,
+                  known:               d.known ?? 0,
+                  inFileDuplicates:    d.inFileDuplicates ?? 0,
                   errors:              0,
                   filename:            file.name,
                   breach_name:         '',
@@ -337,10 +354,13 @@ export default function UploadPage() {
               <>
                 <Progress value={livePct} className="h-2" />
                 <div className="flex items-center justify-between text-xs text-muted-foreground tabular-nums">
-                  <span>{liveImported.toLocaleString()} imported</span>
+                  <span>{liveImported.toLocaleString()} {liveProgress ? 'new' : 'imported'}</span>
                   <span>{livePct}%</span>
                   <span>{liveSkipped.toLocaleString()} skipped</span>
                 </div>
+                {liveProgress && (
+                  <p className="text-center text-xs text-muted-foreground tabular-nums">{phaseLine(liveProgress)}</p>
+                )}
                 {liveTierDropped > 0 && (
                   <p className="text-center text-xs text-muted-foreground tabular-nums">
                     {liveTierDropped.toLocaleString()} filtered (low-tier)
@@ -348,7 +368,12 @@ export default function UploadPage() {
                 )}
               </>
             ) : (
-              <Progress value={progress} className="h-2" />
+              <>
+                <Progress value={progress} className="h-2" />
+                {liveProgress && (
+                  <p className="text-center text-xs text-muted-foreground tabular-nums">{phaseLine(liveProgress)}</p>
+                )}
+              </>
             )}
           </CardContent>
         </Card>
@@ -358,6 +383,8 @@ export default function UploadPage() {
       {state === 'success' && allResults.length > 0 && (() => {
         const totalImported = allResults.reduce((s, r) => s + r.imported, 0)
         const totalSkipped  = allResults.reduce((s, r) => s + r.skipped,  0)
+        const totalKnown    = allResults.reduce((s, r) => s + (r.known ?? 0), 0)
+        const totalRepeated = allResults.reduce((s, r) => s + (r.inFileDuplicates ?? 0), 0)
         const totalErrors   = allResults.reduce((s, r) => s + r.errors,   0)
         const totalTierDropped = allResults.reduce((s, r) => s + (r.tierDropped ?? 0), 0)
         const mergedBreakdown = allResults.reduce((acc, r) => {
@@ -365,15 +392,16 @@ export default function UploadPage() {
             acc[k] = (acc[k] ?? 0) + v
           return acc
         }, {} as Record<string, number>)
-        const total      = totalImported + totalSkipped
-        const import_pct = total > 0 ? Math.round(totalImported / total * 1000) / 10 : 0
+        const import_pct = importRatePct({ imported: totalImported, known: totalKnown, inFileDuplicates: totalRepeated, skipped: totalSkipped })
         const fileRows = allResults.length > 1
           ? allResults.flatMap(r =>
-              r.files ?? [{ filename: r.filename, breach_name: r.breach_name ?? '', imported: r.imported }]
+              r.files ?? [{ filename: r.filename, breach_name: r.breach_name ?? '', imported: r.imported, known: r.known ?? 0 }]
             )
           : allResults[0].files
         const displayResult: UploadResult = {
           imported:            totalImported,
+          known:               totalKnown,
+          inFileDuplicates:    totalRepeated,
           skipped:             totalSkipped,
           tierDropped:         totalTierDropped,
           errors:              totalErrors,
@@ -401,8 +429,14 @@ export default function UploadPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className={(displayResult.tierDropped ?? 0) > 0 ? "grid grid-cols-4 gap-3" : "grid grid-cols-3 gap-3"}>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
                 <StatBox label="Imported" value={displayResult.imported.toLocaleString()} color="green" />
+                {(displayResult.known ?? 0) > 0 && (
+                  <StatBox label="Already in the database" value={(displayResult.known ?? 0).toLocaleString()} color="yellow" />
+                )}
+                {(displayResult.inFileDuplicates ?? 0) > 0 && (
+                  <StatBox label="Repeated in the file" value={(displayResult.inFileDuplicates ?? 0).toLocaleString()} color="yellow" />
+                )}
                 <StatBox label="Skipped"  value={displayResult.skipped.toLocaleString()}  color="yellow" />
                 <StatBox label="Errors"   value={displayResult.errors.toLocaleString()}   color="red" />
                 {(displayResult.tierDropped ?? 0) > 0 && (
@@ -438,7 +472,7 @@ export default function UploadPage() {
               )}
 
               {displayResult.rejection_breakdown && displayResult.skipped > 0 && (() => {
-                const rejTotal   = displayResult.imported + displayResult.skipped
+                const rejTotal   = keptRows(displayResult) + displayResult.skipped
                 const rejections = buildTopRejections(displayResult.rejection_breakdown, rejTotal)
                 if (rejections.length === 0) return null
                 return (
@@ -475,7 +509,7 @@ export default function UploadPage() {
                         <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
                         <span className="font-mono truncate flex-1" title={f.filename}>{f.filename}</span>
                         <span className="text-muted-foreground tabular-nums shrink-0">
-                          {f.imported.toLocaleString()} rows
+                          {newKnownLabel(f.imported, f.known, n => n.toLocaleString())}
                         </span>
                         {f.breach_name && (
                           <Badge variant="outline" className="text-xs shrink-0">{f.breach_name}</Badge>
@@ -775,6 +809,7 @@ interface QueueJob {
   filename:      string
   status:        'done' | 'failed'
   imported:      number
+  known?:        number
   skipped:       number
   duration_ms:   number
   error_message: string | null
@@ -793,6 +828,7 @@ interface QueueStatus {
     files_done:    number
     files_failed:  number
     rows_imported: number
+    rows_known?:   number
     rows_skipped:  number
   }
 }
@@ -893,7 +929,7 @@ function QueueStatusPanel() {
               </div>
 
               <div className="flex gap-4 text-xs text-muted-foreground flex-wrap">
-                <span><span className="font-medium text-foreground">{fmtRows(data.totals.rows_imported)}</span> rows imported</span>
+                <span><span className="font-medium text-foreground">{fmtRows(data.totals.rows_imported)}</span> rows imported{(data.totals.rows_known ?? 0) > 0 && <>, <span className="font-medium text-foreground">{fmtRows(data.totals.rows_known ?? 0)}</span> already known</>}</span>
                 <span><span className="font-medium text-foreground">{data.totals.files_done}</span> files done</span>
                 {data.totals.files_failed > 0 && (
                   <span className="text-red-500"><span className="font-medium">{data.totals.files_failed}</span> failed</span>
@@ -916,7 +952,7 @@ function QueueStatusPanel() {
                       </span>
                       {job.status === 'done' ? (
                         <>
-                          <span className="tabular-nums shrink-0">{fmtRows(job.imported)} rows</span>
+                          <span className="tabular-nums shrink-0">{newKnownLabel(job.imported, job.known, fmtRows)}</span>
                           <span className="text-muted-foreground shrink-0 flex items-center gap-0.5">
                             <Clock className="h-2.5 w-2.5" />{fmtDuration(job.duration_ms)}
                           </span>
