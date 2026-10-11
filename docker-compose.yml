@@ -155,6 +155,11 @@ services:
       # commit step.
       INGEST_NOVELTY_CHECK: ${INGEST_NOVELTY_CHECK:-}
       INGEST_NOVELTY_SLAB_ROWS: ${INGEST_NOVELTY_SLAB_ROWS:-}
+      # Memory guard (lib/clickhouse-memory-guard.ts) -- optional. An import waits before its next batch while ClickHouse's own memory
+      # tracker is at or above MEMORY_GUARD_THRESHOLD_RATIO of its ceiling (empty = 0.75), and goes ahead anyway once it has waited
+      # MEMORY_GUARD_MAX_WAIT_MS (empty = 600000, ten minutes).
+      MEMORY_GUARD_THRESHOLD_RATIO: ${MEMORY_GUARD_THRESHOLD_RATIO:-}
+      MEMORY_GUARD_MAX_WAIT_MS: ${MEMORY_GUARD_MAX_WAIT_MS:-}
       # Exact-content dedup worker — report-only unless explicitly enabled.
       CONTENT_DEDUP_APPLY: ${CONTENT_DEDUP_APPLY:-false}
       DEDUP_CRON_HOURS: ${DEDUP_CRON_HOURS:-24}

@@ -211,6 +211,10 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   holds costs the parse and one scan of one column. `off` imports straight into `ulp.credentials` as before.
 - `INGEST_NOVELTY_SLAB_ROWS` — rows per commit step (default `20000000`, at least `1000`). Files below
   this are committed in one step; larger ones in hash slabs, one slab at a time across all imports.
+- `MEMORY_GUARD_THRESHOLD_RATIO` — an import waits before its next batch while ClickHouse's memory
+  tracker is at or above this share of its ceiling (default `0.75`).
+- `MEMORY_GUARD_MAX_WAIT_MS` — how long it waits before going ahead anyway (default `600000`, ten
+  minutes). The guard paces imports; it never blocks one for good.
 
 Batch size stays a fixed 100,000 rows; inserts remain synchronous, in-order, and
 retryable (unchanged from the resilience work).
