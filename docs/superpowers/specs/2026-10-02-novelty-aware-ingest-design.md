@@ -101,6 +101,19 @@ Row density per byte varies about tenfold between files (some are mostly junk li
   (`lib/content-dedup.ts` does).
 - The batch loop already awaits the disk gate (`lib/ingest-disk-gate.ts`) and the memory guard before every insert, whatever the target table.
 
+### Spike results (2026-10-11, live server, throwaway tables)
+
+| Question | Result |
+|---|---|
+| Hash parity: the stage's `content_key_hash` against the live table's, on real rows | 5,000,000 of 5,000,000 distinct stage hashes found in `ulp.credentials` (probe 10.1 s cold, 541 MiB) |
+| `INSERT ... SELECT ... LIMIT 1 BY` throughput into the live-DDL clone | 6.0M stage rows -> 5.0M written in 45.2 s = **110.6k rows/s**, 1.87 GiB peak; the same insert without `LIMIT 1 BY` 117.2k rows/s, 1.48 GiB (cost of `LIMIT 1 BY` about 6%) |
+| Is `written_rows` exact with 3 projections and 19 skip indexes? | **Yes.** The real client's `command()` returns `summary.written_rows` (a string) even with `send_progress_in_http_headers` on: 5,000,000 (all new), 0 (all known), 2,452,248 (half known, exactly `distinct - known`) |
+| Known-set fill against the empty clone / the 5M-row clone | 0.19 s / 0.9 s |
+| Slabs by `content_key_hash % 4` | 1,273,421 + 1,274,832 + 1,274,331 + 1,177,416 = 5,000,000 distinct (exact) |
+| Monitor SQL on the stage vs the in-process matcher (17 domains, 1M rows, 489,534 new) | identical for `url`; `credential` and `both` differ by exactly 1 row, a legacy blank-first-tab row that `NORM_EMAIL_EXPR` repairs and the JS matcher cannot (the current parser never produces that shape). `buildNormalizedDomainSetMatch` 0.53 s vs `buildDomainSetWhereClause` 1.21 s per 1M rows |
+
+Consequences, all adopted in the implementation plan: the settings of the commit statements are passed as client settings (the client's default `max_execution_time` is 60 s, and the 20M-row slab takes minutes), `K` is derived from the stage's row count and `distinct` is counted per slab, and monitors are matched with `buildNormalizedDomainSetMatch`.
+
 ## Approaches
 
 | | Verdict |
@@ -220,10 +233,8 @@ again. This replaces the 1-hour dedup window rather than adding to it. The `INSE
   parity test (same row through both paths -> same hash) and a drift test against the init SQL; the per-slab written-rows check;
   expected `cityHash64` collisions are negligible (about 1M new x 1.39B existing / 1.8e19 = 0.00008 rows per file; the cron has the same
   exposure).
-- **`INSERT ... SELECT ... LIMIT 1 BY` throughput is unmeasured** (the 103k rows/s above is without `LIMIT 1 BY`), and whether the statement's
-  written-rows summary is exact on a table with three projections is unconfirmed. The first plan task measures both on a scratch clone of the
-  live DDL; if the summary is not exact, the post-condition is a second probe per slab (every distinct hash of the slab is now in the
-  target), at the cost of one more scan.
+- **`INSERT ... SELECT ... LIMIT 1 BY` throughput and the written-rows summary: settled by the spike above** (110.6k rows/s; `written_rows` exact), so
+  no second probe per slab is needed. The check still skips with a warning if a future server version stops sending the summary.
 - The probe scan grows linearly with the table (about 10 s at 1.39B rows, about 20 s at 2.8B). Several staged files could share one scan later.
 - ClickHouse memory: one slab's set is at most 20M x 8 B before overhead, checked after the existing memory guard; the cap is a setting.
 - Stage disk use is about the compressed row size (tens of bytes per row; a 100M-row file is under 10 GiB), guarded by the SP1 gate.
