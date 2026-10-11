@@ -19,8 +19,10 @@
 import { randomUUID } from 'node:crypto'
 import type { ClickHouseSettings } from '@clickhouse/client'
 import { getClient } from '@/lib/clickhouse'
-import { buildNormalizedDomainSetMatch, type MatchMode } from '@/lib/domain-match'
-import { COMMIT_MAX_EXECUTION_S } from '@/lib/ingest-novelty-config'
+import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
+import { buildNormalizedDomainSetMatch, type MatchedCredential, type MatchMode } from '@/lib/domain-match'
+import { waitForDiskSpace } from '@/lib/ingest-disk-gate'
+import { COMMIT_MAX_EXECUTION_S, slabCount } from '@/lib/ingest-novelty-config'
 import type { StageTables } from '@/lib/ingest-stage'
 
 // ── SQL builders (pure) ─────────────────────────────────────────────────────────────────────────────
@@ -214,4 +216,185 @@ export async function acquireCommitLock(signal: AbortSignal): Promise<() => void
     throw err
   }
   return release
+}
+
+// ── the commit ──────────────────────────────────────────────────────────────────────────────────────
+
+export class NoveltyAccountingError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'NoveltyAccountingError'
+  }
+}
+
+export interface CommitMonitor {
+  id: number
+  domains: string[]
+  match_mode: MatchMode
+}
+
+export interface CommitGates {
+  disk(signal: AbortSignal, o: { onPoll?: () => void }): Promise<void>
+  memory(signal: AbortSignal, o: { onPoll?: () => void }): Promise<void>
+}
+
+export interface CommitOptions {
+  tables: StageTables
+  /** Table the new rows are written to. */
+  target: string
+  /** Table probed for rows already held. The same table in production; a probe may read the live table and write a clone. */
+  noveltyAgainst: string
+  /** Rows the parser kept and sent to the stage: the file's importable lines. */
+  parsedRows: number
+  slabRows: number
+  signal: AbortSignal
+  /** Progress heartbeat for the stall watchdog (lib/import-runner.ts): after every statement and on every gate poll. */
+  beat?: () => void
+  onPhase?: (e: { phase: 'checking' | 'inserting'; slab: number; slabs: number }) => void
+  onSlab?: (e: { slab: number; slabs: number; known: number; inserted: number }) => void
+  monitors?: CommitMonitor[]
+  /** Most monitor matches to collect in total; 0 or absent = none. */
+  matchCap?: number
+  /** Test seams. */
+  db?: NoveltyDb
+  gates?: CommitGates
+  newQueryId?: () => string
+}
+
+export interface CommitResult {
+  /** Rows the parser kept. */
+  rows: number
+  /** Distinct credentials among them. */
+  distinct: number
+  /** Distinct credentials that the table already held. */
+  known: number
+  /** New rows written. */
+  inserted: number
+  /** Rows that repeat an earlier row of the same file: rows - distinct. */
+  inFileDuplicates: number
+  slabs: number
+  matches: MatchedCredential[]
+}
+
+interface MonitorRow {
+  url: string
+  email: string
+  password: string
+  domain: string
+}
+
+async function countRows(db: NoveltyDb, sql: string, o: { queryId: string; signal: AbortSignal }): Promise<number> {
+  const rows = await db.select<{ c: string | number }>(sql, o)
+  return Number(rows[0]?.c ?? 0)
+}
+
+const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err))
+
+/**
+ * Moves the stage's rows into `target`, one slab at a time. See the module comment. On any failure or abort the statement that
+ * was running is killed before the lock is released, so no statement of ours is still writing while another import computes its
+ * `known`. Rows an interrupted attempt already wrote are not rolled back: a retry counts them as known.
+ */
+export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
+  const db = opts.db ?? clickhouseNoveltyDb()
+  const gates: CommitGates = opts.gates ?? { disk: waitForDiskSpace, memory: waitForHeadroom }
+  const queryId = opts.newQueryId ?? newQueryId
+  const beat = opts.beat ?? (() => {})
+  const { signal, tables: t } = opts
+  const monitors = (opts.monitors ?? []).filter(m => m.domains.some(d => d.trim() !== ''))
+  const matchCap = Math.max(0, Math.floor(opts.matchCap ?? 0))
+  const matches: MatchedCredential[] = []
+
+  const stageRows = await countRows(db, stageCountSql(t), { queryId: queryId(), signal })
+  beat()
+  const slabs = slabCount(stageRows, opts.slabRows)
+  let distinct = 0
+  let known = 0
+  let inserted = 0
+
+  for (let k = 0; stageRows > 0 && k < slabs; k++) {
+    signal.throwIfAborted()
+    // Room first, THEN the lock: an import that is paused for disk or memory must not hold up another file's commit.
+    await gates.disk(signal, { onPoll: beat })
+    await gates.memory(signal, { onPoll: beat })
+    const release = await acquireCommitLock(signal)
+
+    let running: string | null = null
+    // `running` is cleared only on success, so the catch below still knows which statement to kill.
+    const step = async <T>(fn: (id: string) => Promise<T>): Promise<T> => {
+      const id = queryId()
+      running = id
+      const out = await fn(id)
+      running = null
+      beat()
+      return out
+    }
+
+    try {
+      signal.throwIfAborted()
+      const slabDistinct = await step(id => countRows(db, slabDistinctSql(t, slabs, k), { queryId: id, signal }))
+      if (slabDistinct > 0) {
+        opts.onPhase?.({ phase: 'checking', slab: k + 1, slabs })
+        await step(id => db.exec(knownResetSql(t), { queryId: id, signal }))
+        await step(id => db.exec(knownFillSql(t, opts.noveltyAgainst, slabs, k), { queryId: id, signal }))
+        const slabKnown = await step(id => countRows(db, knownCountSql(t), { queryId: id, signal }))
+        if (slabKnown > slabDistinct) {
+          throw new NoveltyAccountingError(
+            `slab ${k + 1}/${slabs}: ${slabKnown} known hashes for ${slabDistinct} distinct ones; the stage and the table disagree`,
+          )
+        }
+        const expected = slabDistinct - slabKnown
+
+        if (expected > 0) {
+          opts.onPhase?.({ phase: 'inserting', slab: k + 1, slabs })
+          const { writtenRows } = await step(id => db.exec(commitInsertSql(t, opts.target, slabs, k), { queryId: id, signal }))
+          if (writtenRows === null) {
+            console.warn(`[ingest-novelty] slab ${k + 1}/${slabs}: the server sent no written-rows count; the accounting check was skipped`)
+          } else if (writtenRows !== expected) {
+            throw new NoveltyAccountingError(
+              `slab ${k + 1}/${slabs}: ClickHouse reported ${writtenRows} rows written but ${expected} were expected ` +
+              `(${slabDistinct} distinct - ${slabKnown} known). Rows already written are kept; Retry is safe, they will count as already known.`,
+            )
+          }
+
+          // Monitors see only rows that are new. A failed match query must not fail an import whose rows are already written
+          // (a retry would count them as known, so their alerts could never fire): skip that monitor for this slab instead.
+          for (const monitor of monitors) {
+            const room = matchCap - matches.length
+            if (room <= 0) break
+            const q = monitorStageSql(t, slabs, k, monitor, room)
+            if (!q) continue
+            try {
+              const rows = await step(id => db.select<MonitorRow>(q.sql, { queryId: id, signal, params: q.params }))
+              for (const r of rows.slice(0, room)) matches.push({ monitorId: monitor.id, url: r.url, email: r.email, password: r.password, domain: r.domain })
+            } catch (err) {
+              if (signal.aborted) throw err
+              running = null
+              console.warn(`[ingest-novelty] monitor ${monitor.id}: its match query failed, so its alerts for slab ${k + 1}/${slabs} are skipped (${errorText(err)})`)
+            }
+          }
+        }
+
+        distinct += slabDistinct
+        known += slabKnown
+        inserted += expected
+      }
+      opts.onSlab?.({ slab: k + 1, slabs, known, inserted })
+    } catch (err) {
+      if (running !== null) await db.kill(running).catch(() => {})
+      throw err
+    } finally {
+      release()
+    }
+  }
+
+  return {
+    rows: opts.parsedRows,
+    distinct,
+    known,
+    inserted,
+    inFileDuplicates: Math.max(0, opts.parsedRows - distinct),
+    slabs,
+    matches,
+  }
 }
