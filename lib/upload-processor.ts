@@ -23,6 +23,7 @@ import {
   type ClickHouseRetryOptions,
 } from '@/lib/clickhouse-retry'
 import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
+import { waitForDiskSpace } from '@/lib/ingest-disk-gate'
 import { batchDedupToken } from '@/lib/upload-dedup'
 import { parseIngestPolicy, policyActive, shouldDropAtIngest, makeHardDropPredicate } from '@/lib/ingest-filter'
 import { getActiveMonitors, fireMonitorAlertsFromMatches, type DomainMonitor } from '@/lib/domain-monitor'
@@ -324,7 +325,11 @@ export async function streamCredentialsToTable(
           (rejection_breakdown[k as RejectionReason] ?? 0) + v
       }
 
-      await waitForHeadroom(options.signal ?? new AbortController().signal, { onPoll: options.onBeat })
+      // Disk before memory: a full disk is the harsher condition. This pauses (it never fails) while the ClickHouse data disk is
+      // under INGEST_MIN_FREE_BYTES and resumes by itself -- see lib/ingest-disk-gate.ts.
+      const guardSignal = options.signal ?? new AbortController().signal
+      await waitForDiskSpace(guardSignal, { onPoll: options.onBeat })
+      await waitForHeadroom(guardSignal, { onPoll: options.onBeat })
 
       const tInsert = performance.now()
       await insertBatch(creds, breach_name, { signal: options.signal, onRetry: () => options.onBeat?.() }, { table })

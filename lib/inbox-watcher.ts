@@ -40,6 +40,7 @@ import { runImportJob } from '@/lib/import-runner'
 import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable } from '@/lib/inbox-claim'
 import { sniffFileKind } from '@/lib/inbox-helpers'
 import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
+import { waitForDiskSpace } from '@/lib/ingest-disk-gate'
 
 const INBOX = path.resolve('./inbox')
 const DONE  = path.resolve('./inbox/done')
@@ -283,6 +284,8 @@ async function enqueueFile(filePath: string): Promise<void> {
     let procPath: string | null = null
     try {
       const guardController = new AbortController()
+      // Disk first (lib/ingest-disk-gate.ts): while the data disk is under its floor the file stays in inbox/, unclaimed.
+      await waitForDiskSpace(guardController.signal)
       await waitForHeadroom(guardController.signal)
 
       // CLAIM: atomically move the file out of inbox/ into processing/ BEFORE
