@@ -28,7 +28,7 @@ vi.mock('@/lib/upload-processor', () => ({
     captured.path = filePath
     return {
       imported: 1, skipped: 0, errors: 0, filename, breach_name: 'test',
-      rejection_breakdown: {}, alreadyImported: false, tierDropped: 0,
+      known: 0, inFileDuplicates: 0, rejection_breakdown: {}, alreadyImported: false, tierDropped: 0,
     }
   }),
   processZipFile: vi.fn().mockResolvedValue(undefined),
@@ -125,7 +125,7 @@ describe('POST /api/v1/upload: spool first, answer when the import has finished'
       captured.path = filePath
       onEntry({
         imported: 2, skipped: 0, errors: 0, filename: 'inner.txt', breach_name: 'test',
-        rejection_breakdown: {}, alreadyImported: false, tierDropped: 0,
+        known: 0, inFileDuplicates: 0, rejection_breakdown: {}, alreadyImported: false, tierDropped: 0,
       })
     })
 

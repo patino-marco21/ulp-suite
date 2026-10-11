@@ -27,7 +27,7 @@ vi.mock('@/lib/upload-processor', () => ({
     captured.path = filePath
     return {
       imported: 1, skipped: 0, errors: 0, filename, breach_name: 'test',
-      rejection_breakdown: {}, alreadyImported: false, tierDropped: 0,
+      known: 0, inFileDuplicates: 0, rejection_breakdown: {}, alreadyImported: false, tierDropped: 0,
     }
   }),
   processZipFile: vi.fn().mockResolvedValue(undefined),
@@ -181,7 +181,7 @@ describe('POST /api/upload: receive first, then reply', () => {
 describe('POST /api/upload: zip archives', () => {
   const entry = (filename: string, imported: number, extra: Record<string, unknown> = {}) => ({
     imported, skipped: 0, errors: 0, filename, breach_name: 'test',
-    rejection_breakdown: {}, alreadyImported: false, tierDropped: 0, ...extra,
+    known: 0, inFileDuplicates: 0, rejection_breakdown: {}, alreadyImported: false, tierDropped: 0, ...extra,
   })
 
   it('spools the archive, imports it from the file under the runner and removes the file', async () => {

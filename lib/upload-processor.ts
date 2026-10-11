@@ -31,12 +31,20 @@ import { buildMonitorDomainIndex, matchCredentialsAgainstIndex, type MatchedCred
 import { matchBreach } from '@/lib/breach-matcher'
 import { updateJob } from '@/lib/upload-jobs'
 import { startIngest, recordBatch, finishIngest } from '@/lib/ingest-metrics'
-import type { ImportHooks } from '@/lib/import-runner'
+import type { ImportHooks, ImportProgressEvent } from '@/lib/import-runner'
+import { noveltyConfig } from '@/lib/ingest-novelty-config'
+import { commitStage } from '@/lib/ingest-novelty'
+import { createStage, dropStage, newStageId, registerStage, stageTables, unregisterStage } from '@/lib/ingest-stage'
 
 // ─── Public result type ───────────────────────────────────────────────────────
 
 export interface ProcessResult {
+  /** Rows written. With novelty-aware ingest (lib/ingest-novelty.ts) this is NEW rows only. */
   imported:            number
+  /** Distinct credentials of the file that the table already held (0 on the direct path). */
+  known:               number
+  /** Rows that repeat an earlier row of the same file (0 on the direct path, which counts them in `skipped`). */
+  inFileDuplicates:    number
   skipped:             number
   errors:              number
   filename:            string
@@ -248,6 +256,8 @@ export interface StreamToTableOptions {
   breachName?: string
   /** Hard-tier early-drop predicate, applied inside the parser. */
   shouldHardDrop?: (email: string, url: string) => boolean
+  /** Drop a line that repeats an earlier line of the file inside the parser (default true). The staged path turns it off: the stage does it exactly. */
+  dedupInFile?: boolean
   /** Called after each batch inserts, with cumulative counts. */
   onProgress?: (imported: number, skipped: number) => void
   /** Optional accumulator (benchmark): time awaiting parse vs awaiting insert. */
@@ -299,7 +309,7 @@ export async function streamCredentialsToTable(
   let tierDropped = 0
   const rejection_breakdown = makeRejectionMap()
 
-  const gen = parseULPStream(stream, filename, batchSize, options.shouldHardDrop)
+  const gen = parseULPStream(stream, filename, batchSize, options.shouldHardDrop, { dedupInFile: options.dedupInFile })
   let pending = gen.next()
   try {
     while (true) {
@@ -358,6 +368,137 @@ export async function streamCredentialsToTable(
   return { imported, skipped, tierDropped, rejection_breakdown }
 }
 
+// ─── Novelty-aware path ───────────────────────────────────────────────────────
+
+interface StagedImport {
+  stream:         ReadableStream<Uint8Array>
+  filename:       string
+  jobId?:         string
+  onBatch?:       (imported: number) => void
+  hooks:          ImportHooks
+  breach_name:    string
+  filterOn:       boolean
+  softPolicy:     ReturnType<typeof parseIngestPolicy>
+  shouldHardDrop: ReturnType<typeof makeHardDropPredicate>
+  monitors:       DomainMonitor[]
+  monitorsById:   Map<number, DomainMonitor>
+  slabRows:       number
+}
+
+/**
+ * Parse the file into its own stage table, then write only the credentials the table does not hold yet
+ * (docs/superpowers/specs/2026-10-02-novelty-aware-ingest-design.md). Nothing reaches ulp.credentials until the commit, so a file
+ * that fails while staging leaves no trace in it, and a retry after a failed commit counts what was already written as known.
+ */
+async function importThroughStage(a: StagedImport): Promise<ProcessResult> {
+  const { filename, jobId, hooks } = a
+  const tables = stageTables(newStageId())
+
+  let known = 0
+  let inserted = 0
+  let staged = 0
+  let skipped = 0
+  const report = (event: ImportProgressEvent) => {
+    if (jobId) {
+      updateJob(jobId, {
+        phase:    event.phase,
+        staged:   event.staged,
+        skipped:  event.skipped,
+        imported: event.inserted,
+        known:    event.known,
+        slab:     event.slab,
+        slabs:    event.slabs,
+      })
+    }
+    hooks.onImportProgress?.(event)
+  }
+
+  // Register BEFORE creating: the orphan sweeper (lib/ingest-stage.ts) must never see a table of ours that is not registered.
+  registerStage(tables.id)
+  try {
+    await createStage(tables, { signal: hooks.signal, onRetry: () => hooks.beat?.() })
+    hooks.beat?.()
+
+    report({ phase: 'parsing', staged: 0, skipped: 0, known: 0, inserted: 0 })
+    startIngest(filename)
+    let streamed: StreamToTableResult
+    try {
+      streamed = await streamCredentialsToTable(a.stream, filename, {
+        table:          tables.stage,
+        batchSize:      UPLOAD_BATCH_SIZE,
+        pipeline:       importPipelineEnabled(),
+        filterOn:       a.filterOn,
+        dropPolicy:     a.softPolicy,
+        breachName:     a.breach_name,
+        shouldHardDrop: a.shouldHardDrop,
+        dedupInFile:    false,
+        signal:         hooks.signal,
+        onBeat:         hooks.beat,
+        onProgress: (n, skp) => {
+          staged = n
+          skipped = skp
+          report({ phase: 'parsing', staged, skipped, known: 0, inserted: 0 })
+        },
+        onBatchMetrics: recordBatch,
+      })
+    } finally {
+      finishIngest()
+    }
+    staged = streamed.imported
+    skipped = streamed.skipped
+    if (a.filterOn && streamed.tierDropped > 0) {
+      console.log(`[ingest-filter] ${filename}: dropped ${streamed.tierDropped} low-tier rows pre-insert`)
+    }
+
+    const commit = await commitStage({
+      tables,
+      target:         'ulp.credentials',
+      noveltyAgainst: 'ulp.credentials',
+      parsedRows:     streamed.imported,
+      slabRows:       a.slabRows,
+      signal:         hooks.signal ?? new AbortController().signal,
+      beat:           hooks.beat,
+      monitors:       a.monitors.map(m => ({ id: m.id, domains: m.domains, match_mode: m.match_mode })),
+      matchCap:       MAX_INPROCESS_MATCHES,
+      onPhase: e => report({ phase: e.phase, staged, skipped, known, inserted, slab: e.slab, slabs: e.slabs }),
+      onSlab: e => {
+        known = e.known
+        inserted = e.inserted
+        a.onBatch?.(e.inserted)
+        report({ phase: 'inserting', staged, skipped, known, inserted, slab: e.slab, slabs: e.slabs })
+      },
+    })
+
+    // A file that had importable lines is remembered even when it added nothing, so the same-name guard stops its re-upload.
+    if (streamed.imported > 0) await recordSource(filename, commit.inserted, hooks)
+    if (commit.matches.length > 0) {
+      fireMonitorAlertsFromMatches(filename, commit.matches, a.monitorsById).catch(err =>
+        console.error('Domain monitor alert error:', err)
+      )
+    }
+
+    return {
+      imported:            commit.inserted,
+      known:               commit.known,
+      inFileDuplicates:    commit.inFileDuplicates,
+      skipped,
+      errors:              0,
+      filename,
+      breach_name:         a.breach_name,
+      rejection_breakdown: streamed.rejection_breakdown,
+      alreadyImported:     false,
+      tierDropped:         streamed.tierDropped,
+    }
+  } finally {
+    try {
+      await dropStage(tables)
+    } catch (err) {
+      console.warn(`[upload-processor] could not drop the stage tables of ${filename}; the sweeper will: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    unregisterStage(tables.id)
+  }
+}
+
 // ─── Text stream processor ────────────────────────────────────────────────────
 
 /**
@@ -385,7 +526,7 @@ export async function processTextStream(
   if (await sourceAlreadyImported(filename, hooks)) {
     console.log(`[upload-processor] ${filename} already in ulp.sources — skipping re-import`)
     return {
-      imported: 0, skipped: 0, errors: 0, filename, breach_name,
+      imported: 0, known: 0, inFileDuplicates: 0, skipped: 0, errors: 0, filename, breach_name,
       rejection_breakdown: makeRejectionMap(), alreadyImported: true, tierDropped: 0,
     }
   }
@@ -421,6 +562,16 @@ export async function processTextStream(
   const monitorIndex  = buildMonitorDomainIndex(monitors)
   const monitorMatches: MatchedCredential[] = []
   let matchCapWarned = false
+
+  // Novelty-aware ingest: stage the file, then write only what the table does not hold yet (lib/ingest-novelty.ts). Monitors are
+  // matched in ClickHouse on the stage in that path, so the in-process matcher above is not used by it.
+  const novelty = noveltyConfig()
+  if (novelty.enabled) {
+    return importThroughStage({
+      stream, filename, jobId, onBatch, hooks, breach_name, filterOn, softPolicy, shouldHardDrop,
+      monitors, monitorsById, slabRows: novelty.slabRows,
+    })
+  }
 
   startIngest(filename)
   let result
@@ -481,7 +632,7 @@ export async function processTextStream(
     // dedup flows; imports no longer trigger a full-table dedup hook here.
   }
 
-  return { imported, skipped, errors: 0, filename, breach_name, rejection_breakdown, alreadyImported: false, tierDropped }
+  return { imported, known: 0, inFileDuplicates: 0, skipped, errors: 0, filename, breach_name, rejection_breakdown, alreadyImported: false, tierDropped }
 }
 
 /**
@@ -602,6 +753,8 @@ export function processZipEntries(
         console.error(`[upload-processor] skipping zip entry "${entry.fileName}": ${reason}`)
         onEntry({
           imported:            0,
+          known:               0,
+          inFileDuplicates:    0,
           skipped:             0,
           errors:              1,
           filename:            entryName,
