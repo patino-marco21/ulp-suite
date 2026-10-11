@@ -23,19 +23,24 @@ describe('msUntilNextRun', () => {
 describe('dedup-cron source contract', () => {
   const source = readFileSync(new URL('../lib/dedup-cron.ts', import.meta.url), 'utf8')
 
-  test('anchors the first tick to msUntilNextRun instead of a fixed 60s startup delay', () => {
-    expect(source).toContain('msUntilNextRun(')
-    expect(source).not.toContain('}, 60_000)')
+  test('schedules through scheduleEveryHoursFromAnchor, not a boot-relative setTimeout + setInterval pair', () => {
+    expect(source).toContain('scheduleEveryHoursFromAnchor(')
+    expect(source).not.toContain('setInterval(')
+    expect(source).not.toContain('setTimeout(')
+  })
+
+  test('still exports msUntilNextRun for its callers', () => {
+    expect(source).toMatch(/export \{ msUntilNextRun \}/)
   })
 })
 
 describe('dedup-cron idle short-circuit contract', () => {
   const source = readFileSync(new URL('../lib/dedup-cron.ts', import.meta.url), 'utf8')
 
-  test('both cron call sites opt into the idle short-circuit', () => {
+  test('the cron call site opts into the idle short-circuit', () => {
     const calls = source.match(/runContentDedupTick\(\{[^}]*\}\)/g) ?? []
-    expect(calls).toHaveLength(2)
-    for (const call of calls) expect(call).toContain('skipIfUnchanged: true')
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toContain('skipIfUnchanged: true')
   })
 })
 

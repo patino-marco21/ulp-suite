@@ -2,9 +2,8 @@
  * Scheduled content-dedup re-run.
  *
  * Ticks every DEDUP_CRON_HOURS hours (default 24; 0 disables) and runs
- * runContentDedupTick() — report-only unless CONTENT_DEDUP_APPLY=true. Mirrors
- * lib/monitor-rescan-cron.ts (setInterval, `started` guard); the NODE_ENV guard in
- * instrumentation.ts prevents dev hot-reload double-registration.
+ * runContentDedupTick() — report-only unless CONTENT_DEDUP_APPLY=true. The NODE_ENV
+ * guard in instrumentation.ts prevents dev hot-reload double-registration.
  *
  * The first tick is anchored to a fixed UTC hour (DEDUP_CRON_HOUR_UTC, default
  * 04:00) rather than firing 60s after container start — a startup-relative
@@ -13,19 +12,17 @@
  * heavy-query window. SETTINGS still bound the stats query itself. Cron ticks pass
  * skipIfUnchanged: the tick skips its heavy stats scan while the table's row count is
  * unchanged since the last pass (see runContentDedupTick).
+ *
+ * Until 2026-10-11 only the FIRST tick was anchored: the 24 h interval was armed at boot, so every later tick fired at the
+ * boot time of day. lib/daily-schedule.ts keeps every slot on the anchor hour, through restarts and laptop suspends.
  */
 import { dedupCronHours, dedupCronHourUtc, runContentDedupTick } from '@/lib/content-dedup'
+import { msUntilNextRun, scheduleEveryHoursFromAnchor } from '@/lib/daily-schedule'
+
+// Existing callers and tests import it from here.
+export { msUntilNextRun }
 
 let started = false
-
-/** Ms from `now` until the next `hourUtc:00 UTC` (today if still ahead, else tomorrow). */
-export function msUntilNextRun(hourUtc: number, now: Date): number {
-  const next = new Date(Date.UTC(
-    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hourUtc, 0, 0, 0,
-  ))
-  if (next.getTime() <= now.getTime()) next.setUTCDate(next.getUTCDate() + 1)
-  return next.getTime() - now.getTime()
-}
 
 export function startDedupCron(): void {
   if (started) return
@@ -35,13 +32,15 @@ export function startDedupCron(): void {
     return
   }
   started = true
-  const ms = hours * 60 * 60 * 1000
   const hourUtc = dedupCronHourUtc()
   const initialDelay = msUntilNextRun(hourUtc, new Date())
   console.warn(
     `[content-dedup] cron started — first tick in ${Math.round(initialDelay / 60_000)}m ` +
       `(anchored to ${String(hourUtc).padStart(2, '0')}:00 UTC), then every ${hours}h`,
   )
-  setTimeout(() => { runContentDedupTick({ trigger: 'cron', skipIfUnchanged: true }).catch(console.error) }, initialDelay)
-  setInterval(() => { runContentDedupTick({ trigger: 'cron', skipIfUnchanged: true }).catch(console.error) }, ms)
+  scheduleEveryHoursFromAnchor({
+    anchorHourUtc: hourUtc,
+    everyHours: hours,
+    run: () => runContentDedupTick({ trigger: 'cron', skipIfUnchanged: true }),
+  })
 }
