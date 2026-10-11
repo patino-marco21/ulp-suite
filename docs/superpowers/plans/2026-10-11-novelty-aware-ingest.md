@@ -41,19 +41,19 @@
 
 **Files:** none.
 
-- [ ] **Step 1: Create the branch**
+- [x] **Step 1: Create the branch**
 
 ```bash
 cd /home/cole/ulp-suite && git status -sb && git fetch -q origin && git switch -c sp2-novelty-aware-ingest
 ```
 Expected: `## main...origin/main` with nothing else, then `Switched to a new branch 'sp2-novelty-aware-ingest'`.
 
-- [ ] **Step 2: Baseline typecheck**
+- [x] **Step 2: Baseline typecheck**
 
 Run: `cd /home/cole/ulp-suite && npx tsc --noEmit`
 Expected: exit 0, no output.
 
-- [ ] **Step 3: Baseline tests**
+- [x] **Step 3: Baseline tests**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run 2>&1 | tail -8`
 Expected: every file passes. Write down the `Test Files` and `Tests` counts as the BASELINE (last recorded 2026-10-11 after SP1: 159 files, 2,380 tests; the `*.live.test.ts` files are skipped).
@@ -67,7 +67,7 @@ Expected: every file passes. Write down the `Test Files` and `Tests` counts as t
 
 The two unconfirmed items of the spec were measured on 2026-10-11 against the live server, on throwaway `ulp.zz_spike_*` tables (a clone of the live DDL with 19 skip indexes and 3 projections as a plain `MergeTree`, a 6,000,000-row stage holding 5,000,000 distinct real rows plus 1,000,000 in-file repeats, all dropped afterwards; live row counts unchanged).
 
-- [ ] **Step 1: Add the results section**
+- [x] **Step 1: Add the results section**
 
 Insert this block immediately before the line `## Approaches`:
 
@@ -86,16 +86,16 @@ Insert this block immediately before the line `## Approaches`:
 Consequences, all adopted in the implementation plan: the settings of the commit statements are passed as client settings (the client's default `max_execution_time` is 60 s, and the 20M-row slab takes minutes), `K` is derived from the stage's row count and `distinct` is counted per slab, and monitors are matched with `buildNormalizedDomainSetMatch`.
 ```
 
-- [ ] **Step 2: Mark the two risks as settled**
+- [x] **Step 2: Mark the two risks as settled**
 
-In the "Risks" list, replace the bullet that begins `- **\`INSERT ... SELECT ... LIMIT 1 BY\` throughput is unmeasured**` (it runs for three lines) with:
+In the "Risks" list, replace the bullet that begins `- **\`INSERT ... SELECT ... LIMIT 1 BY\` throughput is unmeasured**` (it runs for four lines) with:
 
 ```markdown
 - **`INSERT ... SELECT ... LIMIT 1 BY` throughput and the written-rows summary: settled by the spike above** (110.6k rows/s; `written_rows` exact), so
   no second probe per slab is needed. The check still skips with a warning if a future server version stops sending the summary.
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add docs/superpowers/specs/2026-10-02-novelty-aware-ingest-design.md && git commit -m "docs(specs): record the novelty-commit spike (throughput, written-rows summary, hash parity, monitor SQL)" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -119,7 +119,7 @@ Expected: one file changed.
   - `noveltyConfig(env?: NodeJS.ProcessEnv): NoveltyConfig`
   - `slabCount(stageRows: number, slabRows: number): number`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `/home/cole/ulp-suite/__tests__/ingest-novelty-config.test.ts`:
 
@@ -178,12 +178,12 @@ describe('slabCount', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ingest-novelty-config.test.ts 2>&1 | tail -12`
 Expected: FAIL, `Failed to resolve import "@/lib/ingest-novelty-config"`.
 
-- [ ] **Step 3: Write the module**
+- [x] **Step 3: Write the module**
 
 Create `/home/cole/ulp-suite/lib/ingest-novelty-config.ts`:
 
@@ -223,12 +223,12 @@ export function slabCount(stageRows: number, slabRows: number): number {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ingest-novelty-config.test.ts 2>&1 | tail -8`
 Expected: PASS, all tests in the file.
 
-- [ ] **Step 5: Turn the feature off for every existing suite**
+- [x] **Step 5: Turn the feature off for every existing suite**
 
 Many suites run `processTextStream` against a mocked ClickHouse client that has no `command()` and no stage tables. They test the direct path, so they get it by default, exactly like the disk gate (`__tests__/setup/ingest-gate-off.ts`).
 
@@ -247,12 +247,12 @@ In `/home/cole/ulp-suite/vitest.config.ts` change the `setupFiles` line to:
     setupFiles: ['./__tests__/setup/sqlite-worker-setup.ts', './__tests__/setup/ingest-gate-off.ts', './__tests__/setup/ingest-novelty-off.ts'],
 ```
 
-- [ ] **Step 6: Run the whole suite**
+- [x] **Step 6: Run the whole suite**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run 2>&1 | tail -6`
 Expected: BASELINE files + 1, BASELINE tests + the new ones, all passing.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add lib/ingest-novelty-config.ts __tests__/ingest-novelty-config.test.ts __tests__/setup/ingest-novelty-off.ts vitest.config.ts && git commit -m "feat(ingest): settings for novelty-aware ingest, off by default in the test environment" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -269,7 +269,7 @@ cd /home/cole/ulp-suite && git add lib/ingest-novelty-config.ts __tests__/ingest
 **Interfaces:**
 - Produces: `interface ParseStreamOptions { dedupInFile?: boolean }`; `parseULPStream(stream, filename, batchSize, shouldHardDrop?, options?: ParseStreamOptions)`. Default behaviour (`dedupInFile` true) is unchanged.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `/home/cole/ulp-suite/__tests__/ulp-parser-stream.test.ts`:
 
@@ -299,12 +299,12 @@ describe('parseULPStream: dedupInFile option', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ulp-parser-stream.test.ts -t "dedupInFile" 2>&1 | tail -15`
 Expected: FAIL, the `dedupInFile: false` case gets `{ rows: 1, dedup: 2 }`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `/home/cole/ulp-suite/lib/ulp-parser.ts`, replace
 
@@ -354,12 +354,12 @@ with
     if (seen.size >= STREAM_SEEN_CAP) {
 ```
 
-- [ ] **Step 4: Run the parser suites**
+- [x] **Step 4: Run the parser suites**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ulp-parser-stream.test.ts __tests__/ulp-parser.test.ts __tests__/ulp-parser-block.test.ts __tests__/ulp-parser-extended.test.ts 2>&1 | tail -8`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add lib/ulp-parser.ts __tests__/ulp-parser-stream.test.ts && git commit -m "feat(parser): parseULPStream can leave in-file dedup to the caller" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -386,7 +386,7 @@ cd /home/cole/ulp-suite && git add lib/ulp-parser.ts __tests__/ulp-parser-stream
   - `sweepOrphanStages(opts?: { minAgeSeconds?: number; db?: StageSweepDb }): Promise<string[]>` (returns the dropped table names)
   - `startStageSweeper(opts?: { intervalMs?: number }): Promise<void>` (resolves when the startup sweep has finished or failed; never rejects)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `/home/cole/ulp-suite/__tests__/ingest-stage.test.ts`:
 
@@ -584,12 +584,12 @@ describe('sweepOrphanStages', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ingest-stage.test.ts 2>&1 | tail -10`
 Expected: FAIL, `Failed to resolve import "@/lib/ingest-stage"`.
 
-- [ ] **Step 3: Write the module**
+- [x] **Step 3: Write the module**
 
 Create `/home/cole/ulp-suite/lib/ingest-stage.ts`:
 
@@ -777,17 +777,17 @@ export async function startStageSweeper(opts: { intervalMs?: number } = {}): Pro
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ingest-stage.test.ts 2>&1 | tail -12`
 Expected: PASS.
 
-- [ ] **Step 5: Typecheck**
+- [x] **Step 5: Typecheck**
 
 Run: `cd /home/cole/ulp-suite && npx tsc --noEmit`
 Expected: exit 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add lib/ingest-stage.ts __tests__/ingest-stage.test.ts && git commit -m "feat(ingest): per-import stage tables, a registry of those in use and an orphan sweeper" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -808,7 +808,7 @@ cd /home/cole/ulp-suite && git add lib/ingest-stage.ts __tests__/ingest-stage.te
   - `clickhouseNoveltyDb(): NoveltyDb`
   - `acquireCommitLock(signal: AbortSignal): Promise<() => void>` (the returned release function is idempotent), `resetCommitLock(): void` (test seam)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `/home/cole/ulp-suite/__tests__/ingest-novelty-sql.test.ts`:
 
@@ -1010,12 +1010,12 @@ describe('acquireCommitLock', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ingest-novelty-sql.test.ts 2>&1 | tail -10`
 Expected: FAIL, `Failed to resolve import "@/lib/ingest-novelty"`.
 
-- [ ] **Step 3: Write the module (without `commitStage`, which is Task 6)**
+- [x] **Step 3: Write the module (without `commitStage`, which is Task 6)**
 
 Create `/home/cole/ulp-suite/lib/ingest-novelty.ts`:
 
@@ -1239,17 +1239,17 @@ export async function acquireCommitLock(signal: AbortSignal): Promise<() => void
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ingest-novelty-sql.test.ts 2>&1 | tail -14`
 Expected: PASS.
 
-- [ ] **Step 5: Typecheck**
+- [x] **Step 5: Typecheck**
 
 Run: `cd /home/cole/ulp-suite && npx tsc --noEmit`
 Expected: exit 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add lib/ingest-novelty.ts __tests__/ingest-novelty-sql.test.ts && git commit -m "feat(ingest): the commit SQL, a ClickHouse executor with the commit settings, and the process-wide commit lock" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -1273,7 +1273,7 @@ cd /home/cole/ulp-suite && git add lib/ingest-novelty.ts __tests__/ingest-novelt
   - `interface CommitResult { rows: number; distinct: number; known: number; inserted: number; inFileDuplicates: number; slabs: number; matches: MatchedCredential[] }`
   - `commitStage(opts: CommitOptions): Promise<CommitResult>`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `/home/cole/ulp-suite/__tests__/ingest-novelty-commit.test.ts`:
 
@@ -1377,8 +1377,19 @@ const options = (db: NoveltyDb, extra: Partial<CommitOptions> = {}): CommitOptio
   ...extra,
 })
 
-const shape = (db: { calls: Call[] }) =>
-  db.calls.map(c => (c.kind === 'kill' ? 'kill' : `${c.kind}: ${c.sql.split('\n')[0].slice(0, 46)}`))
+// A readable name for each statement the commit sends, so a test can assert the order without matching SQL text.
+const label = (c: Call): string => {
+  if (c.kind === 'kill') return 'kill'
+  if (c.sql.startsWith('SELECT count() AS c FROM ulp.zz_import_stage_')) return 'select stage count'
+  if (c.sql.startsWith('SELECT uniqExact')) return 'select slab distinct'
+  if (c.sql.startsWith('TRUNCATE TABLE')) return 'truncate known'
+  if (c.sql.startsWith('INSERT INTO ulp.zz_import_known_')) return 'fill known'
+  if (c.sql.startsWith('SELECT count() AS c FROM ulp.zz_import_known_')) return 'select known count'
+  if (c.sql.startsWith('INSERT INTO ulp.')) return 'insert new rows'
+  if (c.sql.startsWith('SELECT url, email, password, domain FROM (')) return 'select monitor matches'
+  return c.sql
+}
+const shape = (db: { calls: Call[] }) => db.calls.map(label)
 
 beforeEach(() => {
   counter = 0
@@ -1393,12 +1404,12 @@ describe('commitStage', () => {
     expect(out).toMatchObject({ rows: 1000, distinct: 900, known: 0, inserted: 900, inFileDuplicates: 100, slabs: 1, matches: [] })
     expect(out.rows).toBe(out.inserted + out.known + out.inFileDuplicates)
     expect(shape(db)).toEqual([
-      'select: SELECT count() AS c FROM ulp.zz_import_stage_',
-      'select: SELECT uniqExact(content_key_hash) AS c FROM u',
-      'exec: TRUNCATE TABLE ulp.zz_import_known_0123456789ab',
-      'exec: INSERT INTO ulp.zz_import_known_0123456789ab',
-      'select: SELECT count() AS c FROM ulp.zz_import_known_',
-      'exec: INSERT INTO ulp.credentials (url, email, passwo',
+      'select stage count',
+      'select slab distinct',
+      'truncate known',
+      'fill known',
+      'select known count',
+      'insert new rows',
     ])
   })
 
@@ -1450,7 +1461,7 @@ describe('commitStage', () => {
     const db = makeDb({ stageRows: 0, distinct: [], known: [] })
     const out = await commitStage(options(db, { parsedRows: 0, gates: gates(events) }))
     expect(out).toMatchObject({ rows: 0, distinct: 0, known: 0, inserted: 0, inFileDuplicates: 0, slabs: 1 })
-    expect(shape(db)).toEqual(['select: SELECT count() AS c FROM ulp.zz_import_stage_'])
+    expect(shape(db)).toEqual(['select stage count'])
     expect(events).toEqual([])
   })
 
@@ -1596,12 +1607,12 @@ describe('commitStage', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ingest-novelty-commit.test.ts 2>&1 | tail -12`
 Expected: FAIL, `commitStage` / `NoveltyAccountingError` are not exported.
 
-- [ ] **Step 3: Append the implementation**
+- [x] **Step 3: Append the implementation**
 
 First replace the import block at the top of `/home/cole/ulp-suite/lib/ingest-novelty.ts` with:
 
@@ -1801,17 +1812,17 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
 }
 ```
 
-- [ ] **Step 4: Run both commit suites**
+- [x] **Step 4: Run both commit suites**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ingest-novelty-commit.test.ts __tests__/ingest-novelty-sql.test.ts 2>&1 | tail -16`
 Expected: PASS.
 
-- [ ] **Step 5: Typecheck**
+- [x] **Step 5: Typecheck**
 
 Run: `cd /home/cole/ulp-suite && npx tsc --noEmit`
 Expected: exit 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add lib/ingest-novelty.ts __tests__/ingest-novelty-commit.test.ts && git commit -m "feat(ingest): commitStage, the slab-by-slab commit with the written-rows check, the gates and the kill on failure" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -1836,7 +1847,7 @@ cd /home/cole/ulp-suite && git add lib/ingest-novelty.ts __tests__/ingest-novelt
   - `UploadJob` gains `known: number`, `inFileDuplicates: number`, `staged: number`, `phase?: ImportPhase`, `slab?: number`, `slabs?: number`; `pushEvent` sends all of them
   - `JobLogEntry` gains `known?: number`; `processing_jobs.known INTEGER NOT NULL DEFAULT 0`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `/home/cole/ulp-suite/__tests__/upload-jobs-novelty.test.ts`:
 
@@ -1925,12 +1936,12 @@ describe('processing_jobs.known', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/upload-jobs-novelty.test.ts __tests__/processing-log-known.test.ts 2>&1 | tail -20`
 Expected: FAIL (`known` is not on the job; `processing_jobs` has no `known` column).
 
-- [ ] **Step 3: The hook types**
+- [x] **Step 3: The hook types**
 
 In `/home/cole/ulp-suite/lib/import-runner.ts` replace
 
@@ -1966,7 +1977,7 @@ export type ImportHooks = Partial<ImportContext> & {
 }
 ```
 
-- [ ] **Step 4: The job store**
+- [x] **Step 4: The job store**
 
 Replace `/home/cole/ulp-suite/lib/upload-jobs.ts` with:
 
@@ -2094,7 +2105,7 @@ setInterval(() => {
 }, GC_INTERVAL_MS)
 ```
 
-- [ ] **Step 5: The SQLite column and the job log**
+- [x] **Step 5: The SQLite column and the job log**
 
 In `/home/cole/ulp-suite/lib/sqlite.ts`, immediately after
 
@@ -2164,12 +2175,12 @@ export function logJob(entry: JobLogEntry): void {
 }
 ```
 
-- [ ] **Step 6: Run the tests, the typecheck and the neighbouring suites**
+- [x] **Step 6: Run the tests, the typecheck and the neighbouring suites**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/upload-jobs-novelty.test.ts __tests__/processing-log-known.test.ts __tests__/processing-log.test.ts 2>&1 | tail -12 && npx tsc --noEmit`
 Expected: PASS, tsc exit 0.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add lib/import-runner.ts lib/upload-jobs.ts lib/sqlite.ts lib/processing-log.ts __tests__/upload-jobs-novelty.test.ts __tests__/processing-log-known.test.ts && git commit -m "feat(ingest): phases and known counts in the import hooks, the job store, the SSE event and processing_jobs" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -2188,7 +2199,7 @@ cd /home/cole/ulp-suite && git add lib/import-runner.ts lib/upload-jobs.ts lib/s
 - Consumes: Tasks 2, 4, 6, 7 (`noveltyConfig`, `stageTables`/`newStageId`/`createStage`/`dropStage`/`registerStage`/`unregisterStage`, `commitStage`, `ImportProgressEvent`, `UploadJob` fields).
 - Produces: `ProcessResult` gains `known: number` and `inFileDuplicates: number` (both always present; 0 on the direct path); `StreamToTableOptions` gains `dedupInFile?: boolean`; `processTextStream` takes the staged path unless `INGEST_NOVELTY_CHECK` is `off|0|false`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `/home/cole/ulp-suite/__tests__/upload-processor-novelty.test.ts`:
 
@@ -2396,12 +2407,12 @@ describe('processTextStream with novelty-aware ingest', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/upload-processor-novelty.test.ts 2>&1 | tail -20`
 Expected: FAIL (the staged path does not exist; `known` is undefined).
 
-- [ ] **Step 3: The imports, `ProcessResult`, and the parser option**
+- [x] **Step 3: The imports, `ProcessResult`, and the parser option**
 
 In `/home/cole/ulp-suite/lib/upload-processor.ts` replace
 
@@ -2458,7 +2469,7 @@ with
   const gen = parseULPStream(stream, filename, batchSize, options.shouldHardDrop, { dedupInFile: options.dedupInFile })
 ```
 
-- [ ] **Step 4: The other `ProcessResult` constructors**
+- [x] **Step 4: The other `ProcessResult` constructors**
 
 In `processTextStream`, replace
 
@@ -2508,7 +2519,7 @@ with
           skipped:             0,
 ```
 
-- [ ] **Step 5: The staged path**
+- [x] **Step 5: The staged path**
 
 Insert this block immediately before the line `// ─── Text stream processor ───` (the whole line starts with those characters):
 
@@ -2674,7 +2685,7 @@ with
   startIngest(filename)
 ```
 
-- [ ] **Step 6: The two route tests that build `ProcessResult` literals**
+- [x] **Step 6: The two route tests that build `ProcessResult` literals**
 
 In `/home/cole/ulp-suite/__tests__/upload-route-spool.test.ts` (two places, lines about 30 and 184) and `/home/cole/ulp-suite/__tests__/upload-v1-route-spool.test.ts` (two places, lines about 31 and 128), every literal ending `rejection_breakdown: {}, alreadyImported: false, tierDropped: 0` gains `known: 0, inFileDuplicates: 0,` before `rejection_breakdown`. Use:
 
@@ -2683,12 +2694,12 @@ cd /home/cole/ulp-suite && sed -i 's/rejection_breakdown: {}, alreadyImported: f
 ```
 Expected: `2` for each file.
 
-- [ ] **Step 7: Run the processor suites, the typecheck, and everything that touches the importer**
+- [x] **Step 7: Run the processor suites, the typecheck, and everything that touches the importer**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/upload-processor-novelty.test.ts __tests__/upload-processor.test.ts __tests__/upload-processor-disk-gate.test.ts __tests__/upload-skip-imported.test.ts __tests__/zip-bomb-guard.test.ts __tests__/upload-route-spool.test.ts __tests__/upload-v1-route-spool.test.ts __tests__/insert-batch-dedup.test.ts 2>&1 | tail -14 && npx tsc --noEmit`
 Expected: PASS, tsc exit 0. If `tsc` reports a `ProcessResult` literal elsewhere, add the two fields there too.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add lib/upload-processor.ts __tests__/upload-processor-novelty.test.ts __tests__/upload-route-spool.test.ts __tests__/upload-v1-route-spool.test.ts && git commit -m "feat(ingest): import through a stage table and write only the credentials the table does not hold" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -2709,7 +2720,7 @@ cd /home/cole/ulp-suite && git add lib/upload-processor.ts __tests__/upload-proc
 - Consumes: `ProcessResult.known`, `ProcessResult.inFileDuplicates` (Task 8); `logJob({ known })`, `updateJob` fields (Task 7).
 - Produces: the HTTP upload reply gains `known`, `inFileDuplicates` and `files[].known`; `import_pct` becomes kept / (kept + skipped) with kept = imported + known + inFileDuplicates (identical to before on the direct path); `/api/v1/upload` replies gain `known`, `inFileDuplicates` and `files[].known`; `/api/upload/queue-status` rows gain `known` and `totals.rows_known`. A ZIP entry that added nothing but had known rows is listed.
 
-- [ ] **Step 1: Update and extend the route tests**
+- [x] **Step 1: Update and extend the route tests**
 
 In `/home/cole/ulp-suite/__tests__/upload-route-spool.test.ts`:
 
@@ -2847,12 +2858,12 @@ describe('GET /api/upload/queue-status: known rows', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/upload-route-spool.test.ts __tests__/upload-v1-route-spool.test.ts __tests__/queue-status-known.test.ts 2>&1 | tail -25`
 Expected: FAIL (the routes do not carry `known` yet).
 
-- [ ] **Step 3: The HTTP upload route**
+- [x] **Step 3: The HTTP upload route**
 
 In `/home/cole/ulp-suite/app/api/upload/route.ts`:
 
@@ -3027,7 +3038,7 @@ with
       })),
 ```
 
-- [ ] **Step 4: The v1 route**
+- [x] **Step 4: The v1 route**
 
 In `/home/cole/ulp-suite/app/api/v1/upload/route.ts`:
 
@@ -3164,7 +3175,7 @@ with
       files:    results.map(r => ({ filename: r.filename, imported: r.imported, known: r.known })),
 ```
 
-- [ ] **Step 5: The queue-status route**
+- [x] **Step 5: The queue-status route**
 
 In `/home/cole/ulp-suite/app/api/upload/queue-status/route.ts` replace the whole body below the imports with:
 
@@ -3239,7 +3250,7 @@ export async function GET(request: NextRequest) {
 
 (keep the file's existing four `import` lines at the top unchanged.)
 
-- [ ] **Step 6: The API docs page**
+- [x] **Step 6: The API docs page**
 
 In `/home/cole/ulp-suite/app/docs/page.tsx` replace
 
@@ -3274,12 +3285,12 @@ with
                   </p>
 ```
 
-- [ ] **Step 7: Run the route suites and the typecheck**
+- [x] **Step 7: Run the route suites and the typecheck**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/upload-route-spool.test.ts __tests__/upload-v1-route-spool.test.ts __tests__/queue-status-known.test.ts 2>&1 | tail -14 && npx tsc --noEmit`
 Expected: PASS, tsc exit 0.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add app/api/upload/route.ts app/api/v1/upload/route.ts app/api/upload/queue-status/route.ts app/docs/page.tsx __tests__/upload-route-spool.test.ts __tests__/upload-v1-route-spool.test.ts __tests__/queue-status-known.test.ts && git commit -m "feat(api): upload replies, the job log and queue status report new, known and repeated rows" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -3303,7 +3314,7 @@ cd /home/cole/ulp-suite && git add app/api/upload/route.ts app/api/v1/upload/rou
   - `InboxJobProgress` gains optional `phase`, `rows_staged`, `rows_known`, `slab`, `slabs`
   - `GET /api/inbox/status`: `current_progress` gains `rows_staged`, `rows_known`, `phase`, `slab`, `slabs`; each `done_recent` row gains `known`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `/home/cole/ulp-suite/__tests__/inbox-progress.test.ts`:
 
@@ -3414,12 +3425,12 @@ describe('GET /api/inbox/status with novelty-aware ingest', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/inbox-progress.test.ts __tests__/inbox-status-route-novelty.test.ts 2>&1 | tail -16`
 Expected: FAIL (`@/lib/inbox-progress` does not exist; the route has no phase fields).
 
-- [ ] **Step 3: The helper**
+- [x] **Step 3: The helper**
 
 Create `/home/cole/ulp-suite/lib/inbox-progress.ts`:
 
@@ -3466,7 +3477,7 @@ export function progressRows(p: { rows_imported: number; phase?: ImportPhase; ro
 }
 ```
 
-- [ ] **Step 4: The watcher**
+- [x] **Step 4: The watcher**
 
 In `/home/cole/ulp-suite/lib/inbox-watcher.ts`:
 
@@ -3593,7 +3604,7 @@ Also update the two header-comment sentences that promise review: in the "Startu
 
 The existing inbox tests read the watcher source and check for `processZipFile(claimedPath` and `processTextFile(claimedPath`; both strings are still there.
 
-- [ ] **Step 5: The status route**
+- [x] **Step 5: The status route**
 
 In `/home/cole/ulp-suite/app/api/inbox/status/route.ts`:
 
@@ -3674,12 +3685,12 @@ Replace the whole block from `// Build enriched progress object with ETA if we h
   }
 ```
 
-- [ ] **Step 6: Run the inbox suites and the typecheck**
+- [x] **Step 6: Run the inbox suites and the typecheck**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/inbox-progress.test.ts __tests__/inbox-status-route-novelty.test.ts __tests__/inbox-watcher-runner.test.ts __tests__/inbox-watcher-globalthis.test.ts __tests__/inbox-watcher-disk-gate.test.ts __tests__/inbox-watcher-memory-guard.test.ts __tests__/inbox-watcher-stability.test.ts __tests__/inbox-status.test.ts 2>&1 | tail -14 && npx tsc --noEmit`
 Expected: PASS, tsc exit 0.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add lib/inbox-progress.ts lib/inbox-watcher.ts app/api/inbox/status/route.ts __tests__/inbox-progress.test.ts __tests__/inbox-status-route-novelty.test.ts && git commit -m "feat(inbox): live progress follows the phases, the log records known rows, an interrupted file is safe to retry" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -3703,7 +3714,7 @@ cd /home/cole/ulp-suite && git add lib/inbox-progress.ts lib/inbox-watcher.ts ap
   - `phaseLine(p: { phase?: ImportPhase | null; staged?: number; known?: number; imported?: number; slab?: number | null; slabs?: number | null }): string | null`
   - `newKnownLabel(imported: number, known: number | undefined, fmt: (n: number) => string): string`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `/home/cole/ulp-suite/__tests__/import-summary.test.ts`:
 
@@ -3760,12 +3771,12 @@ describe('newKnownLabel', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/import-summary.test.ts 2>&1 | tail -10`
 Expected: FAIL, `Failed to resolve import "@/lib/import-summary"`.
 
-- [ ] **Step 3: The helpers**
+- [x] **Step 3: The helpers**
 
 Create `/home/cole/ulp-suite/lib/import-summary.ts`:
 
@@ -3812,12 +3823,12 @@ export function newKnownLabel(imported: number, known: number | undefined, fmt: 
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/import-summary.test.ts 2>&1 | tail -8`
 Expected: PASS.
 
-- [ ] **Step 5: The Upload page**
+- [x] **Step 5: The Upload page**
 
 In `/home/cole/ulp-suite/app/upload/page.tsx`:
 
@@ -4024,7 +4035,7 @@ with
 
 9. In the queue panel: in `interface QueueJob` add `known?: number` after `imported: number`; in `interface QueueStatus` totals add `rows_known?: number` after `rows_imported: number`; replace `<span className="tabular-nums shrink-0">{fmtRows(job.imported)} rows</span>` with `<span className="tabular-nums shrink-0">{newKnownLabel(job.imported, job.known, fmtRows)}</span>`; replace `<span><span className="font-medium text-foreground">{fmtRows(data.totals.rows_imported)}</span> rows imported</span>` with `<span><span className="font-medium text-foreground">{fmtRows(data.totals.rows_imported)}</span> rows imported{(data.totals.rows_known ?? 0) > 0 && <>, <span className="font-medium text-foreground">{fmtRows(data.totals.rows_known ?? 0)}</span> already known</>}</span>`.
 
-- [ ] **Step 6: The Inbox page**
+- [x] **Step 6: The Inbox page**
 
 In `/home/cole/ulp-suite/app/inbox/page.tsx`:
 
@@ -4087,16 +4098,16 @@ with
 
 6. Replace `<span className="tabular-nums shrink-0">{fmtRows(job.imported)} rows</span>` with `<span className="tabular-nums shrink-0">{newKnownLabel(job.imported, job.known, fmtRows)}</span>`.
 
-- [ ] **Step 7: Typecheck, lint the touched files, run the suites**
+- [x] **Step 7: Typecheck, lint the touched files, run the suites**
 
 Run: `cd /home/cole/ulp-suite && npx tsc --noEmit && npx eslint app/upload/page.tsx app/inbox/page.tsx lib/import-summary.ts lib/inbox-progress.ts lib/ingest-stage.ts lib/ingest-novelty.ts lib/ingest-novelty-config.ts lib/upload-processor.ts lib/inbox-watcher.ts 2>&1 | tail -20 && npx vitest run __tests__/import-summary.test.ts 2>&1 | tail -6`
 Expected: tsc exit 0; eslint prints nothing (or only warnings that already exist elsewhere in these files: check with `git stash` if unsure); the suite passes.
 
-- [ ] **Step 8: Look at the pages**
+- [x] **Step 8: Look at the pages**
 
 Start the dev server with the project's preview tool (`preview_start` with the name from `.claude/launch.json`), open `/upload` and `/inbox` in the built-in browser, and confirm both still render. The pages need an admin session; do not type anyone's password: if the pages redirect to the login page, say so and rely on Task 16's rehearsal, where a test admin exists.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add lib/import-summary.ts __tests__/import-summary.test.ts app/upload/page.tsx app/inbox/page.tsx && git commit -m "feat(ui): the Upload and Inbox pages show what was new, what was already known and where the import is" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -4118,7 +4129,7 @@ cd /home/cole/ulp-suite && git add lib/import-summary.ts __tests__/import-summar
 - Consumes: `startStageSweeper` (Task 4).
 - Produces: the sweeper runs, and finishes (or 20 s pass), before the inbox watcher starts; `INGEST_NOVELTY_CHECK`, `INGEST_NOVELTY_SLAB_ROWS` are forwarded by the production compose file (empty = the defaults in code); the rehearsal compose forwards `UPLOAD_CONCURRENCY`, `INGEST_NOVELTY_CHECK`, `INGEST_NOVELTY_SLAB_ROWS` from `REHEARSAL_*` variables.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `/home/cole/ulp-suite/__tests__/novelty-wiring.test.ts`:
 
@@ -4161,12 +4172,12 @@ describe('novelty-aware ingest wiring', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/novelty-wiring.test.ts 2>&1 | tail -14`
 Expected: FAIL (four tests).
 
-- [ ] **Step 3: The start-up sweep**
+- [x] **Step 3: The start-up sweep**
 
 In `/home/cole/ulp-suite/instrumentation.ts`, immediately before the block
 
@@ -4192,7 +4203,7 @@ insert:
 
 ```
 
-- [ ] **Step 4: Compose files**
+- [x] **Step 4: Compose files**
 
 In `/home/cole/ulp-suite/docker-compose.yml`, after the line `      INGEST_DISK_GATE: ${INGEST_DISK_GATE:-}` add:
 
@@ -4215,7 +4226,7 @@ In `/home/cole/ulp-suite/docker-compose.rehearsal.yml`, after the line `      IN
       INGEST_NOVELTY_SLAB_ROWS: ${REHEARSAL_INGEST_NOVELTY_SLAB_ROWS:-}
 ```
 
-- [ ] **Step 5: `.env.example` and the README**
+- [x] **Step 5: `.env.example` and the README**
 
 In `/home/cole/ulp-suite/.env.example`, immediately after the line `# INGEST_DISK_GATE=off` add:
 
@@ -4246,12 +4257,12 @@ In `/home/cole/ulp-suite/README.md`, after the `IMPORT_STALL_TIMEOUT_MS` bullet 
 
 and replace the table row `| Dedup Set cap | 2M entries → ~440 MB max (prevents OOM on huge files) |` with `| Dedup Set cap (direct path only) | 2M entries → ~440 MB max (prevents OOM on huge files); novelty-aware ingest dedups in the stage table, exactly, for any file size |`.
 
-- [ ] **Step 6: Run the wiring test and the neighbouring structure tests**
+- [x] **Step 6: Run the wiring test and the neighbouring structure tests**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/novelty-wiring.test.ts __tests__/rehearsal-isolation.test.ts __tests__/compose-hardening.test.ts 2>&1 | tail -14`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add instrumentation.ts docker-compose.yml docker-compose.rehearsal.yml .env.example README.md __tests__/novelty-wiring.test.ts && git commit -m "feat(ingest): sweep orphan stage tables at start-up, forward and document the novelty settings" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -4262,7 +4273,7 @@ cd /home/cole/ulp-suite && git add instrumentation.ts docker-compose.yml docker-
 
 **Files:** none (fixes go where the failures point).
 
-- [ ] **Step 1: Typecheck, lint, the whole suite**
+- [x] **Step 1: Typecheck, lint, the whole suite**
 
 Run:
 
@@ -4271,11 +4282,11 @@ cd /home/cole/ulp-suite && npx tsc --noEmit && npx next lint 2>&1 | tail -15 && 
 ```
 Expected: tsc exit 0; lint prints no errors (warnings that already exist on `main` may remain: compare with `git stash -u; npx next lint; git stash pop` if in doubt); vitest: every file passes, with BASELINE files + 11 and more than BASELINE tests + 150.
 
-- [ ] **Step 2: If anything fails, fix it where it lives**
+- [x] **Step 2: If anything fails, fix it where it lives**
 
 Use the `superpowers:systematic-debugging` skill for any failure that is not an obvious typo. A failing existing suite that was not touched by this plan is a regression in this plan's code: fix the code, not the test, unless the test pins a response shape this plan changed on purpose (then change the expectation and say why in the commit).
 
-- [ ] **Step 3: Commit any fixes**
+- [x] **Step 3: Commit any fixes**
 
 ```bash
 cd /home/cole/ulp-suite && git add -A && git status --short && git commit -m "fix(ingest): <what the full gate found>" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -4290,7 +4301,7 @@ Skip this step when Step 1 was clean.
 
 What it proves against the real 1.39B-row table without writing to it: the stage's hash agrees with the table's on real rows; the commit classifies rows known / new exactly as an independent natural-key lookup does; the commit settings (`max_execution_time` 3300, `insert_deduplicate` 0) reach the server through the real client; and `KILL QUERY` by id works against the real server. Nothing is written to `ulp.credentials`: the target of the commit is a throwaway clone (`ulp.zz_parity_target`, a plain-MergeTree copy of the live DDL) and the stage tables are dropped at the end.
 
-- [ ] **Step 1: Pick three small real files and write the script**
+- [x] **Step 1: Pick three small real files and write the script**
 
 The download pile is at `~/Downloads/AyuGram Desktop` (the operator's own data; never print or commit a file name). Choose three `.txt` files between 1 and 10 MiB:
 
@@ -4304,7 +4315,7 @@ Create `parity.ts` in the scratchpad directory (the path printed by `echo $SCRAT
 /**
  * Live parity check for novelty-aware ingest. Read-only on ulp.credentials: the commit writes to a throwaway clone.
  *   cd /home/cole/ulp-suite && CLICKHOUSE_HOST=http://<clickhouse container ip>:8123 CLICKHOUSE_USER=default CLICKHOUSE_PASSWORD= \
- *     CLICKHOUSE_DATABASE=ulp INGEST_FILTER_HARD_DROP_TIERS=T3 INGEST_DISK_GATE=off npx tsx <scratch>/parity.ts <file> [<file> ...]
+ *     CLICKHOUSE_DATABASE=ulp INGEST_FILTER_HARD_DROP_TIERS=T3 INGEST_DISK_GATE=off SQLITE_PATH=<scratch>/parity.db npx tsx <scratch>/parity.ts <file> ...
  */
 import { createReadStream, statSync } from 'node:fs'
 import { Readable } from 'node:stream'
@@ -4321,7 +4332,7 @@ const db = clickhouseNoveltyDb()
 const TARGET = 'ulp.zz_parity_target'
 const SAMPLE = 'ulp.zz_parity_sample'
 const rows = async <T = any>(query: string): Promise<T[]> =>
-  (await (await ch.query({ query, format: 'JSONEachRow', clickhouse_settings: { use_query_cache: 0 } as any })).json()) as T[]
+  (await (await ch.query({ query, format: 'JSONEachRow', clickhouse_settings: { use_query_cache: 0, max_memory_usage: 4_000_000_000 } as any })).json()) as T[]
 const one = async (q: string) => (await rows(q))[0]
 let failed = false
 const check = (label: string, ok: boolean, detail = '') => {
@@ -4349,7 +4360,7 @@ async function serverSide(): Promise<void> {
 
   const id = newQueryId()
   const t0 = performance.now()
-  const running = db.exec('SELECT sleepEachRow(1) FROM numbers(40) FORMAT Null', { queryId: id, signal: new AbortController().signal })
+  const running = db.exec('SELECT sleepEachRow(1) FROM numbers(40) SETTINGS max_block_size = 1, max_threads = 1 FORMAT Null', { queryId: id, signal: new AbortController().signal })
   running.catch(() => {})
   await new Promise(r => setTimeout(r, 2500))
   const before = Number((await one(`SELECT count() AS c FROM system.processes WHERE query_id = '${id}'`)).c)
@@ -4360,7 +4371,7 @@ async function serverSide(): Promise<void> {
 
   const ctrl = new AbortController()
   const id2 = newQueryId()
-  const longOne = db.exec('SELECT sleepEachRow(1) FROM numbers(25) FORMAT Null', { queryId: id2, signal: ctrl.signal })
+  const longOne = db.exec('SELECT sleepEachRow(1) FROM numbers(25) SETTINGS max_block_size = 1, max_threads = 1 FORMAT Null', { queryId: id2, signal: ctrl.signal })
   longOne.catch(() => {})
   await new Promise(r => setTimeout(r, 2000))
   ctrl.abort(new Error('stalled'))
@@ -4383,7 +4394,7 @@ async function parityForFile(index: number, path: string): Promise<void> {
     await createStage(tables)
     const t0 = performance.now()
     const streamed = await streamCredentialsToTable(Readable.toWeb(createReadStream(path)) as ReadableStream<Uint8Array>, `parity-${index}.txt`, {
-      table: tables.stage, batchSize: UPLOAD_BATCH_SIZE, filterOn: policyActive(soft), dropPolicy: soft,
+      table: tables.stage, batchSize: UPLOAD_BATCH_SIZE, filterOn: policyActive(soft), dropPolicy: soft, breachName: 'parity-check',
       shouldHardDrop: makeHardDropPredicate(policy), dedupInFile: false, signal: ctl.signal,
     })
     const t1 = performance.now()
@@ -4395,8 +4406,9 @@ async function parityForFile(index: number, path: string): Promise<void> {
     console.log(`  INFO  parsed ${commit.rows.toLocaleString()} rows (${((t1 - t0) / 1000).toFixed(1)} s), distinct ${commit.distinct.toLocaleString()}, known ${commit.known.toLocaleString()} (${(100 * commit.known / Math.max(1, commit.distinct)).toFixed(1)}%), new ${commit.inserted.toLocaleString()}, repeated in file ${commit.inFileDuplicates.toLocaleString()}, commit ${((t2 - t1) / 1000).toFixed(1)} s`)
     check('one slab, accounting adds up (rows = new + known + repeated)', commit.slabs === 1 && commit.rows === commit.inserted + commit.known + commit.inFileDuplicates)
 
-    // A: the hash probe, done directly (no slabs, no known table)
-    const direct = Number((await one(`SELECT uniqExact(content_key_hash) AS c FROM ${tables.stage} WHERE content_key_hash IN (SELECT content_key_hash FROM ulp.credentials)`)).c)
+    // A: the same probe done directly (no slabs, no known table). Always probe the LIVE table with the stage's hashes (the small side):
+    // `x IN (SELECT content_key_hash FROM ulp.credentials)` builds a set of the whole 1.39B-row table and ClickHouse kills it at 24 GiB.
+    const direct = Number((await one(`SELECT uniqExact(content_key_hash) AS c FROM ulp.credentials WHERE content_key_hash IN (SELECT content_key_hash FROM ${tables.stage})`)).c)
     check('known equals a direct hash probe of the whole stage', direct === commit.known, `commit ${commit.known} direct ${direct}`)
 
     // B: natural key, independent of the hash expression: the same (URL key, email, password) exists in the live table
@@ -4412,13 +4424,13 @@ async function parityForFile(index: number, path: string): Promise<void> {
                SELECT ${URL_CONTENT_KEY}, email, password FROM ulp.credentials WHERE email IN (SELECT email FROM ${SAMPLE}))) AS by_natural_key
       FROM ${SAMPLE}`)
     console.log(`  INFO  sample of ${sample.n}: ${sample.by_hash} known by hash, ${sample.by_natural_key} known by natural key`)
-    check('the commit\\'s known/new split equals an independent natural-key lookup on a 5,000-row sample', Number(sample.by_hash) === Number(sample.by_natural_key), JSON.stringify(sample))
+    check('the known/new split of the commit equals an independent natural-key lookup on a 5,000-row sample', Number(sample.by_hash) === Number(sample.by_natural_key), JSON.stringify(sample))
 
     // C: what the commit wrote is exactly the new rows, once each
     const written = await one(`SELECT count() AS c, uniqExact(content_key_hash) AS d FROM ${TARGET}`)
     check('the clone holds exactly the new rows, each once', Number(written.c) === commit.inserted && Number(written.d) === commit.inserted, JSON.stringify(written))
     // D: the target holds nothing the live table already had
-    const overlap = Number((await one(`SELECT uniqExact(content_key_hash) AS c FROM ${TARGET} WHERE content_key_hash IN (SELECT content_key_hash FROM ulp.credentials)`)).c)
+    const overlap = Number((await one(`SELECT uniqExact(content_key_hash) AS c FROM ulp.credentials WHERE content_key_hash IN (SELECT content_key_hash FROM ${TARGET})`)).c)
     check('...and none of them is in the live table', overlap === 0, `overlap ${overlap}`)
   } finally {
     await dropStage(tables).catch(() => {})
@@ -4441,14 +4453,14 @@ async function main() {
 main().catch(err => { console.error('PARITY ERROR', err); failed = true }).finally(() => process.exit(failed ? 1 : 0))
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 ```bash
-cd /home/cole/ulp-suite && IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' ulpsuite_clickhouse | awk '{print $1}') && CLICKHOUSE_HOST=http://$IP:8123 CLICKHOUSE_USER=default CLICKHOUSE_PASSWORD= CLICKHOUSE_DATABASE=ulp INGEST_FILTER_HARD_DROP_TIERS=T3 INGEST_DISK_GATE=off npx tsx "$SCRATCH/parity.ts" <file1> <file2> <file3> 2>&1 | tail -40
+cd /home/cole/ulp-suite && IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' ulpsuite_clickhouse | awk '{print $1}') && CLICKHOUSE_HOST=http://$IP:8123 CLICKHOUSE_USER=default CLICKHOUSE_PASSWORD= CLICKHOUSE_DATABASE=ulp INGEST_FILTER_HARD_DROP_TIERS=T3 INGEST_DISK_GATE=off SQLITE_PATH="$SCRATCH/parity.db" npx tsx "$SCRATCH/parity.ts" <file1> <file2> <file3> 2>&1 | tail -40
 ```
 Expected: every line `PASS`, exit 0. Each file takes seconds to a minute (the table scan is about 10 s). If the natural-key sample disagrees with the hash on any row, that is a finding about the data (rows whose URL differs only by something `URL_CONTENT_KEY` normalises differently from the parser), not a reason to relax the check: investigate before going on.
 
-- [ ] **Step 3: Record the result**
+- [x] **Step 3: Record the result**
 
 Add the numbers (aggregate counts only: no file names, no values) to the spec's "Spike results" table as a new row "Live parity on 3 real files", and commit:
 
@@ -4465,7 +4477,7 @@ cd /home/cole/ulp-suite && git add docs/superpowers/specs/2026-10-02-novelty-awa
 
 The unit tests use fakes. This script uses the production image, a real ClickHouse and a real process kill, in the isolated rehearsal stack (own ClickHouse, own volumes, own port; it shares nothing with the real stack). It follows `scripts/e2e-disk-gate.ts` and `scripts/e2e-upload-resilience.ts`.
 
-- [ ] **Step 1: Write the script**
+- [x] **Step 1: Write the script**
 
 Create `/home/cole/ulp-suite/scripts/e2e-novelty-ingest.ts`:
 
@@ -4488,7 +4500,8 @@ Create `/home/cole/ulp-suite/scripts/e2e-novelty-ingest.ts`:
  *   docker compose build app
  *   npx tsx scripts/e2e-alert-rehearsal.ts --keep    # brings the rehearsal stack up (about 4 minutes) and leaves it running
  *   npx tsx scripts/e2e-novelty-ingest.ts            # about 15 minutes; --only=kill,off runs just those; --skip-gate leaves out the filler
- *   docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v
+ *   REHEARSAL_JWT_SECRET=x REHEARSAL_ADMIN_EMAIL=x@x.test REHEARSAL_ADMIN_PASSWORD=x REHEARSAL_WEBHOOK_SECRET=x \
+ *     docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v   # the compose file wants these set even to stop the stack
  *
  * Needs `zip` and `curl`, and about 40 GiB of free host disk for the gate scenario. Exit 0 when every check passes, 1 when one
  * fails, 2 when the stack is not ready or there is not enough room to run.
@@ -5009,12 +5022,12 @@ main().then(
 )
 ```
 
-- [ ] **Step 2: Typecheck it**
+- [x] **Step 2: Typecheck it**
 
 Run: `cd /home/cole/ulp-suite && npx tsc --noEmit`
 Expected: exit 0 (the repository's `tsconfig.json` includes `scripts/`; if it does not, run `npx tsc --noEmit --skipLibCheck --module esnext --moduleResolution bundler --target es2022 --types node scripts/e2e-novelty-ingest.ts`).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add scripts/e2e-novelty-ingest.ts && git commit -m "test(e2e): rehearse novelty-aware ingest on the production image (real uploads, a real kill, a real disk filler)" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -5026,21 +5039,21 @@ cd /home/cole/ulp-suite && git add scripts/e2e-novelty-ingest.ts && git commit -
 
 **Files:** none (fixes go where the failures point).
 
-- [ ] **Step 1: Keep a rollback tag of the image that is deployed now**
+- [x] **Step 1: Keep a rollback tag of the image that is deployed now**
 
 ```bash
 cd /home/cole/ulp-suite && docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep '^ulp-suite-app:latest' && docker tag ulp-suite-app:latest ulp-suite-app:rollback-$(date -u +%Y%m%d-%H%Mz) && docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep rollback | head -3
 ```
 Expected: `latest` is `7a0c098486cd` (SP1) and a new `rollback-20261011-....z` tag shows the same id. Write the tag name down for Task 18.
 
-- [ ] **Step 2: Build the image**
+- [x] **Step 2: Build the image**
 
 ```bash
 mkdir -p "$SCRATCH/docker-cfg" && echo '{}' > "$SCRATCH/docker-cfg/config.json" && cd /home/cole/ulp-suite && DOCKER_CONFIG="$SCRATCH/docker-cfg" docker compose build app 2>&1 | tail -15
 ```
 Expected: the build succeeds (the first minutes compile Next.js). `docker images ulp-suite-app:latest` shows a new id. (`$SCRATCH` is the session scratchpad directory.)
 
-- [ ] **Step 3: The existing rehearsals must still pass**
+- [x] **Step 3: The existing rehearsals must still pass**
 
 ```bash
 cd /home/cole/ulp-suite && DOCKER_CONFIG="$SCRATCH/docker-cfg" npx tsx scripts/e2e-alert-rehearsal.ts --keep 2>&1 | tail -60
@@ -5059,21 +5072,21 @@ Expected: every check PASS (20), about 5 minutes.
 
 Watch for two kinds of difference, which are about the novelty path being on by default and not about a defect in these scripts: a scenario that freezes ClickHouse for longer than the 30 s stall timeout now also exercises the commit's `KILL` on the way out; and a scenario that counts rows by `source_file` is unaffected because new content is still written. If one of these scripts fails, use the `superpowers:systematic-debugging` skill to find the cause before touching the script.
 
-- [ ] **Step 4: The new rehearsal**
+- [x] **Step 4: The new rehearsal**
 
 ```bash
 cd /home/cole/ulp-suite && npx tsx scripts/e2e-novelty-ingest.ts 2>&1 | tee "$SCRATCH/e2e-novelty.log" | tail -120
 ```
 Expected: every check PASS, exit 0, about 15 minutes. The first run of a new rehearsal usually finds something (the 2026-10-04 rehearsal found two ClickHouse bugs that mocked tests had passed): treat each FAIL as a real finding. Fix it where it lives, with a unit test where one can reproduce it, rebuild the image (Step 2), and re-run only the scenario with `--only=<key>`, then the whole script once more at the end.
 
-- [ ] **Step 5: Tear the rehearsal stack down**
+- [x] **Step 5: Tear the rehearsal stack down**
 
 ```bash
-cd /home/cole/ulp-suite && DOCKER_CONFIG="$SCRATCH/docker-cfg" docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v 2>&1 | tail -5
+cd /home/cole/ulp-suite && REHEARSAL_JWT_SECRET=x REHEARSAL_ADMIN_EMAIL=x@x.test REHEARSAL_ADMIN_PASSWORD=x REHEARSAL_WEBHOOK_SECRET=x DOCKER_CONFIG="$SCRATCH/docker-cfg" docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v 2>&1 | tail -5
 ```
 Expected: the `ulprehearsal_*` containers and volumes are removed (the real `ulpsuite_*` containers are untouched: `docker ps` still shows them healthy).
 
-- [ ] **Step 6: Commit any fixes the rehearsals led to**
+- [x] **Step 6: Commit any fixes the rehearsals led to**
 
 ```bash
 cd /home/cole/ulp-suite && git add -A && git status --short && git commit -m "fix(ingest): <what the rehearsal found>" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -5172,3 +5185,17 @@ Update the project memory (`project_disk_full_incident_2026_10_10.md` and `proje
 ```bash
 cd /home/cole/ulp-suite && sed -i 's/^- \[ \] \*\*Step/- [x] **Step/' docs/superpowers/plans/2026-10-11-novelty-aware-ingest.md && git add docs/superpowers/plans/2026-10-11-novelty-aware-ingest.md && git commit -m "docs: record the novelty-aware ingest release" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" && git push origin main
 ```
+
+---
+
+## What the build changed
+
+Where the code differs from the blocks above (all of it found by running the tests, the parity check or the rehearsals):
+
+- **Task 1:** the risk bullet that Step 2 replaces is four lines long in the spec, not three.
+- **Task 6:** the test's `shape` helper compared hand-truncated SQL strings; it now names each statement (`select stage count`, `truncate known`, `fill known`, `select known count`, `insert new rows`) so the order is asserted without matching SQL text.
+- **Task 11, Step 8:** looked at in Task 16 on the rehearsal app with its throwaway admin (under the host name `rehearsal.localhost`, so that its cookie cannot touch a session for `localhost` or `127.0.0.1`).
+- **Task 14:** the parity script as written (a) had a mis-escaped apostrophe in a message, (b) used `sleepEachRow` with a block ClickHouse refuses (3 s per block: now `max_block_size = 1, max_threads = 1`), (c) let `matchBreach` open the application's SQLite file (it is read-only on this host, which is what stopped it: `breachName` is passed and `SQLITE_PATH` points at a scratch file), and (d) twice probed with `x IN (SELECT content_key_hash FROM ulp.credentials)` (checks A and D), which builds a set of the whole table and which ClickHouse stopped at 24 GiB. Both now probe the live table with the small set, and the script's read queries carry `max_memory_usage = 4 GB`.
+- **Task 15:** the content of every fixture carries the run id; the scenarios that read "the commit is under way" use the table's rows, the ones that read "the file is being read" use the job's staged rows; the receiver preflight uses `State.Running` (the app image's health check always calls the receiver unhealthy); a scenario was added: ClickHouse frozen for 45 s in the middle of the commit.
+- **Task 16:** `e2e-upload-resilience.ts` and `e2e-disk-gate.ts` assumed that a second copy of the same content is stored again and that an import's rows are visible in ClickHouse while it runs; with novelty-aware ingest the copy is "already known" and rows appear at the commit, so their content carries the run id, `followUpImports` uses content of its own, and the queue-wait and freeze scenarios read progress from the job. The teardown command the scripts print needs the `REHEARSAL_*` variables set (the compose file interpolates them even for `down`).
+- **Tooling:** the plan's code blocks were written to the files by a small extractor (`planx.py`, kept in the session scratchpad, not in the repository), which refuses a replace whose old block does not match exactly once.

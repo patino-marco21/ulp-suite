@@ -1,6 +1,6 @@
 # Novelty-aware ingest — design (2026-10-02, revised 2026-10-11)
 
-Status: **approved 2026-10-11 (revised from the 2026-10-02 proposal), not implemented.** Sub-project 2 of the 2026-10-11 plan (sub-project 1,
+Status: **implemented 2026-10-11 (approved the same day; revised from the 2026-10-02 proposal).** Sub-project 2 of the 2026-10-11 plan (sub-project 1,
 `2026-10-11-disk-safety-and-hygiene-design.md`, shipped the same day; the import-reliability work it builds on is
 `2026-10-02-import-reliability-design.md`).
 Reference table: `ulp.credentials`, 1,394,459,025 rows, 128.88 GiB (about 99 bytes per row on disk), ordered by `(domain, email, imported_at)`.
@@ -140,27 +140,32 @@ Consequences, all adopted in the implementation plan: the settings of the commit
    `lib/url-content-key.ts`, the same constant the table's DDL v18 and the cron use). No skip indexes, no projections;
    `parts_to_delay_insert` and `parts_to_throw_insert` are raised on it so a 300M-row file cannot trip TOO_MANY_PARTS. The parser runs with
    `dedupInFile: false`.
-2. **Commit, one slab at a time.** `distinct = uniqExact(content_key_hash)` of the stage and `K = max(1, ceil(distinct / SLAB))`
-   (`INGEST_NOVELTY_SLAB_ROWS`, default 20,000,000: almost every file is one slab; a slab is the stage rows whose `content_key_hash % K = k`).
+2. **Commit, one slab at a time.** `K = max(1, ceil(stage rows / SLAB))` (`INGEST_NOVELTY_SLAB_ROWS`, default 20,000,000: almost every file
+   is one slab; a slab is the stage rows whose `content_key_hash % K = k`). K comes from the stage's row count, which is free: a `uniqExact`
+   over a whole 300M-row stage would need several GB, so each slab counts its own distinct hashes instead.
    For each slab: await the disk gate and the memory guard, take the **process-wide lock** (an async mutex anchored on `globalThis`, because
    `lib/upload-queue.ts` documents that module-level state is duplicated across this app's webpack chunks), then:
    ```sql
+   -- slabDistinct = SELECT uniqExact(content_key_hash) FROM ulp.zz_import_stage_<id> WHERE content_key_hash % {K} = {k}
    -- known = stage hashes of this slab that already exist in the table (the known table is truncated per slab)
    TRUNCATE TABLE ulp.zz_import_known_<id>;
 
    INSERT INTO ulp.zz_import_known_<id>
    SELECT DISTINCT content_key_hash FROM {noveltyAgainst}
-   WHERE content_key_hash IN (SELECT content_key_hash FROM ulp.zz_import_stage_<id> WHERE content_key_hash % {K} = {k})
-   SETTINGS max_execution_time = 3300, use_query_cache = 0, async_insert = 0;
+   WHERE content_key_hash IN (SELECT content_key_hash FROM ulp.zz_import_stage_<id> WHERE content_key_hash % {K} = {k});
 
+   -- skipped when slabDistinct - count(known) is 0
    INSERT INTO {target} (url, email, password, domain, source_file, breach_name)
    SELECT url, email, password, domain, source_file, breach_name
    FROM ulp.zz_import_stage_<id>
    WHERE content_key_hash % {K} = {k}
      AND content_key_hash NOT IN (SELECT content_key_hash FROM ulp.zz_import_known_<id>)
-   LIMIT 1 BY content_key_hash
-   SETTINGS insert_deduplicate = 0, async_insert = 0, max_execution_time = 3300;
+   LIMIT 1 BY content_key_hash;
    ```
+   Every statement carries `max_execution_time = 3300`, `use_query_cache = 0` and `async_insert = 0`, and the insert `insert_deduplicate = 0`, as
+   **client settings** (the client's default `max_execution_time` is 60 s; a trailing SQL `SETTINGS` clause is not relied on). Each statement has
+   its own query id: a failed or aborted one is `KILL QUERY ... SYNC`ed (bounded to 15 s) before the lock is released, because a client-side abort
+   does **not** stop a statement on the server (verified on the live server, 2026-10-11).
    `zz_import_known_<id>` is a small plain MergeTree (`ORDER BY content_key_hash`). `LIMIT 1 BY` makes in-file dedup exact; which of several
    equal-content rows from one file is kept is unspecified (they differ at most in URL scheme or trailing slash, and content-dedup has the same
    tie rule). The lock is per slab, so two concurrent files still parse and stage in parallel, their slabs interleave, and two imports never both
@@ -170,14 +175,19 @@ Consequences, all adopted in the implementation plan: the settings of the commit
 3. **Monitor alerts for new credentials.** After each slab's insert, while its `known` table is still valid, one query per active monitor
    (until `MAX_INPROCESS_MATCHES` is reached):
    ```sql
-   SELECT url, email, password, domain FROM ulp.zz_import_stage_<id>
-   WHERE content_key_hash % {K} = {k}
-     AND content_key_hash NOT IN (SELECT content_key_hash FROM ulp.zz_import_known_<id>)
-     AND <buildDomainSetWhereClause(monitor.domains, monitor.match_mode).clause>
+   SELECT url, email, password, domain FROM (
+     SELECT url, email, password, domain, content_key_hash, <buildNormalizedDomainSetMatch(...).normalizedColumns>
+     FROM ulp.zz_import_stage_<id>
+     WHERE content_key_hash % {K} = {k}
+       AND content_key_hash NOT IN (SELECT content_key_hash FROM ulp.zz_import_known_<id>)
+   ) WHERE <the same function's clause>
    LIMIT 1 BY content_key_hash LIMIT <remaining cap>
    ```
-   Rows become `MatchedCredential`s and go, after the last slab succeeded, through the unchanged `fireMonitorAlertsFromMatches`, whose SQLite
-   ledger still filters what each monitor has already seen.
+   `buildNormalizedDomainSetMatch` normalises once per row and tests the domain set with one `arrayExists`, so the cost does not grow with the number
+   of monitored domains (0.53 s per 1M rows with 17 domains, against 1.21 s for `buildDomainSetWhereClause`). Rows become `MatchedCredential`s and go,
+   after the last slab succeeded, through the unchanged `fireMonitorAlertsFromMatches`, whose SQLite ledger still filters what each monitor has
+   already seen. A failed match query does not fail an import whose rows are already written (a retry would count them as known, so their alerts
+   could never fire): that monitor's alerts for the slab are skipped, with a warning.
 4. **Account, record, clean up.** `rows` (kept by the parser) = `inserted + known + inFileDuplicates`, where
    `known = sum of count(known) over the slabs`, `inserted = distinct - known` and `inFileDuplicates = rows - distinct`. Each slab's insert is
    checked against the number of rows ClickHouse reports as written for the statement (its summary); the job is **failed, not silently
@@ -195,15 +205,16 @@ again. This replaces the 1-hour dedup window rather than adding to it. The `INSE
 
 | Unit | Responsibility |
 |---|---|
-| `lib/ingest-stage.ts` (new) | create and drop a stage and its known table; `sweepOrphanStages()` (drop `ulp.zz_import_stage_*` / `zz_import_known_*` that no running job in this process owns: at startup before the queue starts, and hourly) |
-| `lib/ingest-novelty.ts` (new) | the commit phase above: slabbing, the lock, the gates, the retried unit, the accounting check, the monitor query; takes `target` and `noveltyAgainst` tables separately (default both `ulp.credentials`) so a probe can read the live table while writing a clone |
+| `lib/ingest-novelty-config.ts` (new) | `noveltyConfig()` (`INGEST_NOVELTY_CHECK`, `INGEST_NOVELTY_SLAB_ROWS`), `slabCount()`, the 3300 s statement limit; read by the inbox watcher and the tests without loading the ClickHouse client |
+| `lib/ingest-stage.ts` (new) | create and drop a stage and its known table, a registry of the stages in use, `sweepOrphanStages()` (drop `ulp.zz_import_stage_*` / `zz_import_known_*` that no running job in this process owns) and `startStageSweeper()` (at start-up, before the inbox starts, and hourly) |
+| `lib/ingest-novelty.ts` (new) | the commit phase above: the SQL builders, the executor with the commit settings, the process-wide lock, `commitStage` (slabbing, the gates, the accounting check, the monitor queries, the kill on failure); takes `target` and `noveltyAgainst` tables separately (default both `ulp.credentials`) so a probe can read the live table while writing a clone |
 | `lib/upload-processor.ts` | `processTextStream` runs the novelty flow when `INGEST_NOVELTY_CHECK` is on (default on after the rehearsal; `off|0|false` keeps today's direct path, which the benchmark script also keeps); `streamCredentialsToTable` stays the batch loop and gets the parser option; `ProcessResult` gains `known`, `inFileDuplicates`; phase callbacks |
 | `lib/ulp-parser.ts` | `parseULPStream` gets an optional `{ dedupInFile?: boolean }` (default `true`); the novelty path passes `false` and relies on the stage |
 | `lib/upload-jobs.ts`, `/api/upload` SSE | `known`, `inFileDuplicates`, `phase` (`parsing` / `checking` / `inserting`) and `staged` in the job and the event payload; while parsing, `imported` stays 0 |
 | `/api/upload`, `/api/v1/upload` | the ZIP branch keeps entries that added nothing but had known rows; the v1 reply gains `known`; `imported` documented as "new rows" |
 | SQLite | `processing_jobs.known INTEGER NOT NULL DEFAULT 0` (additive `ALTER` guarded like the existing ones in `lib/sqlite.ts`); `logJob` takes `known` |
-| `lib/inbox-watcher.ts` | logs and records `known`; `current_progress` gains `phase`; the interrupted-file message becomes "safe to Retry" |
-| UI | the Upload result card gets "Already in the database" and a phase line; the Inbox list and current-progress line show "N new, M known" |
+| `lib/inbox-watcher.ts`, `lib/inbox-progress.ts` (new) | logs and records `known`; `current_progress` gains `phase`, `rows_staged`, `rows_known`, `slab`; the interrupted-file message becomes "safe to Retry" |
+| UI, `lib/import-summary.ts` (new) | the Upload result card gets "Already in the database" and "Repeated in the file" and a phase line; the Inbox list, the queue panel and the current-progress line show "N new · M known"; the import rate counts every accepted line (new + known + repeated) |
 | Config and docs | `INGEST_NOVELTY_CHECK`, `INGEST_NOVELTY_SLAB_ROWS` forwarded in compose, in `.env.example` and the README; the API docs say what `imported` means |
 
 ### Behavior changes the operator will see
@@ -264,13 +275,26 @@ never an insert into the real table: the existing live-DDL clone approach, with 
 2. **Unit tests** for slabbing, accounting, the sweeper, the lock, the phase callbacks, the parser option, the hash parity and drift tests,
    the monitor query builder, the job and SSE payloads, and the config parsing.
 3. **Live parity, read-only on the real table:** two or three small real files from the pile go through the novelty commit with a throwaway
-   clone as `target`; their `known` counts must equal what the 2026-10-11 probe computes for the same rows (a cross-check of two
-   independent implementations of the same hash).
+   clone as `target`; their known / new split must equal an independent natural-key lookup (the same URL key, email and password
+   in the live table) on a 5,000-row sample, which is a cross-check that does not use the hash. Done on three real files: see the spike results.
 4. **Rehearsal on the production image** (isolated stack, synthetic data only), a new `scripts/e2e-novelty-ingest.ts`: an all-new file; the same
    content under a second name (0 new, source recorded); a half-overlap file; kill the app mid-commit, restart, retry (total equals distinct); two
    overlapping files at `UPLOAD_CONCURRENCY=2` (no duplicates); a file past the old 2M in-file cap with repeated rows (exact); a ZIP with two
-   entries; the inbox path; a disk-gate pause while staging; `INGEST_NOVELTY_CHECK=off` (the direct path); a monitor alert fired for new rows only.
+   entries; the inbox path; a disk-gate pause while staging; `INGEST_NOVELTY_CHECK=off` (the direct path); a monitor alert fired for new rows only;
+   ClickHouse frozen for 45 s in the middle of the commit (the watchdog, the bounded kill and the lock).
 5. The existing rehearsals (alert 36, upload resilience 33, disk gate 20) must still pass, and the existing suite stays green.
+
+### What the rehearsals found (2026-10-11)
+
+On the production image, in the isolated stack: the alert rehearsal 36/36, the upload-resilience rehearsal 33/33, the disk-gate rehearsal 20/20
+and the new novelty rehearsal 84/84. Nothing in the product failed. The two older scripts needed changes because the new behaviour is the
+intended one: they uploaded the same content more than once (a repeat is now, rightly, "already known") and they read "an import is
+running" from ClickHouse's row count (rows now appear at the commit), so their content carries the run id and they read progress from the
+job. The new rehearsal's first run stopped at its own preflight, which trusted the app image's health check for the webhook receiver (the
+image's check always calls it unhealthy). The live-parity script's two cross-checks first used `x IN (SELECT content_key_hash FROM
+ulp.credentials)`, the pattern approach E forbids: ClickHouse stopped it at 24 GiB tracked memory, and ad-hoc checks on the production server
+now probe the big table with the small set and carry a `max_memory_usage`. A visual check of the Inbox and Upload pages on the rehearsal app showed
+the new wording against real data ("Reading the file: 1,000,000 rows so far", "1.0M new · 200K known").
 
 ## Rollout
 
