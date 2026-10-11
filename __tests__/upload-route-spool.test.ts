@@ -38,6 +38,7 @@ import { logJob } from '@/lib/processing-log'
 import { logUploadAction } from '@/lib/audit-log'
 import { processTextFile, processZipFile } from '@/lib/upload-processor'
 import { POST } from '@/app/api/upload/route'
+import { getJob } from '@/lib/upload-jobs'
 
 const mockProcessTextFile = processTextFile as ReturnType<typeof vi.fn>
 const mockProcessZipFile = processZipFile as ReturnType<typeof vi.fn>
@@ -134,6 +135,24 @@ describe('POST /api/upload: receive first, then reply', () => {
     expect(mockProcessTextFile.mock.calls[0][1]).toBe('Mixed-Case-Dump.TXT')
   })
 
+  it('carries the known and repeated counts into the job, the job log and the audit log', async () => {
+    mockProcessTextFile.mockImplementationOnce(async (_path: string, filename: string) => ({
+      imported: 3, known: 7, inFileDuplicates: 2, skipped: 1, errors: 0, filename, breach_name: 'test',
+      rejection_breakdown: {}, alreadyImported: false, tierDropped: 0,
+    }))
+
+    const res = await post('known.txt', 'https://a.com:user@a.com:pass\n')
+    const { jobId } = await res.json()
+
+    await vi.waitFor(() => expect(getJob(jobId)?.status).toBe('done'))
+    expect(getJob(jobId)).toMatchObject({ imported: 3, known: 7, inFileDuplicates: 2, skipped: 1 })
+    expect(getJob(jobId)?.phase).toBeUndefined()
+    expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ source: 'http', status: 'done', imported: 3, known: 7 }))
+    await vi.waitFor(() => expect(mockAudit).toHaveBeenCalledWith(
+      'upload.complete', admin, jobId, expect.objectContaining({ filename: 'known.txt', imported: 3, known: 7 }),
+    ))
+  })
+
   it('answers 413 and creates no job when the body exceeds the admin-configured cap', async () => {
     mockGetMax.mockResolvedValueOnce(10) // 10 bytes, for this call only
 
@@ -195,7 +214,7 @@ describe('POST /api/upload: zip archives', () => {
     expect(res.status).toBe(200)
     const json = await res.json()
     expect(json.imported).toBe(2)
-    expect(json.files).toEqual([{ filename: 'inner.txt', breach_name: 'test', imported: 2 }])
+    expect(json.files).toEqual([{ filename: 'inner.txt', breach_name: 'test', imported: 2, known: 0 }])
     expect(path.dirname(captured.path)).toBe(spoolRoot)
     expect(mockProcessZipFile.mock.calls[0][2]).toEqual({ signal: expect.any(AbortSignal), beat: expect.any(Function) })
     expect(spoolFiles()).toEqual([])
@@ -227,5 +246,24 @@ describe('POST /api/upload: zip archives', () => {
     expect(await res.json()).toEqual({ success: false, error: 'bad archive' })
     expect(mockAudit).toHaveBeenCalledWith('upload.fail', admin, null, expect.objectContaining({ error: 'bad archive' }))
     expect(spoolFiles()).toEqual([])
+  })
+
+  it('lists an entry that added nothing but had known rows, and counts it in the totals', async () => {
+    mockProcessZipFile.mockImplementationOnce(async (_path: string, onEntry: (r: unknown) => void) => {
+      onEntry(entry('fresh.txt', 2, { skipped: 3, known: 1 }))
+      onEntry(entry('seen.txt', 0, { known: 5, inFileDuplicates: 1 }))
+      onEntry(entry('empty.txt', 0))
+    })
+
+    const res = await post('archive.zip', 'pretend zip bytes')
+
+    const json = await res.json()
+    expect(json).toMatchObject({ imported: 2, known: 6, inFileDuplicates: 1, skipped: 3, errors: 0 })
+    expect(json.files).toEqual([
+      { filename: 'fresh.txt', breach_name: 'test', imported: 2, known: 1 },
+      { filename: 'seen.txt', breach_name: 'test', imported: 0, known: 5 },
+    ])
+    expect(json.import_pct).toBe(75) // kept 9 of 12 lines: 2 + 6 + 1 kept, 3 skipped
+    expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ source: 'http', status: 'done', imported: 2, known: 6 }))
   })
 })

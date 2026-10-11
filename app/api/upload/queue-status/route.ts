@@ -11,6 +11,7 @@ interface ProcessingJobRow {
   filename:      string
   status:        string
   imported:      number
+  known:         number
   skipped:       number
   duration_ms:   number
   error_message: string | null
@@ -22,6 +23,7 @@ interface TotalsRow {
   status:         string
   file_count:     number
   total_imported: number
+  total_known:    number
   total_skipped:  number
 }
 
@@ -31,7 +33,7 @@ export async function GET(request: NextRequest) {
   if (adminError) return adminError
 
   const recent = dbQuery(
-    `SELECT id, source, filename, status, imported, skipped,
+    `SELECT id, source, filename, status, imported, known, skipped,
             duration_ms, error_message, breach_name, created_at
      FROM processing_jobs
      ORDER BY id DESC
@@ -42,6 +44,7 @@ export async function GET(request: NextRequest) {
     `SELECT status,
             COUNT(*)          AS file_count,
             SUM(imported)     AS total_imported,
+            SUM(known)        AS total_known,
             SUM(skipped)      AS total_skipped
      FROM processing_jobs
      GROUP BY status`,
@@ -61,6 +64,7 @@ export async function GET(request: NextRequest) {
       files_done:    done?.file_count    ?? 0,
       files_failed:  failed?.file_count  ?? 0,
       rows_imported: done?.total_imported ?? 0,
+      rows_known:    done?.total_known    ?? 0,
       rows_skipped:  done?.total_skipped  ?? 0,
     },
   })

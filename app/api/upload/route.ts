@@ -55,7 +55,10 @@ async function runWithProgress(
     const result = await fn()
     updateJob(jobId, {
       status:              'done',
+      phase:               undefined,
       imported:            result.imported,
+      known:               result.known,
+      inFileDuplicates:    result.inFileDuplicates,
       skipped:             result.skipped,
       tierDropped:         result.tierDropped,
       rejection_breakdown: result.rejection_breakdown,
@@ -67,12 +70,13 @@ async function runWithProgress(
       filename,
       status:      'done',
       imported:    result.imported,
+      known:       result.known,
       skipped:     result.skipped,
       duration_ms: Date.now() - startAt,
       breach_name: result.breach_name,
     })
     void logUploadAction('upload.complete', actor, jobId, {
-      filename, imported: result.imported, skipped: result.skipped, duration_ms: Date.now() - startAt,
+      filename, imported: result.imported, known: result.known, skipped: result.skipped, duration_ms: Date.now() - startAt,
     })
   } catch (err) {
     updateJob(jobId, {
@@ -245,7 +249,7 @@ export async function POST(request: NextRequest) {
           await runImportJob({
             label: originalFilename,
             work:  ctx => processZipFile(spool.path, result => {
-              if (result.imported > 0) results.push(result)
+              if (result.imported > 0 || result.known > 0) results.push(result)
               if (result.errors > 0) {
                 totalErrors += result.errors
                 failedEntries.push(
@@ -269,11 +273,15 @@ export async function POST(request: NextRequest) {
 
     const totalBreakdown = makeRejectionMap()
     let totalImported = 0
+    let totalKnown    = 0
+    let totalRepeated = 0
     let totalSkipped  = 0
     let totalTierDropped = 0
 
     for (const r of results) {
       totalImported += r.imported
+      totalKnown    += r.known
+      totalRepeated += r.inFileDuplicates
       totalSkipped  += r.skipped
       totalTierDropped += r.tierDropped
       for (const [k, v] of Object.entries(r.rejection_breakdown)) {
@@ -286,6 +294,7 @@ export async function POST(request: NextRequest) {
       filename:    originalFilename,
       status:      'done',
       imported:    totalImported,
+      known:       totalKnown,
       skipped:     totalSkipped,
       duration_ms: Date.now() - startAt,
       ...(failedEntries.length > 0
@@ -293,23 +302,29 @@ export async function POST(request: NextRequest) {
         : {}),
     })
     void logUploadAction('upload.complete', actor, null, {
-      filename: originalFilename, imported: totalImported, skipped: totalSkipped, errors: totalErrors,
+      filename: originalFilename, imported: totalImported, known: totalKnown, skipped: totalSkipped, errors: totalErrors,
       duration_ms: Date.now() - startAt,
     })
 
-    const total = totalImported + totalSkipped
+    // Lines the parser accepted: new rows, rows already in the database and rows repeated inside a file. (On the direct path the
+    // last two are 0, which makes this the same ratio as before.)
+    const kept  = totalImported + totalKnown + totalRepeated
+    const total = kept + totalSkipped
     return NextResponse.json({
       success:             true,
       imported:            totalImported,
+      known:               totalKnown,
+      inFileDuplicates:    totalRepeated,
       skipped:             totalSkipped,
       tierDropped:         totalTierDropped,
       errors:              totalErrors,
-      import_pct:          total > 0 ? Math.round(totalImported / total * 1000) / 10 : 0,
+      import_pct:          total > 0 ? Math.round(kept / total * 1000) / 10 : 0,
       rejection_breakdown: totalBreakdown,
       files:               results.map(r => ({
         filename:    r.filename,
         breach_name: r.breach_name,
         imported:    r.imported,
+        known:       r.known,
       })),
       filename: originalFilename,
     })

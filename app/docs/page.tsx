@@ -817,12 +817,21 @@ export default function DocsPage() {
                     language="json"
                     code={`{
   "success": true,
-  "imported": 45230,
+  "imported": 12480,
+  "known": 32750,
+  "inFileDuplicates": 0,
   "skipped": 4770,
   "errors": 0,
   "filename": "credentials.txt"
 }`}
                   />
+                  <p className="text-sm text-muted-foreground mt-3">
+                    <code className="text-xs bg-muted px-1 rounded">imported</code> counts NEW rows only.{" "}
+                    <code className="text-xs bg-muted px-1 rounded">known</code> is how many distinct credentials of the file the database
+                    already held, and <code className="text-xs bg-muted px-1 rounded">inFileDuplicates</code> how many rows repeated an
+                    earlier row of the same file. A ZIP reply adds <code className="text-xs bg-muted px-1 rounded">known</code> to each
+                    entry of <code className="text-xs bg-muted px-1 rounded">files</code>.
+                  </p>
                 </div>
               </CardContent>
             </Card>

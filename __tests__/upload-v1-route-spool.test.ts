@@ -88,7 +88,7 @@ describe('POST /api/v1/upload: spool first, answer when the import has finished'
     const res = await post('dump.txt', body)
 
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ success: true, imported: 1, skipped: 0, errors: 0, filename: 'dump.txt' })
+    expect(await res.json()).toEqual({ success: true, imported: 1, known: 0, inFileDuplicates: 0, skipped: 0, errors: 0, filename: 'dump.txt' })
     const [filePath, filename, jobId, onBatch, hooks] = mockProcessTextFile.mock.calls[0]
     expect(path.dirname(filePath)).toBe(spoolRoot)
     expect(filename).toBe('dump.txt')
@@ -133,11 +133,30 @@ describe('POST /api/v1/upload: spool first, answer when the import has finished'
 
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
-      success: true, imported: 2, skipped: 0, errors: 0,
-      files: [{ filename: 'inner.txt', imported: 2 }], filename: 'archive.zip',
+      success: true, imported: 2, known: 0, inFileDuplicates: 0, skipped: 0, errors: 0,
+      files: [{ filename: 'inner.txt', imported: 2, known: 0 }], filename: 'archive.zip',
     })
     expect(path.dirname(captured.path)).toBe(spoolRoot)
     expect(spoolFiles()).toEqual([])
+  })
+
+  it('reports known and repeated rows, for a text upload and for a zip entry that added nothing', async () => {
+    mockProcessTextFile.mockImplementationOnce(async (_path: string, filename: string) => ({
+      imported: 3, known: 7, inFileDuplicates: 2, skipped: 1, errors: 0, filename, breach_name: 'test',
+      rejection_breakdown: {}, alreadyImported: false, tierDropped: 0,
+    }))
+    const text = await post('known.txt', 'https://a.com:user@a.com:pass\n')
+    expect(await text.json()).toEqual({ success: true, imported: 3, known: 7, inFileDuplicates: 2, skipped: 1, errors: 0, filename: 'known.txt' })
+    expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ imported: 3, known: 7 }))
+
+    mockProcessZipFile.mockImplementationOnce(async (_path: string, onEntry: (r: unknown) => void) => {
+      onEntry({
+        imported: 0, known: 4, inFileDuplicates: 0, skipped: 0, errors: 0, filename: 'seen.txt', breach_name: 'test',
+        rejection_breakdown: {}, alreadyImported: false, tierDropped: 0,
+      })
+    })
+    const zip = await post('archive.zip', 'pretend zip bytes')
+    expect(await zip.json()).toMatchObject({ imported: 0, known: 4, files: [{ filename: 'seen.txt', imported: 0, known: 4 }] })
   })
 
   it('respects a smaller admin-configured max file size, not just the 10 GB default', async () => {

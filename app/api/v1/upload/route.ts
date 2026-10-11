@@ -8,6 +8,9 @@
  * dropped connection can no longer strand the request or wedge a queue slot.  The response is still synchronous: it is
  * sent when the import has finished.
  *
+ * `imported` in every reply counts NEW rows. `known` is how many distinct credentials of the file the database already held and
+ * `inFileDuplicates` how many rows repeated an earlier row of the same file (novelty-aware ingest; 0 when it is switched off).
+ *
  * Uses the same processing pipeline as the other routes:
  *   - processTextFile  for .txt/.csv  (streams the spool file; also matches credentials against domain monitors
  *                       in-process and fires alerts via fireMonitorAlertsFromMatches — not a separate step)
@@ -104,17 +107,20 @@ export async function POST(request: NextRequest) {
         filename:    originalFilename,
         status:      'done',
         imported:    r.imported,
+        known:       r.known,
         skipped:     r.skipped,
         duration_ms: Date.now() - startAt,
         breach_name: r.breach_name,
       })
       void logUploadAction('upload.api.complete', actor, null, {
-        ...keyDetails, filename: originalFilename, imported: r.imported, skipped: r.skipped, duration_ms: Date.now() - startAt,
+        ...keyDetails, filename: originalFilename, imported: r.imported, known: r.known, skipped: r.skipped, duration_ms: Date.now() - startAt,
       })
 
       const response = NextResponse.json({
         success:  true,
         imported: r.imported,
+        known:    r.known,
+        inFileDuplicates: r.inFileDuplicates,
         skipped:  r.skipped,
         errors:   r.errors,
         filename: r.filename,
@@ -131,7 +137,7 @@ export async function POST(request: NextRequest) {
       await runImportJob({
         label: originalFilename,
         work:  ctx => processZipFile(file, result => {
-          if (result.imported > 0) results.push(result)
+          if (result.imported > 0 || result.known > 0) results.push(result)
           if (result.errors > 0) {
             totalErrors += result.errors
             failedEntries.push(
@@ -143,14 +149,17 @@ export async function POST(request: NextRequest) {
     })
 
     let totalImported = 0
+    let totalKnown    = 0
+    let totalRepeated = 0
     let totalSkipped  = 0
-    for (const r of results) { totalImported += r.imported; totalSkipped += r.skipped }
+    for (const r of results) { totalImported += r.imported; totalKnown += r.known; totalRepeated += r.inFileDuplicates; totalSkipped += r.skipped }
 
     logJob({
       source:      'http',
       filename:    originalFilename,
       status:      'done',
       imported:    totalImported,
+      known:       totalKnown,
       skipped:     totalSkipped,
       duration_ms: Date.now() - startAt,
       ...(failedEntries.length > 0
@@ -158,16 +167,18 @@ export async function POST(request: NextRequest) {
         : {}),
     })
     void logUploadAction('upload.api.complete', actor, null, {
-      ...keyDetails, filename: originalFilename, imported: totalImported, skipped: totalSkipped, errors: totalErrors,
+      ...keyDetails, filename: originalFilename, imported: totalImported, known: totalKnown, skipped: totalSkipped, errors: totalErrors,
       duration_ms: Date.now() - startAt,
     })
 
     const response = NextResponse.json({
       success:  true,
       imported: totalImported,
+      known:    totalKnown,
+      inFileDuplicates: totalRepeated,
       skipped:  totalSkipped,
       errors:   totalErrors,
-      files:    results.map(r => ({ filename: r.filename, imported: r.imported })),
+      files:    results.map(r => ({ filename: r.filename, imported: r.imported, known: r.known })),
       filename: originalFilename,
     })
     return addRateLimitHeaders(response, authResult.rateLimit)
