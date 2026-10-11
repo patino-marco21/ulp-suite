@@ -29,19 +29,19 @@
 
 **Files:** none.
 
-- [ ] **Step 1: Create the branch**
+- [x] **Step 1: Create the branch**
 
 ```bash
 cd /home/cole/ulp-suite && git status -sb && git fetch -q origin && git switch -c sp1-disk-safety-hygiene
 ```
 Expected: `## main...origin/main` (only `?? .claude/` untracked), then `Switched to a new branch 'sp1-disk-safety-hygiene'`.
 
-- [ ] **Step 2: Baseline typecheck**
+- [x] **Step 2: Baseline typecheck**
 
 Run: `cd /home/cole/ulp-suite && npx tsc --noEmit`
 Expected: exit 0, no output.
 
-- [ ] **Step 3: Baseline tests**
+- [x] **Step 3: Baseline tests**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run 2>&1 | tail -8`
 Expected: every file passes. Write down the `Test Files` and `Tests` counts as the BASELINE (last recorded 2026-10-05: 149 files, 2,306 tests; the `*.live.test.ts` files are skipped).
@@ -65,7 +65,7 @@ Expected: every file passes. Write down the `Test Files` and `Tests` counts as t
   - `resetIngestDiskGate(): void` (test seam)
   - `waitForDiskSpace(signal: AbortSignal, opts?: { onPoll?: () => void; check?: (signal: AbortSignal) => Promise<DiskHeadroom>; sleep?: (ms: number, signal: AbortSignal) => Promise<void>; now?: () => number; env?: NodeJS.ProcessEnv }): Promise<void>`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `/home/cole/ulp-suite/__tests__/ingest-disk-gate.test.ts`:
 
@@ -301,12 +301,12 @@ describe('waitForDiskSpace', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ingest-disk-gate.test.ts 2>&1 | tail -15`
 Expected: FAIL: `Failed to resolve import "@/lib/ingest-disk-gate"` (the module does not exist yet).
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `/home/cole/ulp-suite/lib/ingest-disk-gate.ts`:
 
@@ -533,12 +533,12 @@ export async function waitForDiskSpace(signal: AbortSignal, opts: WaitForDiskSpa
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ingest-disk-gate.test.ts 2>&1 | tail -30`
 Expected: PASS, every test in the file green (about 22).
 
-- [ ] **Step 5: Typecheck and commit**
+- [x] **Step 5: Typecheck and commit**
 
 ```bash
 cd /home/cole/ulp-suite && npx tsc --noEmit && git add lib/ingest-disk-gate.ts __tests__/ingest-disk-gate.test.ts && git commit -F - <<'EOF'
@@ -568,7 +568,7 @@ Expected: `tsc` silent, commit created.
 - Consumes: `waitForDiskSpace(signal, { onPoll })` from Task 1.
 - Produces: nothing new; behaviour only.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `/home/cole/ulp-suite/__tests__/upload-processor-disk-gate.test.ts`:
 
@@ -687,12 +687,12 @@ describe('inbox watcher — ingest disk gate wiring', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/upload-processor-disk-gate.test.ts __tests__/inbox-watcher-disk-gate.test.ts 2>&1 | tail -25`
 Expected: FAIL. The first file: `expected "spy" to be called 2 times, but got 0 times`; the second: the import regex does not match.
 
-- [ ] **Step 3: Wire the batch loop**
+- [x] **Step 3: Wire the batch loop**
 
 In `/home/cole/ulp-suite/lib/upload-processor.ts`, add the import directly under the memory-guard import:
 
@@ -717,7 +717,7 @@ with:
       await waitForHeadroom(guardSignal, { onPoll: options.onBeat })
 ```
 
-- [ ] **Step 4: Wire the inbox watcher**
+- [x] **Step 4: Wire the inbox watcher**
 
 In `/home/cole/ulp-suite/lib/inbox-watcher.ts`, add the import under the `waitForHeadroom` import (line 42):
 
@@ -742,7 +742,7 @@ with:
       await waitForHeadroom(guardController.signal)
 ```
 
-- [ ] **Step 5: Keep the existing suites from hanging on the gate**
+- [x] **Step 5: Keep the existing suites from hanging on the gate**
 
 The gate fails closed, and several suites run the real batch loop against a mocked ClickHouse client whose answers have the wrong shape for it. They would pause forever. Switch the gate off for the whole test run (the gate's own suite passes `env` explicitly, so it is unaffected).
 
@@ -767,12 +767,12 @@ to:
     setupFiles: ['./__tests__/setup/sqlite-worker-setup.ts', './__tests__/setup/ingest-gate-off.ts'],
 ```
 
-- [ ] **Step 6: Run the new tests, then the suites that run the batch loop**
+- [x] **Step 6: Run the new tests, then the suites that run the batch loop**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/upload-processor-disk-gate.test.ts __tests__/inbox-watcher-disk-gate.test.ts __tests__/upload-processor.test.ts __tests__/import-pipeline.test.ts __tests__/inbox-watcher-memory-guard.test.ts __tests__/ingest-disk-gate.test.ts 2>&1 | tail -12`
 Expected: PASS for all six files.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && npx tsc --noEmit && git add lib/upload-processor.ts lib/inbox-watcher.ts __tests__/setup/ingest-gate-off.ts vitest.config.ts __tests__/upload-processor-disk-gate.test.ts __tests__/inbox-watcher-disk-gate.test.ts && git commit -F - <<'EOF'
@@ -807,7 +807,7 @@ EOF
   - `GET /api/monitoring/disk` -> `{ disk: DiskReading, gate: IngestDiskGateState }` (401 / 403 like the other monitoring routes)
   - `GET /api/monitoring/ingest-health` gains `ingestGate: IngestDiskGateState`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `/home/cole/ulp-suite/__tests__/disk-banner.test.ts`:
 
@@ -948,12 +948,12 @@ describe('Ingest Health panel — imports paused for lack of disk space', () => 
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/disk-banner.test.ts __tests__/disk-route.test.ts __tests__/ingest-health-disk.test.ts __tests__/ingest-health-panel.test.ts 2>&1 | tail -25`
 Expected: FAIL: the banner and route modules cannot be resolved; the two extended files fail their new tests.
 
-- [ ] **Step 3: Write the pure banner module**
+- [x] **Step 3: Write the pure banner module**
 
 Create `/home/cole/ulp-suite/lib/disk-banner.ts`:
 
@@ -1009,7 +1009,7 @@ export function describeDiskBanner(disk: DiskReading | null, gate: IngestDiskGat
 }
 ```
 
-- [ ] **Step 4: Write the endpoint**
+- [x] **Step 4: Write the endpoint**
 
 Create `/home/cole/ulp-suite/app/api/monitoring/disk/route.ts`:
 
@@ -1032,7 +1032,7 @@ export async function GET(request: NextRequest) {
 }
 ```
 
-- [ ] **Step 5: Add the gate to Ingest Health (route and panel)**
+- [x] **Step 5: Add the gate to Ingest Health (route and panel)**
 
 In `/home/cole/ulp-suite/app/api/monitoring/ingest-health/route.ts` add the import next to the other lib imports:
 
@@ -1088,12 +1088,12 @@ In `/home/cole/ulp-suite/components/ingest-health-panel.tsx`:
         )}
 ```
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/disk-banner.test.ts __tests__/disk-route.test.ts __tests__/ingest-health-disk.test.ts __tests__/ingest-health-panel.test.ts __tests__/ingest-health-route.test.ts 2>&1 | tail -15`
 Expected: PASS for all five files.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && npx tsc --noEmit && git add lib/disk-banner.ts app/api/monitoring/disk/route.ts app/api/monitoring/ingest-health/route.ts components/ingest-health-panel.tsx __tests__/disk-banner.test.ts __tests__/disk-route.test.ts __tests__/ingest-health-disk.test.ts __tests__/ingest-health-panel.test.ts && git commit -F - <<'EOF'
@@ -1119,7 +1119,7 @@ EOF
 - Consumes: `describeDiskBanner`, `DiskBanner`, `DiskBannerPayload` from `@/lib/disk-banner` (Task 3); `GET /api/monitoring/disk`.
 - Produces: default export `DiskBanner` React component (no props).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `/home/cole/ulp-suite/__tests__/disk-banner-component.test.ts` (source-contract style, like `ingest-health-panel.test.ts`; the repo has no DOM test environment):
 
@@ -1173,12 +1173,12 @@ describe('layout', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/disk-banner-component.test.ts 2>&1 | tail -12`
 Expected: FAIL: `ENOENT ... components/disk-banner.tsx`.
 
-- [ ] **Step 3: Write the component**
+- [x] **Step 3: Write the component**
 
 Create `/home/cole/ulp-suite/components/disk-banner.tsx`:
 
@@ -1253,7 +1253,7 @@ export default function DiskBanner() {
 }
 ```
 
-- [ ] **Step 4: Render it in the layout**
+- [x] **Step 4: Render it in the layout**
 
 In `/home/cole/ulp-suite/components/client-layout-with-sidebar.tsx` add the import under the `AppHeader` import:
 
@@ -1277,12 +1277,12 @@ to:
         <main className="flex-1 bg-background">{children}</main>
 ```
 
-- [ ] **Step 5: Run the test, typecheck and lint the two files**
+- [x] **Step 5: Run the test, typecheck and lint the two files**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/disk-banner-component.test.ts 2>&1 | tail -10 && npx tsc --noEmit && npx eslint components/disk-banner.tsx components/client-layout-with-sidebar.tsx`
 Expected: PASS, `tsc` silent, eslint silent (if eslint reports the nested-worktree plugin conflict, run `npx eslint --no-eslintrc -c .eslintrc.json <files>`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add components/disk-banner.tsx components/client-layout-with-sidebar.tsx __tests__/disk-banner-component.test.ts && git commit -F - <<'EOF'
@@ -1311,7 +1311,7 @@ EOF
   - `buildEligiblePartitionsSql(cutoff: string): string` now returns rows `{ partition, parts_with_projection, largest_part_bytes }`
   - `ProjectionScopeTickResult { cutoff: string; cleared: string[]; skipped: Array<{ partition: string; reason: string }> }`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `/home/cole/ulp-suite/__tests__/projection-scope.test.ts` (new imports at the top of the file are `clearProjectionNeedBytes, CLEAR_RESERVE_MARGIN_BYTES` added to the existing import list from `@/lib/projection-scope`; the new block goes at the end):
 
@@ -1481,12 +1481,12 @@ describe.skipIf(!LIVE)('projection-scope eligibility on the live table', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/projection-scope.test.ts __tests__/projection-scope-tick.test.ts 2>&1 | tail -25`
 Expected: FAIL: `clearProjectionNeedBytes` is not exported; the SQL assertions on `system.projection_parts` fail; the tick tests fail on missing `skipped` and on the ALTER settings.
 
-- [ ] **Step 3: Rewrite `lib/projection-scope.ts`**
+- [x] **Step 3: Rewrite `lib/projection-scope.ts`**
 
 Replace the whole of `/home/cole/ulp-suite/lib/projection-scope.ts` with (the cron-hours, window-months, cutoff and clear-SQL helpers are the existing ones, unchanged):
 
@@ -1629,17 +1629,17 @@ export async function runProjectionScopeTick(
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/projection-scope.test.ts __tests__/projection-scope-tick.test.ts __tests__/projection-scope.live.test.ts 2>&1 | tail -20`
 Expected: PASS; the live file is reported as skipped. The three original SQL assertions in `projection-scope.test.ts` pass unchanged.
 
-- [ ] **Step 5: Run the live, read-only check against the real server**
+- [x] **Step 5: Run the live, read-only check against the real server**
 
 Run: `cd /home/cole/ulp-suite && PS_LIVE=1 npx vitest run __tests__/projection-scope.live.test.ts 2>&1 | tail -10`
 Expected: PASS (today the eligible set is empty, so the loop asserts nothing; it proves the query runs on ClickHouse 26.3).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && npx tsc --noEmit && git add lib/projection-scope.ts __tests__/projection-scope.test.ts __tests__/projection-scope-tick.test.ts __tests__/projection-scope.live.test.ts && git commit -F - <<'EOF'
@@ -1668,7 +1668,7 @@ EOF
   - `msUntilNextRun(hourUtc: number, now: Date): number` (moved here; still re-exported by `lib/dedup-cron.ts`)
   - `scheduleEveryHoursFromAnchor(opts: { anchorHourUtc: number; everyHours: number; run: () => unknown; now?: () => number; pollMs?: number }): { cancel(): void; nextRunAt(): number }`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `/home/cole/ulp-suite/__tests__/daily-schedule.test.ts`:
 
@@ -1815,12 +1815,12 @@ describe('projection-scope-cron source contract', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/daily-schedule.test.ts __tests__/dedup-cron.test.ts __tests__/projection-scope-cron.test.ts 2>&1 | tail -20`
 Expected: FAIL: `@/lib/daily-schedule` cannot be resolved; the two cron contracts fail.
 
-- [ ] **Step 3: Write the scheduler**
+- [x] **Step 3: Write the scheduler**
 
 Create `/home/cole/ulp-suite/lib/daily-schedule.ts`:
 
@@ -1882,7 +1882,7 @@ export function scheduleEveryHoursFromAnchor(opts: DailyScheduleOptions): DailyS
 }
 ```
 
-- [ ] **Step 4: Use it in both crons**
+- [x] **Step 4: Use it in both crons**
 
 Replace the whole of `/home/cole/ulp-suite/lib/dedup-cron.ts` with:
 
@@ -1972,12 +1972,12 @@ export function startProjectionScopeCron(): void {
 }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/daily-schedule.test.ts __tests__/dedup-cron.test.ts __tests__/projection-scope-cron.test.ts __tests__/content-dedup-stats-skip.test.ts 2>&1 | tail -15`
 Expected: PASS for all four files.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && npx tsc --noEmit && git add lib/daily-schedule.ts lib/dedup-cron.ts lib/projection-scope-cron.ts __tests__/daily-schedule.test.ts __tests__/dedup-cron.test.ts __tests__/projection-scope-cron.test.ts && git commit -F - <<'EOF'
@@ -2000,7 +2000,7 @@ EOF
 - Modify: `/home/cole/ulp-suite/.env.example`, `/home/cole/ulp-suite/README.md`
 - Test: `/home/cole/ulp-suite/__tests__/ingest-disk-gate-config.test.ts`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `/home/cole/ulp-suite/__tests__/ingest-disk-gate-config.test.ts`:
 
@@ -2027,12 +2027,12 @@ describe('ingest disk gate settings reach the container', () => {
 })
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ingest-disk-gate-config.test.ts 2>&1 | tail -10`
 Expected: FAIL (compose does not forward the variables yet).
 
-- [ ] **Step 3: Forward the variables in compose**
+- [x] **Step 3: Forward the variables in compose**
 
 In `/home/cole/ulp-suite/docker-compose.yml`, directly after the line `      UPLOAD_SPOOL_MIN_FREE_BYTES: ${UPLOAD_SPOOL_MIN_FREE_BYTES:-}` add:
 
@@ -2044,7 +2044,7 @@ In `/home/cole/ulp-suite/docker-compose.yml`, directly after the line `      UPL
       INGEST_DISK_GATE: ${INGEST_DISK_GATE:-}
 ```
 
-- [ ] **Step 4: Document them**
+- [x] **Step 4: Document them**
 
 In `/home/cole/ulp-suite/.env.example`, directly after the `# UPLOAD_SPOOL_MIN_FREE_BYTES=21474836480` line add:
 
@@ -2080,12 +2080,12 @@ with:
   `INGEST_DISK_GATE=off` switches the gate off (`lib/ingest-disk-gate.ts`).
 ```
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [x] **Step 5: Run the test to verify it passes**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ingest-disk-gate-config.test.ts __tests__/upload-reliability-config.test.ts __tests__/compose-hardening.test.ts 2>&1 | tail -10`
 Expected: PASS for all three files.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add docker-compose.yml .env.example README.md __tests__/ingest-disk-gate-config.test.ts && git commit -F - <<'EOF'
@@ -2111,7 +2111,7 @@ EOF
 - Consumes: the running rehearsal stack (`npx tsx scripts/e2e-alert-rehearsal.ts --keep`), `GET /api/monitoring/disk`, `GET /api/monitoring/ingest-health`, `POST /api/upload`.
 - Produces: exit code 0 / 1 / 2 like the other e2e scripts.
 
-- [ ] **Step 1: Let the rehearsal app take gate settings**
+- [x] **Step 1: Let the rehearsal app take gate settings**
 
 In `/home/cole/ulp-suite/docker-compose.rehearsal.yml`, after the `SEARCH_DICT_SETTLE_SECONDS: "5"` line in the `app` service, add:
 
@@ -2125,7 +2125,7 @@ In `/home/cole/ulp-suite/docker-compose.rehearsal.yml`, after the `SEARCH_DICT_S
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/rehearsal-isolation.test.ts 2>&1 | tail -8`
 Expected: PASS (the isolation test pins names, mounts, ports and secrets; none of those changed).
 
-- [ ] **Step 2: Write the script**
+- [x] **Step 2: Write the script**
 
 Create `/home/cole/ulp-suite/scripts/e2e-disk-gate.ts`:
 
@@ -2451,12 +2451,12 @@ main().then(
 )
 ```
 
-- [ ] **Step 3: Typecheck and lint the script**
+- [x] **Step 3: Typecheck and lint the script**
 
 Run: `cd /home/cole/ulp-suite && npx tsc --noEmit && npx eslint scripts/e2e-disk-gate.ts`
 Expected: both silent. (The script is exercised for real in Task 11.)
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git add docker-compose.rehearsal.yml scripts/e2e-disk-gate.ts && git commit -F - <<'EOF'
@@ -2479,7 +2479,7 @@ EOF
 - Modify: `/home/cole/ulp-suite/package-lock.json` (and `package.json` only if `npm audit fix` changes a range)
 - Test: create `/home/cole/ulp-suite/__tests__/ci-workflow.test.ts`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `/home/cole/ulp-suite/__tests__/ci-workflow.test.ts`:
 
@@ -2503,12 +2503,12 @@ describe('CI workflow', () => {
 })
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ci-workflow.test.ts 2>&1 | tail -10`
 Expected: FAIL (`ubuntu-latest` and `@v4` are still there).
 
-- [ ] **Step 3: Change the workflow**
+- [x] **Step 3: Change the workflow**
 
 In `/home/cole/ulp-suite/.github/workflows/ci.yml` change the three lines:
 
@@ -2528,7 +2528,7 @@ to:
       - uses: actions/setup-node@v7
 ```
 
-- [ ] **Step 4: Run the test to verify it passes, then commit the workflow**
+- [x] **Step 4: Run the test to verify it passes, then commit the workflow**
 
 Run: `cd /home/cole/ulp-suite && npx vitest run __tests__/ci-workflow.test.ts 2>&1 | tail -6`
 Expected: PASS.
@@ -2543,7 +2543,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 EOF
 ```
 
-- [ ] **Step 5: Record the audit before the fix**
+- [x] **Step 5: Record the audit before the fix**
 
 Run:
 ```bash
@@ -2551,12 +2551,12 @@ cd /home/cole/ulp-suite && npm audit --json 2>/dev/null | node -e 'let s="";proc
 ```
 Expected: `{"info":0,"low":0,"moderate":3,"high":9,"critical":0,"total":12}` followed by one line per package; `next`, `sharp`, `source-map-js`, `postcss-nested` show `fix`.
 
-- [ ] **Step 6: Apply the non-major fixes**
+- [x] **Step 6: Apply the non-major fixes**
 
 Run: `cd /home/cole/ulp-suite && npm audit fix 2>&1 | tail -8`
 Expected: a summary of added/changed packages. It must NOT run with `--force`, and `package.json` must not gain a new major (`git diff --stat package.json package-lock.json` shows the lockfile, and at most patch/minor range edits in `package.json`).
 
-- [ ] **Step 7: Prove it on disk, not by the command's own report**
+- [x] **Step 7: Prove it on disk, not by the command's own report**
 
 Run:
 ```bash
@@ -2564,7 +2564,7 @@ cd /home/cole/ulp-suite && npm ci 2>&1 | tail -3 && for p in next sharp source-m
 ```
 Expected: `npm ci` succeeds; the four versions printed from `node_modules` are the NEW ones and match the lockfile diff (compare with `git show HEAD:package-lock.json | grep -A2 '"node_modules/next"'`). If a version on disk is still the old one, the fix did not land: stop and investigate before committing.
 
-- [ ] **Step 8: Re-audit and run every gate**
+- [x] **Step 8: Re-audit and run every gate**
 
 Run: `cd /home/cole/ulp-suite && npm audit --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log(JSON.stringify(j.metadata.vulnerabilities));console.log(Object.keys(j.vulnerabilities).sort().join(" "))})'`
 Expected: `next`, `sharp`, `source-map-js` and `postcss-nested` are gone; what remains is the dev-tooling chain that needs majors (`@next/eslint-plugin-next`, `braces`, `chokidar`, `eslint-config-next`, `fast-glob`, `micromatch`, `postcss-selector-parser`, `tailwindcss`: about 8).
@@ -2572,7 +2572,7 @@ Expected: `next`, `sharp`, `source-map-js` and `postcss-nested` are gone; what r
 Then: `cd /home/cole/ulp-suite && npx tsc --noEmit && npm run lint 2>&1 | tail -5 && npx vitest run 2>&1 | tail -6`
 Expected: tsc silent, lint clean, every test file passing.
 
-- [ ] **Step 9: Commit the dependency fix**
+- [x] **Step 9: Commit the dependency fix**
 
 ```bash
 cd /home/cole/ulp-suite && git add package.json package-lock.json && git commit -F - <<'EOF'
@@ -2596,7 +2596,7 @@ EOF
 - Add: `/home/cole/ulp-suite/.claude/launch.json`
 - Remove (local, not tracked): the worktree `/home/cole/ulp-suite/.claude/worktrees/search-dictionary` and the branch `worktree-search-dictionary`
 
-- [ ] **Step 1: Re-prove the files are unreferenced**
+- [x] **Step 1: Re-prove the files are unreferenced**
 
 Run:
 ```bash
@@ -2604,14 +2604,14 @@ cd /home/cole/ulp-suite && echo "--- styles/globals.css:" && grep -rnE "styles/g
 ```
 Expected: no output between the headings other than the headings themselves. If anything is listed, keep that file and say so in the commit.
 
-- [ ] **Step 2: Delete them and make sure the app still builds its CSS and types**
+- [x] **Step 2: Delete them and make sure the app still builds its CSS and types**
 
 ```bash
 cd /home/cole/ulp-suite && git rm -q styles/globals.css public/placeholder.jpg public/placeholder-logo.png public/placeholder-logo.svg public/placeholder.svg public/placeholder-user.jpg && ls styles 2>/dev/null; npx tsc --noEmit && echo tsc-ok
 ```
 Expected: `git rm` lists nothing wrong, `tsc-ok`. (An empty `styles/` directory disappears with its last file.)
 
-- [ ] **Step 3: Ignore the local settings file and track the preview config**
+- [x] **Step 3: Ignore the local settings file and track the preview config**
 
 In `/home/cole/ulp-suite/.gitignore`, directly after the line `.claude/worktrees/` add:
 
@@ -2625,7 +2625,7 @@ cd /home/cole/ulp-suite && git add .gitignore .claude/launch.json && git status 
 ```
 Expected: `M  .gitignore`, `A  .claude/launch.json` and the five-plus deletions; no other `.claude` path appears (the worktree directory is ignored, `settings.local.json` is ignored).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd /home/cole/ulp-suite && git commit -F - <<'EOF'
@@ -2638,7 +2638,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 EOF
 ```
 
-- [ ] **Step 5: Remove the orphan worktree and its merged branch**
+- [x] **Step 5: Remove the orphan worktree and its merged branch**
 
 Run:
 ```bash
@@ -2657,46 +2657,46 @@ Expected: `Deleted branch worktree-search-dictionary (was affe60f).` and `git wo
 
 **Files:** none (verification only; fix and re-run on any failure, and note the fix in the plan).
 
-- [ ] **Step 1: All gates on the branch**
+- [x] **Step 1: All gates on the branch**
 
 Run: `cd /home/cole/ulp-suite && npx tsc --noEmit && npm run lint 2>&1 | tail -4 && npx vitest run 2>&1 | tail -6`
 Expected: tsc silent, lint clean, all test files pass. The file and test counts are higher than the Task 0 baseline by the files this plan added (about 11 files).
 
-- [ ] **Step 2: Memory preflight for the build**
+- [x] **Step 2: Memory preflight for the build**
 
 Run: `free -m | sed -n 2p`
 Expected: at least 6000 MiB available (the image build runs `next build` with a multi-GiB heap). If less, STOP and ask the operator to close heavy tools; do not build.
 
-- [ ] **Step 3: Tag the running image as the rollback BEFORE the build moves `:latest`**
+- [x] **Step 3: Tag the running image as the rollback BEFORE the build moves `:latest`**
 
 ```bash
 cd /home/cole/ulp-suite && TAG=ulp-suite-app:rollback-$(date -u +%Y%m%d-%H%Mz) && docker tag ulp-suite-app:latest "$TAG" && echo "$TAG" && docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep -E 'ulp-suite-app:(latest|rollback-2026101)' | head
 ```
 Expected: the new rollback tag points at the same image id as `:latest` (the one currently deployed). Write the tag down.
 
-- [ ] **Step 4: Build the image from this branch**
+- [x] **Step 4: Build the image from this branch**
 
 ```bash
 mkdir -p /tmp/claude-1000/dockercfg && echo '{}' > /tmp/claude-1000/dockercfg/config.json && cd /home/cole/ulp-suite && DOCKER_CONFIG=/tmp/claude-1000/dockercfg docker compose build app 2>&1 | tail -15
 ```
 Expected: ends with `Image ulp-suite-app Built`; this takes about 3-5 minutes and runs `next build` (so it is also the build gate). `docker images | grep ulp-suite-app:latest` now shows a new image id. The running production containers are not touched.
 
-- [ ] **Step 5: Bring up the rehearsal stack and run the existing alert rehearsal on the new image**
+- [x] **Step 5: Bring up the rehearsal stack and run the existing alert rehearsal on the new image**
 
 Run: `cd /home/cole/ulp-suite && npx tsx scripts/e2e-alert-rehearsal.ts --keep 2>&1 | tail -45`
 Expected: about 4 minutes; ends `36 of 36 checks passed.` (or the current total) and "Stack left running (--keep)". Any FAIL: stop and diagnose (this exercises the new image with the gate ON at its production default).
 
-- [ ] **Step 6: Run the upload-resilience rehearsal (the gate sits in the batch loop it guards)**
+- [x] **Step 6: Run the upload-resilience rehearsal (the gate sits in the batch loop it guards)**
 
 Run: `cd /home/cole/ulp-suite && npx tsx scripts/e2e-upload-resilience.ts 2>&1 | tail -45`
 Expected: about 6 minutes; ends `33 of 33 checks passed.` In particular the "ClickHouse is frozen for 45 s" scenario must still fail the job with the stall reason: it proves the gate's free-space read is abortable.
 
-- [ ] **Step 7: Run the new gate rehearsal**
+- [x] **Step 7: Run the new gate rehearsal**
 
 Run: `cd /home/cole/ulp-suite && npx tsx scripts/e2e-disk-gate.ts 2>&1 | tail -45`
 Expected: about 5 minutes; every check PASS and `N of N checks passed.`, exit 0. Confirm afterwards that the filler is gone: `docker exec ulprehearsal_clickhouse ls /var/lib/clickhouse/zz_disk_gate_filler` must say `No such file`.
 
-- [ ] **Step 8: Tear the rehearsal stack down**
+- [x] **Step 8: Tear the rehearsal stack down**
 
 ```bash
 cd /home/cole/ulp-suite && DOCKER_CONFIG=/tmp/claude-1000/dockercfg REHEARSAL_JWT_SECRET=x REHEARSAL_ADMIN_EMAIL=x@x.test REHEARSAL_ADMIN_PASSWORD=x REHEARSAL_WEBHOOK_SECRET=x docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v --remove-orphans 2>&1 | tail -6 && docker ps -a --format '{{.Names}}' | grep -c ulprehearsal || true
@@ -2709,31 +2709,31 @@ Expected: containers and volumes removed; the count is `0`. (Dummy secrets: comp
 
 **Files:** none.
 
-- [ ] **Step 1: Fast-forward merge and push**
+- [x] **Step 1: Fast-forward merge and push**
 
 ```bash
 cd /home/cole/ulp-suite && git switch main && git merge --ff-only sp1-disk-safety-hygiene && git push origin main 2>&1 | tail -3 && git log --oneline -12
 ```
 Expected: fast-forward, push accepted, the SP1 commits on top of `4ac1817`.
 
-- [ ] **Step 2: Watch CI on the pushed commit**
+- [x] **Step 2: Watch CI on the pushed commit**
 
 Run: `cd /home/cole/ulp-suite && gh run list --branch main --limit 1 --json databaseId,status && gh run watch "$(gh run list --branch main --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status 2>&1 | tail -12`
 Expected: the run succeeds on `ubuntu-24.04` with the v7 actions; the previous warnings ("Node.js 20 is deprecated", "ubuntu-latest will migrate") are gone from its annotations. If it fails, fix forward on `main` with a new commit (never force-push).
 
-- [ ] **Step 3: Pick a quiet moment**
+- [x] **Step 3: Pick a quiet moment**
 
 Run: `docker exec ulpsuite_clickhouse clickhouse-client --query "SELECT count() FROM system.query_log WHERE type = 'QueryFinish' AND interface = 2 AND event_time > now() - INTERVAL 3 MINUTE AND query LIKE 'SELECT%' AND query NOT LIKE '%system.%'"`
 Expected: `0` or a small number. The app restarts for about 30 s; if the operator is mid-search (a larger number), wait a few minutes and re-check.
 
-- [ ] **Step 4: Recreate only the app container**
+- [x] **Step 4: Recreate only the app container**
 
 ```bash
 cd /home/cole/ulp-suite && DOCKER_CONFIG=/tmp/claude-1000/dockercfg docker compose up -d --no-deps app 2>&1 | tail -4 && sleep 45 && docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep ulpsuite
 ```
 Expected: `ulpsuite_app` restarted (`Up ... (healthy)` within about a minute), `ulpsuite_clickhouse` untouched (its uptime unchanged), the app image is the new `:latest` id.
 
-- [ ] **Step 5: Check the deployed code and the start-up log**
+- [x] **Step 5: Check the deployed code and the start-up log**
 
 ```bash
 cd /home/cole/ulp-suite && docker inspect ulpsuite_app --format '{{.Image}} {{index .Config.Labels "com.docker.compose.project.working_dir"}}' && docker exec ulpsuite_app printenv INGEST_DISK_GATE INGEST_MIN_FREE_BYTES; docker logs --since 3m ulpsuite_app 2>&1 | grep -E "cron started|disk-watch|Ready in|ERROR|error" | cut -c1-160
@@ -2755,15 +2755,15 @@ Expected at 04:00Z and 05:00Z the next day (not now): `docker logs ulpsuite_app 
 - Modify: `/home/cole/ulp-suite/docs/superpowers/specs/2026-10-11-disk-safety-and-hygiene-design.md` (status line)
 - Modify: this plan (tick the boxes; note any deviation)
 
-- [ ] **Step 1: Update the spec's status line**
+- [x] **Step 1: Update the spec's status line**
 
 Change the line beginning `Status: **approved 2026-10-11, not implemented.**` to `Status: **implemented and deployed locally on 2026-10-11 (plan `docs/superpowers/plans/2026-10-11-disk-safety-and-hygiene.md`).**` followed by the existing sentence about sub-project 2, and add one line to the Rollout section naming the image id and the rollback tag.
 
-- [ ] **Step 2: Tick this plan's boxes and list deviations**
+- [x] **Step 2: Tick this plan's boxes and list deviations**
 
 Replace `- [ ]` with `- [x]` for every completed step, and add a short "Deviations" paragraph at the end of this file for anything done differently from the text above.
 
-- [ ] **Step 3: Commit and push**
+- [x] **Step 3: Commit and push**
 
 ```bash
 cd /home/cole/ulp-suite && git add docs/superpowers && git commit -F - <<'EOF'
@@ -2774,6 +2774,19 @@ EOF
 git push origin main 2>&1 | tail -2
 ```
 
-- [ ] **Step 4: Update the project memory**
+- [x] **Step 4: Update the project memory**
 
 Update `project_disk_full_incident_2026_10_10.md` and the open-items ledger: SP1 done (commits, image id, rollback tag), the banner and gate are live, what remains (SP2 novelty-aware ingest, the owner's items, the 04:00Z/05:00Z cron check), and the lessons from the execution.
+
+---
+
+## Deviations (what execution found)
+
+1. **Task 1:** the gate suite has 29 tests (parameterised cases), not "about 22".
+2. **Task 6:** `DailyScheduleOptions.run` is `() => unknown`, not `() => void | Promise<void>`: `tsc` rejected `Promise<DedupTickResult>` and `Promise<ProjectionScopeTickResult>`. Code and plan were corrected.
+3. **Task 9:** `require('sharp/package.json')` is blocked by sharp's `exports` map, so the versions are read from `node_modules/<pkg>/package.json` with `fs` (`vers.sh` in the scratchpad). `postcss-nested` is NOT fixed by a patch (it needs the Tailwind major), so the audit went 12 -> 9, not to about 8. 40 packages moved in the lockfile, none by a major.
+4. **Tasks 3 and 4 (found in Task 11):** the banner was first seen rendered on the rehearsal app, and with `INGEST_DISK_GATE=off` it still said "imports pause below ...". `IngestDiskGateState` gained `enabled`, and `describeDiskBanner` drops the clause when it is false (commit 33f72bb, tests first).
+5. **Task 8 (found in Task 11):** the first run of `scripts/e2e-disk-gate.ts` scored 14 of 20: the upload landed within 5 s of the previous job's free-space reading, which the gate deliberately reuses, so it was waved through on the pre-filler value. The script waits 6 s after the filler (commit bed1132); the second and third runs scored 20 of 20.
+6. **Task 11:** the rehearsal totals were 36 of 36 (alert), 33 of 33 (upload resilience) and 20 of 20 (gate). The alert and resilience rehearsals ran on image `d7b448445d96`; the `enabled` fix came after, in image `7a0c098486cd` (the one deployed), and the gate rehearsal was re-run on it. A visual check of the banner and the Ingest Health line in the built-in browser (rehearsal app, test admin) was added to the plan's checks.
+7. **Task 12:** CI took 1 m 06 s and left no annotations. The app was recreated at 02:52:24Z after a check that no app query had run for 3 minutes.
+

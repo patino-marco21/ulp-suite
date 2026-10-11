@@ -1,6 +1,6 @@
 # Disk safety and hygiene — design (2026-10-11)
 
-Status: **approved 2026-10-11, not implemented.** Sub-project 1 of the 2026-10-11 plan. Sub-project 2 is
+Status: **implemented and deployed locally on 2026-10-11** (plan `docs/superpowers/plans/2026-10-11-disk-safety-and-hygiene.md`; see "Release" at the end). Sub-project 1 of the 2026-10-11 plan. Sub-project 2 is
 `2026-10-02-novelty-aware-ingest-design.md` (it waits for this one). Reference machine: one 937 GiB disk shared by the OS, Docker and the ClickHouse
 volume (about 515 GiB: `ulp.credentials` 128.88 GiB, the archive `credentials_predup_auto` 381.20 GiB, the two search dictionaries 2.1 GiB).
 Every number below was measured read-only on 2026-10-10/11. The operator's own search terms, file names and channel names are deliberately absent
@@ -154,3 +154,28 @@ Unit tests are mocks; the 2026-10-04 rehearsal found two ClickHouse bugs they co
 
 - **The dedup auto-apply and the archive.** `.env` arms `CONTENT_DEDUP_APPLY=true` with `DEDUP_MIN_EXCESS=14000000`; an import that leaves 14M duplicate rows makes the next tick drop `credentials_predup_auto` (381 GiB) in step 2, before the disk guard's `preflight()` (step 5), then rewrite the table. That order is intentional (the drop makes room), so it is not changed here; sub-project 2 (novelty-aware ingest keeps the excess near zero) and the operator decide the apply setting. Until then the pending download pile must not be imported.
 - Push alerts (declined; `DISK_ALERT_WEBHOOK_URL` still works if set), ClickHouse `keep_free_space_bytes` (config plus a restart, a possible follow-up), host log caps (the operator's `sudo`), the major upgrades (Tailwind 4, `eslint-config-next`, Next 16, ...), the hardening bundle (`2026-10-03-hardening-bundle-design.md`), a `next build` step in CI, one-word search speed.
+
+## Release (2026-10-11)
+
+Merged to `main` (fast-forward, 15 commits after the plan, last code commit `33f72bb`, docs `12a1b24`), CI green on `ubuntu-24.04` with
+`actions/checkout@v7` and `actions/setup-node@v7` in 1 m 06 s, with none of the old annotations (Node 20, `ubuntu-latest` migration).
+Image `ulp-suite-app:latest` = `7a0c098486cd`, deployed at 02:52:24Z by recreating only `app` (ClickHouse untouched); rollback tag
+`ulp-suite-app:rollback-20261011-0231z` = `defbce7a277e`. Start-up log: crons armed for 04:00Z (dedup) and 05:00Z (projection-scope), the
+disk watcher's first report CRITICAL 118.54 GiB, no errors; `GET /api/monitoring/disk` answers 401 to an anonymous caller.
+
+| Check | Result |
+|---|---|
+| Unit suite | 159 files, 2,380 tests (baseline 149 files, 2,306); `tsc`, `eslint` and `next build` (inside the image build) clean |
+| Live, read-only | `__tests__/projection-scope.live.test.ts` on the real ClickHouse 26.3: passes; the real cutoff returns no partition, so the daily ALTER is gone |
+| Alert rehearsal on the new image (gate on at its defaults) | 36 of 36 |
+| Upload-resilience rehearsal (the gate sits in the loop it guards) | 33 of 33, including the 45 s ClickHouse freeze: the stall watchdog still fails the job, so the gate's free-space read is abortable |
+| `scripts/e2e-disk-gate.ts` | 20 of 20 on the final image: an upload goes through above the floor; under it the upload waits 45 s (longer than the 30 s stall timeout, so the gate's heartbeat works) with nothing inserted, the endpoint and Ingest Health report it; removing the filler resumes it by itself with every row exactly once; `INGEST_DISK_GATE=off` holds nothing back |
+| Banner seen rendered (built-in browser on the rehearsal app, test admin) | critical, critical with the gate off (no "imports pause" clause), and paused ("Imports are paused: 118.0 GiB free, floor 127.8 GiB. They resume by themselves above 140.6 GiB."); the Ingest Health line "Imports paused: waiting for disk space (118.0 GB free, floor 127.8 GB)" |
+| `npm audit` | 12 -> 9 findings: `next` 15.5.24 -> 15.5.27, `sharp` 0.35.4 -> 0.35.5, `source-map-js` 1.2.1 -> 1.2.2 (40 packages in the lockfile moved, none by a major); what remains is the dev-tooling chain behind `tailwindcss` and `eslint-config-next`, `postcss-nested` included |
+
+What the build changed against this design: the gate state carries `enabled` (the banner dropped the "imports pause" clause for a
+switched-off gate after it was seen rendered); the scheduler's `run` is `() => unknown` (the tick functions return result objects, `tsc`
+rejected the first form); `postcss-nested` is not fixed by a patch; the rehearsal waits 6 s after the filler so the gate's 5 s reading
+cache cannot wave the next upload through (the first run of the script failed on exactly that). Still to look at on the next day:
+the dedup and projection-scope log lines stamped 04:00Z and 05:00Z (not 23:33Z), and `projection-scope ... cleared=[none] skipped=[none]`.
+
