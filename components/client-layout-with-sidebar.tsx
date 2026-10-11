@@ -3,6 +3,7 @@ import { usePathname } from "next/navigation";
 import { useEffect } from "react";
 import { AppSidebar } from "@/components/app-sidebar";
 import AppHeader from "@/components/app-header";
+import DiskBanner from "@/components/disk-banner";
 
 interface ClientLayoutWithSidebarProps {
   children: React.ReactNode;
@@ -34,6 +35,7 @@ export default function ClientLayoutWithSidebar({ children, initialUserRole }: C
       <AppSidebar initialUserRole={initialUserRole} />
       <div className="flex-1 flex flex-col min-w-0">
         <AppHeader title={title} />
+        <DiskBanner />
         <main className="flex-1 bg-background">{children}</main>
       </div>
     </>
