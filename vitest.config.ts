@@ -22,7 +22,7 @@ export default defineConfig({
     // checkout (SQLITE_READONLY), and racy on first-admin-seed in a fresh
     // writable checkout.
     globalSetup: ['./__tests__/setup/sqlite-global-setup.ts'],
-    setupFiles: ['./__tests__/setup/sqlite-worker-setup.ts', './__tests__/setup/ingest-gate-off.ts'],
+    setupFiles: ['./__tests__/setup/sqlite-worker-setup.ts', './__tests__/setup/ingest-gate-off.ts', './__tests__/setup/ingest-novelty-off.ts'],
     // Coverage (run with --coverage)
     coverage: {
       provider: 'v8',
