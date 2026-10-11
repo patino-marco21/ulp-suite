@@ -202,6 +202,15 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   batch inserted, no retry, no memory-guard poll) is failed and its queue slot
   freed. Time is measured while the machine is awake, so a laptop suspend does
   not trip it. Default `1200000` (20 minutes).
+- `INGEST_NOVELTY_CHECK` — novelty-aware ingest, on by default (`lib/ingest-novelty.ts`,
+  `docs/superpowers/specs/2026-10-02-novelty-aware-ingest-design.md`). A file is parsed into a private
+  stage table and only the credentials `ulp.credentials` does not hold yet are written; every import
+  reports **new / already in the database / repeated in the file**, a finished file is remembered in
+  `ulp.sources` even when it added nothing, and a retry never duplicates a row (`imported` now means new
+  rows). A fully new file takes about 50% longer than the direct path; a file the database already
+  holds costs the parse and one scan of one column. `off` imports straight into `ulp.credentials` as before.
+- `INGEST_NOVELTY_SLAB_ROWS` — rows per commit step (default `20000000`, at least `1000`). Files below
+  this are committed in one step; larger ones in hash slabs, one slab at a time across all imports.
 
 Batch size stays a fixed 100,000 rows; inserts remain synchronous, in-order, and
 retryable (unchanged from the resilience work).
@@ -403,7 +412,7 @@ Reference deployment: 1.39 billion rows, one 32 GB laptop (cold timings, measure
 |---|---|
 | Insert throughput | ~1–2M rows/min on laptop SSD (single-process) |
 | Peak heap per 500K-row batch | ~100 MB (array in memory before insert) |
-| Dedup Set cap | 2M entries → ~440 MB max (prevents OOM on huge files) |
+| Dedup Set cap (direct path only) | 2M entries → ~440 MB max (prevents OOM on huge files); novelty-aware ingest dedups in the stage table, exactly, for any file size |
 | Exact domain / email lookup | 0.03–1.3 s cold (bloom filters + primary key); a very popular value such as `admin@gmail.com` takes 7–23 s |
 | Browse / search, default sort (domain A-Z) | 5-14 s for the rows (read in primary-key order, stops after 200 matches); the total is a separate query (4-17 s) that arrives after the rows |
 | "Newest first" | 0.1-1 s for a plain browse, a popular domain or word, a tier/password filter or a date range inside the newest import (it was 18-76 s); a rare term, a term with no match, or a date range older than the projection is answered by the plain scan, 14-27 s. Run as time windows on `proj_imported_desc`: `lib/newest-first.ts`, `docs/superpowers/specs/2026-10-01-newest-first-windows-design.md`. The response's `plan` says which one answered |

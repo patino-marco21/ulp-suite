@@ -149,6 +149,12 @@ services:
       # switches the gate off.
       INGEST_MIN_FREE_BYTES: ${INGEST_MIN_FREE_BYTES:-}
       INGEST_DISK_GATE: ${INGEST_DISK_GATE:-}
+      # Novelty-aware ingest (lib/ingest-novelty.ts) -- optional; forwarded explicitly (see above). On by default: a file is parsed
+      # into a stage table and only the credentials ulp.credentials does not hold yet are written. INGEST_NOVELTY_CHECK=off imports
+      # straight into ulp.credentials as before. INGEST_NOVELTY_SLAB_ROWS (empty = 20000000, at least 1000) is the size of one
+      # commit step.
+      INGEST_NOVELTY_CHECK: ${INGEST_NOVELTY_CHECK:-}
+      INGEST_NOVELTY_SLAB_ROWS: ${INGEST_NOVELTY_SLAB_ROWS:-}
       # Exact-content dedup worker — report-only unless explicitly enabled.
       CONTENT_DEDUP_APPLY: ${CONTENT_DEDUP_APPLY:-false}
       DEDUP_CRON_HOURS: ${DEDUP_CRON_HOURS:-24}

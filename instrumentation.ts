@@ -53,6 +53,18 @@ export async function register() {
         console.error('[instrumentation] Monitor rescan cron failed to start:', err)
       }
 
+      // Drop the stage tables a previous process left behind (novelty-aware ingest, lib/ingest-stage.ts) BEFORE the inbox starts
+      // importing. Waits at most 20 s for ClickHouse, so a slow start never delays the app.
+      try {
+        const { startStageSweeper } = await import('./lib/ingest-stage')
+        await Promise.race([
+          startStageSweeper(),
+          new Promise<void>(resolve => setTimeout(resolve, 20_000)),
+        ])
+      } catch (err) {
+        console.error('[instrumentation] Stage-table sweeper failed to start:', err)
+      }
+
       try {
         const { startInboxWatcher } = await import('./lib/inbox-watcher')
         startInboxWatcher()

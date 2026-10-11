@@ -78,6 +78,11 @@ services:
       # (empty = the production defaults: a 50 GiB floor, the gate on).
       INGEST_MIN_FREE_BYTES: ${REHEARSAL_INGEST_MIN_FREE_BYTES:-}
       INGEST_DISK_GATE: ${REHEARSAL_INGEST_DISK_GATE:-}
+      # scripts/e2e-novelty-ingest.ts recreates the app with these (empty = the production defaults: one file at a time, novelty
+      # check on, 20,000,000-row slabs).
+      UPLOAD_CONCURRENCY: ${REHEARSAL_UPLOAD_CONCURRENCY:-}
+      INGEST_NOVELTY_CHECK: ${REHEARSAL_INGEST_NOVELTY_CHECK:-}
+      INGEST_NOVELTY_SLAB_ROWS: ${REHEARSAL_INGEST_NOVELTY_SLAB_ROWS:-}
     volumes:
       - rehearsal_data:/app/data
       - rehearsal_inbox:/app/inbox
