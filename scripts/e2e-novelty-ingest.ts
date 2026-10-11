@@ -10,7 +10,8 @@
  *   positional  a credential line the field split rejects does not take the two lines after it for a login and a password (no merged
  *               row, nothing lost), a genuine label-free URL / login / password record still imports, and "https://e-mail:password"
  *               (a stray scheme, no url) is kept as an e-mail:password pair, and "login:password:https://url" (the url last) is read
- *               in that order, and "http://url login:password" (one space) is read as url, login, password
+ *               in that order, "http://url login:password" (one space) is read as url, login, password, a ";jsessionid=..." path
+ *               parameter stays in the url, and "e-mail:password | note" keeps the pair
  *   monitor     a monitor alerts for rows that are new to the database, not for a row the database already held
  *   big         2.5M distinct lines + 100k repeats of early lines (past the old 2M in-file cap): exact, in 5 slabs, phases visible
  *   kill        the app is killed in the middle of the commit; after the restart the orphan stage tables are gone and a retry
@@ -386,12 +387,16 @@ async function positionalRecords(): Promise<void> {
     `posG${RUN}:${pw('G')}:https://shop7.example-store.test/login`,
     // a url, one space, then login:password
     `http://shop8.example-store.test/login posH${RUN}:${pw('H')}`,
+    // a ";name=value" path parameter in the url is not a field separator
+    `https://shop9.example-store.test/login;jsessionid=AB12${RUN}:posI${RUN}:${pw('I')}`,
+    // an e-mail login and its password in front of a pipe, then a note
+    `posJ${RUN}@probe-mail.test:${pw('J')} | Country: US`,
   ]
   const p = await importLines(P, ls)
-  check('a file with a rejected URL line, a genuine block record, a stray-scheme pair, a url-last line and a url-space line: 7 credentials are new, none known', p.status === 'done' && p.imported === 7 && p.known === 0, brief(p))
-  check('...the rejected line is the only one skipped, 7 rows are stored', p.skipped === 1 && rowsFor(P) === 7, `skipped ${p.skipped}, rows ${rowsFor(P)}`)
+  check('a file with a rejected URL line, a genuine block record, a stray-scheme pair, a url-last line, a url-space line, a path parameter and a pair with a note: 9 credentials are new, none known', p.status === 'done' && p.imported === 9 && p.known === 0, brief(p))
+  check('...the rejected line is the only one skipped, 9 rows are stored', p.skipped === 1 && rowsFor(P) === 9, `skipped ${p.skipped}, rows ${rowsFor(P)}`)
   const stored = chQuery(`SELECT arrayStringConcat(arraySort(groupArray(email)), ',') FROM ulp.credentials WHERE source_file = '${P}'`)
-  const expected = [`posB${RUN}`, `posC${RUN}`, `posD${RUN}@probe-mail.test`, `posE${RUN}`, `posF${RUN}@probe-mail.test`, `posG${RUN}`, `posH${RUN}`].sort().join(',')
+  const expected = [`posB${RUN}`, `posC${RUN}`, `posD${RUN}@probe-mail.test`, `posE${RUN}`, `posF${RUN}@probe-mail.test`, `posG${RUN}`, `posH${RUN}`, `posI${RUN}`, `posJ${RUN}@probe-mail.test`].sort().join(',')
   check('...the two lines after the rejected one are their own credentials, the block record is one, the pair keeps its e-mail: no merged row', stored === expected, `${stored} vs ${expected}`)
   const noUrl = Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND email = 'posF${RUN}@probe-mail.test' AND url = '' AND domain = 'probe-mail.test'`))
   check('...the stray-scheme pair is stored with no url and its e-mail domain', noUrl === 1, `rows ${noUrl}`)
@@ -399,6 +404,10 @@ async function positionalRecords(): Promise<void> {
   check('...the url-last line is stored with its url, its login and its domain', urlLast === 1, `rows ${urlLast}`)
   const urlSpace = Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND email = 'posH${RUN}' AND url = 'http://shop8.example-store.test/login' AND domain = 'shop8.example-store.test'`))
   check('...the url-space line is stored with its url, its login and its domain', urlSpace === 1, `rows ${urlSpace}`)
+  const urlParam = Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND email = 'posI${RUN}' AND url = 'https://shop9.example-store.test/login;jsessionid=AB12${RUN}'`))
+  check('...the path-parameter line keeps the parameter in its url and has its own login', urlParam === 1, `rows ${urlParam}`)
+  const withNote = Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND email = 'posJ${RUN}@probe-mail.test' AND password = '${pw('J')}'`))
+  check('...the pair with a note after the pipe is stored as the pair', withNote === 1, `rows ${withNote}`)
   const merged = Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND position(email, '://') > 0`))
   check('...no stored login holds a whole line', merged === 0, `rows ${merged}`)
 }

@@ -1,9 +1,9 @@
-# Parser: the positional fallback swallowed real lines, and four line layouts were dropped — design (2026-10-11)
+# Parser: the positional fallback swallowed real lines, four line layouts were dropped and two were misread — design (2026-10-11)
 
 Status: **implemented on 2026-10-11** (`lib/ulp-parser.ts`: `canBeLoginLine`, two small edits in the line loops of `parseULPContent` and
-`parseULPStream`, one branch and one helper (`splitLoginPasswordUrl`) in `colonSplit`; `splitUrlSpacePair`; `lib/ulp-telegram-tag.ts`: one condition; tests
+`parseULPStream`, one branch and one helper (`splitLoginPasswordUrl`) in `colonSplit`; `splitUrlSpacePair`, `semicolonIsUrlParameter`, one condition in the pipe rule; `lib/ulp-telegram-tag.ts`: one condition; tests
 `__tests__/ulp-parser-positional-guard.test.ts`, `__tests__/ulp-parser-scheme-email-pair.test.ts`, `__tests__/ulp-parser-login-password-url.test.ts`,
-`__tests__/ulp-parser-url-space-pair.test.ts` and three cases in `__tests__/ulp-parser-telegram-tags.test.ts`; rehearsal scenario `positional` and two cases of `tags` in
+`__tests__/ulp-parser-url-space-pair.test.ts`, `__tests__/ulp-parser-separator-edge-cases.test.ts` and three cases in `__tests__/ulp-parser-telegram-tags.test.ts`; rehearsal scenario `positional` and two cases of `tags` in
 `scripts/e2e-novelty-ingest.ts`). Found while chasing seven stored rows that an offline re-parse of one pile file did not reproduce, and then by a
 survey of what the parser still rejects (45 random pile files, 21M lines). No source file names appear here on purpose: the repository is public.
 
@@ -39,6 +39,14 @@ the part before the first colon after the path as the url, found one field too f
 **5. A Telegram tag with a second link was not cut.** `...:Secret1://t.me/Channel|NAME;@NAME|https://t.me/+AbC123`: the tag stripper
 left the line alone because the text after the first link holds a `:` (the one of the advert's own `https://`), so the line was rejected.
 
+**6. A `;name=value` path parameter in the url was read as the field separator.** `https://shop.example.test/login;jsessionid=AB12:alice:Secret1`: the
+semicolon rule (tab beats `;` beats `|` beats `:`) split the line at the first `;`, so the url became the login and the rest the password. The same
+happened to a password that holds `;name=value`. 915k lines of the pile have a path parameter in the url (262 files); in the first 10M rows stored by
+the re-import 3,339 rows (0.03%) were junk of this kind.
+
+**7. `alice@mail.test:Secret1 | Country: US` was read with the pipe as the field separator**, so `alice@mail.test:Secret1` became the login and the note the
+password. The pipe rule treats a pipe as the separator unless two or more colons stand in front of it; an e-mail login with its password has one.
+
 Measured with `://` in both the stored url and the stored login (the junk row's signature) and with the app's own parser:
 
 | Finding | Number |
@@ -71,12 +79,17 @@ So an import with this parser lost about two real credential lines and stored on
 4. **`http(s)://url login:password` with a space is read as url, login, password** (`splitUrlSpacePair`), but only as a fallback after the field
    split found no fields, so every line that parsed before parses the same. The login holds no `/` (that is a port or a path written after the
    host), the password holds no space, and a url that holds a Telegram link is a banner, not a url.
-5. **The colon of a `scheme://` in the advert after the link no longer counts as a field separator** (`stripTelegramTag`). A real credential
+5. **The colon of a `scheme://` in the advert after the link no longer counts as a field separator** (`stripTelegramTag`).
+6. **A `;name=value` right after the url's path is a path parameter** (`semicolonIsUrlParameter`: the line starts with a scheme and the first `;` is followed by
+   `name=`): the semicolon rule is skipped and the colon split reads `url;jsessionid=AB12:login:password`. `url;login;password`, `login;password` and
+   `login;pass=word` are unchanged (the first has no `=` after the first `;`, the others do not start with a scheme).
+7. **An e-mail login with its password in front of a pipe is a credential followed by a note** (the pipe rule: exactly one colon in front of the pipe
+   and `local@domain:` at the start). `login|password`, `url|login|password`, `host:port|login|password` are unchanged. A real credential
    whose url is a t.me link (`https://t.me/Channel:alice:Secret1`, or a password that is a url) is still left alone.
 
 ## Verification (before anything was deployed)
 
-- 36 new unit tests for rules 1 and 2, 24 for rule 3, 17 for rule 4 and 3 for rule 5 (synthetic fixtures); the full suite (2,673 tests) is green. Against the parser
+- 36 new unit tests for rules 1 and 2, 24 for rule 3, 17 for rule 4, 3 for rule 5 and 15 for rules 6 and 7 (synthetic fixtures); the full suite (2,705 tests) is green. Against the parser
   without rules 1 and 2, 19 of the 36 fail (red), then all pass; the others guard what must not change.
 - **Whole files through `parseULPStream`, the deployed parser against this one** (multiset of credentials, repeats kept):
 
@@ -97,6 +110,11 @@ So an import with this parser lost about two real credential lines and stored on
 - **Rule 4 (url-space), the previous version against this one:** a 9.4M-line list 9,234,036 accepted / 473,552 rejected -> 9,391,504 / 316,084, **0 rows only the
   old parser produced**, 157,468 only the new one; a 5.2M-line list +36,149 new rows and 17 junk rows fewer (the rejected line no longer opens a positional record);
   three other files identical or +1. Per line on the first 3M lines of the 9.4M-line list: 157,468 recovered, 0 lost, 0 changed.
+- **Rules 6 and 7, the previous version against this one, on four junk-heavy files** (whole files): 1,194,353 -> 1,194,267 accepted (only the old parser 2,213, of which
+  2,148 junk rows with a url or a whole line in the login and 65 of the same family; only the new one 2,127); 648,274 -> 648,240 (942 / 908); 442,109 -> 442,065
+  (769 / 725); 2.29M identical. Per line over 6.8M lines of six such files: 5,825 lines change (5,655 of them from a junk row), 336 junk rows are now rejected
+  (a login equal to the password, or a url that is garbage), 13 rejected lines are recovered. Every old-only row that was not caught by the junk signature is a
+  `url | name=value | name=value...:login:password` row of the same family.
 - **What is still rejected** across the 45-file survey after rules 1 to 3 and 5: 0.56% of the lines (1.87% before rules 3 and 5); rule 4 recovers 1.7% more of the lines of the large lists it applies to. More than half of a
   random sample of the remaining rejected lines are banner, watermark or invite lines (correctly rejected); by shape, 0.12% of all lines are bare
   urls, 0.07% have a `/` in the password, and the rest are oddities.
@@ -119,7 +137,7 @@ with this parser; the files are untouched on disk. The older partitions keep the
 - A password with a `/` in it behind a host and a login (`https://host:alice:pa/ss`): the field split takes the first `/` for the start of a
   path and rejects the line (0.07% of the survey, 0.5% of one heavy file, most of the samples are truncated hosts that are not credentials). Not
   fixed: a heuristic for "the `/` belongs to the password" needs its own measurement.
-- `email:password | Label: value`: the pipe rule takes the pipe for the field separator and stores `email:password` as the login (171 lines in the small
-  pile files; 1.65M stored rows of the older partitions have a colon in the login without a scheme).
+- `login:password | Label: value` where the login is not an e-mail address: the pipe rule still takes the pipe for the separator (rule 7 only covers an e-mail login).
+  About half of the 1.65M stored rows of the older partitions with a colon in the login and no scheme are of the e-mail kind.
 - Lines with a url and a single value (`https://host/path:value`, no login) are not credentials and stay rejected.
 - Policy, not parsing: a login equal to the password is rejected (about 1% of the lines of one heavy file), a login with a space (phone numbers) is garbage.

@@ -584,6 +584,14 @@ function colonSplitFields(line: string): [string, string, string] | null {
 }
 
 /**
+ * "https://shop.example.test/login;jsessionid=AB12:alice:Secret1": a ";name=value" inside the url is a path parameter, not a field separator
+ * (the semicolon rule took the url for the login and the rest for the password).
+ */
+function semicolonIsUrlParameter(line: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^;\s]*;[A-Za-z_][\w-]*=/.test(line)
+}
+
+/**
  * "http://shop.example.test/login alice:Secret1": a url, one space, then login:password. Only a fallback, tried after the field split found
  * no fields, so every line that parsed before parses the same. The login holds no "/" (that would be a path or a port written after the host).
  */
@@ -637,7 +645,9 @@ export function parseLine(
       const beforePipe = trimmed.slice(0, trimmed.indexOf('|'))
       // Count colons that are NOT part of a '://' scheme
       const nonSchemeColons = (beforePipe.replace('://', '  ').match(/:/g) ?? []).length
-      if (nonSchemeColons >= 2) {
+      // "alice@mail.test:Secret1 | Country: US": an e-mail login and its password in front of the pipe are a credential, the rest is a note
+      const emailPairBeforePipe = nonSchemeColons === 1 && /^[^\s/:@]+@[^\s/:@]+:/.test(beforePipe)
+      if (nonSchemeColons >= 2 || emailPairBeforePipe) {
         // Has login:pass embedded before the pipe → trailing metadata, strip it
         clean = beforePipe.trim()
       } else {
@@ -695,7 +705,7 @@ export function parseLine(
     } else {
       return { credential: null, reason: 'no_fields' }
     }
-  } else if (clean.includes(';')) {
+  } else if (clean.includes(';') && !semicolonIsUrlParameter(clean)) {
     const parts = clean.split(';')
     if (parts.length >= 3) {
       url      = parts[0].trim()
