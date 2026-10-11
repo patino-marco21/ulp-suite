@@ -491,7 +491,17 @@ function colonSplit(line: string): [string, string, string] | null {
       const urlPart   = line.slice(0, loginStart - 1)
       const loginRest = line.slice(loginStart)
       const colon     = loginRest.indexOf(':')
-      if (colon === -1) return null
+      if (colon === -1) {
+        // "https://alice@mail.test:Secret1": an e-mail address and a password behind a stray scheme, the url field was empty when the list was
+        // made. Salvaged as an e-mail:password pair with no url (the same as the junk-host case in parseLine). Not a port ("user@host:8080"),
+        // not an app id ("android://hash@com.app:x"), and not a host without a login.
+        const userHost = urlPart.slice(afterScheme)
+        const looksLikePort = /^\d{1,5}$/.test(loginRest) && Number(loginRest) <= 65535
+        if (/^https?:\/\//i.test(urlPart) && !looksLikePort && /^[^/\s:@]+@[^/\s:@]+\.[^/\s:@]+$/.test(userHost)) {
+          return ['', userHost, loginRest]
+        }
+        return null
+      }
       // Same symmetric-delimiter check as the with-path branch above — only
       // trim when the url/login separator AND the login/password separator
       // both show a space before the colon. Never trim the port-match
@@ -765,6 +775,19 @@ export function parseLine(
 
 // ── Batch / stream parsers ────────────────────────────────────────────────────
 
+/**
+ * A rejected line that starts with "http" opens a positional record (URL line, login line, password line: the label-free stealer-log
+ * layout), but only when the line after it can be a login. A line with a scheme in it (another URL, an "android://hash@com.app" id), or a
+ * line that is itself a credential ("https://site.com:alice:Secret1", "alice:Secret1", "alice|Secret1"), is not a login: the rejected line was
+ * a credential line the field split could not take (a "/" in the password, a login that is missing) and the lines after it are independent
+ * records. Taking them for the login and the password merged three real lines into one junk row and lost two of them (2026-06-28: a false
+ * no_fields; 2026-10-11: 21 million stored rows have that shape).
+ */
+function canBeLoginLine(line: string, trimmed: string, sourceFile: string): boolean {
+  if (trimmed.includes('://')) return false
+  return parseLine(line, sourceFile).reason === 'no_fields'
+}
+
 export function makeRejectionMap(): Record<string, number> {
   return { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0, tier_dropped: 0 }
 }
@@ -865,8 +888,13 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
 
     // Positional login: URL already collected, waiting for login on this line
     if (positionalUrl) {
-      positionalLogin = trimmed
-      continue
+      if (canBeLoginLine(line, trimmed, sourceFile)) {
+        positionalLogin = trimmed
+        continue
+      }
+      // Not a login: the "URL" line was a rejected credential line, not the start of a record. Count it and read this line on its own.
+      skipped++; breakdown.no_fields++
+      positionalUrl = ''
     }
 
     // Inline parseLine (non-labeled, non-separator, non-positional lines)
@@ -1036,8 +1064,13 @@ export async function* parseULPStream(
 
     // Positional login: URL collected, waiting for login
     if (positionalUrl) {
-      positionalLogin = trimmed
-      return
+      if (canBeLoginLine(line, trimmed, filename)) {
+        positionalLogin = trimmed
+        return
+      }
+      // Not a login: the "URL" line was a rejected credential line, not the start of a record. Count it and read this line on its own.
+      batchRejected++; batchBreakdown.no_fields++
+      positionalUrl = ''
     }
 
     const { credential, reason } = parseLine(line, filename, shouldHardDrop)
