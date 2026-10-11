@@ -31,3 +31,11 @@ describe('security headers', () => {
     }
   })
 })
+
+describe('output tracing', () => {
+  test('the data folders, the inbox included, are never copied into the standalone output', async () => {
+    const mod = await import('../next.config.mjs')
+    const excludes = (mod.default as unknown as { outputFileTracingExcludes: Record<string, string[]> }).outputFileTracingExcludes['*']
+    for (const dir of ['./uploads/**', './clickhouse-data/**', './data/**', './inbox/**']) expect(excludes, dir).toContain(dir)
+  })
+})

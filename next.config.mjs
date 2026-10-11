@@ -8,12 +8,14 @@ const nextConfig = {
   poweredByHeader: false,
   // Tell Next.js not to bundle better-sqlite3 (native addon — must be required at runtime)
   serverExternalPackages: ['better-sqlite3'],
-  // Exclude large data folders from output file tracing (fixes slow builds)
+  // Exclude large data folders from output file tracing (fixes slow builds). ./inbox/** matters: while a big import is running it holds
+  // hundreds of GB of text files, and a local `next build` (standalone output) COPIES whatever tracing finds (2026-10-11: 22 GB in .next).
   outputFileTracingExcludes: {
     '*': [
       './uploads/**',
       './clickhouse-data/**',
       './data/**',
+      './inbox/**',
       './.devtasks/**',
     ],
   },
