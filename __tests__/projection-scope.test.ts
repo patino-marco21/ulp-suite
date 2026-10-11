@@ -5,6 +5,8 @@ import {
   cutoffPartition,
   buildEligiblePartitionsSql,
   buildClearProjectionSql,
+  clearProjectionNeedBytes,
+  CLEAR_RESERVE_MARGIN_BYTES,
   PROJECTION_NAME,
 } from '@/lib/projection-scope'
 
@@ -54,5 +56,25 @@ describe('SQL builders', () => {
     expect(buildClearProjectionSql('202605')).toBe(
       `ALTER TABLE ulp.credentials CLEAR PROJECTION ${PROJECTION_NAME} IN PARTITION '202605'`,
     )
+  })
+})
+
+describe('eligibility asks which parts really carry the projection', () => {
+  test('reads system.projection_parts and joins the parent part for its size', () => {
+    const sql = buildEligiblePartitionsSql('202605')
+    expect(sql).toContain('FROM system.projection_parts AS pp')
+    expect(sql).toContain('INNER JOIN system.parts AS pa ON pa.database = pp.database AND pa.table = pp.table AND pa.name = pp.parent_name')
+    expect(sql).toContain(`pp.name = '${PROJECTION_NAME}'`)
+    expect(sql).toContain('pp.active AND pa.active')
+    expect(sql).toContain('max(pa.bytes_on_disk) AS largest_part_bytes')
+  })
+})
+
+describe('clearProjectionNeedBytes', () => {
+  test('is the largest part x 1.1 plus a 5 GiB margin', () => {
+    const GiB = 1024 ** 3
+    expect(CLEAR_RESERVE_MARGIN_BYTES).toBe(5 * GiB)
+    expect(clearProjectionNeedBytes(58.64 * GiB)).toBe(Math.ceil(58.64 * GiB * 1.1) + 5 * GiB)
+    expect(clearProjectionNeedBytes(0)).toBe(5 * GiB)
   })
 })
