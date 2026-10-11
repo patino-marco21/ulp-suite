@@ -29,6 +29,9 @@ describe('stripTelegramTag — what is cut', () => {
     ['an advert after padding', 'shop.example.test/:alice:Secret1          @best_ulp - daily | https://t.me/+AbC123', 'shop.example.test/:alice:Secret1'],
     ['a two-field line', 'alice@mail.test:Secret1t.me/SomeChannel', 'alice@mail.test:Secret1'],
     ['upper case', 'shop.example.test/:alice:Secret1 HTTPS://T.ME/SomeChannel', 'shop.example.test/:alice:Secret1'],
+    ['a password that is an e-mail address, tag glued on', 'alice@mail.test:bob@yahoo.comt.me/SomeChannel', 'alice@mail.test:bob@yahoo.com'],
+    ['the same on a line with a url', 'https://shop.example.test/login:alice:bob@yahoo.comt.me/SomeChannel', 'https://shop.example.test/login:alice:bob@yahoo.com'],
+    ['the same with a scheme glued on', 'alice@mail.test:bob@yahoo.comhttps://t.me/SomeChannel', 'alice@mail.test:bob@yahoo.com'],
     ['a line ending in CRLF', 'shop.example.test/:alice:Secret1 https://t.me/SomeChannel\r', 'shop.example.test/:alice:Secret1'],
   ])('%s', (_label, input, expected) => {
     expect(stripTelegramTag(input)).toBe(expected)
@@ -40,7 +43,7 @@ describe('stripTelegramTag — what is left alone', () => {
     ['the link is the url field of a real credential', 'https://t.me/SomeChannel:alice:Secret1'],
     ['a bare invite line', 'https://t.me/+AbC123'],
     ['a bare link without a scheme', 't.me/SomeChannel'],
-    ['a host name that merely ends in t.me', 'alice:Secret1@payment.me/x'],
+    ['a URL with user info whose host name merely ends in t', 'https://alice:Secret1@payment.me/x'],
     ['a path that contains t.me/ with fields after it', 'shop.example.test/post.me/x:alice:Secret1'],
     ['no tag', 'shop.example.test/:alice:Secret1'],
     ['an empty line', ''],
@@ -80,6 +83,10 @@ describe('parseLine with a Telegram tag', () => {
     expect(cred('shop.example.test/login:alice@mail.test:Secret1          @best_ulp - daily | https://t.me/+AbC123')).toMatchObject({
       email: 'alice@mail.test', password: 'Secret1',
     })
+  })
+
+  test('a password that is an e-mail address keeps the address and loses the glued tag', () => {
+    expect(cred('alice@mail.test:bob@yahoo.comt.me/SomeChannel')).toMatchObject({ email: 'alice@mail.test', password: 'bob@yahoo.com' })
   })
 
   test('a two-field login:password line', () => {

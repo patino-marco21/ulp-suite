@@ -10,8 +10,8 @@
  * off so the credential in front of it parses as it would have without it.
  *
  * It is deliberately conservative. It only acts when the link is the END of the line (nothing after it that looks like another field),
- * when a field separator stands in front of it (so a bare invite line is left alone), and, for a link glued straight onto a letter or
- * digit, when that letter is not the end of a host name (`user:pass@payment.me/x`).
+ * when a field separator stands in front of it (so a bare invite line is left alone), and, for a URL with user info, when the link would
+ * be the end of its host name (`https://user:pass@payment.me/x`).
  */
 
 const TELEGRAM_LINK = /t\.me\//i
@@ -33,11 +33,11 @@ export function stripTelegramTag(line: string): string {
   if (tail.includes(':')) return line
   // A credential must stand in front of it: at least one field separator that is not the one of a "://" scheme.
   if ((head0.replace(/:\/\//g, '  ').match(/:/g) ?? []).length < 1) return line
-  // Glued straight onto a letter or digit: "user:pass@payment.me/x" ends in a host name, not in a tag.
-  if (/[A-Za-z0-9]$/.test(head0)) {
-    const lastAt = head0.lastIndexOf('@')
-    if (lastAt >= 0 && /^[A-Za-z0-9.-]*$/.test(head0.slice(lastAt + 1))) return line
-  }
+  // A URL with user info whose host name merely ends in "t" ("https://user:pass@payment.me/x") is a host, not a tag. Only that exact shape
+  // is protected: a scheme, user info (no '/' before the '@') and the start of a host name, nothing else in front of "t.me/". A
+  // login:password line whose PASSWORD is an e-mail address ("login:bob@yahoo.comt.me/Channel") is far more common in these lists
+  // (2026-10-11: hundreds of rows in single files) and is cut.
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/@\s]*@[A-Za-z0-9.-]*$/.test(head0)) return line
 
   // Remove what introduces the link: "https://", "https : //", "://", "//", "www." (repeated: "https://https://t.me/").
   let head = head0
