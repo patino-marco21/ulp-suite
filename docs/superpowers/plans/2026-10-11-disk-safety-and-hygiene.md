@@ -59,7 +59,7 @@ Expected: every file passes. Write down the `Test Files` and `Tests` counts as t
 - Produces (later tasks rely on these exact names):
   - `DEFAULT_INGEST_MIN_FREE_BYTES: number`
   - `interface IngestDiskGateConfig { enabled: boolean; floorBytes: number; resumeBytes: number; pollMs: number }`
-  - `interface IngestDiskGateState { paused: boolean; since: number | null; waiters: number; freeBytes: number | null; floorBytes: number; resumeBytes: number; checkedAt: number | null; error?: string }`
+  - `interface IngestDiskGateState { enabled: boolean; paused: boolean; since: number | null; waiters: number; freeBytes: number | null; floorBytes: number; resumeBytes: number; checkedAt: number | null; error?: string }`
   - `ingestDiskGateConfig(env?: NodeJS.ProcessEnv): IngestDiskGateConfig`
   - `getIngestDiskGate(env?: NodeJS.ProcessEnv): IngestDiskGateState`
   - `resetIngestDiskGate(): void` (test seam)
@@ -125,9 +125,16 @@ describe('ingestDiskGateConfig', () => {
 describe('getIngestDiskGate', () => {
   it('reports the configured floor and resume level before any import has asked', () => {
     expect(getIngestDiskGate(env({ INGEST_MIN_FREE_BYTES: String(20 * GiB) }))).toEqual({
-      paused: false, since: null, waiters: 0, freeBytes: null,
+      enabled: true, paused: false, since: null, waiters: 0, freeBytes: null,
       floorBytes: 20 * GiB, resumeBytes: 22 * GiB, checkedAt: null,
     })
+  })
+})
+
+describe('getIngestDiskGate — switched off', () => {
+  it('says so, so that the banner does not claim imports pause', () => {
+    expect(getIngestDiskGate(env({ INGEST_DISK_GATE: 'off' })).enabled).toBe(false)
+    expect(getIngestDiskGate(env()).enabled).toBe(true)
   })
 })
 
@@ -340,6 +347,8 @@ export interface IngestDiskGateConfig {
 }
 
 export interface IngestDiskGateState {
+  /** False when INGEST_DISK_GATE switches the gate off: nothing pauses, and the banner must not say that imports do. */
+  enabled: boolean
   /** True while at least one import is waiting. */
   paused: boolean
   /** When the first current waiter began waiting (epoch ms), or null. */
@@ -388,6 +397,7 @@ export function getIngestDiskGate(env: NodeJS.ProcessEnv = process.env): IngestD
   const s = store()
   const cfg = ingestDiskGateConfig(env)
   return {
+    enabled: cfg.enabled,
     paused: s.waiters > 0,
     since: s.waiters > 0 ? s.since : null,
     waiters: s.waiters,
@@ -817,7 +827,7 @@ const reading = (status: DiskReading['status'], freeGiB: number | null): DiskRea
   checkedAt: 0,
 })
 const gate = (over: Partial<IngestDiskGateState> = {}): IngestDiskGateState => ({
-  paused: false, since: null, waiters: 0, freeBytes: null, floorBytes: 50 * GiB, resumeBytes: 55 * GiB, checkedAt: null, ...over,
+  enabled: true, paused: false, since: null, waiters: 0, freeBytes: null, floorBytes: 50 * GiB, resumeBytes: 55 * GiB, checkedAt: null, ...over,
 })
 
 describe('describeDiskBanner', () => {
@@ -845,6 +855,13 @@ describe('describeDiskBanner', () => {
     expect(describeDiskBanner(reading('critical', 121.5), null)?.message).toBe(
       'Disk critical: 121.5 GiB free of 936.8 GiB (13%). Dedup and projection jobs are blocked below 140.5 GiB.',
     )
+  })
+
+  it('does not claim that imports pause when the gate is switched off', () => {
+    expect(describeDiskBanner(reading('critical', 121.5), gate({ enabled: false }))?.message).toBe(
+      'Disk critical: 121.5 GiB free of 936.8 GiB (13%). Dedup and projection jobs are blocked below 140.5 GiB.',
+    )
+    expect(describeDiskBanner(reading('warn', 150), gate({ enabled: false }))?.message).not.toContain('imports pause')
   })
 
   it('paused beats critical: imports are the thing the operator is waiting for', () => {
@@ -985,7 +1002,7 @@ export function describeDiskBanner(disk: DiskReading | null, gate: IngestDiskGat
 
   const space = `${gib(disk.freeBytes)} free of ${gib(disk.totalBytes)} (${Math.round(disk.freeRatio * 100)}%)`
   const jobs = `Dedup and projection jobs ${disk.status === 'critical' ? 'are blocked' : 'stop'} below ${gib(disk.thresholds.criticalBytes)}`
-  const imports = gate ? `; imports pause below ${gib(gate.floorBytes)}` : ''
+  const imports = gate?.enabled ? `; imports pause below ${gib(gate.floorBytes)}` : ''
   return disk.status === 'critical'
     ? { level: 'critical', message: `Disk critical: ${space}. ${jobs}${imports}.` }
     : { level: 'warn', message: `Disk is getting low: ${space}. ${jobs}${imports}.` }
@@ -1649,7 +1666,7 @@ EOF
 **Interfaces:**
 - Produces:
   - `msUntilNextRun(hourUtc: number, now: Date): number` (moved here; still re-exported by `lib/dedup-cron.ts`)
-  - `scheduleEveryHoursFromAnchor(opts: { anchorHourUtc: number; everyHours: number; run: () => void | Promise<void>; now?: () => number; pollMs?: number }): { cancel(): void; nextRunAt(): number }`
+  - `scheduleEveryHoursFromAnchor(opts: { anchorHourUtc: number; everyHours: number; run: () => unknown; now?: () => number; pollMs?: number }): { cancel(): void; nextRunAt(): number }`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1831,7 +1848,8 @@ export interface DailyScheduleOptions {
   anchorHourUtc: number
   /** Hours between runs, counted from the first run. */
   everyHours: number
-  run: () => void | Promise<void>
+  /** The job. Its result is ignored; a returned promise is awaited only so that a rejection is logged. */
+  run: () => unknown
   /** Wall clock in ms; tests replace it. */
   now?: () => number
   pollMs?: number
@@ -2368,6 +2386,9 @@ async function run(): Promise<number> {
   fillDisk(fillerBytes)
   const low = await waitFor('free space under the floor', () => freeBytes() < floor, 60_000, 500)
   check('free space is now under the floor', !!low, `free ${freeBytes()} floor ${floor}`)
+  // The gate reuses a free-space reading younger than 5 s (a batch every few seconds would otherwise cost a query each). Wait that
+  // out, or the next job's first batch could be waved through on the reading taken before the filler existed.
+  await sleep(6_000)
   const nameB = `e2e-gate-b-${RUN}.txt`
   const b = upload(nameB, genLines(30_000, 'gb'))
   check('the upload was accepted (the file is received into the spool first)', b.status === 200 && !!b.jobId, `HTTP ${b.status}`)

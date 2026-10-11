@@ -63,7 +63,7 @@ Not goals: see "Deliberately NOT done".
 
 ```ts
 export interface IngestDiskGateState {
-  paused: boolean; since: number | null; waiters: number
+  enabled: boolean; paused: boolean; since: number | null; waiters: number
   freeBytes: number | null; floorBytes: number; resumeBytes: number
   checkedAt: number | null; error?: string
 }
@@ -88,6 +88,7 @@ export function getIngestDiskGate(): IngestDiskGateState
 - `lib/disk-banner.ts` (pure): `describeDiskBanner(disk, gate): { level: 'warn' | 'critical' | 'paused'; message: string } | null`.
   - `gate.paused` -> `paused`: "Imports are paused: 48.2 GiB free, floor 50 GiB. They resume by themselves above 55 GiB."
   - else `disk.status === 'critical'` -> `critical`: "Disk critical: 121.5 GiB free of 936.8 GiB (13%). Dedup and projection jobs are blocked below 140.5 GiB; imports pause below 50 GiB."
+  - A switched-off gate (`gate.enabled === false`) drops the "imports pause below ..." clause from the critical and warn messages: with `INGEST_DISK_GATE=off` nothing pauses, and the banner must not say it does (found when the banner was first seen rendered, on the rehearsal stack).
   - else `warn` -> `warn`: "Disk is getting low: 150.0 GiB free of 936.8 GiB (16%). Dedup and projection jobs stop below 140.5 GiB; imports pause below 50 GiB."
   - `ok` and `unknown` -> `null` (an unreadable disk already logs and shows in the panel; a permanent banner for a transient read error would teach the operator to ignore it).
 - `components/disk-banner.tsx` (`"use client"`): fetches the endpoint on mount and every 60 s while `document.visibilityState === 'visible'`; renders nothing on 401, 403, a network error or `null`; `role="alert"` for `critical` and `paused`, `role="status"` for `warn`; amber/red classes from the existing theme tokens; a link "Ingest Health" to `/upload`. Rendered by `components/client-layout-with-sidebar.tsx` between `AppHeader` and `<main>`; the `/login` and `/check` branches return before it.
