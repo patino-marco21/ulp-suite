@@ -15,7 +15,8 @@
  *   npx tsx scripts/e2e-alert-rehearsal.ts --keep    # brings the stack up (about 4 minutes) and leaves it running
  *   npx tsx scripts/e2e-upload-resilience.ts         # about 6 minutes; --slow adds the 300 s slow-client case (+7 minutes)
  *                                                    # (--only-slow runs just that case)
- *   docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v
+ *   REHEARSAL_JWT_SECRET=x REHEARSAL_ADMIN_EMAIL=x@x.test REHEARSAL_ADMIN_PASSWORD=x REHEARSAL_WEBHOOK_SECRET=x \
+ *     docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v   # the compose file wants these set even to stop the stack
  *
  * Needs the `zip` command. Exit 0 when every check passes, 1 when one fails, 2 when the stack is not ready.
  */

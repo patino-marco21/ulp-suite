@@ -18,7 +18,8 @@
  *   docker compose build app
  *   npx tsx scripts/e2e-alert-rehearsal.ts --keep    # brings the rehearsal stack up (about 4 minutes) and leaves it running
  *   npx tsx scripts/e2e-novelty-ingest.ts            # about 15 minutes; --only=kill,off runs just those; --skip-gate leaves out the filler
- *   docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v
+ *   REHEARSAL_JWT_SECRET=x REHEARSAL_ADMIN_EMAIL=x@x.test REHEARSAL_ADMIN_PASSWORD=x REHEARSAL_WEBHOOK_SECRET=x \
+ *     docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v   # the compose file wants these set even to stop the stack
  *
  * Needs `zip` and `curl`, and about 40 GiB of free host disk for the gate scenario. Exit 0 when every check passes, 1 when one
  * fails, 2 when the stack is not ready or there is not enough room to run.

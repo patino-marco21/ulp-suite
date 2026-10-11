@@ -299,7 +299,7 @@ async function main(): Promise<number> {
     check('the rehearsal ran without an unexpected error', false, err instanceof Error ? err.message.split('\n')[0] : String(err))
   } finally {
     if (keep) {
-      console.log(`\nStack left running (--keep). App: ${BASE}. Remove it with:\n  docker compose -f ${COMPOSE_FILE} -p ${PROJECT} down -v`)
+      console.log(`\nStack left running (--keep). App: ${BASE}. Remove it with (the compose file wants these set even to stop the stack):\n  REHEARSAL_JWT_SECRET=x REHEARSAL_ADMIN_EMAIL=x@x.test REHEARSAL_ADMIN_PASSWORD=x REHEARSAL_WEBHOOK_SECRET=x docker compose -f ${COMPOSE_FILE} -p ${PROJECT} down -v`)
     } else {
       try {
         compose(['down', '-v', '--remove-orphans'])
