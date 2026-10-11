@@ -134,11 +134,29 @@ describe('startStageSweeper', () => {
     }
   })
 
-  it('reports what it dropped, and never rejects when ClickHouse is down', async () => {
+  it('retries the first sweep until ClickHouse answers (the app can start before ClickHouse accepts connections)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    h.query
+      .mockRejectedValueOnce(new Error('connect ECONNREFUSED 172.19.0.2:8123'))
+      .mockRejectedValueOnce(new Error('connect ECONNREFUSED 172.19.0.2:8123'))
+      .mockResolvedValue({ json: async () => [] })
+    try {
+      await startStageSweeper({ intervalMs: 3_600_000, retryDelayMs: 1 })
+      expect(h.query).toHaveBeenCalledTimes(3)
+      expect(warn).toHaveBeenCalledWith('[ingest-stage] start-up sweep: no orphan stage tables')
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('orphan sweep failed: connect ECONNREFUSED'))
+    } finally {
+      clearInterval(globalThis.__ulpStageSweeper)
+      globalThis.__ulpStageSweeper = undefined
+    }
+  })
+
+  it('gives up after the configured attempts, says so, and never rejects when ClickHouse stays down', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     h.query.mockRejectedValue(new Error('connection refused'))
     try {
-      await expect(startStageSweeper({ intervalMs: 3_600_000 })).resolves.toBeUndefined()
+      await expect(startStageSweeper({ intervalMs: 3_600_000, attempts: 3, retryDelayMs: 1 })).resolves.toBeUndefined()
+      expect(h.query).toHaveBeenCalledTimes(3)
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('orphan sweep failed: connection refused'))
     } finally {
       clearInterval(globalThis.__ulpStageSweeper)

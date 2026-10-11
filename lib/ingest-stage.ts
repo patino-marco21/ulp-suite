@@ -159,23 +159,33 @@ declare global {
 
 /**
  * Sweeps once now (nothing a previous process started can still be running) and then hourly, leaving anything younger than 30
- * minutes alone. The returned promise settles when the first sweep is done so that start-up can wait for it before the inbox
- * watcher begins; it never rejects.
+ * minutes alone. The first sweep is retried when it fails: after a reboot this process can start a few seconds before ClickHouse
+ * accepts connections (2026-10-11: ECONNREFUSED on the first query), so by default it tries 6 times, 3 s apart, which stays inside the
+ * 20 s start-up budget instrumentation.ts gives it. The returned promise settles when the first sweep succeeded or the attempts ran
+ * out, so that start-up can wait for it before the inbox watcher begins; it never rejects.
  */
-export async function startStageSweeper(opts: { intervalMs?: number } = {}): Promise<void> {
+export async function startStageSweeper(opts: { intervalMs?: number; attempts?: number; retryDelayMs?: number } = {}): Promise<void> {
   if (globalThis.__ulpStageSweeper) return
   // console.warn, not console.log: the production build strips console.log (next.config removeConsole keeps error and warn).
-  const run = async (minAgeSeconds: number, announce: boolean) => {
+  const run = async (minAgeSeconds: number, announce: boolean): Promise<boolean> => {
     try {
       const dropped = await sweepOrphanStages({ minAgeSeconds })
       if (dropped.length > 0) console.warn(`[ingest-stage] dropped ${dropped.length} orphan stage table(s): ${dropped.join(', ')}`)
       else if (announce) console.warn('[ingest-stage] start-up sweep: no orphan stage tables')
+      return true
     } catch (err) {
       console.warn(`[ingest-stage] orphan sweep failed: ${err instanceof Error ? err.message : String(err)}`)
+      return false
     }
   }
   const timer = setInterval(() => void run(SWEEP_AFTER_MS / 1000, false), opts.intervalMs ?? 60 * 60_000)
   timer.unref?.()
   globalThis.__ulpStageSweeper = timer
-  await run(0, true)
+
+  const attempts = Math.max(1, Math.floor(opts.attempts ?? 6))
+  const retryDelayMs = opts.retryDelayMs ?? 3_000
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (await run(0, true)) return
+    if (attempt < attempts) await new Promise<void>(resolve => setTimeout(resolve, retryDelayMs))
+  }
 }
