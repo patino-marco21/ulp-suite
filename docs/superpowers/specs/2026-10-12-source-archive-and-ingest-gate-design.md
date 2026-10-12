@@ -133,8 +133,10 @@ a new batch shows empty values until the tool has run on it, which the batch pro
 ### Disk and time
 
 Peak extra disk while a file is worked on: its archive (at most ~1.5 GiB for the largest, 4.2 GB file) next to the original. Net effect of `--replace` on
-the pile: 140.3 GiB of originals become about 48 GiB, i.e. about 92 GiB freed (the `inbox/done` names are hardlinks and share the blocks). Compression time
-is estimated at 15-30 minutes with 8 workers plus the verification pass; the rehearsal measures it on three real files.
+the pile: 140.3 GiB of originals become about 48 GiB, i.e. about 92 GiB freed (the `inbox/done` names are hardlinks and share the blocks). Node's built-in zstd
+compresses a 64 MiB frame at level 12 (128 MiB window, long-distance matching) at 18 MB/s per stream and decompresses it at 189 MB/s (measured 2026-10-12 on
+Node 24.16), so the pile takes about 17 minutes with 8 workers plus about 2 minutes of verification on an idle machine; the rehearsal confirms it on three
+real files.
 
 ## Part 2: the ingest gate
 
@@ -240,7 +242,8 @@ the exact bytes (checked by sha256), so even `--replace` can be undone as long a
 - **The archive shares the disk with everything else.** It is not a backup. Copying `~/ulp-archive` to an external drive later is one command.
 - **False holds block a good file.** The thresholds come from the pile's own distribution, there is a warn tier, a Release button, and `INGEST_GATE=off`.
 - **False passes.** The gate only catches what its invariants encode; there is still no ground truth. The stage is the place to add a check later.
-- **Node's zstd binding** may lack a parameter or be slow: the plan checks it first and falls back to the `zstd` binary behind the same interface.
+- **Node's zstd binding** exposes the compression level, the window log, long-distance matching and worker threads (checked on Node 24.16); the plan keeps the
+  `zstd` binary as a fallback behind the same interface.
 - **Cost of the counters** in the hot loop: measured against the 5% budget before merge.
 
 ## Later specs (not part of this change)
