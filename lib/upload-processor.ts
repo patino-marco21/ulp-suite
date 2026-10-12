@@ -713,6 +713,11 @@ export async function processArchiveRef(
   onBatch?: (imported: number) => void,
   hooks: ImportHooks = {},
 ): Promise<ProcessResult> {
+  // The sha256 check runs before the commit, and only the staged path has such a point (the direct path inserts as it parses). With the novelty check off a damaged
+  // archive could put damaged rows into the table, so an import from the archive is refused instead of running unchecked.
+  if (!noveltyConfig().enabled) {
+    throw new ArchiveRefError('importing from the archive needs the staged import (INGEST_NOVELTY_CHECK is off): its integrity check must run before any row is written')
+  }
   const ref = readArchiveRefFile(refPath)
   const source = openSource(ref.id, { archiveDir: appArchiveDir() })
   if (source.origin.kind !== 'archive' || source.size !== ref.size || source.entry?.sha256 !== ref.sha256) {

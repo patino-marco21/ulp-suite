@@ -155,6 +155,14 @@ describe('processArchiveRef', () => {
     expect(beforeCommit).toHaveBeenCalledTimes(1)
   })
 
+  it('refuses an archive import when the staged path is off: its integrity check must run before any row is written', async () => {
+    const { refPath } = archived('arch-j.txt')
+    vi.stubEnv('INGEST_NOVELTY_CHECK', 'off')
+    await expect(processArchiveRef(refPath)).rejects.toThrow(/needs the staged import/)
+    expect(h.insert).not.toHaveBeenCalled()
+    expect(h.createStage).not.toHaveBeenCalled()
+  })
+
   it('reports progress through onBatch like a plain file', async () => {
     const { refPath } = archived('arch-i.txt')
     h.commitStage.mockImplementation(async (a: { onSlab?: (e: Record<string, number>) => void }) => {

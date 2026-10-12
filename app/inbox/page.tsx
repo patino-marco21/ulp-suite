@@ -198,8 +198,10 @@ export default function InboxPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filename }),
       })
-      if (res.ok) toast({ title: `${filename} released: it is imported once, and the quality gate will not hold it again` })
-      else        toast({ title: 'Release failed', variant: 'destructive' })
+      const body = res.ok ? await res.json().catch(() => null) as { moved?: string[] } | null : null
+      if (res.ok && body?.moved?.includes(filename)) toast({ title: `${filename} released: it is imported once, and the quality gate will not hold it again` })
+      else if (res.ok) toast({ title: 'Nothing was released', description: `${filename} is gone from the Held list, or its name cannot be released from here (a name with ".." in it must be moved out of inbox/held by hand).`, variant: 'destructive' })
+      else            toast({ title: 'Release failed', variant: 'destructive' })
     } catch {
       toast({ title: 'Release failed', variant: 'destructive' })
     } finally {

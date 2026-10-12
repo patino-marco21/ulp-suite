@@ -251,6 +251,12 @@ let migrationsDone = false
 //      ADD COLUMN IF NOT EXISTS on a table of a few hundred rows, metadata only. scripts/archive-sources.ts fills them for the names it archived; the importer
 //      writes them for a file it read from the source archive, and the duplicate-file guard compares the sha256 when both sides have one.
 const DDL_VERSION = 28
+const DDL_BEFORE_SOURCES_IDENTITY = 27
+
+/** The DDL version to record after a run: a failed v28 ALTER (ulp.sources identity columns) is not recorded as done, so the next start tries it again. */
+export function ddlVersionToRecord(sourcesIdentityFailed: boolean): number {
+  return sourcesIdentityFailed ? DDL_BEFORE_SOURCES_IDENTITY : DDL_VERSION
+}
 
 /** v26: swap country_tier's MATERIALIZED expression (metadata only; see the DDL_VERSION comment above). */
 export function buildCountryTierModifySql(): string {
@@ -1055,20 +1061,24 @@ export async function runClickHouseMigrations(): Promise<void> {
 
   // v28 — ulp.sources identity columns (see DDL_VERSION comment above). IF NOT EXISTS makes it idempotent (the archive tool may have added them first); a failure
   // is logged and the importer then keeps working with the name-only guard for plain files (only an import from the archive writes the new columns).
+  let sourcesIdentityFailed = false
   if (lastDdl < 28) {
     try {
       await client.exec({ query: SOURCES_IDENTITY_ALTER })
       console.warn('[ClickHouse migration] DDL v28 applied (ulp.sources has size, sha256 and archive_id)')
     } catch (err) {
-      console.error('[ClickHouse migration] v28: ulp.sources identity columns -- FAILED:', err instanceof Error ? err.message : String(err))
+      sourcesIdentityFailed = true
+      console.error('[ClickHouse migration] v28: ulp.sources identity columns -- FAILED (tried again at the next start):', err instanceof Error ? err.message : String(err))
     }
   }
 
-  if (lastDdl < DDL_VERSION) {
-    setSetting('ch_ddl_version', String(DDL_VERSION))
-    console.warn(`[ClickHouse migration] DDL now at v${DDL_VERSION}`)
+  // A failed v28 keeps the recorded version below it, so the next start runs the ALTER again: an import from the archive needs the columns.
+  const ddlReached = ddlVersionToRecord(sourcesIdentityFailed)
+  if (lastDdl < ddlReached) {
+    setSetting('ch_ddl_version', String(ddlReached))
+    console.warn(`[ClickHouse migration] DDL now at v${ddlReached}`)
   } else {
-    console.warn(`[ClickHouse migration] DDL v${DDL_VERSION} already applied — skipping`)
+    console.warn(`[ClickHouse migration] DDL v${ddlReached} already applied — skipping`)
   }
 
   // ── Data-repair mutations (fire-and-forget, run exactly once) ────────────
