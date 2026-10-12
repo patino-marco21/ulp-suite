@@ -764,7 +764,7 @@ async function archiveRef(): Promise<void> {
   const hourAgo = new Date(Date.now() - 3_600_000)
   const putOld = (name: string, ls: string[]) => { writeFileSync(join(srcDir, name), text(ls)); utimesSync(join(srcDir, name), hourAgo, hourAgo) }
   putOld(FROM, same)
-  putOld(OTHER, lines('S', 0, 30_000))
+  putOld(OTHER, lines('V', 0, 30_000))
   putOld(DAMAGED, lines('T', 0, 5_000))
   sh('npx', ['tsx', 'scripts/archive-sources.ts', 'archive', '--src', srcDir, '--out', archiveDir, '--workers', '1', '--no-sources'])
   const manifest = new Map<string, any>(readFileSync(join(archiveDir, 'manifest.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l)).map((e: any) => [e.name, e]))
