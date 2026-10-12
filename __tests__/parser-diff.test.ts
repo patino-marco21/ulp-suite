@@ -1,6 +1,7 @@
 /** classifyChange names the reason a line's result differs between the baseline parser and parser v6; "unexplained" must stay empty on real data. */
 import { describe, expect, test } from 'vitest'
-import { classifyChange, classifyOldOnlyRow, type Outcome } from '@/lib/parser-diff'
+import { classifyChange, classifyOldOnlyRow, inertSemicolons, type Outcome } from '@/lib/parser-diff'
+import { pipeJoinAll } from '@/lib/ulp-recover'
 
 const none = (reason: string): Outcome => ({ credential: null, reason })
 const row = (url: string, email: string, password: string): Outcome => ({ credential: { url, email, password }, reason: null })
@@ -70,5 +71,137 @@ describe('a line with a pipe tail', () => {
   test('the helpers are tried on the part in front of the first pipe, as parseLine does', () => {
     const line = 'https://shop.example.test:alice:Pass/word1|tail/with/three/slashes/x'
     expect(classifyChange(line, none('no_fields'), row('https://shop.example.test', 'alice', 'Pass/word1'), none('no_fields'))).toBe('slash-in-password')
+  })
+})
+
+describe('the pipe that joins a url and a credential (parser v6.1)', () => {
+  test.each([
+    ['https://| shop.example.test:alice:Secret1', 'pipe-scheme'],
+    ['Network:| shop.example.test:alice:Secret1', 'pipe-label'],
+    ['https://shop.example.test/login|alice:Secret1', 'pipe-url'],
+  ])('a changed result equal to the baseline parser on the joined line: %s is %s', (line, cls) => {
+    const junk = row('', line.split('|')[0].trim(), 'x')       // what the baseline stored: the scheme, the label or the url as the login
+    const joined = row('u', 'alice', 'Secret1')
+    expect(classifyChange(line, junk, joined, none('x'), joined)).toBe(cls)
+  })
+  test('a rejected line now stored, and a junk row that is no longer stored, are the same class', () => {
+    const line = 'https://| shop.example.test:alice:Secret1'
+    expect(classifyChange(line, none('no_fields'), row('u', 'alice', 'Secret1'), none('x'), row('u', 'alice', 'Secret1'))).toBe('pipe-scheme')
+    expect(classifyChange(line, row('', 'https://', 'shop.example.test:alice:Secret1'), none('no_password'), none('x'), none('no_password'))).toBe('pipe-scheme')
+  })
+  test('a changed result that is NOT what the baseline gives for the joined line stays unexplained', () => {
+    const line = 'https://| shop.example.test:alice:Secret1'
+    expect(classifyChange(line, row('', 'https://', 'x'), row('u', 'alice', 'Secret1'), none('x'), row('u', 'someone-else', 'Secret1'))).toBe('unexplained')
+  })
+  test('a line without such a pipe is never attributed to it', () => {
+    expect(classifyChange('a:b:c', row('u', 'e', 'p1'), row('u', 'e', 'p2'), row('u', 'e', 'p1'), row('u', 'e', 'p2'))).toBe('unexplained')
+  })
+  test.each([
+    [{ url: '', email: 'https://', password: 'shop.example.test:alice:Secret1' }],
+    [{ url: '', email: 'Network:', password: 'shop.example.test:alice:Secret1' }],
+    [{ url: '', email: 'https://shop.example.test/login', password: 'alice:Secret1' }],
+    [{ url: '', email: 'https://shop.example.test/login:', password: 'alice:Secret1' }],
+    [{ url: '', email: 'https://shop.example.test/login', password: ':alice:Secret1' }],
+  ])('the junk row the baseline stored: %j', r => expect(classifyOldOnlyRow(r)).toBe('pipe-join'))
+})
+
+describe('a semicolon behind a complete credential (parser v6.1, rule I)', () => {
+  const line = 'https://shop.example.test:alice@mail.test:Sec;ret1'
+  const junk = row('', 'https://shop.example.test:alice@mail.test:Sec', 'ret1')       // what the baseline stored: the credential as the login
+  const joined = row('https://shop.example.test', 'alice@mail.test', 'Sec;ret1')
+  test('a changed result equal to the baseline parser on the line with the semicolon made inert', () => {
+    expect(classifyChange(line, junk, joined, none('x'), undefined, joined)).toBe('semicolon-password')
+  })
+  test('a rejected line now stored is the same class', () => {
+    expect(classifyChange(line, none('no_fields'), joined, none('x'), undefined, joined)).toBe('semicolon-password')
+  })
+  test('a result that is NOT what the inert-semicolon parse gives stays unexplained', () => {
+    expect(classifyChange(line, junk, joined, none('x'), undefined, row('https://shop.example.test', 'someone', 'else'))).toBe('unexplained')
+  })
+  test('a line whose part in front of the semicolon holds no credential is never attributed to it', () => {
+    expect(classifyChange('https://shop.example.test;alice;Sec', row('u', 'e', 'p1'), row('u', 'e', 'p2'), row('u', 'e', 'p1'), undefined, row('u', 'e', 'p2'))).toBe('unexplained')
+  })
+  test('the junk row the baseline stored: no url, the credential as the login', () => {
+    expect(classifyOldOnlyRow({ url: '', email: 'https://shop.example.test:alice@mail.test:Sec', password: 'ret1' })).toBe('semicolon-junk')
+    expect(classifyOldOnlyRow({ url: '', email: 'alice@mail.test:Sec', password: 'ret1' })).toBe('semicolon-junk')
+  })
+})
+
+describe('a ";name=value" path parameter in a url without a scheme (parser v6.1)', () => {
+  const line = 'shop.example.test/app;jsessionid=AB12:alice:Secret1'
+  const junk = row('', 'shop.example.test/app', 'jsessionid=AB12:alice:Secret1')
+  const fixed = row('shop.example.test/app;jsessionid=AB12', 'alice', 'Secret1')
+  test('the new result equals the baseline parser on the line with the semicolon made inert', () => {
+    expect(classifyChange(line, junk, fixed, none('x'), undefined, fixed)).toBe('semicolon-parameter')
+  })
+  test('the junk row the baseline stored: a path as the login and the parameter and credential as the password', () => {
+    expect(classifyOldOnlyRow({ url: '', email: 'shop.example.test/app', password: 'jsessionid=AB12:alice:Secret1' })).toBe('semicolon-junk')
+  })
+})
+
+describe('a line with leading slashes is read as the scheme-less line behind them (rule E), so the new rules are attributed on that form', () => {
+  test('a path parameter behind //: the classifier sees the host/path;param:login:password line', () => {
+    const line = '//shop.example.test/app;jsessionid=AB12:alice:Secret1'
+    const junk = row('', 'shop.example.test/app', 'jsessionid=AB12:alice:Secret1')
+    const fixed = row('shop.example.test/app;jsessionid=AB12', 'alice', 'Secret1')
+    expect(classifyChange(line, junk, fixed, none('x'), undefined, fixed)).toBe('semicolon-parameter')
+  })
+  test('the helpers look through the slashes', () => {
+    expect(inertSemicolons('//shop.example.test/login;x=y:alice:Secret1')?.kind).toBe('semicolon-parameter')
+    expect(pipeJoinAll('//shop.example.test/login:|alice:Secret1')).toEqual({ kind: 'url', line: 'shop.example.test/login:alice:Secret1' })
+  })
+})
+
+describe('a semicolon line that also holds a pipe (parseLine cuts at the pipe when a semicolon is in the line)', () => {
+  test('the inert reading is the text in front of the pipe, without its trailing semicolons', () => {
+    expect(inertSemicolons('https://shop.example.test:alice:Secret1;|noise;x')).toEqual({ kind: 'semicolon-password', line: 'https://shop.example.test:alice:Secret1' })
+    expect(inertSemicolons('shop.example.test/app;jsessionid=AB12:alice:Secret1|note')).toEqual({ kind: 'semicolon-parameter', line: 'shop.example.test/app\uE000jsessionid=AB12:alice:Secret1' })
+  })
+  test('a pipe in front of the first semicolon leaves no semicolon to read', () => {
+    expect(inertSemicolons('alice@mail.test:Secret1|x;y')).toBeNull()
+  })
+})
+
+describe('a Telegram tag behind the credential is cut before the semicolon rules look at the line', () => {
+  test('the inert reading is of the line without the tag', () => {
+    const r = inertSemicolons('shop.example.test/app;jsessionid=AB12:alice:Secret1          @SomeChannel - fresh ulp | https://t.me/+AbC123')
+    expect(r?.kind).toBe('semicolon-parameter')
+    expect(r?.line).not.toContain('SomeChannel')
+    expect(r?.line.startsWith('shop.example.test/app')).toBe(true)
+  })
+})
+
+describe('a semicolon line with tabs in front of the pipe cut, and one that starts with a pipe', () => {
+  test('the tabs go with the cut text (parseLine trims it)', () => {
+    expect(inertSemicolons('https://shop.example.test/:alice@mail.test:Sec;ret1\t\t|||   advert')).toEqual({ kind: 'semicolon-password', line: 'https://shop.example.test/:alice@mail.test:Sec\uE000ret1' })
+  })
+  test('a leading pipe is not a cut: the line is read whole', () => {
+    expect(inertSemicolons('| https://shop.example.test/:alice:Sec;ret1')?.kind).toBe('semicolon-password')
+  })
+})
+
+describe('classifyOldOnlyRow: a url that holds a whole credential (the 3-part split of url:login:pass;x;y)', () => {
+  test.each([
+    [{ url: 'https://shop.example.test/login:alice:Sec', email: 'k', password: 'kf;ai' }],
+    [{ url: 'https://shop.example.test/en/reg/:alice@mail.test:', email: '-[sh', password: '*P"hk8&' }],
+  ])('%j is split-junk', r => expect(classifyOldOnlyRow(r)).toBe('split-junk'))
+  test('a url with user info and a port is a real url, not that junk', () => {
+    expect(classifyOldOnlyRow({ url: 'http://user:pass@shop.example.test:8080/x', email: 'alice', password: 'Secret1' })).toBe('unexplained')
+  })
+})
+
+describe('classifyOldOnlyRow: more shapes of the old semicolon split', () => {
+  test.each([
+    [{ url: 'www.shop.example.test/app/sign-in', email: 'token=43ab', password: 'utm_source=x;utm_campaign=y:alice:Secret1' }],
+    [{ url: 'https://HP:La:rcd@tu.example.test', email: 'Al', password: 'Rcd;so;ey' }],
+  ])('%j is junk of the semicolon split', r => expect(['semicolon-junk', 'split-junk']).toContain(classifyOldOnlyRow(r)))
+  test('a url with plain user info and a port is a real url', () => {
+    expect(classifyOldOnlyRow({ url: 'http://user:pass@shop.example.test:8080/x', email: 'alice', password: 'Secret1' })).toBe('unexplained')
+  })
+})
+
+describe('classifyOldOnlyRow: a host and a path as the login', () => {
+  test('no url, the url as the login (a path parameter whose value holds white space)', () => {
+    expect(classifyOldOnlyRow({ url: '', email: 'shop.example.test/en/login', password: 'q=[a b]:80:Secret1' })).toBe('semicolon-junk')
   })
 })

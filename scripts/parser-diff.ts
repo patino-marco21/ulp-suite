@@ -5,18 +5,23 @@
  *
  *   npx tsx scripts/parser-diff.ts --baseline-ref 624b845 --dir "$HOME/Downloads/AyuGram Desktop" --every 17
  *   npx tsx scripts/parser-diff.ts --baseline-ref 624b845 --files "/abs/a.txt" "/abs/b.txt" --stream
+ *   npx tsx scripts/parser-diff.ts --baseline-ref HEAD --same-policy ...      (parser rules only: both sides use the T3 keep-list)
  *
- * --slices K (default 4) x --slice-mb M (default 2) per file, whole file when it is at most 8 MiB. --stream also compares whole files (at most
+ * --whole reads EVERY line of every file (exact counts, no extrapolation); --lines-with '|;' then examines only the lines that hold one of those characters, which
+ * is exact for a rule that needs one of them (the pile-wide proof of the pipe and semicolon rules of parser v6.1 ran this way: --baseline-ref HEAD --same-policy --whole
+ * --lines-with '|;'). Without --whole: --slices K (default 4) x --slice-mb M (default 2) per file, whole file when it is at most 8 MiB. --stream also compares whole files (at most
  * --stream-max-mb, default 150) through parseULPStream and reports the rows only the baseline produces (expected: only double-encoded text).
  */
 import { execFileSync } from 'node:child_process'
-import { closeSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, createReadStream, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { createInterface } from 'node:readline'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Readable } from 'node:stream'
-import { CHANGE_CLASSES, classifyChange, classifyOldOnlyRow, type ChangeClass, type Outcome } from '@/lib/parser-diff'
+import { CHANGE_CLASSES, classifyChange, classifyOldOnlyRow, inertSemicolons, restoreSemicolons, type ChangeClass, type Outcome } from '@/lib/parser-diff'
 import { DEFAULT_HARD_KEEP_COUNTRIES, makeHardDropPredicate, parseIngestPolicy } from '@/lib/ingest-filter'
 import { parseInlineLine, parseULPStream } from '@/lib/ulp-parser'
+import { pipeJoinAll } from '@/lib/ulp-recover'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
 
 const args = process.argv.slice(2)
@@ -32,11 +37,15 @@ async function main(): Promise<void> {
   writeFileSync(baselinePath, execFileSync('git', ['show', `${ref}:lib/ulp-parser.ts`], { cwd: repo, maxBuffer: 64 << 20 }))
   const baseline = await import(pathToFileURL(baselinePath).href) as {
     parseLine: (line: string, file: string, hard?: (e: string, u: string) => boolean) => Outcome
+    parseInlineLine?: (line: string, file: string, hard?: (e: string, u: string) => boolean) => Outcome   // parser v6 and later
     parseULPStream: typeof parseULPStream
   }
+  // A baseline from v6 on reads a line like the new parser does (UTF-8 repair, Android app ids), so only the rules that differ show up; an older one is read as before.
+  const baselineParse = (line: string, hard: (e: string, u: string) => boolean): Outcome => (baseline.parseInlineLine ?? baseline.parseLine)(line, 'f.txt', hard)
 
-  const baselineHard = makeHardDropPredicate(parseIngestPolicy({ INGEST_FILTER_HARD_DROP_TIERS: 'T3' }))
   const newHard = makeHardDropPredicate(parseIngestPolicy({ INGEST_FILTER_HARD_DROP_TIERS: 'T3', INGEST_FILTER_HARD_KEEP_COUNTRIES: DEFAULT_HARD_KEEP_COUNTRIES }))
+  // --same-policy compares two parsers under the SAME T3 policy (the keep-list), so that only parser rules differ; without it the baseline keeps the old policy (no keep-list)
+  const baselineHard = args.includes('--same-policy') ? newHard : makeHardDropPredicate(parseIngestPolicy({ INGEST_FILTER_HARD_DROP_TIERS: 'T3' }))
 
   let files: string[]
   if (flag('dir')) {
@@ -57,7 +66,14 @@ async function main(): Promise<void> {
   const examples = new Map<ChangeClass, string[]>()
   let totalLines = 0
 
-  function* sampleLines(path: string, size: number): Generator<{ line: string; weight: number }> {
+  const everyLine = args.includes('--whole')
+  const linesWith = flag('lines-with')
+  async function* sampleLines(path: string, size: number): AsyncGenerator<{ line: string; weight: number }> {
+    if (everyLine) {
+      const rl = createInterface({ input: createReadStream(path, { encoding: 'latin1' }), crlfDelay: Infinity })
+      for await (const line of rl) yield { line, weight: 1 }
+      return
+    }
     const whole = size <= 8 * 1048576
     const offsets = whole ? [0] : Array.from({ length: K }, (_, i) => Math.floor(i * (size - SLICE) / Math.max(1, K - 1)))
     const weight = whole ? 1 : size / (K * SLICE)
@@ -76,14 +92,19 @@ async function main(): Promise<void> {
   }
 
   for (const path of files) {
-    for (const { line, weight } of sampleLines(path, statSync(path).size)) {
+    for await (const { line, weight } of sampleLines(path, statSync(path).size)) {
       if (!line.trim()) continue
+      if (linesWith && ![...linesWith].some(c => line.includes(c))) continue
       totalLines += weight
-      const o = toOutcome(baseline.parseLine(line, 'f.txt', baselineHard))
       const repaired = repairUtf8Line(line)
+      const o = toOutcome(baselineParse(baseline.parseInlineLine ? repaired : line, baselineHard))
       const n = toOutcome(parseInlineLine(repaired, 'f.txt', newHard))
-      const oR = repaired === line ? o : toOutcome(baseline.parseLine(repaired, 'f.txt', baselineHard))
-      const cls = classifyChange(line, o, n, oR)
+      const oR = repaired === line || baseline.parseInlineLine ? o : toOutcome(baselineParse(repaired, baselineHard))
+      const join = pipeJoinAll(repaired.trim())
+      const oJ = join ? toOutcome(baselineParse(join.line, baselineHard)) : undefined
+      const inert = inertSemicolons(repaired.trim())
+      const oS = inert ? restoreSemicolons(toOutcome(baselineParse(inert.line, baselineHard))) : undefined
+      const cls = classifyChange(line, o, n, oR, oJ, oS)
       if (cls === 'same') continue
       counts.set(cls, (counts.get(cls) ?? 0) + weight)
       raw.set(cls, (raw.get(cls) ?? 0) + 1)
@@ -92,7 +113,7 @@ async function main(): Promise<void> {
     }
   }
 
-  console.log(`baseline ${ref} vs working tree, ${files.length} files, ~${(totalLines / 1e6).toFixed(1)}M lines (extrapolated)`)
+  console.log(`baseline ${ref} vs working tree, ${files.length} files, ${everyLine ? '' : '~'}${(totalLines / 1e6).toFixed(1)}M lines ${everyLine ? `(exact${linesWith ? `, only lines with one of ${JSON.stringify(linesWith)}` : ''})` : '(extrapolated)'}`)
   for (const cls of CHANGE_CLASSES) {
     const w = counts.get(cls) ?? 0
     if (w === 0 && cls !== 'unexplained') continue

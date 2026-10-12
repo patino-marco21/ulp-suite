@@ -2,6 +2,8 @@
  * Line layouts that parseLine used to reject and that parser v6 reads (docs/superpowers/specs/2026-10-12-parser-v6-and-redo-design.md). Each helper is pure and
  * returns null when the line is not of its shape. All of them are tried only AFTER the existing field split found nothing, except splitSpacePaddedColons:
  * the existing split returns white-space-padded fields for that shape, and the garbage gate then rejects them.
+ * The parser v6.1 helpers at the end of the file (joinPipedUrl, holdsCredential, isUrlPathParameter) are not fallbacks: they decide what a pipe or a semicolon in
+ * the line means before the separator rules run, and each acts only where the old rule produced junk (see "Parser v6.1" in the same spec).
  */
 
 /** Ports a web server really listens on: a number after the host that is one of these is a port, not a login (rule D). */
@@ -106,4 +108,90 @@ export function recoverAndroidAppLine(trimmed: string): string | null {
   const m = ANDROID_WITHOUT_SCHEME.exec(trimmed)
   if (!m) return null
   return m[1] ? `android:${trimmed}` : `android://${trimmed}`
+}
+
+// ─── Parser v6.1: a pipe that joins a url and a credential ───────────────────────────────────────────────────────────────────────────────────────────
+const SCHEME_ONLY = /^[a-z][a-z0-9+.-]*:\/\/$/i
+const ONE_WORD_LABEL = /^[A-Za-z][A-Za-z0-9_-]{0,19}:$/
+const SCHEME_URL = /^[a-z][a-z0-9+.-]*:\/\/\S+$/i
+const BARE_HOST = /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+(:\d{1,5})?(\/\S*)?$/
+/** "login:password" as it follows a url and a pipe: no slash or white space in the login, and not the start of "scheme://...". */
+const LOGIN_PASSWORD = /^[^:\s/|]+:(?!\/\/)\S/
+/** A credential line behind a label: after an optional scheme, a first field and a colon with something behind it. */
+const CREDENTIAL_LINE = /^[^:\s|][^:|]*:\S/
+
+/**
+ * The text in front of a separator already holds a credential: two or more colons that are not part of "://" (url:login:password, host:login:password), or an
+ * e-mail address followed by a colon (login:password with an e-mail login). What follows such a separator is then a note (a pipe) or part of the password (a semicolon).
+ */
+export function holdsCredential(before: string): boolean {
+  const colons = (before.replace('://', '  ').match(/:/g) ?? []).length   // colons that are not part of a "://"
+  return colons >= 2 || (colons === 1 && /^[^\s/:@]+@[^\s/:@]+:/.test(before))
+}
+
+/**
+ * A ";name=value" path parameter at the start of a line: "https://host/login;jsessionid=AB12:alice:Secret1", and (parser v6.1) the same without the scheme, where the
+ * host has a dot, a path follows, and the ";name=value" parameters are followed by the colon that starts the credential ("host/app;jsessionid=AB12:alice:Secret1"; but
+ * "host/login;user=alice;Secret1" stays url;login;password). The semicolon is part of the url then, not the field separator.
+ */
+export function isUrlPathParameter(line: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^;\s]*;[A-Za-z_][\w-]*=/.test(line)
+    || /^[\w-]+(?:\.[\w-]+)+(?::\d{1,5})?\/[^;\s]*(?:;[A-Za-z_][\w-]*=[^;:\s]*)+:/.test(line)
+}
+
+/** Which layout of a pipe joining a url and a credential was read (rule F: only the scheme; G: a one-word label; H: a url). */
+export interface PipeJoin { kind: 'scheme' | 'label' | 'url'; line: string }
+
+/**
+ * Some lists put the pipe where a colon belongs: "https://| host:login:password" (only the scheme in front of it), "Network:| host:login:password" (a one-word
+ * label), "https://host/path:| login:password", "https://host/path |:login:password" and "https://host/path|login:password" (a url, then the credential).
+ * parseLine used to read that pipe as the login/password separator and stored the scheme, the label or the url as the login. Returns the layout and the line to
+ * parse instead (the pipe removed, the url and the credential joined by a colon), or null when the pipe is something else: login|password, url|login|password, a
+ * credential followed by a note. parseLine calls this only where it would otherwise have read the pipe as the field separator.
+ */
+export function pipeJoin(line: string): PipeJoin | null {
+  const i = line.indexOf('|')
+  if (i <= 0) return null
+  const before = line.slice(0, i).trim()
+  const rest = line.slice(i + 1).trim()
+  if (!rest) return null
+  const part = rest.split('|')[0].replace(/^:\s*/, '').trim()   // the first piece behind the pipe, without the colon that may lead it
+
+  // F: only the scheme in front of the pipe. A login (an e-mail address, or a bare word) right behind it has no host to join with.
+  if (SCHEME_ONLY.test(before)) {
+    const first = rest.split(':')[0]
+    return { kind: 'scheme', line: /[./]/.test(first) && !first.includes('@') ? before + rest : rest }
+  }
+  // G: a one-word label and a colon: the label is not part of the credential behind it.
+  if (ONE_WORD_LABEL.test(before)) return CREDENTIAL_LINE.test(part.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')) ? { kind: 'label', line: rest } : null
+  // H: a url, then the pipe, then "login:password". A bare host needs the colon in front of the pipe (without it "john.smith|pa:ss" is a login and a password).
+  const urlPart = before.replace(/\s*:$/, '')
+  const urlLike = SCHEME_URL.test(urlPart) || (before.endsWith(':') && BARE_HOST.test(urlPart))
+  if (urlLike && LOGIN_PASSWORD.test(part)) return { kind: 'url', line: `${urlPart}:${part}` }
+  return null
+}
+
+/**
+ * pipeJoin, tried only where parseLine would otherwise have read the pipe as the login/password separator: no tab or semicolon in the line (those are the primary
+ * separator and the pipe is noise), fewer than two colons in front of the pipe (two or more mean the credential is already in front of it and the rest is a
+ * note), and no e-mail address and colon in front of it ("alice@mail.test:Secret1 | Country: US").
+ */
+export function joinPipedUrl(trimmed: string): PipeJoin | null {
+  if (!trimmed.includes('|') || trimmed.startsWith('|') || trimmed.includes('\t') || trimmed.includes(';')) return null
+  if (holdsCredential(trimmed.slice(0, trimmed.indexOf('|')))) return null
+  return pipeJoin(trimmed)
+}
+
+/** The line after every join has been applied (parseLine goes on until none applies: "https://| host/path:|:login:pass" has two) and the layout of the first. */
+export function pipeJoinAll(trimmed: string): PipeJoin | null {
+  const base = protocolRelativeToPlain(trimmed) ?? trimmed   // "//host/path|login:pass" is read as the scheme-less line behind the slashes (rule E)
+  const first = joinPipedUrl(base)
+  if (!first) return null
+  let line = first.line
+  for (let i = 0; i < 4; i++) {
+    const next = joinPipedUrl(line.trim())
+    if (!next) break
+    line = next.line
+  }
+  return { kind: first.kind, line }
 }

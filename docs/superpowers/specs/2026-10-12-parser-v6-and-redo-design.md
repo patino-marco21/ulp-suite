@@ -110,6 +110,73 @@ format (`flushBlockState`) follows the same rule. The minimum password length of
 **What stays rejected on purpose:** lines with no login, `url::password`, a url with a single value, bare links, banners, placeholder logins, sentinel
 passwords, passwords of 1-2 characters, e-mail equal to its password, and the slash-in-password lines the garbage rules or the URL-fragment filter refuse.
 
+## Parser v6.1 (added the same night, before the redo)
+
+Run 4 finished (397.5M rows) and its own residual check, a colon in the login or `://` in both url and login, found 842,706 junk rows (0.21%). The driver
+session traced most of them to the pipe rule and suggested a fix. I reproduced the classes on the pile files (a read-only survey of every pipe and
+semicolon line, masked) and found the semicolon rule does the same kind of damage in two more places that the signature does not see. Five narrow
+rewrites, all in `lib/ulp-recover.ts` (pure helpers) and called from `parseLine` / `parseInlineLine`; none touches a line that parses correctly today
+(the "unchanged" tests pin the layouts next to each one):
+
+**F. Only the scheme in front of a pipe** (`https://| host:login:password`, 267k lines, nearly all from one file): the pipe was read as the login/password
+separator, so the login became `https://` and the password the whole credential. The scheme and the text behind the pipe are joined (`https://host:login:password`);
+when what follows is an e-mail address or a bare word the scheme is dropped.
+
+**G. A one-word label and a colon in front of a pipe** (`Network:| host:login:password`, 169k lines, one label in one file): the label is dropped and the rest is
+parsed as an ordinary line. It needs a credential-like piece behind the pipe.
+
+**H. A url, then the pipe, then `login:password`** (`url:| login:pass`, `url |:login:pass`, `url|login:pass`, 235k lines): the url and the credential are joined by a colon.
+The url is a scheme url, or a bare host followed by a colon before the pipe (without that colon `john.smith|pa:ss` is a login and a password and stays one). The part
+behind the pipe is `login:password` with no slash or white space in the login and not the start of `scheme://`.
+
+F, G and H act only where the old code read the pipe as the separator (no tab or semicolon in the line, fewer than two colons in front of the pipe, no e-mail
+address and colon in front of it), so `url:login:pass|note`, `alice@mail.test:Secret1 | Country: US`, `url|login|pass` and `login|pass` are untouched. `parseInlineLine`
+applies the join before the Android rule, so a label in front of `HASH==@com.app/:login:pass` still gets its `android://` back.
+
+**I. A `;` behind a complete credential belongs to the password** (`https://host:alice@mail.test:Sec;ret1`, 1.32M lines): when the text in front of the first `;`
+already holds a credential (two or more colons that are not part of `://`, or an e-mail address and a colon), the line is split on its colons and the semicolons stay in the
+password; semicolons at the very end are a delimiter and go. Before, `url;login;password` with the whole credential as the "url" or the login stored junk
+or lost the line (the driver's class 6c, 125k rows, plus the 3-part variant its signature misses). 76% of the tails behind the first `;` hold punctuation, i.e. look like
+password characters; 10% are empty (a trailing `;`), 8% are a Telegram link the tag rule already cuts.
+
+**J. A `;name=value` path parameter in a url without a scheme** (`host/app;jsessionid=AB12:alice:Secret1`): the existing rule covered `https://host/app;jsessionid=...`;
+the scheme-less form stored `host/app` as the login and `jsessionid=...:alice:Secret1` as the password. The parameters must be followed by the colon that starts
+the credential (`host/login;user=alice;Secret1` stays `url;login;password`). This class is much bigger than the 17k rows the driver counted, because its junk has no
+colon in the login: 3.0M stored rows of run 4 have a `/` in the login, most of them this one.
+
+**Measured (2026-10-12, before the redo).**
+
+*Exact differential* (`scripts/parser-diff.ts --baseline-ref HEAD --same-policy --whole --lines-with '|;'`: the committed v6 parser against the working tree, same T3
+keep-list on both sides, every line of every one of the 504 files that holds a pipe or a semicolon, the only lines these rules can touch; the examples are masked).
+**3,720,781,452 lines read, 14,548,519 examined, 2,902,050 changed, unexplained 0.** A change is "explained" only when the new result is exactly what the committed
+parser gives for the same line with the pipe joined, or with its semicolons made inert, so a rule cannot hide an unrelated change:
+
+| Rule | Changed lines | New rows (rejected before) | Rows gone (junk, or the real credential is T3 / too short) | Row rewritten (junk -> the credential) |
+|---|---|---|---|---|
+| J. `;name=value` path parameter, no scheme | 1,215,177 | 95 | 419,232 | 795,850 |
+| I. `;` behind a complete credential | 1,059,250 | 452,970 | 120,955 | 485,325 |
+| F. only the scheme in front of a pipe | 267,621 | 199 | 42,141 | 225,281 |
+| H. url, pipe, `login:password` | 190,605 | 7,317 | 49,869 | 133,419 |
+| G. one-word label and a pipe | 167,924 | 2,502 | 20,666 | 144,756 |
+| an Android app id behind a label or with a semicolon in the password | 1,473 | 1,305 | 4 | 164 |
+
+Together: 464,388 credentials the importer used to lose are stored, 1,784,795 junk rows become the credential they were (url, login and password in the right fields),
+652,867 junk rows are not stored any more (most of them because the credential is now seen for what it is and the T3 policy or a password under 3 characters rejects it),
+net **-188,479 rows** over the pile. A strict regression probe (the old row had an e-mail login, a clean url and no semicolon in it; up to 25 examples per file collected, 100 in all) found three kinds of
+line and no regression: lines whose old row was an e-mail-looking fragment of the password (the new row has the real login), the lines of one account export (a JSON blob,
+then `email;first name;last name;id;token`: the old "password" was a name and a token, and the line is rejected now), and `file://|login|password` lines whose useless
+url `file://` is empty now.
+
+*Residual junk* (sampled slices of every file, 2.36B lines weighted, the same detector on the old and the new parser): stored rows that look like junk fall from 6.86M (0.349% of
+the stored rows) to 4.45M (0.226%); the clearly-junk kinds (a login that is a scheme or ends in a colon, a colon in the login, a url that holds a credential) fall from 1.65M to
+0.44M (-73%). The rest of the 4.45M is mostly legitimate: Android and app logins that are dates or ids with slashes (`20/01/1990`). What is left of the clearly-junk kinds is a
+long tail of small shapes (JSON blobs, `label:|:value`, a bare host as the login of `host:password`).
+
+*Speed:* `parseULPStream` on one 100 MB file, two rounds each, 6.10 / 6.34 s for the committed v6 and 6.17 / 6.49 s for v6.1 (within the noise of a loaded machine, the pipe check
+runs before any trim); `parseLine` alone 4.8-5.0 s for both.
+
+*The 3.0M run-4 rows with a `/` in the login* (0.76% of partition 202610) are the reason rule J exists: they were invisible to the driver's junk signature (a colon in the login).
+
 ## The T3 keep-list (wealth rule)
 
 `INGEST_FILTER_HARD_DROP_TIERS=T3` stays, with a new policy-level setting **`INGEST_FILTER_HARD_KEEP_COUNTRIES`**, default

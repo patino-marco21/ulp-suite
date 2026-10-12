@@ -15,6 +15,8 @@
  *   v6          parser v6: space-padded colons, an Android app id without its scheme (one row per login+password), a slash in the password (e-mail and
  *               other login), a numeric login, a protocol-relative url, UTF-8 text stored as typed, login == password (stored unless it is an e-mail),
  *               and a T3 line of a kept country (Poland, stored) next to one of another country (Brazil, dropped)
+ *   pipes       parser v6.1: a pipe that joins a url, only its scheme or a label and a credential ("https://| host:login:pass", "Network:| ...", "url|login:pass"),
+ *               a ';' in the password of a colon-separated line, a ";name=value" path parameter in a url without a scheme, and the layouts that must not move
  *   monitor     a monitor alerts for rows that are new to the database, not for a row the database already held
  *   big         2.5M distinct lines + 100k repeats of early lines (past the old 2M in-file cap): exact, in 5 slabs, phases visible
  *   kill        the app is killed in the middle of the commit; after the restart the orphan stage tables are gone and a retry
@@ -453,6 +455,57 @@ async function parserV6(): Promise<void> {
   check('T3: the Polish line is stored, the Brazilian one is not', one(`email = 'v6p${RUN}'`) === 1 && one(`email = 'v6q${RUN}'`) === 0)
 }
 
+async function parserV61(): Promise<void> {
+  console.log('\n1e. Parser v6.1: pipes that join a url and a credential, a semicolon in the password, a path parameter without a scheme')
+  const P = `e2e-nov-v61-${RUN}.txt`
+  const pw = (k: string) => `Pw-${RUN}-${k}`
+  const app = `AbCdEfGhIjKlMnOpQr61${RUN}==@com.example.app61`
+  const ls = [
+    `https://| shopf1.example-store.test:v61f1${RUN}@probe-mail.test:${pw('F1')}`,                    // F: only the scheme in front of the pipe
+    `https://| shopf2.example-store.test/login:v61f2${RUN}:${pw('F2')}`,                              // F: ... with a path, another login
+    `Network:| shopg1.example-store.test:v61g1${RUN}:${pw('G1')}`,                                      // G: a one-word label
+    `Network:| v61g2${RUN}@probe-mail.test:${pw('G2')}`,                                                // G: ... in front of an e-mail pair
+    `Network:| ${app}/:v61g3${RUN}@probe-mail.test:${pw('G3')}`,                                        // G: ... in front of an Android app id without its scheme
+    `https://shoph1.example-store.test/login:| v61h1${RUN}:${pw('H1')}`,                                // H: a url, a colon, the pipe
+    `https://shoph2.example-store.test/login |:v61h2${RUN}@probe-mail.test:${pw('H2')}`,                // H: ... a space and the pipe in front of the colon
+    `https://shoph3.example-store.test/login|v61h3${RUN}@probe-mail.test:${pw('H3')}`,                  // H: ... the pipe alone
+    `https://shopi1.example-store.test:v61i1${RUN}@probe-mail.test:Sec;${pw('I1')}`,                    // I: a semicolon in the password, url:e-mail:password
+    `v61i2${RUN}@probe-mail.test:Sec;${pw('I2')}`,                                                      // I: ... an e-mail and its password
+    `shopj.example-store.test/app;jsessionid=AB${RUN}:v61j${RUN}:${pw('J')}`,                           // a path parameter in a url without a scheme
+    // the layouts that must not move
+    `https://shopk1.example-store.test|v61k1${RUN}@probe-mail.test|${pw('K1')}`,                        // url|login|password
+    `v61k2${RUN}@probe-mail.test|Sec:${pw('K2')}`,                                                      // e-mail|password with a colon in the password
+    `https://shopk3.example-store.test/login:v61k3${RUN}:${pw('K3')}|RU|note`,                          // a credential then notes
+    `https://shopk4.example-store.test;v61k4${RUN};${pw('K4')}`,                                        // url;login;password
+  ]
+  const v = await importLines(P, ls)
+  check('a file with one line per v6.1 rule and the layouts that must not move: 15 rows are new, none known', v.status === 'done' && v.imported === 15 && v.known === 0, brief(v))
+  check('...nothing is skipped and 15 rows are stored', v.skipped === 0 && rowsFor(P) === 15, `skipped ${v.skipped}, rows ${rowsFor(P)}`)
+  const one = (where: string) => Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND ${where}`))
+  check('F: the scheme in front of the pipe joins the host, and the login and password are the credential',
+    one(`url = 'https://shopf1.example-store.test' AND email = 'v61f1${RUN}@probe-mail.test' AND password = '${pw('F1')}'`) === 1
+    && one(`url = 'https://shopf2.example-store.test/login' AND email = 'v61f2${RUN}' AND password = '${pw('F2')}'`) === 1)
+  check('G: the label is dropped (a url, an e-mail pair without a url, an Android app id with its scheme put back)',
+    one(`url = 'shopg1.example-store.test' AND email = 'v61g1${RUN}' AND password = '${pw('G1')}'`) === 1
+    && one(`url = '' AND email = 'v61g2${RUN}@probe-mail.test' AND password = '${pw('G2')}'`) === 1
+    && one(`startsWith(url, 'android://') AND email = 'v61g3${RUN}@probe-mail.test' AND password = '${pw('G3')}'`) === 1)
+  check('H: the url keeps its path and the credential behind the pipe is the login and the password',
+    one(`url = 'https://shoph1.example-store.test/login' AND email = 'v61h1${RUN}' AND password = '${pw('H1')}'`) === 1
+    && one(`url = 'https://shoph2.example-store.test/login' AND email = 'v61h2${RUN}@probe-mail.test' AND password = '${pw('H2')}'`) === 1
+    && one(`url = 'https://shoph3.example-store.test/login' AND email = 'v61h3${RUN}@probe-mail.test' AND password = '${pw('H3')}'`) === 1)
+  check('I: the semicolon is part of the password',
+    one(`url = 'https://shopi1.example-store.test' AND email = 'v61i1${RUN}@probe-mail.test' AND password = 'Sec;${pw('I1')}'`) === 1
+    && one(`url = '' AND email = 'v61i2${RUN}@probe-mail.test' AND password = 'Sec;${pw('I2')}'`) === 1)
+  check('a path parameter in a url without a scheme stays in the url',
+    one(`url = 'shopj.example-store.test/app;jsessionid=AB${RUN}' AND email = 'v61j${RUN}' AND password = '${pw('J')}'`) === 1)
+  check('the layouts that must not move are stored as before',
+    one(`url = 'https://shopk1.example-store.test' AND email = 'v61k1${RUN}@probe-mail.test' AND password = '${pw('K1')}'`) === 1
+    && one(`url = '' AND email = 'v61k2${RUN}@probe-mail.test' AND password = 'Sec:${pw('K2')}'`) === 1
+    && one(`url = 'https://shopk3.example-store.test/login' AND email = 'v61k3${RUN}' AND password = '${pw('K3')}'`) === 1
+    && one(`url = 'https://shopk4.example-store.test' AND email = 'v61k4${RUN}' AND password = '${pw('K4')}'`) === 1)
+  check('no row holds a scheme, a label or a url as its login', one(`(email IN ('https://', 'Network:') OR startsWith(email, 'https://'))`) === 0)
+}
+
 async function monitorScenario(): Promise<void> {
   console.log('\n2. A monitor alerts for the rows that are new to the database')
   const hook = await api('POST', '/api/monitoring/webhooks', { name: `Novelty Receiver ${RUN}`, url: `http://${RECEIVER}:9000/hook`, secret: 'rehearsal' })
@@ -677,6 +730,7 @@ async function run(): Promise<number> {
   if (want('tags')) await telegramTags()
   if (want('positional')) await positionalRecords()
   if (want('v6')) await parserV6()
+  if (want('pipes')) await parserV61()
   if (want('monitor')) await monitorScenario()
   if (want('big')) await bigFile()
   if (want('kill')) await killMidCommit()

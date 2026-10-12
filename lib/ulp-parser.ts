@@ -1,9 +1,13 @@
 /**
- * ULP credential line parser — v6
+ * ULP credential line parser — v6.1
  *
  * v6 (2026-10-12, docs/superpowers/specs/2026-10-12-parser-v6-and-redo-design.md): UTF-8 lines are read as UTF-8 (lib/ulp-utf8.ts), and
  * layouts that used to be rejected are read by lib/ulp-recover.ts (space-padded colons, a slash in the password, a numeric login, protocol-relative
  * urls, Android app ids without their scheme). A login equal to the password is rejected only when it is an e-mail address.
+ *
+ * v6.1 (2026-10-12, same spec, "Parser v6.1"): a pipe that joins a url, only its scheme or a one-word label and a colon-separated credential is replaced by the
+ * join (joinPipedUrl: "https://| host:login:pass", "Network:| host:login:pass", "https://host/path|login:pass"); a ';' behind a credential that is already
+ * complete is part of the password (holdsCredential); a ";name=value" path parameter is part of a url that has no scheme too (isUrlPathParameter).
  *
  * Design: one algorithm, no regex in the hot path, RFC 3986-correct
  * colon disambiguation. ~150 lines for a format that is field:field:field.
@@ -23,7 +27,7 @@ import { hasGarbageIdentity, hasMojibakeSignature, hasEdgeWhitespace } from '@/l
 import { hasTelegramLink, stripTelegramTag } from '@/lib/ulp-telegram-tag'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
 import {
-  looksLikeUrlFragment, protocolRelativeToPlain, recoverAndroidAppLine, splitNumericLogin, splitSlashInPassword, splitSpacePaddedColons,
+  holdsCredential, isUrlPathParameter, joinPipedUrl, looksLikeUrlFragment, protocolRelativeToPlain, recoverAndroidAppLine, splitNumericLogin, splitSlashInPassword, splitSpacePaddedColons,
 } from '@/lib/ulp-recover'
 
 export interface ULPCredential {
@@ -592,12 +596,10 @@ function colonSplitFields(line: string): [string, string, string] | null {
 }
 
 /**
- * "https://shop.example.test/login;jsessionid=AB12:alice:Secret1": a ";name=value" inside the url is a path parameter, not a field separator
- * (the semicolon rule took the url for the login and the rest for the password).
+ * "https://shop.example.test/login;jsessionid=AB12:alice:Secret1" (and the same without the scheme): a ";name=value" inside the url is a path parameter, not a
+ * field separator (the semicolon rule took the url for the login and the rest for the password).
  */
-function semicolonIsUrlParameter(line: string): boolean {
-  return /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^;\s]*;[A-Za-z_][\w-]*=/.test(line)
-}
+const semicolonIsUrlParameter = isUrlPathParameter
 
 /**
  * "http://shop.example.test/login alice:Secret1": a url, one space, then login:password. Only a fallback, tried after the field split found
@@ -654,6 +656,10 @@ export function parseLine(
   // credential in front of it parses as itself instead of being rejected or storing the tag in the password.
   trimmed = stripTelegramTag(trimmed)
 
+  // Parser v6.1: a pipe between a url (or only its scheme, or a label) and a colon-separated credential is the join of the two, not the login/password separator
+  const joined = joinPipedUrl(trimmed)
+  if (joined) return parseLine(joined.line, sourceFile, shouldHardDrop)
+
   // Pipe separator detection:
   // If the line already uses tab or semicolon as its primary separator, pipe is
   // just noise (e.g. password field contains '|') — strip from first pipe.
@@ -668,11 +674,9 @@ export function parseLine(
       clean = trimmed.split('|')[0].trim()
     } else {
       const beforePipe = trimmed.slice(0, trimmed.indexOf('|'))
-      // Count colons that are NOT part of a '://' scheme
-      const nonSchemeColons = (beforePipe.replace('://', '  ').match(/:/g) ?? []).length
-      // "alice@mail.test:Secret1 | Country: US": an e-mail login and its password in front of the pipe are a credential, the rest is a note
-      const emailPairBeforePipe = nonSchemeColons === 1 && /^[^\s/:@]+@[^\s/:@]+:/.test(beforePipe)
-      if (nonSchemeColons >= 2 || emailPairBeforePipe) {
+      // Two or more colons that are not part of a '://' scheme, or "alice@mail.test:Secret1 | Country: US" (an e-mail login and its password in front of the pipe):
+      // the credential is already complete, the rest is a note
+      if (holdsCredential(beforePipe)) {
         // Has login:pass embedded before the pipe → trailing metadata, strip it
         clean = beforePipe.trim()
       } else {
@@ -683,6 +687,9 @@ export function parseLine(
   } else {
     clean = trimmed
   }
+
+  // Parser v6.1, rule I: a ';' behind a credential that is already complete is part of the password, except at the very end: "alice@mail.test:Secret1;" ends in a delimiter
+  if (clean.includes(';') && !clean.includes('\t') && !semicolonIsUrlParameter(clean) && holdsCredential(clean.slice(0, clean.indexOf(';')))) clean = clean.replace(/;+\s*$/, '')
 
   // Rule 2: separator detection (\t beats ; beats | beats :)
   let url = '', login = '', password = ''
@@ -730,7 +737,8 @@ export function parseLine(
     } else {
       return { credential: null, reason: 'no_fields' }
     }
-  } else if (clean.includes(';') && !semicolonIsUrlParameter(clean)) {
+  } else if (clean.includes(';') && !semicolonIsUrlParameter(clean) && !holdsCredential(clean.slice(0, clean.indexOf(';')))) {
+    // (Parser v6.1, rule I: a ';' behind a credential that is already complete is part of the password, so that line is split on its colons below.)
     const parts = clean.split(';')
     if (parts.length >= 3) {
       url      = parts[0].trim()
@@ -850,9 +858,12 @@ export interface InlineResult {
 
 /** One line read on its own: parseLine, after an Android app id without its scheme (rule B) got the scheme back. The side-copy tool uses it too. */
 export function parseInlineLine(line: string, filename: string, shouldHardDrop?: (email: string, url: string) => boolean): InlineResult {
-  const android = recoverAndroidAppLine(line.trim())
+  // A pipe that joins a url, a scheme or a label and a credential is replaced first (v6.1), so that the Android rule sees "HASH==@com.app/:login:pass" behind a label
+  const piped = line.includes('|') ? joinPipedUrl(line.trim()) : null
+  const text = piped ? piped.line : line
+  const android = recoverAndroidAppLine(text.trim())
   if (android) return { ...parseLine(android, filename, shouldHardDrop), androidRecovered: true }
-  return { ...parseLine(line, filename, shouldHardDrop), androidRecovered: false }
+  return { ...parseLine(text, filename, shouldHardDrop), androidRecovered: false }
 }
 
 // ── Batch / stream parsers ────────────────────────────────────────────────────
