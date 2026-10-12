@@ -47,6 +47,9 @@ repository writes its scratch files under `PILE_WORK_DIR`: point that at a scrat
    not run compose from there. The running stack is project `ulp-suite` (working dir `/home/cole/ulp-suite`):
    `cd <checkout at the merged commit> && DOCKER_CONFIG=/tmp/claude-1000/dockercfg docker compose -p ulp-suite -f docker-compose.yml --project-directory /home/cole/ulp-suite --env-file /home/cole/ulp-suite/.env up -d --no-deps app`
    (`git diff <the primary checkout's HEAD> <main sha> -- docker-compose.yml` shows what changes: the keep-list variable on the app and two backup booleans). Never `build` from here.
+   Rehearse it first, it changes nothing: the same command with `config | grep -E 'INGEST_FILTER|CONTENT_DEDUP_APPLY'` must show `HARD_DROP_TIERS: T3`, the 15 countries and
+   `CONTENT_DEDUP_APPLY: "false"` (do not print the whole config: it holds the secrets), and with `--dry-run up -d --no-deps app` it prints `Container ulpsuite_app Recreate`
+   (checked on 2026-10-12: the live container kept its start time and image).
 4. Verify: `docker inspect ulpsuite_app --format '{{.State.Health.Status}} {{.RestartCount}}'` is `healthy 0`;
    `docker exec ulpsuite_app printenv | grep -E 'INGEST_FILTER|CONTENT_DEDUP_APPLY'` shows `HARD_DROP_TIERS=T3`, the 15-country `HARD_KEEP_COUNTRIES` and
    `CONTENT_DEDUP_APPLY=false`; the log has no error; the login page answers.
