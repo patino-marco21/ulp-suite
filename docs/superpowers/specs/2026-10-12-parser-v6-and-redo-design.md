@@ -18,7 +18,7 @@ credential values appear here on purpose: the repository is public until the own
 | 7 | The 20 pile files whose names are already in `ulp.sources` and the one new download are part of the redo. |
 | 8 | In-range dependency refresh (hardening Task 8) goes into the same image. Majors stay put. No Dependabot file. |
 | 9 | Build flow: this spec, then the owner's review, then a plan, then a TDD build in a separate worktree. The redo starts as soon as the build is proven, in the daytime too, with a warning before the ~30 s restart. |
-| 10 | Search targets: domain and e-mail/username must be fast; a one-word keyword may take up to 30 s. CSV exports up to ~1M rows (separate project). |
+| 10 | Search targets: domain and e-mail/username must be fast (a login-only search scope is added after the redo); a one-word keyword may take up to 30 s. CSV exports up to ~1M rows (separate project). |
 
 ## What the review found
 
@@ -193,9 +193,17 @@ the 12 largest files. The side copy needs 5-9 GiB more and the dictionary 2.2 Gi
 
 ## Related work agreed in the same interview (not part of this change)
 
-- **Backup:** rehearse the S3 path of `clickhouse-backup` against a throwaway MinIO container (own container, own volume, never the other stack's) with a small
-  sandbox table; no credentials. The old partitions' cleanup (~20M junk or tag rows, ~1.6M garbled-UTF-8 rows, 3.2M "Case D" rows, ~650K mangled-T3 rows) waits for a
-  backup; it rewrites ~130 GiB.
+- **Backup (rehearsed on 2026-10-12, throwaway MinIO, small synthetic table, no credentials):** the wrapper's `full`, `inc`, `list` and `status`, and
+  a partition-limited backup, all work against an S3-compatible target, and a restored copy matched the live table row for row (equal row counts and
+  equal sums of the content hash). The restore drill (`verify`) needed two fixes, to be made in the build: `clickhouse.default_replica_path:
+  /clickhouse/tables/{shard}/{database}/{table}` in `docker/clickhouse-backup/config.yml` (the tool's default uses a `{cluster}` macro this server does
+  not define), and `--tables 'ulp.*'` in the wrapper's `verify` (a comma list together with `--restore-database-mapping` builds a pattern that matches nothing).
+  The compose service should also forward `S3_FORCE_PATH_STYLE` and `S3_DISABLE_SSL` (needed for MinIO-like targets). The space guard refuses a real backup while
+  free space minus the largest partition is below 140.5 GiB, so the first real backup should be the static partitions only (`--partitions 202607,202608`,
+  ~96 GiB), or run with `BACKUP_FORCE=1` knowingly. A real destination is still needed; the old partitions' cleanup waits for it. That cleanup (~20M junk
+  or tag rows, ~1.6M garbled-UTF-8 rows, 3.2M "Case D" rows, ~650K mangled-T3 rows) rewrites ~130 GiB.
+- **Login-only search scope:** a `login:` prefix and a small "search in" dropdown on the credentials page (a login-column token lookup takes ~0.1 s; the
+  all-columns keyword search takes ~16 s; an exact e-mail takes ~1.2 s). Small change after the redo.
 - **CSV export:** raise the 10,000-row cap to ~1M and stream the file. Separate project after the redo.
 - **GitHub:** the owner makes the repository private in the settings; the Dependabot file stays out.
 
