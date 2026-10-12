@@ -55,10 +55,23 @@ export interface ImportProgressEvent {
   slabs?: number
 }
 
+/** Who a file is when it was read from the source archive (lib/archive-ref.ts): written to ulp.sources and compared by the duplicate-file guard. */
+export interface SourceIdentity {
+  sha256: string
+  size: number
+  archiveId: string
+}
+
 /** What the pipeline functions accept: every part optional, so existing callers and tests need no change. */
 export type ImportHooks = Partial<ImportContext> & {
   /** Novelty-aware ingest reports where it is: parsing, checking against the table, inserting. */
   onImportProgress?: (event: ImportProgressEvent) => void
+  /** An admin released this file from the Held list: the quality gate then reports what it found but does not hold the file. */
+  gateOverride?: boolean
+  /** Runs once the whole file was read and BEFORE the final gate check and the commit; a throw fails the import with nothing written (the archive's sha256 check). */
+  beforeCommit?: () => void | Promise<void>
+  /** The file's identity when it was read from the source archive. */
+  source?: SourceIdentity
 }
 
 export interface RunImportOptions<T> {

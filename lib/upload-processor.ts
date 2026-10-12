@@ -36,6 +36,10 @@ import type { ImportHooks, ImportProgressEvent } from '@/lib/import-runner'
 import { noveltyConfig } from '@/lib/ingest-novelty-config'
 import { commitStage } from '@/lib/ingest-novelty'
 import { createStage, dropStage, newStageId, registerStage, stageTables, unregisterStage } from '@/lib/ingest-stage'
+import {
+  IngestHeldError, describeVerdict, evaluateGate, newGateCounters, parseGateConfig, recordGateBatch,
+  type GateCounters, type GateReport, type GateVerdict,
+} from '@/lib/ingest-quality-gate'
 
 // ─── Public result type ───────────────────────────────────────────────────────
 
@@ -57,6 +61,8 @@ export interface ProcessResult {
   tierDropped:         number
   /** Set when errors > 0 from a skipped zip entry — why it was skipped (oversized, bad ratio, corrupted, encrypted, ...). */
   error_reason?:       string
+  /** The quality gate's report, set when its final verdict was not `pass` (a warn, or a hold that an admin released). */
+  gate?:               GateReport
 }
 
 export const UPLOAD_BATCH_SIZE = 100_000
@@ -252,6 +258,10 @@ export interface StreamToTableOptions {
   signal?: AbortSignal
   /** Progress heartbeat for the stall watchdog (lib/import-runner.ts): after each batch, on each retry, on each memory-guard poll. */
   onBeat?: () => void
+  /** Counts the lines and the rows that break a rule (lib/ingest-quality-gate.ts). Passed by the staged path and, for a warning only, by the direct path. */
+  gate?: GateCounters
+  /** Runs once, after the first batch that brings `gate.lines` to `atLines`. A throw ends the import before that batch is written (an early hold costs a million lines, not a 4 GB file). */
+  gateCheckpoint?: { atLines: number; check: () => void }
 }
 
 export interface StreamToTableResult {
@@ -289,6 +299,7 @@ export async function streamCredentialsToTable(
   let imported = 0
   let skipped = 0
   let tierDropped = 0
+  let checkpointDone = false
   const rejection_breakdown = makeRejectionMap()
 
   const gen = parseULPStream(stream, filename, batchSize, options.shouldHardDrop, { dedupInFile: options.dedupInFile })
@@ -304,6 +315,17 @@ export async function streamCredentialsToTable(
 
       // Kick off parsing of the NEXT batch before blocking on this insert.
       if (pipeline) pending = gen.next()
+
+      // The quality gate counts what the parser produced, before the tier filter below drops anything. A hold at the checkpoint throws here, before this
+      // batch is written; the finally releases the parser.
+      if (options.gate) {
+        recordGateBatch(options.gate, batch)
+        const cp = options.gateCheckpoint
+        if (cp && !checkpointDone && options.gate.lines >= cp.atLines) {
+          checkpointDone = true
+          cp.check()
+        }
+      }
 
       let creds = batch.credentials
       if (filterOn && dropPolicy) {
@@ -376,6 +398,21 @@ async function importThroughStage(a: StagedImport): Promise<ProcessResult> {
   const { filename, jobId, hooks } = a
   const tables = stageTables(newStageId())
 
+  // The quality gate counts the rows as they are staged and holds the file before commitStage when they break too many rules. A hold throws, so the
+  // finally below drops the stage tables and nothing reaches ulp.credentials. A released file (hooks.gateOverride) is reported, not held.
+  const gateConfig = parseGateConfig()
+  const gate = gateConfig.mode === 'off' ? undefined : newGateCounters()
+  const gateCheck = (phase: 'early' | 'final'): GateVerdict | null => {
+    if (!gate) return null
+    const verdict = evaluateGate(gate, gateConfig, phase)
+    const holds = verdict.level === 'hold' && !hooks.gateOverride
+    if (verdict.level !== 'pass' && (phase === 'final' || holds)) {
+      console.warn(`[quality-gate] ${filename}: ${describeVerdict(verdict)}${verdict.level === 'hold' && hooks.gateOverride ? ' -- released by an admin, importing anyway' : ''}`)
+    }
+    if (holds) throw new IngestHeldError(verdict.report)
+    return verdict
+  }
+
   let known = 0
   let inserted = 0
   let staged = 0
@@ -422,6 +459,8 @@ async function importThroughStage(a: StagedImport): Promise<ProcessResult> {
           report({ phase: 'parsing', staged, skipped, known: 0, inserted: 0 })
         },
         onBatchMetrics: recordBatch,
+        gate,
+        gateCheckpoint: gate ? { atLines: gateConfig.earlyLines, check: () => { gateCheck('early') } } : undefined,
       })
     } finally {
       finishIngest()
@@ -431,6 +470,10 @@ async function importThroughStage(a: StagedImport): Promise<ProcessResult> {
     if (a.filterOn && streamed.tierDropped > 0) {
       console.log(`[ingest-filter] ${filename}: dropped ${streamed.tierDropped} low-tier rows pre-insert`)
     }
+
+    // Integrity before the gate: a damaged archive would read as a bad file. A throw here fails the job with nothing written.
+    await hooks.beforeCommit?.()
+    const gateVerdict = gateCheck('final')
 
     const commit = await commitStage({
       tables,
@@ -470,6 +513,7 @@ async function importThroughStage(a: StagedImport): Promise<ProcessResult> {
       rejection_breakdown: streamed.rejection_breakdown,
       alreadyImported:     false,
       tierDropped:         streamed.tierDropped,
+      gate:                gateVerdict && gateVerdict.level !== 'pass' ? gateVerdict.report : undefined,
     }
   } finally {
     try {
@@ -555,6 +599,10 @@ export async function processTextStream(
     })
   }
 
+  // Warn only: this path inserts as it parses, so there is nothing left to hold when the verdict is known.
+  const gateConfig = parseGateConfig()
+  const gate = gateConfig.mode === 'off' ? undefined : newGateCounters()
+
   startIngest(filename)
   let result
   try {
@@ -573,6 +621,7 @@ export async function processTextStream(
         if (onBatch) onBatch(imp)
       },
       onBatchMetrics: recordBatch,
+      gate,
       onBatchCredentials: monitorIndex.size > 0
         ? creds => {
             // Cap accumulation — see MAX_INPROCESS_MATCHES above. Once hit, stop
@@ -592,6 +641,11 @@ export async function processTextStream(
     })
   } finally {
     finishIngest()
+  }
+
+  if (gate) {
+    const verdict = evaluateGate(gate, gateConfig, 'final')
+    if (verdict.level !== 'pass') console.warn(`[quality-gate] ${filename}: ${describeVerdict(verdict)} (direct path: rows already written)`)
   }
 
   imported    = result.imported

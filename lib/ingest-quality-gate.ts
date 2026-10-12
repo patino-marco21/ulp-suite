@@ -44,16 +44,25 @@ export function urlHoldsCredential(url: string): boolean {
   return holdsCredential(url)
 }
 
-/** The first invariant a stored row breaks, or null. Each row is counted once. */
+/** "t.me/" contains a slash, so the regex only runs on the (rare) field that has one. */
+const hasTelegramLink = (s: string): boolean => s.includes('/') && TELEGRAM_LINK.test(s)
+
+/**
+ * The first invariant a stored row breaks, or null. Each row is counted once, under the first kind that matches, in the order of GATE_KINDS. This runs for every
+ * row of every import, so the clean row's path is short: no colon in the login rules out three kinds at once.
+ */
 export function classifyStoredRow(url: string, login: string, password: string): GateKind | null {
-  if (LOGIN_IS_URL.test(login) || login.endsWith(':')) return 'login-is-scheme-or-ends-colon'
-  if (login.includes('://')) return 'login-has-scheme'
+  const hasColon = login.includes(':')
+  if (hasColon) {
+    if (LOGIN_IS_URL.test(login) || login.endsWith(':')) return 'login-is-scheme-or-ends-colon'
+    if (login.includes('://')) return 'login-has-scheme'
+  }
   if (login.includes('/') && !url.startsWith('android://')) return 'login-has-slash'
-  if (login.includes(':')) return 'login-has-colon'
+  if (hasColon) return 'login-has-colon'
   if (url === '' && !login.includes('@') && BARE_HOST.test(login)) return 'login-is-bare-host'
   if (urlHoldsCredential(url)) return 'url-holds-credential'
   if (password.includes('://')) return 'password-has-scheme'
-  if (TELEGRAM_LINK.test(password) || TELEGRAM_LINK.test(login)) return 'telegram-link-in-field'
+  if (hasTelegramLink(password) || hasTelegramLink(login)) return 'telegram-link-in-field'
   if (DOUBLE_ENCODED.test(password)) return 'double-encoded-text'
   return null
 }
