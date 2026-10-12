@@ -34,6 +34,10 @@ vi.mock('@/lib/upload-processor', () => ({
   processZipFile: vi.fn().mockResolvedValue(undefined),
 }))
 
+const held = vi.hoisted(() => ({ holdSpooledFile: vi.fn() }))
+vi.mock('@/lib/inbox-helpers', () => ({ holdSpooledFile: held.holdSpooledFile }))
+
+import { IngestHeldError, type GateReport } from '@/lib/ingest-quality-gate'
 import { settingsManager } from '@/lib/settings'
 import { logJob } from '@/lib/processing-log'
 import { logUploadAction } from '@/lib/audit-log'
@@ -61,6 +65,7 @@ afterAll(() => {
 })
 
 beforeEach(() => {
+  held.holdSpooledFile.mockReset()
   mockProcessTextFile.mockClear()
   mockProcessZipFile.mockReset()
   mockProcessZipFile.mockResolvedValue(undefined)
@@ -192,5 +197,19 @@ describe('POST /api/v1/upload: spool first, answer when the import has finished'
     expect(await res.json()).toEqual({ success: false, error: 'Upload cancelled' })
     expect(mockProcessTextFile).not.toHaveBeenCalled()
     expect(spoolFiles()).toEqual([])
+  })
+})
+
+describe('POST /api/v1/upload: a file the quality gate holds', () => {
+  const REPORT = { v: 1, phase: 'final', level: 'hold', reasons: ['10.00% of the stored rows break a rule (limit 2%)'] } as unknown as GateReport
+
+  it('answers 422 with the report, keeps the file and logs the job as held (not failed)', async () => {
+    held.holdSpooledFile.mockReturnValue('kept.txt')
+    mockProcessTextFile.mockRejectedValueOnce(new IngestHeldError(REPORT))
+    const res = await post('held.txt', 'a:b:c\n')
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ success: false, held: true, kept: true, report: { level: 'hold' } })
+    expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ filename: 'held.txt', status: 'held' }))
+    expect(mockLogJob).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }))
   })
 })

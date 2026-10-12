@@ -62,3 +62,15 @@ describe('Ingest Health panel — imports paused for lack of disk space', () => 
     expect(panel).toContain('{ingestGate?.paused && (')
   })
 })
+
+describe('Ingest Health panel — files held by the quality gate', () => {
+  test('shows an amber line with the count and points at the Inbox, only when something is held', () => {
+    expect(panel).toContain('data-testid="held-files"')
+    expect(panel).toContain('held by the quality gate')
+    expect(panel).toContain('{held && held.count > 0 && (')
+  })
+
+  test('the block is optional in the payload, so an older server response still renders', () => {
+    expect(panel).toMatch(/held\?: \{/)
+  })
+})

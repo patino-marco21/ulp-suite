@@ -13,6 +13,8 @@ import { formatBytes } from '@/lib/utils'
 import { runImportJob } from '@/lib/import-runner'
 import { spoolRequestBody, discardSpool, describeSpoolError, type SpoolResult } from '@/lib/upload-spool'
 import { logUploadAction } from '@/lib/audit-log'
+import { isIngestHeldError } from '@/lib/ingest-quality-gate'
+import { holdSpooledFile } from '@/lib/inbox-helpers'
 
 // 60 uploads per IP per 5 minutes — permits batch multi-file uploads while
 // still blocking runaway automation.  Admin-only endpoint; session auth is the
@@ -79,23 +81,27 @@ async function runWithProgress(
       filename, imported: result.imported, known: result.known, skipped: result.skipped, duration_ms: Date.now() - startAt,
     })
   } catch (err) {
+    // A held file is not a failed import: the quality gate stopped it before one row was stored, and the upload is kept in inbox/held/.
+    const heldError = isIngestHeldError(err) ? err : null
+    const message = err instanceof Error ? err.message : 'Upload failed'
     updateJob(jobId, {
       status: 'error',
-      error:  err instanceof Error ? err.message : 'Upload failed',
+      error:  heldError ? `${message} The file was kept; an admin can review it and release it in the Inbox.` : message,
     })
     const j = getJob(jobId)
     if (j) await pushEvent(j)
     logJob({
       source:        'http',
       filename,
-      status:        'failed',
+      status:        heldError ? 'held' : 'failed',
       imported:      0,
       skipped:       0,
       duration_ms:   Date.now() - startAt,
       error_message: err instanceof Error ? err.message : String(err),
+      ...(heldError ? { gate_report: JSON.stringify(heldError.report) } : {}),
     })
     void logUploadAction('upload.fail', actor, jobId, {
-      filename, error: err instanceof Error ? err.message : String(err), duration_ms: Date.now() - startAt,
+      filename, error: err instanceof Error ? err.message : String(err), duration_ms: Date.now() - startAt, ...(heldError ? { held: true } : {}),
     })
   } finally {
     clearInterval(interval)
@@ -191,6 +197,7 @@ export async function POST(request: NextRequest) {
   }
 
   // For text the queue owns the spool file from here on; for ZIP this handler does until it responds.
+  const requestStartedAt = Date.now()
   let handedOff = false
   try {
     // ── Plain text / CSV ──────────────────────────────────────────────────────
@@ -215,6 +222,10 @@ export async function POST(request: NextRequest) {
               label: originalFilename,
               work:  ctx => processTextFile(spool.path, originalFilename, jobId, undefined, ctx),
             })
+          } catch (err) {
+            // Keep a file the quality gate held (the spool file moves to inbox/held/); everything else is discarded below, as before.
+            if (isIngestHeldError(err)) holdSpooledFile(spool.path, originalFilename)
+            throw err
           } finally {
             setCurrentJob(null)
             await discardSpool(spool.path)
@@ -329,6 +340,15 @@ export async function POST(request: NextRequest) {
       filename: originalFilename,
     })
   } catch (error) {
+    if (isIngestHeldError(error)) {
+      // The quality gate stopped an entry of the archive. The archive is kept in inbox/held/; an admin can review it and release it in the Inbox.
+      const kept = holdSpooledFile(spool.path, originalFilename)
+      logJob({
+        source: 'http', filename: originalFilename, status: 'held', imported: 0, skipped: 0, duration_ms: Date.now() - requestStartedAt,
+        error_message: error.message, gate_report: JSON.stringify(error.report),
+      })
+      return NextResponse.json({ success: false, held: true, kept: kept !== null, error: error.message, report: error.report }, { status: 422 })
+    }
     console.error('Upload error:', error)
     return NextResponse.json(
       { success: false, error: error instanceof Error ? error.message : 'Upload failed' },

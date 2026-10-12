@@ -1,14 +1,15 @@
 import { NextRequest } from 'next/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const h = vi.hoisted(() => ({ progress: null as null | Record<string, unknown>, dbQuery: vi.fn() }))
+const h = vi.hoisted(() => ({ progress: null as null | Record<string, unknown>, dbQuery: vi.fn(), held: [] as Array<Record<string, unknown>>, latestHeldReport: vi.fn() }))
 vi.mock('@/lib/auth', () => ({
   validateRequest: vi.fn().mockResolvedValue({ userId: '1', role: 'admin', email: 'admin@example.com' }),
   requireAdminRole: vi.fn().mockReturnValue(null),
 }))
 vi.mock('@/lib/sqlite', () => ({ dbQuery: h.dbQuery }))
 vi.mock('@/lib/upload-queue', () => ({ uploadQueue: { activeCount: 1, pendingCount: 0 }, getCurrentJob: () => 'big.txt' }))
-vi.mock('@/lib/inbox-helpers', () => ({ getWaiting: () => [], getFailed: () => [], getDoneCount: () => 0 }))
+vi.mock('@/lib/inbox-helpers', () => ({ getWaiting: () => [], getFailed: () => [], getHeld: () => h.held, getDoneCount: () => 0 }))
+vi.mock('@/lib/ingest-gate-store', () => ({ latestHeldReport: h.latestHeldReport }))
 vi.mock('@/lib/inbox-watcher', () => ({ getInboxJobProgress: () => h.progress, getInFlightCount: () => 1 }))
 
 import { GET } from '@/app/api/inbox/status/route'
@@ -17,6 +18,8 @@ const get = async () => (await GET(new NextRequest('http://localhost/api/inbox/s
 
 beforeEach(() => {
   h.progress = null
+  h.held = []
+  h.latestHeldReport.mockReset()
   h.dbQuery.mockReset()
   h.dbQuery.mockReturnValue([])
 })
@@ -61,5 +64,29 @@ describe('GET /api/inbox/status with novelty-aware ingest', () => {
     const json = await get()
     expect(h.dbQuery.mock.calls[0][0]).toMatch(/SELECT[^;]*\bknown\b/)
     expect(json.done_recent[0]).toMatchObject({ imported: 5, known: 9 })
+  })
+
+  it('lists the files held by the quality gate with the report of their hold', async () => {
+    h.held = [{ name: 'held.txt', size_bytes: 10, mtime: 'x' }, { name: 'noreport.txt', size_bytes: 5, mtime: 'y' }]
+    h.latestHeldReport.mockImplementation((name: string) => (name === 'held.txt' ? { level: 'hold', junkPct: 7 } : null))
+    const json = await get()
+    expect(json.held).toEqual([
+      { name: 'held.txt', size_bytes: 10, mtime: 'x', report: { level: 'hold', junkPct: 7 } },
+      { name: 'noreport.txt', size_bytes: 5, mtime: 'y', report: null },
+    ])
+  })
+
+  it('says nothing is held when nothing is', async () => {
+    expect((await get()).held).toEqual([])
+  })
+
+  it('selects the gate level and the first reason of each recent job, and tolerates a malformed report', async () => {
+    h.dbQuery.mockReturnValue([{ id: 1, filename: 'a.txt', status: 'held', imported: 0, known: 0, skipped: 0, duration_ms: 1, error_message: 'Held', created_at: 'x', gate_level: 'hold', gate_note: '7% break a rule' }])
+    const json = await get()
+    const sql = h.dbQuery.mock.calls[0][0] as string
+    expect(sql).toMatch(/json_valid\(gate_report\)/)
+    expect(sql).toMatch(/AS gate_level/)
+    expect(sql).toMatch(/AS gate_note/)
+    expect(json.done_recent[0]).toMatchObject({ status: 'held', gate_level: 'hold', gate_note: '7% break a rule' })
   })
 })

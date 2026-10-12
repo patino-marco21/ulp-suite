@@ -63,6 +63,8 @@ interface IngestHealth {
     lastError: string | null
     lastBuildMs: number | null
   }
+  // Files the ingest quality gate is holding in inbox/held/ (lib/ingest-quality-gate.ts).
+  held?: { count: number }
 }
 
 const fmtRate = (n: number) =>
@@ -111,7 +113,7 @@ export function IngestHealthPanel() {
   }, [])
 
   if (!data) return null
-  const { app, clickhouse, diskBudget, disk, ingestGate, backup, searchDictionary } = data
+  const { app, clickhouse, diskBudget, disk, ingestGate, backup, searchDictionary, held } = data
   const active = app.filename !== null && Date.now() - app.updatedAt < 5_000
   const partsPct = Math.min(100, Math.round((clickhouse.activeParts / clickhouse.partsThreshold) * 100))
 
@@ -200,6 +202,11 @@ export function IngestHealthPanel() {
             {ingestGate.freeBytes === null
               ? ` (free space unreadable${ingestGate.error ? `: ${ingestGate.error}` : ""})`
               : ` (${fmtGB(ingestGate.freeBytes)} free, floor ${fmtGB(ingestGate.floorBytes)})`}
+          </div>
+        )}
+        {held && held.count > 0 && (
+          <div className="text-xs border-t pt-3 text-amber-600 font-medium" data-testid="held-files" role="status">
+            {held.count} file{held.count === 1 ? "" : "s"} held by the quality gate — review {held.count === 1 ? "it" : "them"} in the Inbox
           </div>
         )}
         {backup && (

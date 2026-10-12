@@ -13,12 +13,16 @@ vi.mock('@/lib/ingest-metrics', () => ({
   }),
 }))
 
+const held = vi.hoisted(() => ({ list: [] as Array<{ name: string }> }))
+vi.mock('@/lib/inbox-helpers', () => ({ getHeld: () => held.list }))
+
 import { executeQuery } from '@/lib/clickhouse'
 import { GET } from '@/app/api/monitoring/ingest-health/route'
 import { liveStateFromRow, encodeDictionaryComment, resetSearchDictionaryCache } from '@/lib/search-dictionary'
 
 const mockEQ = executeQuery as ReturnType<typeof vi.fn>
 beforeEach(() => {
+  held.list = []
   resetSearchDictionaryCache()
   mockEQ.mockReset()
   // Re-arm a default resolved value after reset (matches the pattern used in
@@ -87,5 +91,16 @@ describe('GET /api/monitoring/ingest-health', () => {
     const json = await (await GET({} as any)).json()
     expect(json.searchDictionary).toMatchObject({ state: 'fresh', builtAt: '2026-10-03T12:00:00.000Z', pairRows: 85, emailRows: 13, bytes: 2100 })
     expect(json.searchDictionary).not.toHaveProperty('fingerprint')
+  })
+
+  it('reports how many files the quality gate is holding', async () => {
+    held.list = [{ name: 'a.txt' }, { name: 'b.txt' }]
+    const json = await (await GET({} as any)).json()
+    expect(json.held).toEqual({ count: 2 })
+  })
+
+  it('reports zero held files when there are none', async () => {
+    const json = await (await GET({} as any)).json()
+    expect(json.held).toEqual({ count: 0 })
   })
 })

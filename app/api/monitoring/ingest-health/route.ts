@@ -7,6 +7,7 @@ import { readDisk } from '@/lib/disk-watch'
 import { getIngestDiskGate } from '@/lib/ingest-disk-gate'
 import { readBackupStatus } from '@/lib/backup-status'
 import { getSearchDictionaryStatus } from '@/lib/search-dictionary'
+import { getHeld } from '@/lib/inbox-helpers'
 
 export const dynamic = 'force-dynamic'
 
@@ -73,7 +74,10 @@ export async function GET(request: NextRequest) {
     lastError: dict.lastError, lastBuildMs: dict.lastBuildMs,
   }
 
+  // Files the ingest quality gate stopped (lib/ingest-quality-gate.ts): they wait in inbox/held/ for an admin to release them.
+  const held = { count: getHeld().length }
+
   return NextResponse.json({
-    app: getIngestMetrics(), clickhouse, diskBudget, disk, ingestGate: getIngestDiskGate(), backup: readBackupStatus(), searchDictionary,
+    app: getIngestMetrics(), clickhouse, diskBudget, disk, ingestGate: getIngestDiskGate(), backup: readBackupStatus(), searchDictionary, held,
   })
 }

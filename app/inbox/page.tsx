@@ -4,7 +4,7 @@ export const dynamic = "force-dynamic"
 import { useState, useEffect, useCallback } from "react"
 import {
   Inbox, CheckCircle, XCircle, Loader2, RefreshCw,
-  AlertCircle, HardDrive, Timer,
+  AlertCircle, HardDrive, Timer, ShieldAlert,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -26,13 +26,16 @@ interface InboxFileEntry {
 interface DoneEntry {
   id:            number
   filename:      string
-  status:        'done' | 'failed'
+  status:        'done' | 'failed' | 'held'
   imported:      number
   known?:        number
   skipped:       number
   duration_ms:   number
   error_message: string | null
   created_at:    string
+  /** The ingest quality gate's verdict for this job and its first reason, when it recorded one. */
+  gate_level?:   string | null
+  gate_note?:    string | null
 }
 
 interface CurrentProgress {
@@ -53,6 +56,23 @@ interface CurrentProgress {
   slabs?:          number | null
 }
 
+interface GateReportView {
+  level:      'pass' | 'warn' | 'hold'
+  phase:      'early' | 'final'
+  reasons:    string[]
+  lines:      number
+  stored:     number
+  junkPct:    number
+  unsplitPct: number
+  garbagePct: number
+  kinds:      Record<string, number>
+  shapes:     Array<{ shape: string; count: number }>
+}
+
+interface HeldEntry extends InboxFileEntry {
+  report: GateReportView | null
+}
+
 interface InboxStatus {
   watcher_active:   boolean
   current_file:     string | null
@@ -61,6 +81,7 @@ interface InboxStatus {
   waiting:          InboxFileEntry[]   // excludes file currently being processed
   waiting_total:    number             // true waiting + 1 if processing
   failed:           InboxFileEntry[]
+  held?:            HeldEntry[]
   done_count:       number
   done_recent:      DoneEntry[]
   in_flight_count?: number
@@ -116,6 +137,7 @@ export default function InboxPage() {
   const [retrying, setRetrying]       = useState<string | null>(null)
   const [retryingAll, setRetryingAll] = useState(false)
   const [scanning, setScanning]       = useState(false)
+  const [releasing, setReleasing]     = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -165,6 +187,23 @@ export default function InboxPage() {
       toast({ title: 'Retry all failed', variant: 'destructive' })
     } finally {
       setRetryingAll(false)
+    }
+  }, [toast])
+
+  const release = useCallback(async (filename: string) => {
+    setReleasing(filename)
+    try {
+      const res = await fetch('/api/inbox/release', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename }),
+      })
+      if (res.ok) toast({ title: `${filename} released: it is imported once, and the quality gate will not hold it again` })
+      else        toast({ title: 'Release failed', variant: 'destructive' })
+    } catch {
+      toast({ title: 'Release failed', variant: 'destructive' })
+    } finally {
+      setReleasing(null)
     }
   }, [toast])
 
@@ -397,6 +436,66 @@ export default function InboxPage() {
         </CardContent>
       </Card>
 
+      {/* Held by the ingest quality gate */}
+      {data && (data.held?.length ?? 0) > 0 && (
+        <Card data-testid="held-card">
+          <CardHeader className="py-3">
+            <CardTitle className="text-base text-amber-600 dark:text-amber-400">
+              Held by the quality gate ({data.held!.length} files)
+            </CardTitle>
+            <p className="text-xs text-muted-foreground">
+              These files were stopped before one row was stored: too many of their rows look wrongly split. Read the reasons; Release imports a file once anyway.
+            </p>
+          </CardHeader>
+          <CardContent className="pt-0 pb-4">
+            <div className="space-y-3">
+              {data.held!.map(f => (
+                <div key={f.name} className="text-xs space-y-1">
+                  <div className="flex items-center gap-2">
+                    <ShieldAlert className="h-3 w-3 shrink-0 text-amber-500" />
+                    <span className="font-mono truncate flex-1 text-muted-foreground" title={f.name}>{f.name}</span>
+                    <span className="text-muted-foreground shrink-0">{fmtBytes(f.size_bytes)}</span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => release(f.name)}
+                      disabled={releasing === f.name}
+                      className="h-6 px-2 text-xs"
+                    >
+                      {releasing === f.name ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                      <span className="ml-1">Release</span>
+                    </Button>
+                  </div>
+                  {f.report ? (
+                    <div className="pl-5 space-y-0.5 text-muted-foreground">
+                      {f.report.reasons.map(r => <p key={r}>{r}</p>)}
+                      <p className="tabular-nums">
+                        {fmtRows(f.report.lines)} lines read, {fmtRows(f.report.stored)} stored; {f.report.junkPct}% break a rule,
+                        {' '}{f.report.unsplitPct}% unsplit, {f.report.garbagePct}% garbage
+                        {f.report.phase === 'early' ? ' (stopped early, after the first million lines)' : ''}
+                      </p>
+                      {Object.keys(f.report.kinds).length > 0 && (
+                        <p>{Object.entries(f.report.kinds).map(([k, n]) => `${k}: ${fmtRows(n)}`).join(', ')}</p>
+                      )}
+                      {f.report.shapes.length > 0 && (
+                        <details>
+                          <summary className="cursor-pointer">Most common shapes of the rows that break a rule</summary>
+                          <ul className="font-mono">
+                            {f.report.shapes.slice(0, 10).map(s => <li key={s.shape}>{fmtRows(s.count)} × {s.shape}</li>)}
+                          </ul>
+                        </details>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="pl-5 text-muted-foreground">No report was recorded for this file.</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Failed */}
       <Card>
         <CardHeader className="py-3">
@@ -467,7 +566,9 @@ export default function InboxPage() {
                 <div key={job.id} className="flex items-center gap-2 text-xs py-0.5">
                   {job.status === 'done'
                     ? <CheckCircle className="h-3 w-3 shrink-0 text-green-500" />
-                    : <XCircle    className="h-3 w-3 shrink-0 text-red-500" />
+                    : job.status === 'held'
+                      ? <ShieldAlert className="h-3 w-3 shrink-0 text-amber-500" />
+                      : <XCircle    className="h-3 w-3 shrink-0 text-red-500" />
                   }
                   <span className="font-mono truncate flex-1 text-muted-foreground" title={job.filename}>
                     {job.filename}
@@ -475,13 +576,16 @@ export default function InboxPage() {
                   {job.status === 'done' ? (
                     <>
                       <span className="tabular-nums shrink-0">{newKnownLabel(job.imported, job.known, fmtRows)}</span>
+                      {job.gate_level === 'warn' && (
+                        <span className="text-amber-600 shrink-0" title={job.gate_note ?? 'The quality gate warned about this file'}>gate: warn</span>
+                      )}
                       <span className="text-muted-foreground shrink-0 flex items-center gap-0.5">
                         <Timer className="h-2.5 w-2.5" />{fmtDuration(job.duration_ms)}
                       </span>
                     </>
                   ) : (
-                    <span className="text-red-500 truncate max-w-xs" title={job.error_message ?? ''}>
-                      {job.error_message ?? 'failed'}
+                    <span className={`${job.status === 'held' ? 'text-amber-600' : 'text-red-500'} truncate max-w-xs`} title={job.error_message ?? ''}>
+                      {job.error_message ?? job.status}
                     </span>
                   )}
                 </div>

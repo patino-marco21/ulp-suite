@@ -2,7 +2,8 @@ import { type NextRequest, NextResponse } from 'next/server'
 import { validateRequest, requireAdminRole } from '@/lib/auth'
 import { dbQuery } from '@/lib/sqlite'
 import { uploadQueue, getCurrentJob } from '@/lib/upload-queue'
-import { getWaiting, getFailed, getDoneCount } from '@/lib/inbox-helpers'
+import { getWaiting, getFailed, getHeld, getDoneCount } from '@/lib/inbox-helpers'
+import { latestHeldReport } from '@/lib/ingest-gate-store'
 import { getInboxJobProgress, getInFlightCount } from '@/lib/inbox-watcher'
 import { progressRows } from '@/lib/inbox-progress'
 
@@ -18,6 +19,8 @@ interface DoneRow {
   duration_ms:   number
   error_message: string | null
   created_at:    string
+  gate_level:    string | null
+  gate_note:     string | null
 }
 
 export async function GET(request: NextRequest) {
@@ -35,10 +38,14 @@ export async function GET(request: NextRequest) {
   const waiting    = current ? allWaiting.filter(f => f.name !== current) : allWaiting
 
   const failed     = getFailed()
+  // Files the ingest quality gate stopped, each with the report of its hold (null when none was recorded).
+  const held       = getHeld().map(f => ({ ...f, report: latestHeldReport(f.name) }))
   const done_count = getDoneCount()
 
   const done_recent = dbQuery(
-    `SELECT id, filename, status, imported, known, skipped, duration_ms, error_message, created_at
+    `SELECT id, filename, status, imported, known, skipped, duration_ms, error_message, created_at,
+            CASE WHEN json_valid(gate_report) THEN json_extract(gate_report, '$.level') END AS gate_level,
+            CASE WHEN json_valid(gate_report) THEN json_extract(gate_report, '$.reasons[0]') END AS gate_note
      FROM processing_jobs
      WHERE source = 'inbox'
      ORDER BY id DESC
@@ -115,6 +122,7 @@ export async function GET(request: NextRequest) {
     in_flight_count,
     stale_in_flight,  // > 0 means files may be stuck — use Force Scan to recover
     failed,
+    held,
     done_count,
     done_recent,
   })

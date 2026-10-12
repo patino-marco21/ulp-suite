@@ -29,6 +29,8 @@ import { formatBytes } from "@/lib/utils"
 import { runImportJob } from '@/lib/import-runner'
 import { spoolRequestBody, discardSpool, describeSpoolError, type SpoolResult } from '@/lib/upload-spool'
 import { logUploadAction } from '@/lib/audit-log'
+import { isIngestHeldError } from '@/lib/ingest-quality-gate'
+import { holdSpooledFile } from '@/lib/inbox-helpers'
 
 export const dynamic    = "force-dynamic"
 export const maxDuration = 300  // 5 minutes — large uploads need sustained time
@@ -183,6 +185,18 @@ export async function POST(request: NextRequest) {
     })
     return addRateLimitHeaders(response, authResult.rateLimit)
   } catch (error) {
+    if (isIngestHeldError(error) && spool) {
+      // The quality gate stopped the file before one row was stored. It is kept in inbox/held/; an admin can review it and release it in the Inbox.
+      const kept = holdSpooledFile(spool.path, originalFilename)
+      logJob({
+        source: 'http', filename: originalFilename, status: 'held', imported: 0, skipped: 0, duration_ms: Date.now() - startAt,
+        error_message: error.message, gate_report: JSON.stringify(error.report),
+      })
+      void logUploadAction('upload.api.fail', actor, null, {
+        ...keyDetails, filename: originalFilename, error: error.message, duration_ms: Date.now() - startAt, held: true,
+      })
+      return NextResponse.json({ success: false, held: true, kept: kept !== null, error: error.message, report: error.report }, { status: 422 })
+    }
     const known = describeSpoolError(error)
     const cancelled = !known && request.signal.aborted
     if (cancelled) {
