@@ -7,6 +7,7 @@
 # Env: PILE_DIR ("$HOME/Downloads/AyuGram Desktop"), PILE_WORK_DIR (<repo>/.pile-work), IN_FLIGHT (2), FLOOR_GIB (60), PHASE_STOP_GIB (0 = none),
 #      MAX_FILES, PARTITION (202610: the partition the run fills), CH_CONTAINER (ulpsuite_clickhouse), DRY_RUN=1 (print the queue and stop),
 #      ULP_REPO (the checkout whose ./inbox and ./data are used; default: the checkout this script is in).
+#      POLL_SECS (10: seconds between two looks at the inbox; the tests use a fraction).
 # Log lines: START / FEED / PROGRESS / JOBS / STOP / LOW DISK / DISK OK / PHASE LIMIT / COMPLETE.
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO=${ULP_REPO:-$(cd "$SCRIPT_DIR/../.." && pwd)}; cd "$REPO" || exit 1
@@ -94,5 +95,5 @@ while true; do
     node "$SCRIPT_DIR/jobs-summary.cjs" "$WORK/dbcopy" "$START_TS" 2>&1 | head -1 | sed "s/^/$(now) /"
     exit 0
   fi
-  sleep 10
+  sleep "${POLL_SECS:-10}"
 done
