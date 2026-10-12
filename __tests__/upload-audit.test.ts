@@ -47,4 +47,13 @@ describe('logUploadAction', () => {
     expect(params[6]).toBeNull() // ip address
     expect(params[7]).toBeNull() // user agent
   })
+
+  it('files an inbox release under the inbox resource type', async () => {
+    await logUploadAction('inbox.release', { id: 3, email: 'admin@example.com' }, null, { moved: ['a.txt'], mode: 'one' })
+
+    const [, params] = mockDbRun.mock.calls[0]
+    expect(params[2]).toBe('inbox.release')
+    expect(params[3]).toBe('inbox')
+    expect(JSON.parse(params[5])).toEqual({ moved: ['a.txt'], mode: 'one' })
+  })
 })

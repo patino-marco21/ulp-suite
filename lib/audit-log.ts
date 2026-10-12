@@ -4,7 +4,7 @@ import { clientIpForLog } from '@/lib/client-ip'
 export type AuditAction =
   | 'upload.start' | 'upload.complete' | 'upload.fail'
   | 'upload.api.start' | 'upload.api.complete' | 'upload.api.fail'
-  | 'inbox.retry'
+  | 'inbox.retry' | 'inbox.release'
   | 'user.create' | 'user.update' | 'user.delete'
   | 'user.login' | 'user.logout' | 'user.login.fail'
   | 'user.password.change' | 'user.totp.enable' | 'user.totp.disable'
@@ -115,13 +115,13 @@ export async function logSettingsAction(
 }
 
 /**
- * Upload pipeline events: who started an upload, how it ended, and who pressed Retry on an inbox file. The upload.* actions
+ * Upload pipeline events: who started an upload, how it ended, and who pressed Retry or Release on an inbox file. The upload.* actions
  * were defined from the start but nothing emitted them, so a hung job left no trace and no user was ever attributed.
  */
 export async function logUploadAction(
   action: 'upload.start' | 'upload.complete' | 'upload.fail'
         | 'upload.api.start' | 'upload.api.complete' | 'upload.api.fail'
-        | 'inbox.retry',
+        | 'inbox.retry' | 'inbox.release',
   performedBy: { id: number | null; email: string | null },
   resourceId: string | null,
   details: Record<string, unknown>,
@@ -132,7 +132,7 @@ export async function logUploadAction(
     user_id: performedBy.id,
     user_email: performedBy.email,
     action,
-    resource_type: action === 'inbox.retry' ? 'inbox' : 'upload',
+    resource_type: action === 'inbox.retry' || action === 'inbox.release' ? 'inbox' : 'upload',
     resource_id: resourceId,
     details,
     ip_address: clientInfo.ip,

@@ -11,11 +11,12 @@ describe('inbox watcher: imports run under the stall watchdog', () => {
     expect(source).not.toContain('processTextStream')
   })
 
-  test('both the text and the zip import run inside runImportJob', () => {
+  test('the text, the zip and the archive-reference import all run inside runImportJob', () => {
     const afterClaim = source.slice(source.indexOf('claimFileForProcessing(filePath, PROC)'))
-    expect(afterClaim.match(/runImportJob\(/g)?.length).toBe(2)
+    expect(afterClaim.match(/runImportJob\(/g)?.length).toBe(3)
     expect(afterClaim).toContain('processZipFile(claimedPath')
     expect(afterClaim).toContain('processTextFile(claimedPath')
+    expect(afterClaim).toContain('processArchiveRef(claimedPath')
   })
 
   test('the task still clears its in-flight state in a finally, so the slot and the inFlight entry are always released', () => {

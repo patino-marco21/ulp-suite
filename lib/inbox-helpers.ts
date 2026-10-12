@@ -11,6 +11,13 @@ import path from 'path'
 export const INBOX_DIR  = path.resolve('./inbox')
 export const DONE_DIR   = path.resolve('./inbox/done')
 export const FAILED_DIR = path.resolve('./inbox/failed')
+/** Files the ingest quality gate stopped before one row was stored; an admin releases them from the Inbox page. */
+export const HELD_DIR   = path.resolve('./inbox/held')
+
+/** A plain file name: no separator, no "..", no NUL. */
+export function isSafeFileName(name: string): boolean {
+  return name.length > 0 && !name.includes('/') && !name.includes('\\') && !name.includes('..') && !name.includes('\0')
+}
 
 export interface InboxFileEntry {
   name:       string
@@ -51,6 +58,11 @@ export function getFailed(): InboxFileEntry[] {
   return readFileEntries(FAILED_DIR)
 }
 
+/** Files in inbox/held/. */
+export function getHeld(heldDir: string = HELD_DIR): InboxFileEntry[] {
+  return readFileEntries(heldDir)
+}
+
 /** Count of files in inbox/done/ — no file details (could be thousands). */
 export function getDoneCount(): number {
   try {
@@ -69,7 +81,7 @@ export function getDoneCount(): number {
 export function retryFiles(filenames: string[]): string[] {
   const moved: string[] = []
   for (const name of filenames) {
-    if (name.includes('/') || name.includes('\\') || name.includes('..')) continue
+    if (!isSafeFileName(name)) continue
     try {
       fs.renameSync(path.join(FAILED_DIR, name), path.join(INBOX_DIR, name))
       moved.push(name)
@@ -89,6 +101,56 @@ export function retryAllFailed(): string[] {
     return retryFiles(names)
   } catch {
     return []
+  }
+}
+
+/**
+ * Move named files from inbox/held/ → inbox/ (same traversal guard as retryFiles). The caller stores the one-shot release BEFORE calling this: the watcher
+ * can claim the file the moment it appears. Returns the names actually moved.
+ */
+export function releaseFiles(filenames: string[], heldDir: string = HELD_DIR, inboxDir: string = INBOX_DIR): string[] {
+  const moved: string[] = []
+  for (const name of filenames) {
+    if (!isSafeFileName(name)) continue
+    try {
+      fs.renameSync(path.join(heldDir, name), path.join(inboxDir, name))
+      moved.push(name)
+    } catch {
+      // file missing or unreadable — skip
+    }
+  }
+  return moved
+}
+
+/**
+ * Keep a spooled HTTP upload that the quality gate held: move it into inbox/held/ under a safe name that is not taken yet. The spool directory is usually on
+ * another filesystem than the inbox, so a rename that fails with EXDEV falls back to copy + remove. Returns the name it is kept under, or null (the caller then
+ * discards the spool file as before).
+ */
+export function holdSpooledFile(spoolPath: string, uploadName: string, heldDir: string = HELD_DIR): string | null {
+  const base = path.basename(uploadName.replace(/\\/g, '/')).replace(/[\u0000-\u001f]/g, '').trim()
+  const safe = base === '' || base === '.' || base === '..' ? `upload-${Date.now()}.txt` : base
+  try {
+    fs.mkdirSync(heldDir, { recursive: true })
+    const ext = path.extname(safe)
+    const stem = safe.slice(0, safe.length - ext.length)
+    let name = safe
+    for (let n = 2; fs.existsSync(path.join(heldDir, name)); n++) {
+      if (n > 100) return null
+      name = `${stem} (${n})${ext}`
+    }
+    const dest = path.join(heldDir, name)
+    try {
+      fs.renameSync(spoolPath, dest)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err
+      fs.copyFileSync(spoolPath, dest)
+      fs.rmSync(spoolPath, { force: true })
+    }
+    return name
+  } catch (err) {
+    console.error('[inbox] could not keep the held upload:', err instanceof Error ? err.message : err)
+    return null
   }
 }
 

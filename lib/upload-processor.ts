@@ -691,6 +691,15 @@ export async function processTextFile(
   }
 }
 
+// Replaced by Task 6 (reads the plaintext from the source archive).
+export async function processArchiveRef(
+  _refPath: string,
+  _onBatch?: (imported: number) => void,
+  _hooks: ImportHooks = {},
+): Promise<ProcessResult> {
+  throw new Error('archive references are not supported yet')
+}
+
 // ─── ZIP processor (yauzl — lazy entry streaming) ────────────────────────────
 
 class ZipEntryStreamError extends Error {

@@ -9,6 +9,7 @@
  *   ./inbox/processing/ — a file lives here for the duration of its import
  *   ./inbox/done/       — successfully processed files are moved here
  *   ./inbox/failed/     — failed (or interrupted) files are moved here
+ *   ./inbox/held/       — files the ingest quality gate stopped before one row was stored (an admin releases them)
  *
  * Uses the global uploadQueue (pLimit(1)) so inbox jobs and HTTP uploads
  * share the same single-at-a-time constraint and never compete for RAM.
@@ -36,10 +37,13 @@ import path from 'path'
 import fs from 'fs'
 import { uploadQueue, queueSize, setCurrentJob } from '@/lib/upload-queue'
 import { logJob } from '@/lib/processing-log'
-import { processTextFile, processZipFile } from '@/lib/upload-processor'
+import { processTextFile, processZipFile, processArchiveRef } from '@/lib/upload-processor'
 import { runImportJob } from '@/lib/import-runner'
 import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable } from '@/lib/inbox-claim'
 import { sniffFileKind } from '@/lib/inbox-helpers'
+import { isIngestHeldError } from '@/lib/ingest-quality-gate'
+import { consumeGateOverride } from '@/lib/ingest-gate-store'
+import { ARCHIVE_REF_EXT } from '@/lib/archive-ref'
 import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 import { waitForDiskSpace } from '@/lib/ingest-disk-gate'
 import { noveltyConfig } from '@/lib/ingest-novelty-config'
@@ -49,6 +53,8 @@ import type { ImportPhase, ImportProgressEvent } from '@/lib/import-runner'
 const INBOX = path.resolve('./inbox')
 const DONE  = path.resolve('./inbox/done')
 const FAIL  = path.resolve('./inbox/failed')
+// held/ keeps a file the ingest quality gate stopped before one row was stored (lib/ingest-quality-gate.ts); an admin releases it from the Inbox page.
+const HELD  = path.resolve('./inbox/held')
 // processing/ holds a file for the duration of its import. A file is moved here
 // (atomic rename) BEFORE it is read, so a second attempt or a post-restart
 // reconcile can't re-pick it -- the filesystem is the dedup gate that the
@@ -60,6 +66,7 @@ const PROC  = path.resolve('./inbox/processing')
 const DONE_PREFIX = DONE + path.sep
 const FAIL_PREFIX = FAIL + path.sep
 const PROC_PREFIX = PROC + path.sep
+const HELD_PREFIX = HELD + path.sep
 
 let started = false
 
@@ -188,7 +195,7 @@ export function forceReconcile(): number {
   return queued
 }
 
-const SUPPORTED_EXTS = new Set(['.txt', '.csv', '.zip'])
+const SUPPORTED_EXTS = new Set(['.txt', '.csv', '.zip', ARCHIVE_REF_EXT])
 
 /** Delete files in dir that are older than maxAgeMs. Silent on errors. */
 function cleanupOldFiles(dir: string, maxAgeMs: number): void {
@@ -253,13 +260,13 @@ async function enqueueFile(filePath: string): Promise<void> {
       imported:      0,
       skipped:       0,
       duration_ms:   0,
-      error_message: `Unsupported file extension "${ext || '(none)'}" and the content is neither text nor a ZIP archive — supported: .txt, .csv, .zip`,
+      error_message: `Unsupported file extension "${ext || '(none)'}" and the content is neither text nor a ZIP archive — supported: .txt, .csv, .zip, .archiveref`,
     })
     return
   }
   if (inFlight.has(filename))       return   // already queued or processing
   // Use path separator guards so 'done_batch.txt' is NOT excluded:
-  if (filePath.startsWith(DONE_PREFIX) || filePath.startsWith(FAIL_PREFIX) || filePath.startsWith(PROC_PREFIX)) return
+  if (filePath.startsWith(DONE_PREFIX) || filePath.startsWith(FAIL_PREFIX) || filePath.startsWith(PROC_PREFIX) || filePath.startsWith(HELD_PREFIX)) return
 
   // Guard against claiming a file an external process (e.g. `cp` of a large
   // file) is still writing. fs.createReadStream hits EOF at the file's
@@ -293,6 +300,7 @@ async function enqueueFile(filePath: string): Promise<void> {
     let known    = 0
     let skipped  = 0
     let procPath: string | null = null
+    let gateReport: string | undefined
     try {
       const guardController = new AbortController()
       // Disk first (lib/ingest-disk-gate.ts): while the data disk is under its floor the file stays in inbox/, unclaimed.
@@ -308,6 +316,11 @@ async function enqueueFile(filePath: string): Promise<void> {
         console.warn(`[inbox-watcher] claim skipped (already gone): ${filename}`)
         return   // finally still clears inFlight; nothing imported
       }
+
+      // A file an admin released from the Held list is imported once without being held again (lib/ingest-gate-store.ts). The quality gate still
+      // counts it and reports what it found.
+      const gateOverride = consumeGateOverride(filename)
+      if (gateOverride) console.warn(`[inbox-watcher] ${filename} was released by an admin: the quality gate reports on it but does not hold it`)
 
       console.log(`[inbox-watcher] processing: ${filename}`)
       // Capture file size (from the claimed path) for ETA in the status API.
@@ -341,8 +354,25 @@ async function enqueueFile(filePath: string): Promise<void> {
             } else if (result.errors > 0) {
               console.warn(`[inbox-watcher]   ${result.filename}: skipped (entry error)`)
             }
-          }, { ...ctx, onImportProgress }),
+          }, { ...ctx, onImportProgress, gateOverride }),
         })
+      } else if (ext === ARCHIVE_REF_EXT) {
+        // The reference names a file in the source archive (lib/archive-ref.ts): the plaintext is read from there, never from the inbox.
+        const result = await runImportJob({
+          label: filename,
+          work:  ctx => processArchiveRef(claimedPath, n => {
+            const cp = getCurrentProgress()
+            if (cp) cp.rows_imported = n
+          }, { ...ctx, onImportProgress, gateOverride }),
+        })
+        imported = result.imported
+        known    = result.known
+        skipped  = result.skipped
+        gateReport = result.gate ? JSON.stringify(result.gate) : undefined
+        console.log(
+          `[inbox-watcher] done: ${filename} (from the archive) ` +
+          `imported=${result.imported} known=${result.known} skipped=${result.skipped}`
+        )
       } else {
         const result = await runImportJob({
           label: filename,
@@ -350,11 +380,12 @@ async function enqueueFile(filePath: string): Promise<void> {
             // onBatch: update live progress after each batch (each slab with novelty-aware ingest)
             const cp = getCurrentProgress()
             if (cp) cp.rows_imported = n
-          }, { ...ctx, onImportProgress }),
+          }, { ...ctx, onImportProgress, gateOverride }),
         })
         imported = result.imported
         known    = result.known
         skipped  = result.skipped
+        gateReport = result.gate ? JSON.stringify(result.gate) : undefined
         console.log(
           `[inbox-watcher] done: ${filename} ` +
           `imported=${result.imported} known=${result.known} skipped=${result.skipped}`
@@ -372,25 +403,54 @@ async function enqueueFile(filePath: string): Promise<void> {
         known,
         skipped,
         duration_ms: Date.now() - startAt,
+        gate_report: gateReport,
       })
     } catch (err) {
-      console.error(`[inbox-watcher] failed: ${filename}`, err)
-      logJob({
-        source:        'inbox',
-        filename,
-        status:        'failed',
-        imported,
-        known,
-        skipped,
-        duration_ms:   Date.now() - startAt,
-        error_message: err instanceof Error ? err.message : String(err),
-      })
-      // Move the claimed file (if we claimed it) to failed/ for review.
-      if (procPath) {
-        try {
-          fs.mkdirSync(FAIL, { recursive: true })
-          fs.renameSync(procPath, path.join(FAIL, filename))
-        } catch {}
+      if (isIngestHeldError(err)) {
+        // The quality gate stopped the file before one of its rows was stored: keep it in held/ for an admin to look at, and log why.
+        console.warn(`[inbox-watcher] held: ${filename}: ${err.message}`)
+        logJob({
+          source:        'inbox',
+          filename,
+          status:        'held',
+          imported,
+          known,
+          skipped,
+          duration_ms:   Date.now() - startAt,
+          error_message: err.message,
+          gate_report:   JSON.stringify(err.report),
+        })
+        if (procPath) {
+          try {
+            fs.mkdirSync(HELD, { recursive: true })
+            fs.renameSync(procPath, path.join(HELD, filename))
+          } catch (moveErr) {
+            console.error(`[inbox-watcher] could not move the held file ${filename} to held/, moving it to failed/:`, moveErr)
+            try {
+              fs.mkdirSync(FAIL, { recursive: true })
+              fs.renameSync(procPath, path.join(FAIL, filename))
+            } catch {}
+          }
+        }
+      } else {
+        console.error(`[inbox-watcher] failed: ${filename}`, err)
+        logJob({
+          source:        'inbox',
+          filename,
+          status:        'failed',
+          imported,
+          known,
+          skipped,
+          duration_ms:   Date.now() - startAt,
+          error_message: err instanceof Error ? err.message : String(err),
+        })
+        // Move the claimed file (if we claimed it) to failed/ for review.
+        if (procPath) {
+          try {
+            fs.mkdirSync(FAIL, { recursive: true })
+            fs.renameSync(procPath, path.join(FAIL, filename))
+          } catch {}
+        }
       }
     } finally {
       setCurrentProgress(null)
@@ -432,7 +492,7 @@ export function startInboxWatcher(): void {
   started = true
 
   // Ensure directories exist before the watcher starts
-  ;[INBOX, DONE, FAIL, PROC].forEach(d => fs.mkdirSync(d, { recursive: true }))
+  ;[INBOX, DONE, FAIL, PROC, HELD].forEach(d => fs.mkdirSync(d, { recursive: true }))
 
   // Sweep any files left in processing/ by a previous run that was interrupted
   // mid-import (crash/OOM/redeploy). They may be partially imported, so move

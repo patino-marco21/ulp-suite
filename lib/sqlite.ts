@@ -299,6 +299,18 @@ function initSchema(db: Database.Database): void {
   // (idempotent -- the catch swallows "duplicate column", like the ALTERs below).
   try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN known INTEGER NOT NULL DEFAULT 0`) } catch {}
 
+  // Ingest quality gate (lib/ingest-quality-gate.ts): the JSON report of a held or warned import. Additive, like `known` above.
+  try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN gate_report TEXT`) } catch {}
+
+  // One-shot releases of held files (lib/ingest-gate-store.ts): an admin pressed Release; the next claim of that file name consumes the row.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gate_overrides (
+      filename   TEXT PRIMARY KEY,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+
   // Add rescan columns to existing databases (idempotent — catch swallows "duplicate column" errors)
   try { db.exec(`ALTER TABLE domain_monitors ADD COLUMN rescan_mode TEXT NOT NULL DEFAULT 'dedup' CHECK(rescan_mode IN ('dedup','digest'))`) } catch {}
   try { db.exec(`ALTER TABLE domain_monitors ADD COLUMN rescan_interval_hours INTEGER NOT NULL DEFAULT 24`) } catch {}
