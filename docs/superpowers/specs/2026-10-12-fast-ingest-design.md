@@ -114,7 +114,9 @@ spec's `ulp.sources` columns (v28).
 a heartbeat and counts after every batch. The main thread creates and drops the stage tables, applies the gate's verdict (archive and gate spec, once built), runs
 the group commit, writes `ulp.sources` and the job row, and reports progress; it no longer parses.
 
-**Protocol.** Main to worker: `stage` (job id, path, file name, stage table, breach name, the ingest policy as plain data, batch size) and `abort`. Worker to
+**Protocol.** Main to worker: `stage` (job id, a source descriptor, file name, stage table, breach name, the ingest policy as plain data, batch size) and `abort`. The
+source descriptor is a path or an archive id: the worker opens either through `openSource()` (archive spec), so a redo after the originals have been replaced reads the
+archive directly and no plaintext is rebuilt on disk. Worker to
 main: `progress` (staged, skipped, rejection counts, gate counters), `done` (the `StreamToTableResult`) or `error` (message, whether it is retryable). The
 heartbeat feeds `runImportJob`'s stall watchdog exactly as the in-process callbacks do. Abort stops the batch loop and cancels the insert in flight, as the
 `AbortSignal` does today.
@@ -139,7 +141,7 @@ take about 9 minutes each at one worker's speed (66M lines at 128k lines/s), so 
 `ORDER=largest-first` (after a short smallest-first canary of its first few files, which keeps the early feedback of today's order). The order does not change the rows
 stored, but a credential that appears in several files is attributed to the first file in the order, so the run log records the order used.
 
-**Eligible files.** Plain text and CSV on disk: inbox files, and HTTP uploads (which spool to disk first). ZIP entries and anything else keep the in-process path.
+**Eligible files.** Plain text and CSV on disk: inbox files, HTTP uploads (which spool to disk first), and archive references (archive spec). ZIP entries and anything else keep the in-process path.
 In development (`next dev`) and in the unit tests the pool is off.
 
 ## Testing and rehearsal

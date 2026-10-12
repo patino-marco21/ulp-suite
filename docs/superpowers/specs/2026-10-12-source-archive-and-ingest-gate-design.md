@@ -116,6 +116,24 @@ otherwise the basename is looked up in the manifest and decoded frame by frame (
 decoding). `scripts/parser-diff.ts`, `scripts/pile/verify-file.ts` and `scripts/extract-dropped-lines.ts` switch from `createReadStream`/`readSync` to it,
 so they keep working after the originals are gone; **this must be merged before any original is replaced.**
 
+### The importer reads the archive too (a redo after the originals are gone)
+
+Without this, the archive does not deliver its purpose. After `--replace` there is nothing to hardlink into `inbox/`, restoring 140 GiB of plaintext would need 140 GiB
+of free space, and `inbox/done` keeps plaintext for seven days. So the importer accepts an **archive reference**:
+
+- A tiny file `<name>.archiveref` (JSON: archive id, original name, size, sha256) dropped into `inbox/` is claimed like a text file (`.archiveref` joins the
+  supported extensions in `lib/inbox-watcher.ts`). `processTextFile` (and the parse workers of the fast-ingest spec) read the plaintext through `openSource(id)`: no
+  plaintext touches the disk, `ulp.sources` records the original name, and `inbox/done` keeps only the reference.
+- The importer hashes the plaintext while it reads; at the end, a sha256 that differs from the manifest's fails the job before the commit, so a damaged archive cannot
+  put damaged rows into the table.
+- The duplicate-file guard (`querySourceAlreadyImported` in `lib/upload-processor.ts`) compares the sha256 when both the reference and the `ulp.sources` row have one: the
+  same name with different content is a new file (the twenty same-name files of the pile then no longer need their `ulp.sources` rows removed by hand before a redo),
+  the same name with the same content stays blocked. A plain file has no hash at claim time, so it keeps the name-only guard.
+- `scripts/pile/feed.sh` gets `SOURCE=archive`: it writes the reference files from the manifest instead of hardlinking originals.
+- Decompression (189 MB/s per stream at level 12) is far faster than parsing (about 10 MB/s per Node worker), so it adds well under 10% CPU.
+
+This is an app change, so it ships with the gate in the single deploy after run 5.
+
 ### Identity in `ulp.sources`
 
 Three columns are added (DDL v28, `ADD COLUMN IF NOT EXISTS`, a table of a few hundred rows): `size UInt64 DEFAULT 0`, `sha256 String DEFAULT ''`,
@@ -220,6 +238,9 @@ All fixtures are synthetic (made-up hosts, logins and passwords); no real creden
   shaped like a clean file must pass. (The gate is a function of rows, so these are built as rows; the current parser no longer produces such rows.)
 - A `scripts/e2e-novelty-ingest.ts` scenario named `ingest-gate` (the name `gate` is the disk gate's): a normal file with `INGEST_GATE_JUNK_PCT` lowered ends
   `held` with zero rows in `ulp.credentials`, Release imports it, and the audit row exists.
+- An end-to-end scenario `archive-ref` in `scripts/e2e-novelty-ingest.ts`: the same synthetic file imported from `inbox/` as plain text and through an
+  `.archiveref` gives the same rows and the same job counts, a flipped bit in the archive fails the job before any row is committed, and no plaintext copy of the file
+  appears in `inbox/`.
 - Rehearsal on real files (read-only on the originals, output in a scratch directory): archive a small, a 100 MB and a 1 GB pile file, restore them and compare
   sha256; the speed and the ratio are appended to this spec as a Results section after the build.
 - Gate: the full suite, `tsc`, `eslint`, `next build`, and the alert, upload-resilience and novelty rehearsals on the isolated stack.
