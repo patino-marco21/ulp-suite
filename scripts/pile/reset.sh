@@ -53,13 +53,17 @@ echo "inbox/done: $n_ok names are hardlinks of pile originals (would be unlinked
 if [ "$mode" != apply ]; then echo "(check only: nothing changed)"; exit 0; fi
 
 echo "== DROP PARTITION $PARTITION"
-ch "ALTER TABLE ulp.credentials DROP PARTITION '$PARTITION' SETTINGS max_partition_size_to_drop = 0" && echo dropped
+# A refused drop (for instance a partition above the server's 50 GB limit that the setting did not lift) stops everything here: nothing after it may run
+# while the rows are still in the table, or the sources rows and the done names would no longer describe what is in it.
+ch "ALTER TABLE ulp.credentials DROP PARTITION '$PARTITION' SETTINGS max_partition_size_to_drop = 0" || { echo "ABORT: the DROP of partition $PARTITION failed; nothing after it was run"; exit 1; }
+echo dropped
 echo "== DELETE the pile's sources rows"
 if [ -n "$SQL_NAMES" ]; then
-  ch "ALTER TABLE ulp.sources DELETE WHERE imported_at >= '$CUT' OR filename IN ($SQL_NAMES) SETTINGS mutations_sync = 2" && echo deleted
+  ch "ALTER TABLE ulp.sources DELETE WHERE imported_at >= '$CUT' OR filename IN ($SQL_NAMES) SETTINGS mutations_sync = 2" || { echo "ABORT: deleting the sources rows failed; the partition is already dropped, no inbox/done name was unlinked"; exit 1; }
 else
-  ch "ALTER TABLE ulp.sources DELETE WHERE imported_at >= '$CUT' SETTINGS mutations_sync = 2" && echo deleted
+  ch "ALTER TABLE ulp.sources DELETE WHERE imported_at >= '$CUT' SETTINGS mutations_sync = 2" || { echo "ABORT: deleting the sources rows failed; the partition is already dropped, no inbox/done name was unlinked"; exit 1; }
 fi
+echo deleted
 echo "== unlink inbox/done names"
 while IFS= read -r f; do rm -f -- "$f"; done < "$WORK/reset-unlink.txt"
 echo "inbox/done left: $(ls -A inbox/done | wc -l)"

@@ -32,6 +32,8 @@ sql="\${@: -1}"
 printf '%s\\n' "$sql" >> "${sqlLog}"
 case "$sql" in
   "SELECT filename FROM ulp.sources") cat "${sources}" ;;
+  ALTER*"DROP PARTITION"*) if [ -n "$SHIM_FAIL_DROP" ]; then echo "Code: 359. DB::Exception: Partition size is greater than the limit" >&2; exit 1; fi ;;
+  ALTER*DELETE*) if [ -n "$SHIM_FAIL_DELETE" ]; then echo "Code: 1. DB::Exception: mutation refused" >&2; exit 1; fi ;;
   ALTER*) ;;
   *) echo 0 ;;
 esac
@@ -173,6 +175,25 @@ describe('scripts/pile/reset.sh in a sandbox', () => {
     expect(readFileSync(join(box.pile, 'b.txt'), 'utf8')).toBe('BBB')
     expect(readFileSync(join(box.pile, 'd.txt'), 'utf8')).toBe('DDD')
     expect(readFileSync(join(box.root, 'elsewhere.txt'), 'utf8')).toBe('EEE')
+  })
+
+  test('apply stops at once when ClickHouse refuses the drop: no sources rows are deleted and no name is unlinked', () => {
+    box = makeBox({})
+    const done = withDoneNames(box)
+    const r = run(box, 'apply', { ALL_PILE_NAMES: '1', SHIM_FAIL_DROP: '1' })
+    expect(r.status, r.stdout + r.stderr).toBe(1)
+    expect(r.stdout).toContain('ABORT: the DROP of partition 202610 failed')
+    expect(sqlLines(box).filter(l => l.startsWith('ALTER')).length).toBe(1)           // the refused drop only
+    expect(readdirSync(done).sort()).toEqual(['a.txt', 'b.txt', 'c.txt', 'd.txt'])     // nothing unlinked
+  })
+
+  test('apply stops when the sources rows cannot be deleted: no name is unlinked', () => {
+    box = makeBox({})
+    const done = withDoneNames(box)
+    const r = run(box, 'apply', { SHIM_FAIL_DELETE: '1' })
+    expect(r.status, r.stdout + r.stderr).toBe(1)
+    expect(r.stdout).toContain('ABORT: deleting the sources rows failed')
+    expect(readdirSync(done).sort()).toEqual(['a.txt', 'b.txt', 'c.txt', 'd.txt'])
   })
 
   test('never removes the LAST name of any data: with the pile directory misconfigured to be the done directory itself, single-link names stay and every byte survives', () => {
