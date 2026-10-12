@@ -174,7 +174,7 @@ Preconditions: run 4 complete and its global checks recorded, the build proven, 
 1. Tag the running image as the rollback **before** building (`ulp-suite-app:rollback-<date>`), build from the merged commit with `git archive` (not from a
    worktree), deploy with `up -d --no-deps app` anchored to the primary checkout's `.env` (`--project-directory`, `--env-file`).
 2. Reset: `DROP PARTITION '202610'` (with `max_partition_size_to_drop = 0` if refused), delete the pile's `ulp.sources` rows (the run's rows and the 20 older
-   same-name rows), unlink the `inbox/done` hardlink names (inode and link-count guard). The originals are not touched.
+   same-name rows), unlink the `inbox/done` hardlink names (inode and link-count guard; this frees no space while the originals exist). The originals are not touched.
 3. Feed the whole pile again with the same smallest-first feeder (two files in flight, floor 60 GiB), Monitor armed.
 4. Verify (list above), build the search dictionary by hand (`--skip-headroom-check`), check the cron lines.
 5. **Side copy:** `scripts/extract-dropped-lines.ts`, a standalone offline tool (8 worker processes, nice 19) that streams every original through the final
@@ -187,9 +187,18 @@ Preconditions: run 4 complete and its global checks recorded, the build proven, 
 ## Disk budget
 
 Run 4 is projected to end near 70 GiB free with partition `202610` near 70 GiB. After `DROP PARTITION` about 140 GiB are free. The redo's partition
-should end near 81 GiB (70 GiB + 1.8% more rows + the 9.6 GiB keep-list), i.e. about **59 GiB free**, right at the feeder's 60 GiB floor. The owner has
-pre-authorized the levers for that case: remove the 34 stopped Strix sandbox containers (33.7 GB), unlink the `inbox/done` names of finished files, and defer
-the 12 largest files. The side copy needs 5-9 GiB more and the dictionary 2.2 GiB.
+should end near 81 GiB (70 GiB + 1.8% more rows + the 9.6 GiB keep-list), i.e. about **59 GiB free**, right at the feeder's 60 GiB floor, before the transient
+space of merged-away parts (kept for 8 minutes: 19 GiB at one point of run 4). The feeder and the app's own gate pause by themselves and resume, so a brief
+pause near the end is expected, not a fault. What actually frees or saves space, in the order to use it:
+
+1. **Defer the 12 largest files** (45 GiB of input): they are fed last, so stopping before them costs nothing already done. Pre-authorized by the owner.
+2. **Remove the 34 stopped Strix sandbox containers** (33.7 GB). The owner said yes in the interview, but they belong to another project, removal is irreversible
+   and they may hold output, so it is confirmed with the owner again right before, after looking at what is in them. The session that drives the run declined to act
+   on a relayed authorization, which is the right call.
+3. **Not a lever:** unlinking the `inbox/done` names frees nothing by itself. Each name is a second hardlink of the original's inode, so the blocks stay allocated until the
+   originals go. It only matters after the owner deletes the originals.
+
+The side copy needs 5-9 GiB more and the dictionary 2.2 GiB.
 
 ## Related work agreed in the same interview (not part of this change)
 
