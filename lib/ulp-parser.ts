@@ -17,6 +17,7 @@
 
 import { hasGarbageIdentity, hasMojibakeSignature, hasEdgeWhitespace } from '@/lib/ulp-garbage'
 import { hasTelegramLink, stripTelegramTag } from '@/lib/ulp-telegram-tag'
+import { repairUtf8Line } from '@/lib/ulp-utf8'
 
 export interface ULPCredential {
   url:         string
@@ -400,7 +401,7 @@ export async function* parseBlockStream(
         buffer = lines.pop() ?? ''
 
         for (const line of lines) {
-          const result = parseBlockLine(line, state)
+          const result = parseBlockLine(repairUtf8Line(line), state)
           if (result === 'separator') {
             tryFlushBlock()
             if (batch.length >= batchSize) yield flushBatch()
@@ -410,7 +411,7 @@ export async function* parseBlockStream(
         // No '\n' found (or a huge trailing partial line) — force-flush so
         // buffer can't grow unboundedly. See MAX_LINE_LENGTH.
         if (buffer.length > MAX_LINE_LENGTH) {
-          const result = parseBlockLine(buffer, state)
+          const result = parseBlockLine(repairUtf8Line(buffer), state)
           buffer = ''
           if (result === 'separator') {
             tryFlushBlock()
@@ -420,7 +421,7 @@ export async function* parseBlockStream(
       }
     }
     if (buffer) {
-      const result = parseBlockLine(buffer, state)
+      const result = parseBlockLine(repairUtf8Line(buffer), state)
       if (result === 'separator') tryFlushBlock()
     }
     tryFlushBlock()  // flush final incomplete block
@@ -1057,7 +1058,9 @@ export async function* parseULPStream(
     blockState = makeBlockState()
   }
 
-  function processLine(line: string) {
+  function processLine(rawLine: string) {
+    // The file's bytes were read as Latin-1: a line that is valid UTF-8 is read as UTF-8 (lib/ulp-utf8.ts), any other line stays as it was.
+    const line = repairUtf8Line(rawLine)
     const trimmed = line.trim()
 
     // Labeled field — discard any in-progress positional state, enter labeled mode
