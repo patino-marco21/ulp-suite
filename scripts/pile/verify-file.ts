@@ -137,14 +137,14 @@ async function main(): Promise<void> {
       console.log(check('own       hashes written under this file == job.new', own, job.imported))
       console.log(check('known     hashes held under other files == job.known', present - own, job.known))
       console.log(check('rows      rows of this file in the table == job.new (no duplicates written)', rows, job.imported))
-      console.log(check('source    ulp.sources.line_count == job.new', src === '' ? 'missing' : Number(src), job.imported))
+      console.log(check('source    ulp.sources.line_count == job.new (a file with no new row has no sources row)', src === '' ? (job.imported === 0 ? 0 : 'missing') : Number(src), job.imported))
     } else {
       // a RE-IMPORT: the rows the first import wrote and the new parser still produces stay (and count as "known" for this file)
       console.log(check('own       distinct hashes under this file >= job.new', own >= job.imported ? 'yes' : `no (${own} < ${job.imported})`, 'yes'))
       console.log(check('rows      rows of this file in the table == its distinct hashes (no duplicates)', rows, own))
       const linked = Number(clickhouse(`SELECT count() FROM ulp.credentials WHERE _partition_id = '${PARTITION}' AND source_file = ${sqlStr(filename)} AND (position(password, 't.me/') > 0 OR position(email, 't.me/') > 0)`))
       console.log(check('clean     no stored email or password of this file holds a Telegram link', linked, 0))
-      console.log(check('source    ulp.sources.line_count == job.new (the delta)', src === '' ? 'missing' : Number(src), job.imported))
+      console.log(check('source    ulp.sources.line_count == job.new (the delta; no new row, no sources row)', src === '' ? (job.imported === 0 ? 0 : 'missing') : Number(src), job.imported))
       console.log(`info: rows of this file now ${rows}; the delta the re-import added ${job.imported}`)
     }
     console.log(`info: in-file repeats = ${staged - D}`)
