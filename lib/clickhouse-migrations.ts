@@ -19,6 +19,7 @@ import {
   buildImportedDescProjectionCurrentSql,
 } from './credentials-projections'
 import { URL_CONTENT_KEY } from './url-content-key'
+import { SOURCES_IDENTITY_ALTER } from './source-archive'
 
 // Per-process guard (still useful to avoid redundant calls within one process)
 let migrationsDone = false
@@ -246,7 +247,10 @@ let migrationsDone = false
 //      projection's key (0.13 s). The old projection is dropped (instant; base rows untouched) and the new one added
 //      (metadata); building it for 495M rows is scripts/rebuild-imported-desc-projection.sh, supervised, NOT run here
 //      (see v23). Until it finishes the readiness gate (isNewestFirstReady) keeps the plain query in use.
-const DDL_VERSION = 27
+// v28: ulp.sources gets the identity of the file a row came from: size, sha256, archive_id (docs/superpowers/specs/2026-10-12-source-archive-and-ingest-gate-design.md).
+//      ADD COLUMN IF NOT EXISTS on a table of a few hundred rows, metadata only. scripts/archive-sources.ts fills them for the names it archived; the importer
+//      writes them for a file it read from the source archive, and the duplicate-file guard compares the sha256 when both sides have one.
+const DDL_VERSION = 28
 
 /** v26: swap country_tier's MATERIALIZED expression (metadata only; see the DDL_VERSION comment above). */
 export function buildCountryTierModifySql(): string {
@@ -1046,6 +1050,17 @@ export async function runClickHouseMigrations(): Promise<void> {
       }
     } catch (err) {
       console.error('[ClickHouse migration] v27: re-creating proj_imported_desc -- FAILED:', err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  // v28 — ulp.sources identity columns (see DDL_VERSION comment above). IF NOT EXISTS makes it idempotent (the archive tool may have added them first); a failure
+  // is logged and the importer then keeps working with the name-only guard for plain files (only an import from the archive writes the new columns).
+  if (lastDdl < 28) {
+    try {
+      await client.exec({ query: SOURCES_IDENTITY_ALTER })
+      console.warn('[ClickHouse migration] DDL v28 applied (ulp.sources has size, sha256 and archive_id)')
+    } catch (err) {
+      console.error('[ClickHouse migration] v28: ulp.sources identity columns -- FAILED:', err instanceof Error ? err.message : String(err))
     }
   }
 

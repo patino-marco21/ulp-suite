@@ -426,7 +426,12 @@ CREATE TABLE IF NOT EXISTS ulp.sources
 (
     filename    String   CODEC(ZSTD(1)),
     line_count  UInt64,
-    imported_at DateTime DEFAULT now() CODEC(Delta, ZSTD(1))
+    imported_at DateTime DEFAULT now() CODEC(Delta, ZSTD(1)),
+    -- Identity of the file (DDL v28; lib/clickhouse-migrations.ts is the source of truth -- keep in sync). Filled by scripts/archive-sources.ts and by an
+    -- import from the source archive; empty for a file imported as plain text.
+    size        UInt64   DEFAULT 0,
+    sha256      String   DEFAULT '',
+    archive_id  String   DEFAULT ''
 )
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/ulp/sources', '{replica}')
 ORDER BY imported_at;

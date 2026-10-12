@@ -2767,7 +2767,7 @@ export const SOURCES_IDENTITY_ALTER =
 
 - [ ] **Step 4: The migration and the init SQL**
 
-In `lib/clickhouse-migrations.ts`: add near the other imports `import { SOURCES_IDENTITY_ALTER } from '@/lib/source-archive'`; add to the DDL_VERSION comment block, after the v27 paragraph:
+In `lib/clickhouse-migrations.ts` (which uses relative imports): add after `import { URL_CONTENT_KEY } from './url-content-key'` the line `import { SOURCES_IDENTITY_ALTER } from './source-archive'`; add to the DDL_VERSION comment block, after the v27 paragraph:
 
 ```ts
 // v28: ulp.sources gets the identity of the file a row came from: size, sha256, archive_id (docs/superpowers/specs/2026-10-12-source-archive-and-ingest-gate-design.md).

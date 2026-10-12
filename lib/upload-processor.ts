@@ -111,10 +111,14 @@ function makeRetryLogger(
  * in ulp.credentials. Used both to skip re-imports (processTextStream) and to keep
  * recordSource idempotent.
  */
-async function querySourceAlreadyImported(filename: string, signal: AbortSignal): Promise<boolean> {
+async function querySourceAlreadyImported(filename: string, signal: AbortSignal, sha256?: string): Promise<boolean> {
   const res = await getClient().query({
-    query:        `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1`,
-    query_params: { f: filename },
+    // With a content hash (an import from the source archive) the same name with other content is a different file; a row without a hash (an older
+    // import, or a plain file) still blocks by name. Without a hash -- a plain file, whose content is not known at claim time -- it is the name alone.
+    query:        sha256
+      ? `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} AND (sha256 = '' OR sha256 = {h:String}) LIMIT 1`
+      : `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1`,
+    query_params: sha256 ? { f: filename, h: sha256 } : { f: filename },
     format:       'JSONEachRow',
     abort_signal: signal,
     clickhouse_settings: {
@@ -137,7 +141,7 @@ async function querySourceAlreadyImported(filename: string, signal: AbortSignal)
 
 export async function sourceAlreadyImported(filename: string, hooks: ImportHooks = {}): Promise<boolean> {
   const rows = await withClickHouseRetry(
-    async signal => querySourceAlreadyImported(filename, signal),
+    async signal => querySourceAlreadyImported(filename, signal, hooks.source?.sha256),
     { signal: hooks.signal, onRetry: makeRetryLogger('source check', filename, () => hooks.beat?.()) }
   )
   return rows
@@ -201,14 +205,20 @@ export async function recordSource(filename: string, lineCount: number, hooks: I
       // OOM crash between processTextStream and renameSync, or a Force Scan race).
       // Retried inserts re-check the guard so an ambiguous transient error does not
       // create duplicate source rows on a later attempt.
-      if (await querySourceAlreadyImported(filename, signal)) {
+      if (await querySourceAlreadyImported(filename, signal, hooks.source?.sha256)) {
         console.log(`[upload-processor] recordSource: ${filename} already in ulp.sources — skipping`)
         return
       }
 
       await chClient.insert({
         table:  'ulp.sources',
-        values: [{ filename, line_count: lineCount }],
+        values: [{
+          filename,
+          line_count: lineCount,
+          // The identity of the file, when the importer knows it (it read the file from the source archive). A plain file leaves the columns at their defaults;
+          // scripts/archive-sources.ts fills them later.
+          ...(hooks.source ? { size: hooks.source.size, sha256: hooks.source.sha256, archive_id: hooks.source.archiveId } : {}),
+        }],
         format: 'JSONEachRow',
         abort_signal: signal,
       })

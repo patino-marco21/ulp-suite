@@ -382,6 +382,10 @@ export function openSource(ref: string, opts: { archiveDir?: string } = {}): Sou
 
 // ── ulp.sources: file identity ──────────────────────────────────────────────────────────────────────
 
+/** DDL v28 (lib/clickhouse-migrations.ts) and the archive tool run this same statement: ulp.sources learns the identity of the file a row came from. */
+export const SOURCES_IDENTITY_ALTER =
+  `ALTER TABLE ulp.sources ADD COLUMN IF NOT EXISTS size UInt64 DEFAULT 0, ADD COLUMN IF NOT EXISTS sha256 String DEFAULT '', ADD COLUMN IF NOT EXISTS archive_id String DEFAULT ''`
+
 export function sqlQuote(s: string): string {
   return `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
 }
@@ -391,9 +395,7 @@ export function sqlQuote(s: string): string {
  * size, sha256 and archive id (names that are not in the table are simply not touched). Safe to run again.
  */
 export function sourcesSyncSql(entries: ManifestEntry[]): string {
-  const cols =
-    `ADD COLUMN IF NOT EXISTS size UInt64 DEFAULT 0, ADD COLUMN IF NOT EXISTS sha256 String DEFAULT '', ADD COLUMN IF NOT EXISTS archive_id String DEFAULT ''`
-  const statements = [`ALTER TABLE ulp.sources ${cols};`]
+  const statements = [`${SOURCES_IDENTITY_ALTER};`]
   if (entries.length > 0) {
     const names = `[${entries.map(e => sqlQuote(e.name)).join(', ')}]`
     const arr = (f: (e: ManifestEntry) => string) => `[${entries.map(f).join(', ')}]`
