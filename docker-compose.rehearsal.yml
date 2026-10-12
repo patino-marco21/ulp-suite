@@ -85,6 +85,8 @@ services:
       UPLOAD_CONCURRENCY: ${REHEARSAL_UPLOAD_CONCURRENCY:-}
       INGEST_NOVELTY_CHECK: ${REHEARSAL_INGEST_NOVELTY_CHECK:-}
       INGEST_NOVELTY_SLAB_ROWS: ${REHEARSAL_INGEST_NOVELTY_SLAB_ROWS:-}
+      # lib/archive-ref.ts reads the source archive from here; scripts/e2e-novelty-ingest.ts (scenario archive-ref) copies a scratch archive into the container.
+      ULP_ARCHIVE_DIR: /archive
     volumes:
       - rehearsal_data:/app/data
       - rehearsal_inbox:/app/inbox

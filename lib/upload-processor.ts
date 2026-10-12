@@ -40,6 +40,8 @@ import {
   IngestHeldError, describeVerdict, evaluateGate, newGateCounters, parseGateConfig, recordGateBatch,
   type GateCounters, type GateReport, type GateVerdict,
 } from '@/lib/ingest-quality-gate'
+import { openSource } from '@/lib/source-archive'
+import { ArchiveRefError, appArchiveDir, hashingStream, readArchiveRefFile } from '@/lib/archive-ref'
 
 // ─── Public result type ───────────────────────────────────────────────────────
 
@@ -701,13 +703,38 @@ export async function processTextFile(
   }
 }
 
-// Replaced by Task 6 (reads the plaintext from the source archive).
+/**
+ * Import a file from the source archive (scripts/archive-sources.ts) instead of from the inbox: `refPath` is an `.archiveref` file (lib/archive-ref.ts). The
+ * plaintext is decoded frame by frame, hashed on its way to the parser, and imported under the ORIGINAL name; no plaintext copy is made. If its sha256 is not the
+ * reference's, the import fails before the commit (beforeCommit), so a damaged archive cannot put damaged rows into the table.
+ */
 export async function processArchiveRef(
-  _refPath: string,
-  _onBatch?: (imported: number) => void,
-  _hooks: ImportHooks = {},
+  refPath: string,
+  onBatch?: (imported: number) => void,
+  hooks: ImportHooks = {},
 ): Promise<ProcessResult> {
-  throw new Error('archive references are not supported yet')
+  const ref = readArchiveRefFile(refPath)
+  const source = openSource(ref.id, { archiveDir: appArchiveDir() })
+  if (source.origin.kind !== 'archive' || source.size !== ref.size || source.entry?.sha256 !== ref.sha256) {
+    throw new ArchiveRefError(`the reference for ${ref.id} does not match the archive manifest (size or sha256 differ)`)
+  }
+  const nodeStream = source.stream()
+  const { stream, digest } = hashingStream(nodeStream)
+  try {
+    return await processTextStream(stream, ref.name, undefined, onBatch, {
+      ...hooks,
+      source: { sha256: ref.sha256, size: ref.size, archiveId: ref.id },
+      beforeCommit: async () => {
+        const got = digest()
+        if (got !== ref.sha256) {
+          throw new ArchiveRefError(`archive ${ref.id} failed its sha256 check while it was read (got ${got.slice(0, 12)}, expected ${ref.sha256.slice(0, 12)})`)
+        }
+        await hooks.beforeCommit?.()
+      },
+    })
+  } finally {
+    nodeStream.destroy()
+  }
 }
 
 // ─── ZIP processor (yauzl — lazy entry streaming) ────────────────────────────

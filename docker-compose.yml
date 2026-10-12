@@ -158,6 +158,19 @@ services:
       # commit step.
       INGEST_NOVELTY_CHECK: ${INGEST_NOVELTY_CHECK:-}
       INGEST_NOVELTY_SLAB_ROWS: ${INGEST_NOVELTY_SLAB_ROWS:-}
+      # Ingest quality gate (lib/ingest-quality-gate.ts) -- optional; forwarded explicitly (see above). A file whose rows break too many rules is held in
+      # inbox/held/ before one row is stored. INGEST_QUALITY_GATE=warn only reports, =off switches it off. The thresholds are percentages; empty = the
+      # defaults in code (hold above 2% rows that break a rule, 5% unsplit lines, 25% garbage; at least 20000 lines; the first check after 1000000 lines).
+      INGEST_QUALITY_GATE: ${INGEST_QUALITY_GATE:-}
+      INGEST_QUALITY_GATE_JUNK_PCT: ${INGEST_QUALITY_GATE_JUNK_PCT:-}
+      INGEST_QUALITY_GATE_UNSPLIT_PCT: ${INGEST_QUALITY_GATE_UNSPLIT_PCT:-}
+      INGEST_QUALITY_GATE_GARBAGE_PCT: ${INGEST_QUALITY_GATE_GARBAGE_PCT:-}
+      INGEST_QUALITY_GATE_WARN_JUNK_PCT: ${INGEST_QUALITY_GATE_WARN_JUNK_PCT:-}
+      INGEST_QUALITY_GATE_WARN_UNSPLIT_PCT: ${INGEST_QUALITY_GATE_WARN_UNSPLIT_PCT:-}
+      INGEST_QUALITY_GATE_MIN_LINES: ${INGEST_QUALITY_GATE_MIN_LINES:-}
+      INGEST_QUALITY_GATE_EARLY_LINES: ${INGEST_QUALITY_GATE_EARLY_LINES:-}
+      # Source archive (lib/archive-ref.ts): an .archiveref file in the inbox is read from this directory, the host's ULP_ARCHIVE_HOST_DIR mounted read-only below.
+      ULP_ARCHIVE_DIR: /archive
       # Memory guard (lib/clickhouse-memory-guard.ts) -- optional. An import waits before its next batch while ClickHouse's own memory
       # tracker is at or above MEMORY_GUARD_THRESHOLD_RATIO of its ceiling (empty = 0.75), and goes ahead anyway once it has waited
       # MEMORY_GUARD_MAX_WAIT_MS (empty = 600000, ten minutes).
@@ -194,6 +207,9 @@ services:
       - ./uploads:/app/uploads
       - ./data:/app/data
       - ./inbox:/app/inbox
+      # The source archive (scripts/archive-sources.ts), read-only. The host directory must exist BEFORE `docker compose up` (mkdir ~/ulp-archive): if it does
+      # not, Docker creates it owned by root and the archive tool cannot write to it.
+      - ${ULP_ARCHIVE_HOST_DIR:-${HOME}/ulp-archive}:/archive:ro
     depends_on:
       clickhouse:
         condition: service_healthy

@@ -211,6 +211,21 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   holds costs the parse and one scan of one column. `off` imports straight into `ulp.credentials` as before.
 - `INGEST_NOVELTY_SLAB_ROWS` — rows per commit step (default `20000000`, at least `1000`). Files below
   this are committed in one step; larger ones in hash slabs, one slab at a time across all imports.
+- `INGEST_QUALITY_GATE` — the ingest quality gate, on by default (`hold`; `lib/ingest-quality-gate.ts`,
+  `docs/superpowers/specs/2026-10-12-source-archive-and-ingest-gate-design.md`). While a file is staged the importer counts
+  the rows that break a rule a correctly parsed row never breaks (a login that is a URL, a url that holds a credential, a
+  Telegram link in a field, double-encoded text) and the lines it could not split. When at least 20,000 lines were read and
+  more than 2% of the stored rows break a rule, more than 5% of the lines were unsplit, or more than 25% are garbage, the
+  file is **held** before one row is stored: it moves to `inbox/held/`, the Inbox page lists it with the reasons, and an admin
+  can **Release** it (it is then imported once without being held again). `warn` only reports; `off` switches it off.
+  Thresholds: `INGEST_QUALITY_GATE_JUNK_PCT` (2), `INGEST_QUALITY_GATE_UNSPLIT_PCT` (5), `INGEST_QUALITY_GATE_GARBAGE_PCT` (25),
+  `INGEST_QUALITY_GATE_WARN_JUNK_PCT` (1), `INGEST_QUALITY_GATE_WARN_UNSPLIT_PCT` (2), `INGEST_QUALITY_GATE_MIN_LINES` (20000) and
+  `INGEST_QUALITY_GATE_EARLY_LINES` (1000000: a big file is checked once after that many lines, so a bad 4 GB file costs a
+  million lines, not the whole file). `npx tsx scripts/preflight.ts <file>...` gives the verdict from a sample before a file is imported.
+- `ULP_ARCHIVE_HOST_DIR` — the host directory of the source archive (`scripts/archive-sources.ts`, default `~/ulp-archive`,
+  which must exist), mounted read-only at `/archive`. A file named `<name>.archiveref` dropped into `inbox/` (the feeder writes
+  them with `SOURCE=archive`) is imported from the archive instead of from the inbox: the plaintext is decoded on the way to the
+  parser, its sha256 is checked before the commit, and no plaintext copy is made.
 - `MEMORY_GUARD_THRESHOLD_RATIO` — an import waits before its next batch while ClickHouse's memory
   tracker is at or above this share of its ceiling (default `0.75`).
 - `MEMORY_GUARD_MAX_WAIT_MS` — how long it waits before going ahead anyway (default `600000`, ten
