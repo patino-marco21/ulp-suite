@@ -31,6 +31,10 @@ describe('splitSpacePaddedColons (rule A)', () => {
     expect(splitSpacePaddedColons('Daily : alice : Secret1')).toBeNull() // no dot or slash in the first part
     expect(splitSpacePaddedColons('https://shop.example.test : alice : Secret1')).toBeNull()
   })
+  test('"login:password : https : //url" (a credential followed by its padded url) is another layout and is left alone', () => {
+    expect(splitSpacePaddedColons('alice.x@mail.test:pw1 : https : //shop.example.test/x')).toBeNull()
+    expect(splitSpacePaddedColons('shop.example.test:8080 : alice : Secret1')).toBeNull()
+  })
   test('an e-mail first part with more padded colons is a login and a password that holds one', () => {
     expect(splitSpacePaddedColons('alice@mail.test : pass : word')).toBeNull()
   })

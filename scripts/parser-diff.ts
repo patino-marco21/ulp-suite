@@ -14,7 +14,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, st
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Readable } from 'node:stream'
-import { CHANGE_CLASSES, classifyChange, type ChangeClass, type Outcome } from '@/lib/parser-diff'
+import { CHANGE_CLASSES, classifyChange, classifyOldOnlyRow, type ChangeClass, type Outcome } from '@/lib/parser-diff'
 import { DEFAULT_HARD_KEEP_COUNTRIES, makeHardDropPredicate, parseIngestPolicy } from '@/lib/ingest-filter'
 import { parseInlineLine, parseULPStream } from '@/lib/ulp-parser'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
@@ -103,7 +103,6 @@ async function main(): Promise<void> {
   let streamUnexplained = 0
   if (args.includes('--stream')) {
     const maxMb = Number(flag('stream-max-mb') ?? '150')
-    const doubleEncoded = /[Â-ï][\u0080-¿]/
     for (const path of files.filter(f => statSync(f).size <= maxMb * 1048576)) {
       const rows = async (gen: AsyncGenerator<{ credentials: Array<{ url: string; email: string; password: string }> }>) => {
         const m = new Map<string, number>()
@@ -114,11 +113,22 @@ async function main(): Promise<void> {
       const body = () => Readable.toWeb(Readable.from(bytes)) as unknown as ReadableStream<Uint8Array>
       const oldRows = await rows(baseline.parseULPStream(body(), 'f.txt', 100000, baselineHard, { dedupInFile: false }))
       const newRows = await rows(parseULPStream(body(), 'f.txt', 100000, newHard, { dedupInFile: false }))
-      let onlyOld = 0, onlyOldExplained = 0, onlyNew = 0
-      for (const [k, v] of oldRows) { const d = v - (newRows.get(k) ?? 0); if (d > 0) { onlyOld += d; if (doubleEncoded.test(k)) onlyOldExplained += d } }
+      let onlyOld = 0, onlyNew = 0
+      const oldOnly = new Map<string, number>()
+      const exUnexplained: string[] = []
+      for (const [k, v] of oldRows) {
+        const d = v - (newRows.get(k) ?? 0)
+        if (d <= 0) continue
+        onlyOld += d
+        const [url, email, password] = k.split('\u0000')
+        const cls = classifyOldOnlyRow({ url, email, password })
+        oldOnly.set(cls, (oldOnly.get(cls) ?? 0) + d)
+        if (cls === 'unexplained' && exUnexplained.length < 6) exUnexplained.push(`${mask(url).slice(0, 40)} | ${mask(email)} | ${mask(password)}`)
+      }
       for (const [k, v] of newRows) { const d = v - (oldRows.get(k) ?? 0); if (d > 0) onlyNew += d }
-      streamUnexplained += onlyOld - onlyOldExplained
-      console.log(`  stream ${mask(path.split('/').pop() ?? '')}: old ${[...oldRows.values()].reduce((a, b) => a + b, 0)} rows, new ${[...newRows.values()].reduce((a, b) => a + b, 0)}; only in old ${onlyOld} (double-encoded text: ${onlyOldExplained}, other: ${onlyOld - onlyOldExplained}); only in new ${onlyNew}`)
+      streamUnexplained += oldOnly.get('unexplained') ?? 0
+      console.log(`  stream ${mask(path.split('/').pop() ?? '')}: old ${[...oldRows.values()].reduce((a, b) => a + b, 0)} rows, new ${[...newRows.values()].reduce((a, b) => a + b, 0)}; only in old ${onlyOld} (${[...oldOnly].map(([c, n]) => `${c} ${n}`).join(', ') || 'none'}); only in new ${onlyNew}`)
+      for (const e of exUnexplained) console.log(`      UNEXPLAINED old-only row: ${e}`)
     }
   }
 

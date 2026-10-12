@@ -45,7 +45,8 @@ export function splitSpacePaddedColons(line: string): [string, string, string] |
   if (!second) return null
   const login = afterFirst.slice(0, second.index)
   const password = afterFirst.slice(second.index + second[0].length)
-  if (!/[./]/.test(head) || /\s/.test(head) || /\s/.test(login) || login === '' || password === '' || PADDED_COLON.test(password)) return null
+  // A "host" with a colon is the start of "login:password : https : //url" (a credential followed by its padded url): not this rule, left as it was.
+  if (!/[./]/.test(head) || head.includes(':') || /\s/.test(head) || /\s/.test(login) || login === '' || password === '' || PADDED_COLON.test(password)) return null
   return [head, login, password]
 }
 

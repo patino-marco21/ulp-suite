@@ -1,6 +1,6 @@
 /** classifyChange names the reason a line's result differs between the baseline parser and parser v6; "unexplained" must stay empty on real data. */
 import { describe, expect, test } from 'vitest'
-import { classifyChange, type Outcome } from '@/lib/parser-diff'
+import { classifyChange, classifyOldOnlyRow, type Outcome } from '@/lib/parser-diff'
 
 const none = (reason: string): Outcome => ({ credential: null, reason })
 const row = (url: string, email: string, password: string): Outcome => ({ credential: { url, email, password }, reason: null })
@@ -37,4 +37,29 @@ describe('classifyChange', () => {
     expect(classifyChange('a:b:c', row('u', 'e', 'p1'), row('u', 'e', 'p2'), row('u', 'e', 'p1'))).toBe('unexplained')
     expect(classifyChange('plain:line:here', none('no_fields'), row('u', 'e', 'p'), none('no_fields'))).toBe('unexplained')
   })
+})
+
+describe('Android lines whose old result was a mangled row', () => {
+  const hash = 'AbCdEfGhIjKlMnOpQrSt'
+  test('a changed result on an app id without its scheme belongs to rule B, whatever the old result was', () => {
+    const line = `${hash}==@ar.gob.ar/:20123:do456`
+    expect(classifyChange(line, row('', `${hash}==@ar.gob.ar/`, '20123:do456'), row('android://x', '20123', 'do456'), none('x'))).toBe('android-no-scheme')
+    expect(classifyChange(line, row('', `${hash}==@ar.gob.ar/`, '20123:do456'), none('garbage'), none('x'))).toBe('android-no-scheme')
+  })
+})
+
+describe('utf8-lost: stored by the old parser, rejected once the line is decoded', () => {
+  test('the old parser rejects the repaired line too, so the repair explains it', () => {
+    const line = asRead('https://shop.example.test/login:alice:何')
+    expect(classifyChange(line, row('u', 'alice', '何'.length ? 'Ã¤Â½Â\u0095' : ''), none('no_password'), none('no_password'))).toBe('utf8-lost')
+  })
+})
+
+describe('classifyOldOnlyRow', () => {
+  test.each([
+    [{ url: 'https://x.test/', email: 'alice', password: 'cafÃ©123' }, 'double-encoded'],
+    [{ url: '', email: 'AbCdEfGhIjKlMnOpQrSt==@ar.gob.ar/', password: '20123:do456' }, 'android-mangled'],
+    [{ url: 'https://x.test/', email: 'alice', password: 'caf\u00e9123' }, 'utf8-text'],
+    [{ url: 'https://x.test/', email: 'alice', password: 'Secret1' }, 'unexplained'],
+  ])('%j is %s', (r, cls) => expect(classifyOldOnlyRow(r)).toBe(cls))
 })
