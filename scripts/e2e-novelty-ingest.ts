@@ -375,8 +375,9 @@ async function positionalRecords(): Promise<void> {
   const P = `e2e-nov-positional-${RUN}.txt`
   const pw = (k: string) => `Pw-${RUN}-${k}`
   const ls = [
-    // a credential line the field split cannot take (a "/" in the password): it is rejected, and the two real lines after it are kept
-    `https://shop1.example-store.test:posA${RUN}:Pass/${RUN}`,
+    // a credential line the field split cannot take (a password with three slashes looks like a path; parser v6 reads one slash, see scenario v6):
+    // it is rejected, and the two real lines after it are kept
+    `https://shop1.example-store.test:posA${RUN}:Pass/${RUN}/x/y`,
     `https://shop2.example-store.test:posB${RUN}:${pw('B')}`,
     `https://shop3.example-store.test:posC${RUN}:${pw('C')}`,
     // a genuine label-free record: a bare URL, a lone login, a password

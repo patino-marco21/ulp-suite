@@ -206,12 +206,12 @@ async function main(): Promise<number> {
         `https://${DOMAIN}/login:alice@${DOMAIN}:Rehearsal-Pa55-one`,
         'https://shop.example.com/cart:bob@gmail.com:Another-Pa55-two',
         'https://forum.example.com/login:ivan.ru:NoAtSign-Pa55-three',
-        'https://portal.example.com/in:carol@mail.ru:T3-Pa55-four',
+        'https://portal.example.com/in:carol@rediffmail.com:T3-Pa55-four',   // India: T3 and not on the hard-keep list
       ].join('\n') + '\n',
     )
     const imported = await waitFor('3 rows imported', () => chQuery('SELECT count() FROM ulp.credentials') === '3', 120_000, 3000)
     check('the file was imported: 3 rows (the T3 row was dropped by the ingest policy)', !!imported, `rows: ${chQuery('SELECT count() FROM ulp.credentials')}`)
-    check('the T3 login is not stored', chQuery("SELECT count() FROM ulp.credentials WHERE email = 'carol@mail.ru'") === '0')
+    check('the T3 login is not stored', chQuery("SELECT count() FROM ulp.credentials WHERE email = 'carol@rediffmail.com'") === '0')
     check('a login with no "@" is NOT labelled T3 (the stored-label bug of 2026-10-01)', chQuery("SELECT country_tier FROM ulp.credentials WHERE email = 'ivan.ru'") === '')
 
     const alertA = await waitFor(
@@ -256,7 +256,7 @@ async function main(): Promise<number> {
       insertRow('https', `//${DOMAIN}/portal`, `frank@${DOMAIN}|Pa55-six`, '', 'legacy.txt'), // repairable, but the correct copy exists
       insertRow('https', `//${DOMAIN}/portal`, `frank@${DOMAIN}|Pa55-six`, '', 'legacy-b.txt'), // the same credential, staged twice
       insertRow('https', '//shop.example.com/x', 'gina|ab', '', 'legacy.txt'), // password too short
-      insertRow('https', '//site.example.ru/login', 'x@mail.ru|Secret-Pa55', '', 'legacy.txt'), // T3 once corrected
+      insertRow('https', '//site.example.in/login', 'x@rediffmail.com|Secret-Pa55', '', 'legacy.txt'), // T3 (India, not on the hard-keep list) once corrected
     ]
     chQuery(`INSERT INTO ulp.credentials (url, email, password, domain, source_file, breach_name, imported_at) VALUES ${legacy.join(', ')}`)
     chQuery(
@@ -277,7 +277,7 @@ async function main(): Promise<number> {
     check('APPLY=1 appends exactly the one repairable row that was not already there', first.status === 0 && /already in ulp.credentials \(skipped\): 1\b/.test(first.stdout) && /appended: 1 repaired/.test(first.stdout), (first.stdout + first.stderr).slice(-300))
     check('...with its original imported_at and source_file and a real domain', count(`url = 'https://docs.example.com/y' AND email = 'hank@example.com' AND password = 'Pa55-seven' AND domain = 'docs.example.com' AND source_file = 'legacy.txt' AND imported_at = '${stamp}'`) === '1')
     check('the credential that already existed was not duplicated', count(`email = 'frank@${DOMAIN}' AND url = 'https://${DOMAIN}/portal'`) === '1')
-    check('the T3 row and the too-short password were not appended', count("email = 'x@mail.ru'") === '0' && count("url = 'https://shop.example.com/x'") === '0')
+    check('the T3 row and the too-short password were not appended', count("email = 'x@rediffmail.com'") === '0' && count("url = 'https://shop.example.com/x'") === '0')
     check('the five legacy rows are untouched', count("source_file LIKE 'legacy%' AND domain = ''") === '5')
     check('the scratch table is gone', chQuery("SELECT count() FROM system.tables WHERE database = 'ulp' AND name = 'zz_scheme_split_repaired'") === '0')
     const second = wrapper(true)
