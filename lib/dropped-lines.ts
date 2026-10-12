@@ -59,7 +59,7 @@ export async function extractDroppedLines(
 
   let carry: Buffer = Buffer.alloc(0)
   for await (const chunk of createReadStream(srcPath, { highWaterMark: 4 << 20 })) {
-    let buf: Buffer = carry.length ? Buffer.concat([carry, chunk as Buffer]) : (chunk as Buffer)
+    const buf: Buffer = carry.length ? Buffer.concat([carry, chunk as Buffer]) : (chunk as Buffer)
     let start = 0
     for (let nl = buf.indexOf(10, start); nl !== -1; nl = buf.indexOf(10, start)) {
       handle(buf.subarray(start, nl))
