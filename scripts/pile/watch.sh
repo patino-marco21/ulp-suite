@@ -1,5 +1,5 @@
 #!/bin/bash
-# One monitor for a pile run: feeder events (STOP / LOW DISK / DISK OK / PHASE LIMIT / COMPLETE), anomalies (app or ClickHouse restart or unhealthy, read-only
+# One monitor for a pile run: feeder events (STOP / LOW DISK / DISK OK / PHASE LIMIT / COMPLETE / HELD / SKIP / WARN), anomalies (app or ClickHouse restart or unhealthy, read-only
 # replica, replication queue, open mutations, detached parts, errors in text_log, app log errors) and a HEARTBEAT line at the start and every HB seconds.
 # usage: START_TS='2026-10-12 12:00:00' FEED_LOG=<path of the feeder's output> scripts/pile/watch.sh      (run it under the Monitor tool; it ends only when stopped)
 # Env: START_TS (required), FEED_LOG (required), HB (1800), PARTITION (202610), CH_CONTAINER, APP_CONTAINER (ulpsuite_app), PILE_WORK_DIR,
@@ -13,7 +13,7 @@ START_TS=${START_TS:?set START_TS}; FEED_LOG=${FEED_LOG:?set FEED_LOG}
 HB=${HB:-1800}
 trap 'kill $(jobs -p) 2>/dev/null' EXIT
 
-tail -n 0 -F "$FEED_LOG" | grep --line-buffered -E 'STOP|LOW DISK|DISK OK|PHASE LIMIT|COMPLETE' | sed -u 's/^/FEEDER /' &
+tail -n 0 -F "$FEED_LOG" | grep --line-buffered -E 'STOP|LOW DISK|DISK OK|PHASE LIMIT|COMPLETE|HELD|SKIP|WARN' | sed -u 's/^/FEEDER /' &
 docker logs -f --since "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$APP_CONTAINER" 2>&1 \
   | grep -E --line-buffered 'rror|[Ff]ailed|CRITICAL|[Pp]aused|abort|ECONN' | grep -v --line-buffered 'monitor-rescan' | sed -u 's/^/APP-LOG /' &
 
@@ -26,7 +26,7 @@ heartbeat() {
   js=$(node "$SCRIPT_DIR/jobs-summary.cjs" "$WORK/hbq" "$START_TS" 2>&1 | head -1 | sed 's/^JOBS since [0-9: -]*: //')
   p=$(chq "SELECT concat(toString(round(sumIf(bytes_on_disk, partition='$PARTITION')/1073741824, 1)), ' GiB, ', toString(sumIf(rows, partition='$PARTITION')), ' rows') FROM system.parts WHERE database='ulp' AND table='credentials' AND active")
   free=$(df -BG --output=avail / | tail -1 | tr -d ' ')
-  inflight=$(( $(ls -A inbox | grep -v -E '^(done|failed|processing)$' | wc -l) + $(ls -A inbox/processing | wc -l) ))
+  inflight=$(( $(ls -A inbox | grep -v -E '^(done|failed|processing|held)$' | wc -l) + $(ls -A inbox/processing | wc -l) ))
   pgrep -f "scripts/pile/feed.sh" >/dev/null && alive=alive || alive=NOT-RUNNING
   echo "$(date -u +%T) HEARTBEAT feeder=$alive fed=$fed inflight=$inflight | $js | p${PARTITION}=$p | free=$free"
 }

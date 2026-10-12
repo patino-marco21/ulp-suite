@@ -17,7 +17,7 @@ CUT=${CUT:?set CUT to the first import time of the run, for example CUT=\'2026-1
 ch() { docker exec "$CH_CONTAINER" clickhouse-client --max_execution_time=300 -q "$1"; }
 mode=${1:-check}
 
-top=$(ls -A inbox | grep -v -E '^(done|failed|processing)$' | wc -l); proc=$(ls -A inbox/processing | wc -l); nfail=$(ls -A inbox/failed | wc -l)
+top=$(ls -A inbox | grep -v -E '^(done|failed|processing|held)$' | wc -l); proc=$(ls -A inbox/processing | wc -l); nfail=$(ls -A inbox/failed | wc -l)
 echo "inbox: top-level=$top processing=$proc failed=$nfail"
 [ "$top" = 0 ] && [ "$proc" = 0 ] || { echo "ABORT: files are in flight"; exit 1; }
 echo "mutations open: $(ch "SELECT count() FROM system.mutations WHERE database='ulp' AND NOT is_done")  merges running: $(ch "SELECT count() FROM system.merges")"

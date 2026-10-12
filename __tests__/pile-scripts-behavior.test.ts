@@ -11,7 +11,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 
 const script = (f: string) => new URL(`../scripts/pile/${f}`, import.meta.url).pathname
 
-interface Box { root: string; repo: string; pile: string; work: string; bin: string; sqlLog: string; sources: string; env: NodeJS.ProcessEnv }
+interface Box { root: string; repo: string; pile: string; work: string; bin: string; sqlLog: string; sources: string; sourcesTsv: string; env: NodeJS.ProcessEnv }
 let box: Box | undefined
 afterEach(() => { if (box) rmSync(box.root, { recursive: true, force: true }); box = undefined })
 
@@ -24,14 +24,15 @@ function makeBox(files: Record<string, string>): Box {
   for (const d of [join(repo, 'inbox', 'done'), join(repo, 'inbox', 'failed'), join(repo, 'inbox', 'processing'), join(repo, 'data'), pile, work, bin]) mkdirSync(d, { recursive: true })
   for (const [name, body] of Object.entries(files)) writeFileSync(join(pile, name), body)
   const db = new Database(join(repo, 'data', 'ulp.db')); db.exec(JOBS_SCHEMA); db.close()
-  const sqlLog = join(root, 'sql.log'), sources = join(root, 'sources.txt')
-  writeFileSync(sqlLog, ''); writeFileSync(sources, '')
+  const sqlLog = join(root, 'sql.log'), sources = join(root, 'sources.txt'), sourcesTsv = join(root, 'sources-tsv.txt')
+  writeFileSync(sqlLog, ''); writeFileSync(sources, ''); writeFileSync(sourcesTsv, '')
   // "docker exec <container> clickhouse-client [options] -q <sql>": the last argument is the SQL. Logged; the list of imported names comes from a file; an ALTER answers nothing; the rest answers 0.
   writeFileSync(join(bin, 'docker'), `#!/bin/bash
 sql="\${@: -1}"
 printf '%s\\n' "$sql" >> "${sqlLog}"
 case "$sql" in
   "SELECT filename FROM ulp.sources") cat "${sources}" ;;
+  "SELECT filename, sha256 FROM ulp.sources") cat "${sourcesTsv}" ;;
   ALTER*"DROP PARTITION"*) if [ -n "$SHIM_FAIL_DROP" ]; then echo "Code: 359. DB::Exception: Partition size is greater than the limit" >&2; exit 1; fi ;;
   ALTER*DELETE*) if [ -n "$SHIM_FAIL_DELETE" ]; then echo "Code: 1. DB::Exception: mutation refused" >&2; exit 1; fi ;;
   ALTER*) ;;
@@ -42,15 +43,16 @@ esac
     ...process.env, PATH: `${bin}:${process.env.PATH}`, ULP_REPO: repo, PILE_DIR: pile, PILE_WORK_DIR: work,
     CH_CONTAINER: 'fake-clickhouse', POLL_SECS: '0.2', FLOOR_GIB: '0', IN_FLIGHT: '2',
   }
-  return { root, repo, pile, work, bin, sqlLog, sources, env }
+  return { root, repo, pile, work, bin, sqlLog, sources, sourcesTsv, env }
 }
 
 const sizes = (n: number) => 'x'.repeat(n)
-const inboxTop = (b: Box) => readdirSync(join(b.repo, 'inbox')).filter(n => !['done', 'failed', 'processing'].includes(n))
+const inboxTop = (b: Box) => readdirSync(join(b.repo, 'inbox')).filter(n => !['done', 'failed', 'processing', 'held'].includes(n))
 const sqlLines = (b: Box) => readFileSync(b.sqlLog, 'utf8').split('\n').filter(Boolean)
 
-/** Runs a script and a fake importer side by side: the importer moves each inbox file to `done` (or, for `failName`, to `failed`) after two ticks. */
-async function runFeeder(b: Box, env: NodeJS.ProcessEnv, failName?: string): Promise<{ code: number | null; out: string; maxInbox: number }> {
+/** Runs a script and a fake importer side by side: the importer moves each inbox file to `done` (or, for `failName`, to `failed`, for `holdName`, to `held`) after two ticks. */
+async function runFeeder(b: Box, env: NodeJS.ProcessEnv, failName?: string, holdName?: string): Promise<{ code: number | null; out: string; maxInbox: number }> {
+  mkdirSync(join(b.repo, 'inbox', 'held'), { recursive: true })   // the app creates it at start; the feeder must not count it as a file in flight
   const child = spawn('bash', [script('feed.sh')], { env, stdio: ['ignore', 'pipe', 'pipe'] })
   let out = ''
   child.stdout.on('data', d => { out += d }); child.stderr.on('data', d => { out += d })
@@ -59,7 +61,7 @@ async function runFeeder(b: Box, env: NodeJS.ProcessEnv, failName?: string): Pro
     const top = inboxTop(b); maxInbox = Math.max(maxInbox, top.length)
     for (const name of top) {
       const n = (age.get(name) ?? 0) + 1; age.set(name, n)
-      if (n >= 2) renameSync(join(b.repo, 'inbox', name), join(b.repo, 'inbox', name === failName ? 'failed' : 'done', name))
+      if (n >= 2) renameSync(join(b.repo, 'inbox', name), join(b.repo, 'inbox', name === failName ? 'failed' : name === holdName ? 'held' : 'done', name))
     }
   }, 100)
   const code = await new Promise<number | null>(resolve => {
@@ -121,6 +123,57 @@ describe('scripts/pile/feed.sh in a sandbox', () => {
     expect(out).not.toContain(' FEED ')
     expect(inboxTop(box)).toEqual([])
   }, 30_000)
+
+  test('a file the app holds is logged once as HELD, does not stop the feeding, and the run still completes', async () => {
+    box = makeBox({ 'a.txt': sizes(10), 'b.txt': sizes(20), 'c.txt': sizes(30) })
+    const { code, out } = await runFeeder(box, box.env, undefined, 'b.txt')
+    expect(code, out).toBe(0)
+    expect([...out.matchAll(/ HELD \+1 /g)]).toHaveLength(1)
+    expect(out).toMatch(/COMPLETE all 3 files processed \(held=1, skipped=0\)/)
+    expect(readdirSync(join(box.repo, 'inbox', 'held'))).toEqual(['b.txt'])
+    expect(readdirSync(join(box.repo, 'inbox', 'done')).sort()).toEqual(['a.txt', 'c.txt'])
+  }, 60_000)
+
+  test('a held directory in the inbox is not a file in flight, and a name already held is not queued again', async () => {
+    box = makeBox({ 'a.txt': sizes(10), 'b.txt': sizes(20) })
+    mkdirSync(join(box.repo, 'inbox', 'held'), { recursive: true })
+    writeFileSync(join(box.repo, 'inbox', 'held', 'b.txt'), 'held earlier')
+    const { code, out } = await runFeeder(box, box.env)
+    expect(code, out).toBe(0)
+    expect(out).toContain('START queue=1 files')
+    expect([...out.matchAll(/FEED \d+\/1 [\d.]+ MB (\S+)/g)].map(m => m[1])).toEqual(['a.txt'])
+  }, 60_000)
+
+  test('PREFLIGHT=1 skips a file the preflight would hold (exit 1), feeds one it cannot judge (exit 2) with a warning, and still completes', async () => {
+    box = makeBox({ 'a.txt': sizes(10), 'b.txt': sizes(20), 'c.txt': sizes(30) })
+    const pf = join(box.bin, 'preflight')
+    writeFileSync(pf, `#!/bin/bash\ncase "$1" in\n  *b.txt) echo "HOLD 9.00% of the stored rows break a rule (limit 2%)"; exit 1 ;;\n  *c.txt) echo "boom"; exit 2 ;;\n  *) exit 0 ;;\nesac\n`, { mode: 0o755 })
+    const { code, out } = await runFeeder(box, { ...box.env, PREFLIGHT: '1', PREFLIGHT_CMD: pf })
+    expect(code, out).toBe(0)
+    expect(out).toMatch(/SKIP 2\/3 \(preflight would hold it\) b\.txt: HOLD 9\.00%/)
+    expect(out).toMatch(/WARN preflight could not judge c\.txt \(exit 2\); feeding it anyway/)
+    expect(out).toMatch(/COMPLETE all 3 files processed \(held=0, skipped=1\)/)
+    expect(readdirSync(join(box.repo, 'inbox', 'done')).sort()).toEqual(['a.txt', 'c.txt'])
+  }, 60_000)
+
+  test('SOURCE=archive writes a reference for each archived name that ulp.sources does not have with the same content, and links nothing', async () => {
+    box = makeBox({}) // no originals at all: they were replaced by the archive
+    const arc = join(box.root, 'arc')
+    mkdirSync(arc)
+    const e = (name: string, c: string, size: number) => JSON.stringify({ name, id: c.repeat(24), size, sha256: c.repeat(64), lines: 1, frames: [], archive_bytes: 1, archive_sha256: 'e'.repeat(64), level: 12, created_at: 'x' })
+    writeFileSync(join(arc, 'manifest.jsonl'), [e('a.txt', 'a', 10), e('b.txt', 'b', 20), e('c.txt', 'c', 30), e('d.txt', 'd', 40)].join('\n') + '\n')
+    // a.txt: same name, same content: done.  b.txt: same name, other content: a new file.  c.txt: an older row without a hash: done by name.
+    writeFileSync(box.sourcesTsv, `a.txt\t${'a'.repeat(64)}\nb.txt\t${'f'.repeat(64)}\nc.txt\t\n`)
+    const dry = spawnSync('bash', [script('feed.sh')], { env: { ...box.env, SOURCE: 'archive', ULP_ARCHIVE_DIR: arc, DRY_RUN: '1' }, encoding: 'utf8' })
+    expect(dry.status, dry.stdout + dry.stderr).toBe(0)
+    expect(dry.stdout).toContain('START queue=2 files')
+    const { code, out } = await runFeeder(box, { ...box.env, SOURCE: 'archive', ULP_ARCHIVE_DIR: arc })
+    expect(code, out).toBe(0)
+    expect([...out.matchAll(/FEED \d+\/2 [\d.]+ MB (\S+)/g)].map(m => m[1])).toEqual(['b.txt', 'd.txt'])
+    expect(readdirSync(join(box.repo, 'inbox', 'done')).sort()).toEqual(['b.txt.archiveref', 'd.txt.archiveref'])
+    const ref = JSON.parse(readFileSync(join(box.repo, 'inbox', 'done', 'b.txt.archiveref'), 'utf8'))
+    expect(ref).toEqual({ v: 1, id: 'b'.repeat(24), name: 'b.txt', size: 20, sha256: 'b'.repeat(64) })
+  }, 60_000)
 })
 
 describe('scripts/pile/reset.sh in a sandbox', () => {
@@ -206,6 +259,14 @@ describe('scripts/pile/reset.sh in a sandbox', () => {
     expect(readFileSync(join(done, 'b.txt'), 'utf8')).toBe('BBB')
     expect(readFileSync(join(box.pile, 'a.txt'), 'utf8')).toBe('AAA')          // the other names still hold the bytes of the two that went
     expect(readFileSync(join(box.root, 'elsewhere.txt'), 'utf8')).toBe('EEE')
+  })
+
+  test('an inbox/held directory is not a file in flight', () => {
+    box = makeBox({})
+    mkdirSync(join(box.repo, 'inbox', 'held'), { recursive: true })
+    const r = run(box, 'check')
+    expect(r.stdout).toContain('top-level=0')
+    expect(r.stdout).not.toContain('ABORT: files are in flight')
   })
 })
 

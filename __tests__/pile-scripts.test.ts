@@ -11,7 +11,7 @@ describe('scripts/pile', () => {
     execFileSync('bash', ['-n', path(f)])
   })
   test('nothing is hard-wired to one machine or one session', () => {
-    for (const f of ['feed.sh', 'reset.sh', 'watch.sh', 'global-checks.sh', 'jobs-summary.cjs', 'verify-file.ts']) {
+    for (const f of ['feed.sh', 'reset.sh', 'watch.sh', 'global-checks.sh', 'jobs-summary.cjs', 'verify-file.ts', 'archive-queue.cjs']) {
       const s = read(f)
       expect(s, f).not.toContain('/tmp/claude-')
       expect(s, f).not.toContain('/home/cole')
@@ -41,5 +41,13 @@ describe('scripts/pile', () => {
       expect(s, f).toContain('REPO=${ULP_REPO:-')
       expect(s, f).not.toContain('node scripts/pile/')
     }
+  })
+  test('feed.sh, watch.sh and reset.sh do not count the held directory as a file in flight', () => {
+    for (const f of ['feed.sh', 'watch.sh', 'reset.sh']) expect(read(f), f).toContain('(done|failed|processing|held)')
+  })
+  test('the feeder knows the archive source, the preflight and the held files, and the archive helper is plain CommonJS', () => {
+    const s = read('feed.sh')
+    for (const word of ['SOURCE', 'PREFLIGHT_CMD', 'archive-queue.cjs', 'HELD +', 'SKIP']) expect(s, word).toContain(word)
+    expect(read('archive-queue.cjs')).not.toMatch(/^import |\brequire\('@\//m)
   })
 })
