@@ -1,7 +1,9 @@
 # Parser v6, three speed fixes and a T3 keep-list: design and the redo of the pile import (2026-10-12)
 
-Status: **design for the owner's review, nothing implemented yet.** Written after a review of what the parser still gets wrong, requested by the owner
-before the 140 GiB of original files are touched. Every number below comes from a read-only survey of the pile (a sample of 4.5 GiB, 76.7M lines, taken
+Status: **implemented on 2026-10-12** (branch parser-v6, merged to main; last code commit 435ec3e); **not yet deployed, the redo waits for run 4 and the
+owner's go.** The owner approved this design ("Go"); the measured outcome of the build is in "Results" at the end. Written after a review of what the parser
+still gets wrong, requested by the owner before the 140 GiB of original files are touched. Every number in the sections before "Results" comes from a
+read-only survey of the pile (a sample of 4.5 GiB, 76.7M lines, taken
 as 2 MiB slices from all 504 files and extrapolated by file size; accuracy a few percent) and from the live table. No source file names, search terms or
 credential values appear here on purpose: the repository is public until the owner makes it private.
 
@@ -222,3 +224,56 @@ The side copy needs 5-9 GiB more and the dictionary 2.2 GiB.
   guard against junk. The differential proof (step 2) is what shows whether a guard is too loose; the sample's masked failures are listed in the plan.
 - Deploying mid-redo is not planned; a deploy always follows the "wait for nothing in `inbox/processing`" rule.
 - The redo ends at the disk floor; the pre-authorized levers cover it, and the feeder pauses by itself rather than failing.
+
+## Results (2026-10-12)
+
+Measured on branch `parser-v6` with run 4 still going on the live stack. Numbers only: no file names, search terms or credential values.
+
+**Gate (HEAD 435ec3e):** `tsc --noEmit` clean, `eslint` (app, components, lib) clean, `vitest` **194 test files / 2,873 tests passed** (4 files / 58 tests skipped by
+design), `next build` exit 0 (run at 21:30 on the final sources: no file under app, lib or components changed after it, and the last commit only touches e2e scripts).
+
+**Candidate image** `ulp-suite-app:v6-candidate`, id `ea163ada5f10`, built from the tree of 8c79c1c. `:latest` is untouched (`474ff5812e25`, run 4's parser 624b845);
+the rollback tag `rollback-20261012-run4` points at it. Rehearsals ran on the isolated stack while run 4 kept running:
+
+| Script | Result |
+|---|---|
+| `e2e-alert-rehearsal.ts` | 36/36 (and again on HEAD 435ec3e: 36/36) |
+| `e2e-upload-resilience.ts` | 33/33 |
+| `e2e-novelty-ingest.ts`, every scenario except `gate` | first full run 93/96. The three failures were all in `positional`: its fixture held a one-slash password, which rule C now recovers as a stored row. The fixture became a three-slash password in 435ec3e. Rerun of `tags,positional,v6` on HEAD: **27/27** (v6: one line per rule, all stored or dropped as designed) |
+| `e2e-disk-gate.ts`, novelty `gate` | **not run yet**: they write tens of GiB of filler and wait until run 4 has finished |
+
+A real-browser pass on the candidate (11 pages: credentials, batch lookup, saved searches, breaches, domains, upload, inbox, sources, users with its
+Add User dialog and the Role select, API keys, the public check page) rendered every page with no console error, and the Role select chose both roles.
+
+**Differential proof** (`scripts/parser-diff.ts`: the baseline parser at main 624b845 against the working tree, 30 pile files of different families, about 120M
+lines, sampled per file and extrapolated). Every changed line belongs to a named class, **unexplained 0**:
+
+| Class | Lines (millions) |
+|---|---|
+| space-padded colons | 0.73 |
+| Android app id without its scheme | 1.12 |
+| slash in the password | 0.032 |
+| numeric login (read as a port before) | 0.013 |
+| protocol-relative url | 0.19 |
+| UTF-8: rejected before, stored now (the repair alone explains it) | 0.094 |
+| UTF-8: stored before as double-encoded text, now as the text | 0.15 |
+| UTF-8: stored before, not now (the repair makes the old parser reject it too) | 0.000 (5 sampled lines) |
+| `login == password`, login not an e-mail | 0.59 |
+| T3 kept by the keep-list | 3.26 |
+| unexplained | 0 (0 sampled lines) |
+
+Whole-file multiset diffs of 21 of those files (chosen to hold every class, so not a pile-wide estimate): 10,525,176 rows before, 10,976,990 after (+451,814);
+every one of the 17,608 rows only the old parser stores is one of four old defects: double-encoded text 11,846, a mangled Android id 5,461, UTF-8 text 297,
+the positional-fallback junk row 4.
+
+**Speed** (one ~100 MB pile file, 1.63M lines, busy machine; outputs byte-identical, the tests keep the old code as the reference): `parseLine` with the T3
+predicate 10.3 s -> 6.3 s (5.3 s without the predicate in both runs), so the predicate went from about 5 s to about 1 s per file; `classifyTier` alone 1.72 -> 0.65
+us/row; the md5 token 1.61 -> 0.44 us/row and the CSV step 1.57 -> 0.57 us/row per kept row. The wall-clock gain on the production image is measured during the
+redo (expected 6-8 h for the pile against run 4's ~11 h).
+
+**Dependency refresh** (in range, `package.json` unchanged): `next` 15.5.27 (already the newest in range), `react` and `react-dom` 19.2.6 -> 19.3.0,
+`better-sqlite3` 12.10.0 -> 12.11.1, `@clickhouse/client` 1.23.1 -> 1.24.1, `@radix-ui/react-select` 2.2.6 -> 2.4.0; 178 packages changed, 32 added, 31 removed in
+the lock file (60 of the changed ones are production dependencies). The one code change it needed is `asRole` in `app/users/page.tsx`: the new select passes a plain string.
+
+**Not done in this change:** the two disk-filling rehearsals (above); the deploy and the redo itself, which follow `docs/pile-import-runbook.md` once run 4 is
+complete and the owner says go; the follow-up projects listed above (login-only search scope, CSV export, a real backup destination).
