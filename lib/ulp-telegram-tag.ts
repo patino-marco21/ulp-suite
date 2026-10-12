@@ -24,6 +24,40 @@ export function hasTelegramLink(text: string): boolean {
   return LINK_WITH_BOUNDARY.test(text)
 }
 
+const SCHEME_CHAR = /[A-Za-z0-9+.-]/
+const LETTER = /[A-Za-z]/
+const WHITESPACE = /\s/
+
+/**
+ * `tail.replace(/[A-Za-z][A-Za-z0-9+.-]*:\/\//g, '').includes(':')` in linear time: is there a ':' that is not the colon of a "scheme://"? The regex starts again at every letter of
+ * a long token of letters, digits, '+', '.' and '-', so a token of n characters behind the link cost n*n steps whether or not "://" followed it. A scheme is a whole such
+ * token that holds a letter and is followed by "://" (the match starts at its first letter); the scan goes on behind the "://".
+ */
+export function hasColonOutsideSchemes(tail: string): boolean {
+  const n = tail.length
+  let i = 0
+  while (i < n) {
+    const c = tail[i]
+    if (c === ':') return true
+    if (!SCHEME_CHAR.test(c)) { i++; continue }
+    let j = i
+    let hasLetter = false
+    while (j < n && SCHEME_CHAR.test(tail[j])) { if (!hasLetter && LETTER.test(tail[j])) hasLetter = true; j++ }
+    i = hasLetter && tail.startsWith('://', j) ? j + 3 : j
+  }
+  return false
+}
+
+/** `s.replace(/[\s:]+$/, '')` -- the white space and colons at the end -- in linear time (the regex starts again at every position of a run in the middle of the text). */
+export function stripTrailingSpaceAndColons(s: string): string {
+  let end = s.length
+  while (end > 0 && (s[end - 1] === ':' || WHITESPACE.test(s[end - 1]))) end--
+  return end === s.length ? s : s.slice(0, end)
+}
+
+/** "https://https://t.me/" has two prefixes to take off; tens of thousands of them are not a link but junk, and taking them off one by one re-scans the whole text each time. */
+const MAX_LINK_PREFIXES = 64
+
 export function stripTelegramTag(line: string): string {
   const at = line.search(TELEGRAM_LINK)
   if (at < 0) return line
@@ -32,7 +66,7 @@ export function stripTelegramTag(line: string): string {
 
   // The link must be the end of the line: another ':' after it means more fields follow (a real credential whose url is a t.me link). The
   // colon of a "https://" in an advert that follows the link ("t.me/Chan|NAME;@NAME|https://t.me/+AbC123") is not a field separator.
-  if (tail.replace(/[A-Za-z][A-Za-z0-9+.-]*:\/\//g, '').includes(':')) return line
+  if (hasColonOutsideSchemes(tail)) return line
   // A credential must stand in front of it: at least one field separator that is not the one of a "://" scheme.
   if ((head0.replace(/:\/\//g, '  ').match(/:/g) ?? []).length < 1) return line
   // A URL with user info whose host name merely ends in "t" ("https://user:pass@payment.me/x") is a host, not a tag. Only that exact shape
@@ -43,12 +77,12 @@ export function stripTelegramTag(line: string): string {
 
   // Remove what introduces the link: "https://", "https : //", "://", "//", "www." (repeated: "https://https://t.me/").
   let head = head0
-  for (;;) {
+  for (let strips = 0; strips < MAX_LINK_PREFIXES; strips++) {
     const m = /(?:https?\s*:\s*\/\/\s*|\/\/\s*|www\.)$/i.exec(head)
     if (!m) break
     head = head.slice(0, m.index)
   }
-  head = head.replace(/[\s:]+$/, '')
+  head = stripTrailingSpaceAndColons(head)
 
   // An advert in front of the link is separated from the password by padding (3 or more white-space characters). Only the text after
   // the last ':' is looked at, so a padded password in an earlier field is never touched.
@@ -56,5 +90,5 @@ export function stripTelegramTag(line: string): string {
   const padding = /\s{3,}/.exec(head.slice(lastColon + 1))
   if (padding) head = head.slice(0, lastColon + 1 + padding.index)
 
-  return head.replace(/[\s:]+$/, '')
+  return stripTrailingSpaceAndColons(head)
 }
