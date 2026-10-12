@@ -142,6 +142,32 @@ export function isUrlPathParameter(line: string): boolean {
     || /^[\w-]+(?:\.[\w-]+)+(?::\d{1,5})?\/[^;\s]*(?:;[A-Za-z_][\w-]*=[^;:\s]*)+:/.test(line)
 }
 
+const WHITESPACE = /\s/
+
+/**
+ * `s.replace(/\s*:$/, '')` -- a final colon and the white space in front of it -- in linear time. The regex starts again at every position of a run of white space, so
+ * a run of n characters in the middle of a line costs n*n steps (a line of 400,000 spaces and a pipe held the importer's thread for minutes). `\s` is a set of single UTF-16
+ * code units, so testing them one by one gives the same cut.
+ */
+export function stripTrailingColon(s: string): string {
+  if (!s.endsWith(':')) return s
+  let end = s.length - 1
+  while (end > 0 && WHITESPACE.test(s[end - 1])) end--
+  return s.slice(0, end)
+}
+
+/**
+ * `s.replace(/;+\s*$/, '')` -- a final run of semicolons and the white space behind it -- in linear time. The regex starts again at every semicolon of a run, so a run of
+ * n semicolons costs n*n steps. When no semicolon stands directly in front of the trailing white space the string is returned as it is, like the regex does when it finds no match.
+ */
+export function stripTrailingSemicolons(s: string): string {
+  let end = s.length
+  while (end > 0 && WHITESPACE.test(s[end - 1])) end--
+  let start = end
+  while (start > 0 && s[start - 1] === ';') start--
+  return start < end ? s.slice(0, start) : s
+}
+
 /** Which layout of a pipe joining a url and a credential was read (rule F: only the scheme; G: a one-word label; H: a url). */
 export interface PipeJoin { kind: 'scheme' | 'label' | 'url'; line: string }
 
@@ -168,7 +194,7 @@ export function pipeJoin(line: string): PipeJoin | null {
   // G: a one-word label and a colon: the label is not part of the credential behind it.
   if (ONE_WORD_LABEL.test(before)) return CREDENTIAL_LINE.test(part.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')) ? { kind: 'label', line: rest } : null
   // H: a url, then the pipe, then "login:password". A bare host needs the colon in front of the pipe (without it "john.smith|pa:ss" is a login and a password).
-  const urlPart = before.replace(/\s*:$/, '')
+  const urlPart = stripTrailingColon(before)
   const urlLike = SCHEME_URL.test(urlPart) || (before.endsWith(':') && BARE_HOST.test(urlPart))
   if (urlLike && LOGIN_PASSWORD.test(part)) return { kind: 'url', line: `${urlPart}:${part}` }
   return null

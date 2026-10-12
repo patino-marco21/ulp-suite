@@ -28,6 +28,7 @@ import { hasTelegramLink, stripTelegramTag } from '@/lib/ulp-telegram-tag'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
 import {
   holdsCredential, isUrlPathParameter, joinPipedUrl, looksLikeUrlFragment, protocolRelativeToPlain, recoverAndroidAppLine, splitNumericLogin, splitSlashInPassword, splitSpacePaddedColons,
+  stripTrailingSemicolons,
 } from '@/lib/ulp-recover'
 
 export interface ULPCredential {
@@ -622,10 +623,18 @@ function colonSplit(line: string): [string, string, string] | null {
 
 // ── Core parse function ───────────────────────────────────────────────────────
 
+/**
+ * How many pipe joins (rules F, G, H) parseLine follows one after the other. A real line needs one or two ("https://| host/path:|:login:pass" has two); a degenerate line
+ * of tens of thousands of pipes after "https://" used to recurse once per pipe until the stack overflowed, which fails the whole import. Past the limit the line is read
+ * as it stands.
+ */
+const MAX_PIPE_JOINS = 64
+
 export function parseLine(
   line: string,
   sourceFile: string,
   shouldHardDrop?: (email: string, url: string) => boolean,
+  pipeJoins = 0,
 ): { credential: ULPCredential | null; reason: RejectionReason | null } {
   let trimmed = line.trim()
 
@@ -657,8 +666,8 @@ export function parseLine(
   trimmed = stripTelegramTag(trimmed)
 
   // Parser v6.1: a pipe between a url (or only its scheme, or a label) and a colon-separated credential is the join of the two, not the login/password separator
-  const joined = joinPipedUrl(trimmed)
-  if (joined) return parseLine(joined.line, sourceFile, shouldHardDrop)
+  const joined = pipeJoins < MAX_PIPE_JOINS ? joinPipedUrl(trimmed) : null
+  if (joined) return parseLine(joined.line, sourceFile, shouldHardDrop, pipeJoins + 1)
 
   // Pipe separator detection:
   // If the line already uses tab or semicolon as its primary separator, pipe is
@@ -689,7 +698,7 @@ export function parseLine(
   }
 
   // Parser v6.1, rule I: a ';' behind a credential that is already complete is part of the password, except at the very end: "alice@mail.test:Secret1;" ends in a delimiter
-  if (clean.includes(';') && !clean.includes('\t') && !semicolonIsUrlParameter(clean) && holdsCredential(clean.slice(0, clean.indexOf(';')))) clean = clean.replace(/;+\s*$/, '')
+  if (clean.includes(';') && !clean.includes('\t') && !semicolonIsUrlParameter(clean) && holdsCredential(clean.slice(0, clean.indexOf(';')))) clean = stripTrailingSemicolons(clean)
 
   // Rule 2: separator detection (\t beats ; beats | beats :)
   let url = '', login = '', password = ''

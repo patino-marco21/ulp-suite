@@ -6,7 +6,8 @@
  * the line held a colon at all.
  */
 import { describe, expect, it } from 'vitest'
-import { splitSpacePaddedColons } from '@/lib/ulp-recover'
+import { joinPipedUrl, pipeJoin, pipeJoinAll, splitSpacePaddedColons, stripTrailingColon, stripTrailingSemicolons } from '@/lib/ulp-recover'
+import { parseInlineLine, parseLine } from '@/lib/ulp-parser'
 
 /** The function as it was before: the same body with the original, quadratic regex. It is the reference of the differential. */
 const OLD_PADDED_COLON = /\s+:\s+/
@@ -106,5 +107,109 @@ describe('splitSpacePaddedColons: linear time', () => {
   it('still finds the fields of a line that has a long run in its password', () => {
     const line = 'host.test : alice : ' + 'p'.repeat(10) + ' '.repeat(RUN) + 'x'
     expect(splitSpacePaddedColons(line)).toEqual(['host.test', 'alice', 'p'.repeat(10) + ' '.repeat(RUN) + 'x'])
+  })
+})
+
+describe('stripTrailingColon: the same cut as the regex it replaces', () => {
+  it('agrees with s.replace(/\\s*:$/, "") on every string of up to 8 characters over space, tab, colon, a letter and a no-break space', () => {
+    const bad: string[] = []
+    let checked = 0
+    for (const s of allStrings([' ', '\t', ':', 'a', '\u00a0'], 8)) {
+      checked++
+      if (stripTrailingColon(s) !== s.replace(/\s*:$/, '') && bad.length < 5) bad.push(JSON.stringify(s))
+    }
+    expect(checked).toBeGreaterThan(400_000)
+    expect(bad).toEqual([])
+  }, 120_000)
+
+  it('cuts the colon and the white space in front of it, and nothing else', () => {
+    expect(stripTrailingColon('https://a.test/x :')).toBe('https://a.test/x')
+    expect(stripTrailingColon('https://a.test/x:')).toBe('https://a.test/x')
+    expect(stripTrailingColon('https://a.test/x')).toBe('https://a.test/x')
+    expect(stripTrailingColon('  :')).toBe('')
+    expect(stripTrailingColon(':')).toBe('')
+    expect(stripTrailingColon('a: :')).toBe('a:')
+  })
+})
+
+describe('the pipe rules: linear time', () => {
+  const RUN = Number(process.env.LINEAR_RUN ?? 400_000)
+  const limitMs = 1000
+  const time = (fn: () => unknown) => { const t = performance.now(); fn(); return performance.now() - t }
+  const sp = ' '.repeat(RUN)
+
+  it.each([
+    ['a long run inside the text in front of the pipe', 'https://a.test/x:' + sp + 'word|' + 'user:pass'],
+    ['a long run in front of the pipe and another behind it', 'https://a.test/x:' + sp + 'word|' + sp + 'x'],
+    ['a long run of spaces and then a pipe, with nothing else', 'head' + sp + 'word' + sp + '|x'],
+    ['a long run of tabs in front of the pipe', 'head' + '\t'.repeat(RUN) + 'word|x'],
+    ['a long run behind the pipe', 'https://a.test/x|' + sp + 'user:pass'],
+  ])('pipeJoin, joinPipedUrl and pipeJoinAll: %s', (_label, line) => {
+    expect(time(() => pipeJoin(line))).toBeLessThan(limitMs)
+    expect(time(() => joinPipedUrl(line))).toBeLessThan(limitMs)
+    expect(time(() => pipeJoinAll(line))).toBeLessThan(limitMs)
+  })
+
+  it('parseInlineLine on the same shapes', () => {
+    for (const line of ['https://a.test/x:' + sp + 'word|' + sp + 'x', 'user@mail.test:' + sp + 'word' + sp + '|x', 'head' + sp + 'word' + sp + '|x']) {
+      expect(time(() => parseInlineLine(line, 'probe.txt'))).toBeLessThan(limitMs)
+    }
+  })
+
+  it('still joins a url and a credential across a pipe, with white space around the colon', () => {
+    expect(pipeJoin('https://shop.example.test/login :| alice:Secret1')).toEqual({ kind: 'url', line: 'https://shop.example.test/login:alice:Secret1' })
+    expect(pipeJoin('https://shop.example.test/login|alice:Secret1')).toEqual({ kind: 'url', line: 'https://shop.example.test/login:alice:Secret1' })
+  })
+})
+
+describe('stripTrailingSemicolons: the same cut as the regex it replaces', () => {
+  it('agrees with s.replace(/;+\\s*$/, "") on every string of up to 8 characters over semicolon, space, tab, a letter and a colon', () => {
+    const bad: string[] = []
+    let checked = 0
+    for (const s of allStrings([';', ' ', '\t', 'a', ':'], 8)) {
+      checked++
+      if (stripTrailingSemicolons(s) !== s.replace(/;+\s*$/, '') && bad.length < 5) bad.push(JSON.stringify(s))
+    }
+    expect(checked).toBeGreaterThan(400_000)
+    expect(bad).toEqual([])
+  }, 120_000)
+
+  it('cuts the final run of semicolons and the white space behind it, and nothing else', () => {
+    expect(stripTrailingSemicolons('alice@mail.test:Secret1;')).toBe('alice@mail.test:Secret1')
+    expect(stripTrailingSemicolons('alice@mail.test:Secret1;;  ')).toBe('alice@mail.test:Secret1')
+    expect(stripTrailingSemicolons('alice@mail.test:Sec;ret1')).toBe('alice@mail.test:Sec;ret1')
+    expect(stripTrailingSemicolons('alice@mail.test:Secret1  ')).toBe('alice@mail.test:Secret1  ')
+    expect(stripTrailingSemicolons(';;;')).toBe('')
+  })
+})
+
+describe('a run of semicolons: linear time', () => {
+  const RUN = Number(process.env.LINEAR_RUN ?? 400_000)
+  const time = (fn: () => unknown) => { const t = performance.now(); fn(); return performance.now() - t }
+
+  it.each([
+    ['a run of semicolons behind an e-mail login and a colon', 'user@mail.test:' + ';'.repeat(RUN) + 'x'],
+    ['two runs with a word between them', 'user@mail.test:pass' + ';'.repeat(RUN) + 'word' + ';'.repeat(RUN) + 'x'],
+    ['a run of semicolons and a url tail', 'user@mail.test:' + ';'.repeat(RUN) + ':https://a.test'],
+  ])('parseInlineLine: %s', (_label, line) => {
+    expect(time(() => parseInlineLine(line, 'probe.txt'))).toBeLessThan(1000)
+  })
+})
+
+describe('parseLine: a degenerate pipe line does not recurse to a stack overflow', () => {
+  const time = (fn: () => unknown) => { const t = performance.now(); fn(); return performance.now() - t }
+
+  it.each([20_000, 200_000])('"https://| " followed by %i pipes and a path is answered, not thrown', n => {
+    const line = 'https://| ' + '|'.repeat(n) + '/p'
+    let ms = 0
+    expect(() => { ms = time(() => parseLine(line, 'probe.txt')) }).not.toThrow()
+    expect(ms).toBeLessThan(2000)
+  })
+
+  it('still follows the joins a real line needs (two), exactly as before', () => {
+    const a = parseLine('https://| shop.example.test/login:|alice:Secret1', 'probe.txt')
+    const b = parseLine('https://shop.example.test/login:alice:Secret1', 'probe.txt')
+    expect(a).toEqual(b)
+    expect(b.credential).not.toBeNull()
   })
 })
