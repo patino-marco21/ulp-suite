@@ -36,8 +36,8 @@ repository writes its scratch files under `PILE_WORK_DIR`: point that at a scrat
 1. Tag the running image BEFORE anything else (the containerd image store garbage-collects an image whose tag moves):
    `docker tag "$(docker inspect ulpsuite_app --format '{{.Image}}')" ulp-suite-app:rollback-<yyyymmdd>-<hhmm>z`.
 2. The image: the tested candidate is the best choice, because the bits that were rehearsed are the bits that are deployed. It is valid only while nothing that
-   goes into the image changed after the commit it was built from (8c79c1c for `v6-candidate`):
-   `git diff --stat 8c79c1c..<main sha> -- app lib components public Dockerfile docker-entrypoint.sh package.json package-lock.json next.config.mjs tsconfig.json`
+   goes into the image changed after the commit it was built from (e20feb4, parser v6.1, for `v6-candidate`; the earlier candidate without the pipe and semicolon rules is `v6-candidate-prepipe`, built from 8c79c1c):
+   `git diff --stat e20feb4..<main sha> -- app lib components public Dockerfile docker-entrypoint.sh package.json package-lock.json next.config.mjs tsconfig.json`
    must print nothing; then `docker tag ulp-suite-app:v6-candidate ulp-suite-app:latest`. Otherwise build from the merged commit, not from a worktree:
    `git archive <sha> | tar -x -C /tmp/build-<sha>`, then `DOCKER_CONFIG=/tmp/claude-1000/dockercfg docker build -t ulp-suite-app:latest /tmp/build-<sha>`, and run the alert
    rehearsal and the novelty `v6` scenario on that image before using it.
