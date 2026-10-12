@@ -188,6 +188,20 @@ describe('scripts/pile/reset.sh in a sandbox', () => {
   })
 })
 
+describe('scripts/pile/global-checks.sh in a sandbox', () => {
+  test('counts the distinct hashes one hash bucket at a time (a single uniqExact over ~400M rows exceeds the server memory cap) and reports rows / distinct / duplicates', () => {
+    box = makeBox({})
+    const r = spawnSync('bash', [script('global-checks.sh')], { env: { ...box.env, CUT: '2026-10-11 21:57:59', QUICK: '1' }, encoding: 'utf8' })
+    expect(r.status, r.stdout + r.stderr).toBe(0)
+    expect(r.stdout).toContain('rows / distinct hashes / duplicates: 0 / 0 / 0')
+    const sql = sqlLines(box)
+    const distinctQueries = sql.filter(l => l.includes('uniqExact(content_key_hash)'))
+    expect(distinctQueries.length).toBe(8)
+    for (let k = 0; k < 8; k++) expect(distinctQueries.some(l => l.includes(`content_key_hash % 8 = ${k}`)), `bucket ${k}`).toBe(true)
+    expect(distinctQueries.every(l => l.includes('% 8 ='))).toBe(true)    // never one query over the whole partition
+  })
+})
+
 describe('scripts/pile/jobs-summary.cjs', () => {
   test('sums the jobs since a time and lists one line per job on request, never a line of a file', () => {
     box = makeBox({})
