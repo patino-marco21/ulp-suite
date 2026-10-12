@@ -26,6 +26,7 @@ import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 import { waitForDiskSpace } from '@/lib/ingest-disk-gate'
 import { batchDedupToken } from '@/lib/upload-dedup'
 import { parseIngestPolicy, policyActive, shouldDropAtIngest, makeHardDropPredicate } from '@/lib/ingest-filter'
+import { csvChunks } from '@/lib/upload-csv'
 import { getActiveMonitors, fireMonitorAlertsFromMatches, type DomainMonitor } from '@/lib/domain-monitor'
 import { buildMonitorDomainIndex, matchCredentialsAgainstIndex, type MatchedCredential } from '@/lib/domain-match'
 import { matchBreach } from '@/lib/breach-matcher'
@@ -79,11 +80,6 @@ export const MAX_INPROCESS_MATCHES = 5_000
 const IMPORT_RETRY_MAX_ELAPSED_MS = 2 * 60 * 60 * 1_000 // 2 hours
 
 // ─── ClickHouse helpers ───────────────────────────────────────────────────────
-
-/** Escape a value for ClickHouse CSV: wrap in double-quotes, double internal quotes. */
-function csvField(v: string): string {
-  return '"' + v.replace(/"/g, '""') + '"'
-}
 
 function retryErrorSummary(error: unknown): string {
   return privacySafeClickHouseErrorSummary(error)
@@ -159,21 +155,7 @@ export async function insertBatch(
 
   await withClickHouseRetry(
     async signal => {
-      const readable = Readable.from(
-        (function* () {
-          for (const c of credentials) {
-            yield [
-              csvField(c.url),
-              csvField(c.email),
-              csvField(c.password),
-              csvField(c.domain),
-              csvField(c.source_file),
-              csvField(breach_name),
-            ].join(',') + '\n'
-          }
-        })(),
-        { objectMode: false },
-      )
+      const readable = Readable.from(csvChunks(credentials, breach_name), { objectMode: false })
 
       await chClient.insert({
         table: opts.table ?? 'ulp.credentials',
