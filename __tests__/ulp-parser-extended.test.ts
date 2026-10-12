@@ -435,9 +435,10 @@ describe('§5 Scheme variety', () => {
     expect(why('Android://HASH==@com.app')).toBe('no_fields')
   })
 
-  test('// prefix (without scheme) rejected as comment-like line', () => {
-    expect(cred('//example.com:user:pass123')).toBeNull()
-    expect(why('//example.com:user:pass123')).toBe('blank')
+  test('// prefix: a comment-like line is blank, a protocol-relative credential is read (parser v6)', () => {
+    expect(cred('// just a comment')).toBeNull()
+    expect(why('// just a comment')).toBe('blank')
+    expect(cred('//example.com:user:pass123')?.url).toBe('example.com')
   })
 
   test('custom scheme: mysql:// URL accepted', () => {
@@ -720,9 +721,8 @@ describe('§10 Validation edge cases', () => {
   })
 
   describe('login === password', () => {
-    test('exact match: rejected', () => {
-      expect(cred('https://example.com:secret123:secret123')).toBeNull()
-      expect(why('https://example.com:secret123:secret123')).toBe('no_password')
+    test('exact match, login is not an e-mail: accepted (parser v6)', () => {
+      expect(cred('https://example.com:secret123:secret123')).not.toBeNull()
     })
 
     test('different case: accepted (comparison is exact)', () => {
@@ -988,7 +988,7 @@ describe('§13 parseULPContent batch counters', () => {
   })
 
   test('login === password lines counted in no_password breakdown', () => {
-    const content = 'example.com:samepass:samepass\nuser@example.com:pass123'
+    const content = 'example.com:me@x.test:me@x.test\nuser@example.com:pass123'
     const result = parseULPContent(content, src)
     expect(result.credentials.length).toBe(1)
     expect(result.skipped).toBe(1)

@@ -26,9 +26,10 @@ const lines = (...l: string[]) => l.join('\n') + '\n'
 
 // each of these is rejected by parseLine as no_fields and starts with "http"
 const REJECTED_URL_LINES: Array<[string, string]> = [
-  ['a "/" in the password', 'https://shop.example.test:alice:Pass/word1'],
+  // parser v6 reads a password with ONE slash (https://shop.example.test:alice:Pass/word1), so these are the shapes it still refuses
+  ['a "/" in the password that looks like a path (three slashes)', 'https://shop.example.test:alice:Pass/wor/d1/x'],
   ['an e-mail login, no url, and a "/" in the password', 'https://alice@mail.test:Pass/word1'],
-  ['an e-mail login and a "/" in the password', 'https://shop.example.test:alice@mail.test:Pass/word1'],
+  ['a password that is a URL fragment', 'https://shop.example.test:alice:www.other.test/login'],
 ]
 
 describe.each(REJECTED_URL_LINES)('a rejected credential line (%s) does not swallow the lines after it', (_label, rejectedLine) => {
@@ -54,7 +55,7 @@ describe.each(REJECTED_URL_LINES)('a rejected credential line (%s) does not swal
 })
 
 describe('what can follow a rejected URL line', () => {
-  const rejected = 'https://shop.example.test:alice:Pass/word1'
+  const rejected = 'https://shop.example.test:alice:Pass/wor/d1/x'
 
   test.each([
     ['a two-field line', 'carol:Secret1'],

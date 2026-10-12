@@ -1,5 +1,9 @@
 /**
- * ULP credential line parser — v5
+ * ULP credential line parser — v6
+ *
+ * v6 (2026-10-12, docs/superpowers/specs/2026-10-12-parser-v6-and-redo-design.md): UTF-8 lines are read as UTF-8 (lib/ulp-utf8.ts), and
+ * layouts that used to be rejected are read by lib/ulp-recover.ts (space-padded colons, a slash in the password, a numeric login, protocol-relative
+ * urls, Android app ids without their scheme). A login equal to the password is rejected only when it is an e-mail address.
  *
  * Design: one algorithm, no regex in the hot path, RFC 3986-correct
  * colon disambiguation. ~150 lines for a format that is field:field:field.
@@ -18,6 +22,9 @@
 import { hasGarbageIdentity, hasMojibakeSignature, hasEdgeWhitespace } from '@/lib/ulp-garbage'
 import { hasTelegramLink, stripTelegramTag } from '@/lib/ulp-telegram-tag'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
+import {
+  looksLikeUrlFragment, protocolRelativeToPlain, splitNumericLogin, splitSlashInPassword, splitSpacePaddedColons,
+} from '@/lib/ulp-recover'
 
 export interface ULPCredential {
   url:         string
@@ -266,7 +273,7 @@ export function makeBlockState(): BlockState {
 
 /**
  * Flush `state` into a ULPCredential if it satisfies validation rules.
- * Returns null if login is empty, password is absent/too-short, or login===password.
+ * Returns null if login is empty, password is absent/too-short, or an e-mail login equals the password.
  */
 export function flushBlockState(
   state: BlockState,
@@ -275,7 +282,7 @@ export function flushBlockState(
   const { url, login, password } = state
   if (!login)                           return null
   if (!password || password.length < 3) return null
-  if (login === password)               return null
+  if (login === password && login.includes('@')) return null   // an e-mail equal to its password is a column artifact; admin:admin is a real default pair
   if (isJunkCredential(login, password)) return null
   const domain = url
     ? extractDomain(url)
@@ -602,7 +609,13 @@ function splitUrlSpacePair(line: string): [string, string, string] | null {
 }
 
 function colonSplit(line: string): [string, string, string] | null {
-  return colonSplitFields(line) ?? splitUrlSpacePair(line)
+  // Rule A first: for a white-space-padded line colonSplitFields returns padded fields, which the garbage gate then rejects.
+  // The others are fallbacks, tried only when the existing logic found no fields, so every line that parsed before parses the same.
+  return splitSpacePaddedColons(line)
+    ?? colonSplitFields(line)
+    ?? splitSlashInPassword(line)
+    ?? splitNumericLogin(line)
+    ?? splitUrlSpacePair(line)
 }
 
 // ── Core parse function ───────────────────────────────────────────────────────
@@ -613,6 +626,17 @@ export function parseLine(
   shouldHardDrop?: (email: string, url: string) => boolean,
 ): { credential: ULPCredential | null; reason: RejectionReason | null } {
   let trimmed = line.trim()
+
+  // Rule E (parser v6): "//host/path:login:password" is a protocol-relative url, not a comment. Read as a scheme-less line; a password that is a URL
+  // fragment (the extra slash belonged to a path) is garbage.
+  if (trimmed.startsWith('//')) {
+    const plain = protocolRelativeToPlain(trimmed)
+    if (plain) {
+      const r = parseLine(plain, sourceFile, shouldHardDrop)
+      if (r.credential && looksLikeUrlFragment(r.credential.password)) return { credential: null, reason: 'garbage' }
+      return r
+    }
+  }
 
   // Rule 1: blank / comment / section header / // prefix
   // NOTE: android:// lines are intentionally NOT filtered here.  Android app
@@ -756,7 +780,7 @@ export function parseLine(
   // Rule 3: validation
   if (!login)                           return { credential: null, reason: 'no_fields' }
   if (!password || password.length < 3) return { credential: null, reason: 'no_password' }
-  if (login === password)               return { credential: null, reason: 'no_password' }
+  if (login === password && login.includes('@')) return { credential: null, reason: 'no_password' }
 
   // Rule 3.4: hard-tier early drop. The instant we have a plausible login/url we
   // can classify; if it's a configured hard-drop tier, bail BEFORE the binary /

@@ -177,7 +177,7 @@ describe('parseLine — rejection: no_fields', () => {
 
 describe('parseLine — rejection: no_password', () => {
   test.each([
-    ['login equals password',     'dupvalue:dupvalue'],
+    ['e-mail login equals password', 'user@example.com:user@example.com'],
     ['1-char password',           'user@example.com:x'],
     ['2-char password',           'user@example.com:ab'],
     // Note: 'http' and 'https' are ≥3 chars → accepted in v5 (no pass_is_scheme check)
@@ -500,8 +500,9 @@ describe('parseLine — email:password only (no URL)', () => {
 })
 
 describe('parseLine — validation rules', () => {
-  test('login === password is rejected', () => {
-    expect(why('user:user')).toBe('no_password')
+  test('login === password is rejected only for an e-mail login', () => {
+    expect(why('user@example.com:user@example.com')).toBe('no_password')
+    expect(cred('user:user')).not.toBeNull()
   })
 
   test('password shorter than 3 chars is rejected', () => {

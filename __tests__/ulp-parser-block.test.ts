@@ -154,9 +154,9 @@ describe('§C flushBlockState', () => {
     expect(flushBlockState(state, src)).toBeNull()
   })
 
-  test('login === password → null', () => {
-    const state: BlockState = { url: 'https://site.com', login: 'same', password: 'same' }
-    expect(flushBlockState(state, src)).toBeNull()
+  test('login === password → null for an e-mail login, accepted for any other login', () => {
+    expect(flushBlockState({ url: 'https://site.com', login: 'same@x.test', password: 'same@x.test' }, src)).toBeNull()
+    expect(flushBlockState({ url: 'https://site.com', login: 'same', password: 'same' }, src)).not.toBeNull()
   })
 
   test('missing url → domain fallback to email domain', () => {
