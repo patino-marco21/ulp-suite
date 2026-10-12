@@ -12,6 +12,9 @@
  *               (a stray scheme, no url) is kept as an e-mail:password pair, and "login:password:https://url" (the url last) is read
  *               in that order, "http://url login:password" (one space) is read as url, login, password, a ";jsessionid=..." path
  *               parameter stays in the url, and "e-mail:password | note" keeps the pair
+ *   v6          parser v6: space-padded colons, an Android app id without its scheme (one row per login+password), a slash in the password (e-mail and
+ *               other login), a numeric login, a protocol-relative url, UTF-8 text stored as typed, login == password (stored unless it is an e-mail),
+ *               and a T3 line of a kept country (Poland, stored) next to one of another country (Brazil, dropped)
  *   monitor     a monitor alerts for rows that are new to the database, not for a row the database already held
  *   big         2.5M distinct lines + 100k repeats of early lines (past the old 2M in-file cap): exact, in 5 slabs, phases visible
  *   kill        the app is killed in the middle of the commit; after the restart the orphan stage tables are gone and a retry
@@ -412,6 +415,43 @@ async function positionalRecords(): Promise<void> {
   check('...no stored login holds a whole line', merged === 0, `rows ${merged}`)
 }
 
+async function parserV6(): Promise<void> {
+  console.log('\n1d. Parser v6 (docs/superpowers/specs/2026-10-12-parser-v6-and-redo-design.md)')
+  const V = `e2e-nov-v6-${RUN}.txt`
+  const pw = (k: string) => `Pw-${RUN}-${k}`
+  const app = (n: number) => `AbCdEfGhIjKlMnOpQr${String(n).padStart(2, '0')}${RUN}==@com.example.app${n}`
+  const café = `café-${RUN}`
+  const ls = [
+    `shopa.example-store.test : v6a${RUN}@probe-mail.test : ${pw('A')}`,                          // A: space-padded colons, no scheme
+    `${app(1)}/:v6b${RUN}@probe-mail.test:${pw('B')}`,                                             // B: an Android app id without its scheme ...
+    `${app(2)}/:v6b${RUN}@probe-mail.test:${pw('B')}`,                                             // ... the same account under another app id: one row
+    `https://shopc1.example-store.test:v6c1${RUN}@probe-mail.test:Pa/ss-${RUN}`,                  // C: a slash in the password, e-mail login
+    `https://shopc2.example-store.test:v6c2${RUN}:Pa/ss-${RUN}`,                                   // C: a slash in the password, another login
+    `https://shopd.example-store.test:48213:${pw('D')}`,                                           // D: a number that is not a web port is the login
+    `//shope.example-store.test/login:v6e${RUN}:${pw('E')}`,                                       // E: a protocol-relative url
+    `https://shopu.example-store.test/login:v6u${RUN}@probe-mail.test:${café}`,                    // UTF-8 password
+    `https://shopv.example-store.test/login:Иван${RUN}:${pw('V')}`,            // UTF-8 (Cyrillic) login
+    `https://shopw.example-store.test/login:same${RUN}:same${RUN}`,                                // login == password, not an e-mail: stored
+    `https://shopx.example-store.test/login:v6x${RUN}@probe-mail.test:v6x${RUN}@probe-mail.test`, // e-mail == password: skipped
+    `https://shop.example-store.com.pl/login:v6p${RUN}:${pw('P')}`,                                // T3, Poland is on the keep-list: stored
+    `https://shop.example-store.com.br/login:v6q${RUN}:${pw('Q')}`,                                // T3, Brazil is not: dropped
+  ]
+  const v = await importLines(V, ls)
+  check('a file with one line per v6 rule: 10 rows are new, none known', v.status === 'done' && v.imported === 10 && v.known === 0, brief(v))
+  check('...3 lines are skipped (the repeat of the Android account, the e-mail equal to its password, the Brazilian T3 line) and 10 rows are stored', v.skipped === 3 && rowsFor(V) === 10, `skipped ${v.skipped}, rows ${rowsFor(V)}`)
+  const one = (where: string) => Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${V}' AND ${where}`))
+  const hex = (s: string) => `unhex('${Buffer.from(s, 'utf8').toString('hex')}')`
+  check('A: the padded line is stored with its url, login and password', one(`url = 'shopa.example-store.test' AND email = 'v6a${RUN}@probe-mail.test' AND password = '${pw('A')}'`) === 1)
+  check('B: the Android account is one row, with the scheme put back', one(`email = 'v6b${RUN}@probe-mail.test' AND startsWith(url, 'android://')`) === 1)
+  check('C: both slash-in-password lines keep the slash and have the host as url', one(`email = 'v6c1${RUN}@probe-mail.test' AND password = 'Pa/ss-${RUN}' AND url = 'https://shopc1.example-store.test'`) === 1
+    && one(`email = 'v6c2${RUN}' AND password = 'Pa/ss-${RUN}' AND url = 'https://shopc2.example-store.test'`) === 1)
+  check('D: the number is the login', one(`email = '48213' AND password = '${pw('D')}' AND url = 'https://shopd.example-store.test'`) === 1)
+  check('E: the protocol-relative line is a scheme-less url with its domain', one(`url = 'shope.example-store.test/login' AND email = 'v6e${RUN}' AND domain = 'shope.example-store.test'`) === 1)
+  check('UTF-8: the password is stored as typed (not double-encoded) and the Cyrillic login is stored', one(`password = ${hex(café)}`) === 1 && one(`email = ${hex(`Иван${RUN}`)}`) === 1)
+  check('login == password: stored for a login that is not an e-mail, skipped for an e-mail', one(`email = 'same${RUN}' AND password = 'same${RUN}'`) === 1 && one(`email = 'v6x${RUN}@probe-mail.test'`) === 0)
+  check('T3: the Polish line is stored, the Brazilian one is not', one(`email = 'v6p${RUN}'`) === 1 && one(`email = 'v6q${RUN}'`) === 0)
+}
+
 async function monitorScenario(): Promise<void> {
   console.log('\n2. A monitor alerts for the rows that are new to the database')
   const hook = await api('POST', '/api/monitoring/webhooks', { name: `Novelty Receiver ${RUN}`, url: `http://${RECEIVER}:9000/hook`, secret: 'rehearsal' })
@@ -635,6 +675,7 @@ async function run(): Promise<number> {
   if (want('basic')) await basic()
   if (want('tags')) await telegramTags()
   if (want('positional')) await positionalRecords()
+  if (want('v6')) await parserV6()
   if (want('monitor')) await monitorScenario()
   if (want('big')) await bigFile()
   if (want('kill')) await killMidCommit()
