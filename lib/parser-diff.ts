@@ -32,23 +32,28 @@ export function classifyChange(rawLine: string, oldO: Outcome, newO: Outcome, ol
   const stored = newO.credential as Cred
   if (oldO.reason === 'tier_dropped') return 't3-kept'
   if (oldOnRepaired.credential && sameCred(oldOnRepaired.credential, stored)) return 'utf8-recovered'
-  const t = repairUtf8Line(rawLine).trim()
-  if (splitSpacePaddedColons(t)) return 'padded-colons'
-  if (recoverAndroidAppLine(t)) return 'android-no-scheme'
-  if (protocolRelativeToPlain(t)) return 'protocol-relative'
-  if (splitSlashInPassword(t)) return 'slash-in-password'
-  if (splitNumericLogin(t)) return 'numeric-login'
+  // parseLine cuts a pipe tail off before it splits the fields, so the helpers are tried on the whole line and on the part in front of the first pipe
+  const full = repairUtf8Line(rawLine).trim()
+  for (const t of [full, full.includes('|') ? full.slice(0, full.indexOf('|')).trim() : full]) {
+    if (splitSpacePaddedColons(t)) return 'padded-colons'
+    if (recoverAndroidAppLine(t)) return 'android-no-scheme'
+    if (protocolRelativeToPlain(t)) return 'protocol-relative'
+    if (splitSlashInPassword(t)) return 'slash-in-password'
+    if (splitNumericLogin(t)) return 'numeric-login'
+  }
   if (stored.email === stored.password && !stored.email.includes('@')) return 'login-equals-password'
   return 'unexplained'
 }
 
 /** A stored row that only the baseline parser produces (stream mode): the reason it is gone. */
-export type OldOnlyClass = 'double-encoded' | 'android-mangled' | 'utf8-text' | 'unexplained'
+export type OldOnlyClass = 'double-encoded' | 'android-mangled' | 'positional-merge' | 'utf8-text' | 'unexplained'
 
 export function classifyOldOnlyRow(row: { url: string; email: string; password: string }): OldOnlyClass {
   const fields = [row.url, row.email, row.password]
   if (fields.some(f => /[\u00c2-\u00ef][\u0080-\u00bf]/.test(f))) return 'double-encoded'
-  if (/^[A-Za-z0-9_+-]{16,}==@[A-Za-z0-9_.-]+\/?$/.test(row.email) || /^(android:)?\/\/[A-Za-z0-9_+-]{16,}==@/.test(row.url)) return 'android-mangled'
+  if (/^[A-Za-z0-9_+-]{16,}==@/.test(row.email) || /^(android:)?\/\/[A-Za-z0-9_+-]{16,}==@/.test(row.url)) return 'android-mangled'
+  // the junk signature of the old positional fallback: a whole line (it holds a colon) in the login field
+  if (row.email.includes(':')) return 'positional-merge'
   if (fields.some(f => /[\u0080-\u00ff]/.test(f))) return 'utf8-text'
   return 'unexplained'
 }

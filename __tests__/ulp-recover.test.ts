@@ -8,7 +8,7 @@ import {
 describe('looksLikeUrlFragment', () => {
   test.each([
     'www.other.test/login', 'https://x.test/a', 'other.example.test/login?x=1', 'a?b=1', 'page.php', 'index.html', 'login.aspx',
-    'a/b/c/d', 'x.test/path', 'one.two.test/a',
+    'a/b/c/d', 'x.test/path', 'one.two.test/a', '/hn:ef', '/etc/x',
   ])('%s is a fragment', pw => expect(looksLikeUrlFragment(pw)).toBe(true))
 
   test.each(['Pa/ss1', 'p@ss/word', 'a/b', 'a/b/c', 'Secret1', 'abc/def.ghi', 'Tr0ub4dor&3/x'])('%s is a password', pw =>

@@ -59,7 +59,16 @@ describe('classifyOldOnlyRow', () => {
   test.each([
     [{ url: 'https://x.test/', email: 'alice', password: 'cafÃ©123' }, 'double-encoded'],
     [{ url: '', email: 'AbCdEfGhIjKlMnOpQrSt==@ar.gob.ar/', password: '20123:do456' }, 'android-mangled'],
+    [{ url: '', email: 'AbCdEfGhIjKlMnOpQrSt==@net.example.me/:25123:abc', password: 'ry123' }, 'android-mangled'],
+    [{ url: 'https://shop.example.test:alice@mail.test', email: 'bob::carol@mail.test:Secret1', password: 'https://other.example.test:62 BC:As' }, 'positional-merge'],
     [{ url: 'https://x.test/', email: 'alice', password: 'caf\u00e9123' }, 'utf8-text'],
     [{ url: 'https://x.test/', email: 'alice', password: 'Secret1' }, 'unexplained'],
   ])('%j is %s', (r, cls) => expect(classifyOldOnlyRow(r)).toBe(cls))
+})
+
+describe('a line with a pipe tail', () => {
+  test('the helpers are tried on the part in front of the first pipe, as parseLine does', () => {
+    const line = 'https://shop.example.test:alice:Pass/word1|tail/with/three/slashes/x'
+    expect(classifyChange(line, none('no_fields'), row('https://shop.example.test', 'alice', 'Pass/word1'), none('no_fields'))).toBe('slash-in-password')
+  })
 })

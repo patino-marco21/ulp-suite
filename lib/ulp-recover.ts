@@ -11,11 +11,12 @@ export const COMMON_WEB_PORTS: ReadonlySet<number> = new Set([
 ])
 
 /**
- * A "password" that is really a piece of a URL: a scheme, a host name followed by a slash, a leading www., a query string, a web file extension, or three
- * or more slashes. Used by the slash-in-password and protocol-relative rules, where the extra slash can belong to a path instead of the password.
+ * A "password" that is really a piece of a URL: a scheme, a leading slash, a host name followed by a slash, a leading www., a query string, a web file
+ * extension, or three or more slashes. Used by the slash-in-password and protocol-relative rules, where the extra slash can belong to a path instead of the password.
  */
 export function looksLikeUrlFragment(password: string): boolean {
   return password.includes('://')
+    || password.startsWith('/')
     || /^www\./i.test(password)
     || /^[\w-]+(\.[\w-]+)+\//.test(password)
     || /[?&][\w%.-]+=/.test(password)
