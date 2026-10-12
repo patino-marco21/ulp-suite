@@ -23,7 +23,7 @@ import { hasGarbageIdentity, hasMojibakeSignature, hasEdgeWhitespace } from '@/l
 import { hasTelegramLink, stripTelegramTag } from '@/lib/ulp-telegram-tag'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
 import {
-  looksLikeUrlFragment, protocolRelativeToPlain, splitNumericLogin, splitSlashInPassword, splitSpacePaddedColons,
+  looksLikeUrlFragment, protocolRelativeToPlain, recoverAndroidAppLine, splitNumericLogin, splitSlashInPassword, splitSpacePaddedColons,
 } from '@/lib/ulp-recover'
 
 export interface ULPCredential {
@@ -841,6 +841,20 @@ export function parseLine(
   }
 }
 
+export interface InlineResult {
+  credential: ULPCredential | null
+  reason: RejectionReason | null
+  /** True when the line was an Android app id that lost its "android://" prefix (rule B) and the prefix was put back. */
+  androidRecovered: boolean
+}
+
+/** One line read on its own: parseLine, after an Android app id without its scheme (rule B) got the scheme back. The side-copy tool uses it too. */
+export function parseInlineLine(line: string, filename: string, shouldHardDrop?: (email: string, url: string) => boolean): InlineResult {
+  const android = recoverAndroidAppLine(line.trim())
+  if (android) return { ...parseLine(android, filename, shouldHardDrop), androidRecovered: true }
+  return { ...parseLine(line, filename, shouldHardDrop), androidRecovered: false }
+}
+
 // ── Batch / stream parsers ────────────────────────────────────────────────────
 
 /**
@@ -1037,6 +1051,9 @@ export async function* parseULPStream(
   const STREAM_SEEN_CAP = 2_000_000
   const seen = new Set<string>()
   let streamSeenCapWarned = false
+  // Rule B: an Android account shows up under many app ids; the repeats of a (login, password) pair that lost its scheme are dropped per file.
+  const ANDROID_SEEN_CAP = 2_000_000
+  const androidSeen = new Set<string>()
 
   function flushBatch(): StreamBatch {
     const out: StreamBatch = { credentials: batch, rejected: batchRejected, breakdown: batchBreakdown }
@@ -1143,8 +1160,13 @@ export async function* parseULPStream(
       positionalUrl = ''
     }
 
-    const { credential, reason } = parseLine(line, filename, shouldHardDrop)
+    const { credential, reason, androidRecovered } = parseInlineLine(line, filename, shouldHardDrop)
     if (credential) {
+      if (androidRecovered) {
+        const pair = `${credential.email}\0${credential.password}`
+        if (androidSeen.has(pair)) { batchRejected++; batchBreakdown.dedup++; return }
+        if (androidSeen.size < ANDROID_SEEN_CAP) androidSeen.add(pair)
+      }
       const fp = `${credential.url}\0${credential.email}\0${credential.password}`
       if (streamSeenCheck(fp)) { batchRejected++; batchBreakdown.dedup++ }
       else                     { batch.push(credential) }

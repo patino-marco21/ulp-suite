@@ -3,7 +3,7 @@
  * Every fixture is synthetic. The "unchanged" tests pin lines whose result must not move.
  */
 import { describe, expect, test } from 'vitest'
-import { parseLine } from '@/lib/ulp-parser'
+import { parseInlineLine, parseLine, parseULPStream } from '@/lib/ulp-parser'
 
 const src = 'v6.txt'
 const cred = (line: string) => parseLine(line, src).credential
@@ -79,5 +79,53 @@ describe('login == password', () => {
   })
   test('a password under three characters is still rejected', () => {
     expect(why('https://shop.example.test/login:alice:ab')).toBe('no_password')
+  })
+})
+
+async function streamParse(content: string, dedupInFile = false) {
+  const credentials: Array<{ url: string; email: string; password: string }> = []
+  let rejected = 0
+  let dedup = 0
+  const body = new Response(content).body as ReadableStream<Uint8Array>
+  for await (const b of parseULPStream(body, src, 1000, undefined, { dedupInFile })) {
+    credentials.push(...b.credentials)
+    rejected += b.rejected
+    dedup += b.breakdown.dedup
+  }
+  return { credentials, rejected, dedup }
+}
+
+describe('rule B: Android app ids without their scheme (stream parser)', () => {
+  const id = (n: number) => `AbCdEfGhIjKlMnOpQrSt${n}==@com.example.app${n}`
+  const line = (n: number, login = 'alice@mail.test', pw = 'Secret1') => `${id(n)}/:${login}:${pw}\n`
+
+  test('the scheme is put back and the row looks like the ones that kept it', async () => {
+    const r = await streamParse(line(1))
+    expect(r.credentials).toEqual([expect.objectContaining({ url: `android://${id(1)}/`, email: 'alice@mail.test', password: 'Secret1' })])
+  })
+
+  test('the same login and password under many app ids is one row per file', async () => {
+    const r = await streamParse(line(1) + line(2) + line(3) + line(4, 'alice@mail.test', 'Other-pw1'))
+    expect(r.credentials.map(c => c.password)).toEqual(['Secret1', 'Other-pw1'])
+    expect(r.dedup).toBe(2)
+    expect(r.rejected).toBe(2)
+  })
+
+  test('the per-file rule applies even when in-file dedup is off (novelty-aware ingest)', async () => {
+    const r = await streamParse(line(1) + line(2), false)
+    expect(r.credentials).toHaveLength(1)
+  })
+
+  test('lines that kept their android:// prefix are not touched by it', async () => {
+    const kept = (n: number) => `android://${id(n)}/:alice@mail.test:Secret1\n`
+    const r = await streamParse(kept(1) + kept(2))
+    expect(r.credentials).toHaveLength(2)
+  })
+
+  test('parseInlineLine says when the scheme was put back', () => {
+    const r = parseInlineLine(`${id(1)}/:alice@mail.test:Secret1`, src)
+    expect(r.androidRecovered).toBe(true)
+    expect(r.credential?.url).toBe(`android://${id(1)}/`)
+    expect(parseInlineLine('https://shop.example.test/login:alice:Secret1', src).androidRecovered).toBe(false)
   })
 })
