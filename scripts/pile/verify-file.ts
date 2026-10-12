@@ -22,12 +22,12 @@
  *   source       ulp.sources.line_count                         == job.new
  */
 import { spawnSync } from 'node:child_process'
-import { createReadStream } from 'node:fs'
 import { basename } from 'node:path'
 import { Readable } from 'node:stream'
 import Database from 'better-sqlite3'
 import { parseULPStream } from '@/lib/ulp-parser'
 import { DEFAULT_HARD_KEEP_COUNTRIES, parseIngestPolicy, makeHardDropPredicate } from '@/lib/ingest-filter'
+import { openSource } from '@/lib/source-archive'
 
 const PILE = process.env.PILE_DIR ?? `${process.env.HOME}/Downloads/AyuGram Desktop`
 const CH = process.env.CH_CONTAINER ?? 'ulpsuite_clickhouse'
@@ -93,7 +93,7 @@ async function main(): Promise<void> {
     let S: number, D: number, present: number, own: number
     let staged = 0, skipped = 0
     try {
-      const stream = Readable.toWeb(createReadStream(path)) as unknown as ReadableStream<Uint8Array>
+      const stream = Readable.toWeb(openSource(path).stream()) as unknown as ReadableStream<Uint8Array>
       let batch: string[] = []
       const flush = () => { if (batch.length) { stageRows(batch.join('\n') + '\n'); batch = [] } }
       const breakdown: Record<string, number> = {}

@@ -1,7 +1,8 @@
 /**
  * Side copy of everything the importer does not store (lib/dropped-lines.ts), for a whole directory of original files. Read-only on the originals.
  *
- *   nice -n 19 npx tsx scripts/extract-dropped-lines.ts --src "$HOME/Downloads/AyuGram Desktop" --out /path/with/room [--workers 8] [--only a.txt,b.txt] [--limit N]
+ *   nice -n 19 npx tsx scripts/extract-dropped-lines.ts --src "$HOME/Downloads/AyuGram Desktop" --out /path/with/room [--workers 8] [--only a.txt,b.txt] [--limit N] [--from-archive]
+ *   (--from-archive takes the names from the source archive manifest, ULP_ARCHIVE_DIR, and reads the archive when the original is gone; --src may then be omitted)
  *
  * One `<index>-<sha1 of the name>.drop.zst` per original plus `manifest.jsonl` (name, size, counts per reason, output bytes, sha256 of the output).
  * The policy is the importer's: INGEST_FILTER_HARD_DROP_TIERS (default T3) and INGEST_FILTER_HARD_KEEP_COUNTRIES (default: the 15 wealthy T3 countries).
@@ -9,10 +10,11 @@
  */
 import { fork } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setPriority } from 'node:os'
 import { extractDroppedLines } from '@/lib/dropped-lines'
+import { defaultArchiveDir, latestByName, openSource, readManifest } from '@/lib/source-archive'
 import { DEFAULT_HARD_KEEP_COUNTRIES, makeHardDropPredicate, parseIngestPolicy } from '@/lib/ingest-filter'
 
 const args = process.argv.slice(2)
@@ -34,12 +36,14 @@ async function main(): Promise<void> {
       process.send?.({ name: job.name, stats })
     })
   } else {
-    const src = flag('src')
+    const fromArchive = args.includes('--from-archive')
+    const src = flag('src') ?? (fromArchive ? '.' : undefined)
     const out = flag('out')
-    if (!src || !out) { console.error('usage: extract-dropped-lines.ts --src <dir> --out <dir> [--workers 8] [--only a,b] [--limit N]'); process.exit(2) }
+    if (!src || !out) { console.error('usage: extract-dropped-lines.ts --src <dir> --out <dir> [--workers 8] [--only a,b] [--limit N] [--from-archive]'); process.exit(2) }
     mkdirSync(out, { recursive: true })
     const only = flag('only')?.split(',')
-    let names = readdirSync(src).filter(n => n.toLowerCase().endsWith('.txt') && (!only || only.includes(n))).sort()
+    const listed = fromArchive ? [...latestByName(readManifest(defaultArchiveDir())).keys()] : readdirSync(src)
+    let names = listed.filter(n => n.toLowerCase().endsWith('.txt') && (!only || only.includes(n))).sort()
     const limit = Number(flag('limit', '0'))
     if (limit > 0) names = names.slice(0, limit)
     const manifest = join(out, 'manifest.jsonl')
@@ -60,7 +64,7 @@ async function main(): Promise<void> {
         const outFile = join(out, `${String(index).padStart(3, '0')}-${createHash('sha1').update(name).digest('hex').slice(0, 8)}.drop.zst`)
         w.send({ src: join(src, name), out: outFile, name })
         w.once('message', (m: { name: string; stats: { lines: number; stored: number; dropped: number; outBytes: number } & Record<string, unknown> }) => {
-          appendFileSync(manifest, JSON.stringify({ name, size: statSync(join(src, name)).size, out: outFile, ...m.stats }) + '\n')
+          appendFileSync(manifest, JSON.stringify({ name, size: openSource(join(src, name)).size, out: outFile, ...m.stats }) + '\n')
           totals.lines += m.stats.lines; totals.stored += m.stats.stored; totals.dropped += m.stats.dropped; totals.outBytes += m.stats.outBytes
           console.error(`[${++finished}/${todo.length}] ${((Date.now() - start) / 60000).toFixed(1)} min  lines ${totals.lines}  dropped ${totals.dropped}  out ${(totals.outBytes / 1073741824).toFixed(2)} GiB`)
           feed()

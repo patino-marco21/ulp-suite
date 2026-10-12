@@ -7,12 +7,13 @@
  * more than the importer rejected; it never holds fewer. Blank and white-space-only lines are not counted and not kept.
  */
 import { createHash } from 'node:crypto'
-import { createReadStream, createWriteStream } from 'node:fs'
+import { createWriteStream } from 'node:fs'
 import { once } from 'node:events'
 import { pipeline } from 'node:stream/promises'
 import { constants as zlibConstants, createZstdCompress } from 'node:zlib'
 import { parseInlineLine } from '@/lib/ulp-parser'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
+import { openSource } from '@/lib/source-archive'
 
 const NEWLINE = Buffer.from('\n')
 
@@ -58,7 +59,7 @@ export async function extractDroppedLines(
   }
 
   let carry: Buffer = Buffer.alloc(0)
-  for await (const chunk of createReadStream(srcPath, { highWaterMark: 4 << 20 })) {
+  for await (const chunk of openSource(srcPath).stream()) {
     const buf: Buffer = carry.length ? Buffer.concat([carry, chunk as Buffer]) : (chunk as Buffer)
     let start = 0
     for (let nl = buf.indexOf(10, start); nl !== -1; nl = buf.indexOf(10, start)) {

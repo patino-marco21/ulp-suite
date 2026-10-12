@@ -6,6 +6,7 @@
  *   npx tsx scripts/parser-diff.ts --baseline-ref 624b845 --dir "$HOME/Downloads/AyuGram Desktop" --every 17
  *   npx tsx scripts/parser-diff.ts --baseline-ref 624b845 --files "/abs/a.txt" "/abs/b.txt" --stream
  *   npx tsx scripts/parser-diff.ts --baseline-ref HEAD --same-policy ...      (parser rules only: both sides use the T3 keep-list)
+ *   npx tsx scripts/parser-diff.ts --baseline-ref 624b845 --from-archive --every 17   (the names come from the source archive manifest, ULP_ARCHIVE_DIR; no originals needed)
  *
  * --whole reads EVERY line of every file (exact counts, no extrapolation); --lines-with '|;' then examines only the lines that hold one of those characters, which
  * is exact for a rule that needs one of them (the pile-wide proof of the pipe and semicolon rules of parser v6.1 ran this way: --baseline-ref HEAD --same-policy --whole
@@ -13,7 +14,7 @@
  * --stream-max-mb, default 150) through parseULPStream and reports the rows only the baseline produces (expected: only double-encoded text).
  */
 import { execFileSync } from 'node:child_process'
-import { closeSync, createReadStream, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -23,6 +24,7 @@ import { DEFAULT_HARD_KEEP_COUNTRIES, makeHardDropPredicate, parseIngestPolicy }
 import { parseInlineLine, parseULPStream } from '@/lib/ulp-parser'
 import { pipeJoinAll } from '@/lib/ulp-recover'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
+import { defaultArchiveDir, latestByName, openSource, readManifest, type Source } from '@/lib/source-archive'
 
 const args = process.argv.slice(2)
 const flag = (name: string): string | undefined => { const i = args.indexOf(`--${name}`); return i === -1 ? undefined : args[i + 1] }
@@ -52,6 +54,9 @@ async function main(): Promise<void> {
     const dir = flag('dir') as string
     const every = Number(flag('every') ?? '1')
     files = readdirSync(dir).filter(n => n.toLowerCase().endsWith('.txt')).sort().filter((_, i) => i % every === 0).map(n => join(dir, n))
+  } else if (args.includes('--from-archive')) {
+    const every = Number(flag('every') ?? '1')
+    files = [...latestByName(readManifest(defaultArchiveDir())).keys()].filter(n => n.toLowerCase().endsWith('.txt')).sort().filter((_, i) => i % every === 0)
   } else {
     files = args.slice(args.indexOf('--files') + 1).filter(a => !a.startsWith('--'))
   }
@@ -68,31 +73,28 @@ async function main(): Promise<void> {
 
   const everyLine = args.includes('--whole')
   const linesWith = flag('lines-with')
-  async function* sampleLines(path: string, size: number): AsyncGenerator<{ line: string; weight: number }> {
+  async function* sampleLines(source: Source): AsyncGenerator<{ line: string; weight: number }> {
+    const size = source.size
     if (everyLine) {
-      const rl = createInterface({ input: createReadStream(path, { encoding: 'latin1' }), crlfDelay: Infinity })
+      const rl = createInterface({ input: source.stream().setEncoding('latin1'), crlfDelay: Infinity })
       for await (const line of rl) yield { line, weight: 1 }
       return
     }
     const whole = size <= 8 * 1048576
     const offsets = whole ? [0] : Array.from({ length: K }, (_, i) => Math.floor(i * (size - SLICE) / Math.max(1, K - 1)))
     const weight = whole ? 1 : size / (K * SLICE)
-    if (whole) { for (const line of readFileSync(path).toString('latin1').split('\n')) yield { line, weight }; return }
-    const fd = openSync(path, 'r')
-    try {
-      for (const off of offsets) {
-        const len = Math.min(SLICE, size - off)
-        const buf = Buffer.allocUnsafe(len); readSync(fd, buf, 0, len, off)
-        let text = buf.toString('latin1')
-        if (off > 0) { const nl = text.indexOf('\n'); text = nl === -1 ? '' : text.slice(nl + 1) }
-        if (off + len < size) { const nl = text.lastIndexOf('\n'); text = nl === -1 ? '' : text.slice(0, nl) }
-        for (const line of text.split('\n')) yield { line, weight }
-      }
-    } finally { closeSync(fd) }
+    if (whole) { for (const line of (await source.readAll()).toString('latin1').split('\n')) yield { line, weight }; return }
+    for (const off of offsets) {
+      const len = Math.min(SLICE, size - off)
+      let text = (await source.readSlice(off, len)).toString('latin1')
+      if (off > 0) { const nl = text.indexOf('\n'); text = nl === -1 ? '' : text.slice(nl + 1) }
+      if (off + len < size) { const nl = text.lastIndexOf('\n'); text = nl === -1 ? '' : text.slice(0, nl) }
+      for (const line of text.split('\n')) yield { line, weight }
+    }
   }
 
   for (const path of files) {
-    for await (const { line, weight } of sampleLines(path, statSync(path).size)) {
+    for await (const { line, weight } of sampleLines(openSource(path))) {
       if (!line.trim()) continue
       if (linesWith && ![...linesWith].some(c => line.includes(c))) continue
       totalLines += weight
@@ -124,13 +126,13 @@ async function main(): Promise<void> {
   let streamUnexplained = 0
   if (args.includes('--stream')) {
     const maxMb = Number(flag('stream-max-mb') ?? '150')
-    for (const path of files.filter(f => statSync(f).size <= maxMb * 1048576)) {
+    for (const path of files.filter(f => openSource(f).size <= maxMb * 1048576)) {
       const rows = async (gen: AsyncGenerator<{ credentials: Array<{ url: string; email: string; password: string }> }>) => {
         const m = new Map<string, number>()
         for await (const b of gen) for (const c of b.credentials) { const k = `${c.url}\u0000${c.email}\u0000${c.password}`; m.set(k, (m.get(k) ?? 0) + 1) }
         return m
       }
-      const bytes = readFileSync(path)
+      const bytes = await openSource(path).readAll()
       const body = () => Readable.toWeb(Readable.from(bytes)) as unknown as ReadableStream<Uint8Array>
       const oldRows = await rows(baseline.parseULPStream(body(), 'f.txt', 100000, baselineHard, { dedupInFile: false }))
       const newRows = await rows(parseULPStream(body(), 'f.txt', 100000, newHard, { dedupInFile: false }))

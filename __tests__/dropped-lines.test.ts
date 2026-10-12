@@ -7,6 +7,7 @@ import { zstdDecompressSync } from 'node:zlib'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { extractDroppedLines } from '@/lib/dropped-lines'
 import { makeHardDropPredicate, parseIngestPolicy } from '@/lib/ingest-filter'
+import { appendManifest, archiveFile } from '@/lib/source-archive'
 
 let dir: string
 beforeAll(() => { dir = mkdtempSync(join(tmpdir(), 'dropped-lines-')) })
@@ -55,5 +56,28 @@ describe('extractDroppedLines', () => {
     const stats = await extractDroppedLines(src, out, hardDrop)
     expect(stats).toMatchObject({ lines: 1, stored: 1, dropped: 0 })
     expect(zstdDecompressSync(readFileSync(out)).length).toBe(0)
+  })
+})
+
+describe('extractDroppedLines reads the archive when the original is gone', () => {
+  test('a source that exists only in the archive gives the same result', async () => {
+    const arcDir = mkdtempSync(join(dir, 'arc-'))
+    const body = 'https://shop.example.com.br/login:carlos:Secret4\njust a banner line\n'
+    const p = join(dir, 'gone.txt')
+    writeFileSync(p, body)
+    appendManifest(arcDir, archiveFile(p, { archiveDir: arcDir }))
+    rmSync(p)
+
+    const before = process.env.ULP_ARCHIVE_DIR
+    process.env.ULP_ARCHIVE_DIR = arcDir
+    try {
+      const stats = await extractDroppedLines(p, join(dir, 'gone.drop.zst'), hardDrop)
+      expect(stats.lines).toBe(2)
+      expect(stats.dropped).toBe(2)          // the T3 line outside the keep-list and the banner
+      expect(stats.stored).toBe(0)
+    } finally {
+      if (before === undefined) delete process.env.ULP_ARCHIVE_DIR
+      else process.env.ULP_ARCHIVE_DIR = before
+    }
   })
 })
