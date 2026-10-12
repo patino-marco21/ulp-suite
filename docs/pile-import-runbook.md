@@ -41,9 +41,12 @@ repository writes its scratch files under `PILE_WORK_DIR`: point that at a scrat
    must print nothing; then `docker tag ulp-suite-app:v6-candidate ulp-suite-app:latest`. Otherwise build from the merged commit, not from a worktree:
    `git archive <sha> | tar -x -C /tmp/build-<sha>`, then `DOCKER_CONFIG=/tmp/claude-1000/dockercfg docker build -t ulp-suite-app:latest /tmp/build-<sha>`, and run the alert
    rehearsal and the novelty `v6` scenario on that image before using it.
-3. Nothing in `inbox/processing`. Recreate only the app, anchored to the primary checkout's environment (from a worktree `docker compose` would blank the
-   secrets and serve an empty database):
-   `cd /home/cole/ulp-suite && DOCKER_CONFIG=/tmp/claude-1000/dockercfg docker compose --project-directory /home/cole/ulp-suite --env-file /home/cole/ulp-suite/.env up -d --no-deps app`.
+3. Nothing in `inbox/processing`. Recreate only the app **with the compose file of the merged commit**, anchored to the primary checkout's environment (from a
+   worktree plain `docker compose` would blank the secrets and serve an empty database). The primary checkout may still be on an older branch whose
+   `docker-compose.yml` does not forward `INGEST_FILTER_HARD_KEEP_COUNTRIES`: the new image would then run with an EMPTY keep-list and drop every T3 line again, so do
+   not run compose from there. The running stack is project `ulp-suite` (working dir `/home/cole/ulp-suite`):
+   `cd <checkout at the merged commit> && DOCKER_CONFIG=/tmp/claude-1000/dockercfg docker compose -p ulp-suite -f docker-compose.yml --project-directory /home/cole/ulp-suite --env-file /home/cole/ulp-suite/.env up -d --no-deps app`
+   (`git diff <the primary checkout's HEAD> <main sha> -- docker-compose.yml` shows what changes: the keep-list variable on the app and two backup booleans). Never `build` from here.
 4. Verify: `docker inspect ulpsuite_app --format '{{.State.Health.Status}} {{.RestartCount}}'` is `healthy 0`;
    `docker exec ulpsuite_app printenv | grep -E 'INGEST_FILTER|CONTENT_DEDUP_APPLY'` shows `HARD_DROP_TIERS=T3`, the 15-country `HARD_KEEP_COUNTRIES` and
    `CONTENT_DEDUP_APPLY=false`; the log has no error; the login page answers.
