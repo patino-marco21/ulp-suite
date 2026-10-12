@@ -47,6 +47,9 @@ import {
 
 type UserRole = 'admin' | 'analyst'
 
+/** The Select hands its value over as a string (newer @radix-ui/react-select typings); anything but 'admin' is the least-privileged role. */
+const asRole = (value: string): UserRole => (value === 'admin' ? 'admin' : 'analyst')
+
 interface User {
   id: number
   email: string
@@ -607,7 +610,7 @@ export default function UsersPage() {
                 <Label htmlFor="role" className="text-foreground">Role</Label>
                 <Select
                   value={formData.role}
-                  onValueChange={(value: UserRole) => setFormData({ ...formData, role: value })}
+                  onValueChange={(value: string) => setFormData({ ...formData, role: asRole(value) })}
                 >
                   <SelectTrigger className="glass-card border-border/50">
                     <SelectValue placeholder="Select role" />
@@ -703,7 +706,7 @@ export default function UsersPage() {
                 <Label htmlFor="edit-role" className="text-foreground">Role</Label>
                 <Select
                   value={formData.role}
-                  onValueChange={(value: UserRole) => setFormData({ ...formData, role: value })}
+                  onValueChange={(value: string) => setFormData({ ...formData, role: asRole(value) })}
                 >
                   <SelectTrigger className="glass-card border-border/50">
                     <SelectValue placeholder="Select role" />
