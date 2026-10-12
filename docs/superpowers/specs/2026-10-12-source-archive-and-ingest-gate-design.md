@@ -1,7 +1,8 @@
 # Source archive and ingest gate: design (2026-10-12)
 
-Status: design, written for the owner's review. Nothing in this document is built. The repository is public: this file holds numbers only, never file
-names, search terms or credential values.
+Status: Part 1 (the source archive: library, guards, CLI, readers, runbook) is BUILT and merged (plan `docs/superpowers/plans/2026-10-12-source-archive.md`); the importer's
+archive reference (`.archiveref`), the ingest gate (Part 2) and the DDL v28 are designed here and not built yet. The repository is public: this file holds numbers only,
+never file names, search terms or credential values.
 
 ## Why
 
