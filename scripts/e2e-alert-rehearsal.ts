@@ -164,7 +164,9 @@ async function main(): Promise<number> {
     const expr = chQuery("SELECT default_expression FROM system.columns WHERE database='ulp' AND table='credentials' AND name='country_tier'")
     check('country_tier reads email_domain (DDL v26 / the init SQL)', expr.includes('email_domain') && !expr.includes("splitByChar('@', lower(email))"))
     const ddl = appNode(`const D=require('better-sqlite3');const db=new D('/app/data/ulp.db',{readonly:true});console.log(db.prepare("SELECT value FROM app_settings WHERE key_name='ch_ddl_version'").get().value)`)
-    check('the DDL version recorded in SQLite is 27', ddl === '27', `got ${ddl}`)
+    check('the DDL version recorded in SQLite is 28 (v28: ulp.sources identity columns)', ddl === '28', `got ${ddl}`)
+    const sourcesCols = chQuery("SELECT arrayStringConcat(arraySort(groupArray(name)), ',') FROM system.columns WHERE database='ulp' AND table='sources' AND name IN ('size','sha256','archive_id')")
+    check('ulp.sources has the identity columns (DDL v28 / the init SQL)', sourcesCols === 'archive_id,sha256,size', `got ${sourcesCols}`)
     const projCurrent = chQuery("SELECT count() FROM system.projections WHERE database = 'ulp' AND table = 'credentials' AND name = 'proj_imported_desc' AND position(query, 'is_noise') > 0 AND position(query, 'content_key_hash') > 0")
     check('proj_imported_desc carries is_noise and content_key_hash (DDL v27 / the init SQL)', projCurrent === '1', `count ${projCurrent}`)
 

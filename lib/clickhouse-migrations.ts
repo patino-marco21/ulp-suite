@@ -1074,11 +1074,11 @@ export async function runClickHouseMigrations(): Promise<void> {
 
   // A failed v28 keeps the recorded version below it, so the next start runs the ALTER again: an import from the archive needs the columns.
   const ddlReached = ddlVersionToRecord(sourcesIdentityFailed)
-  if (lastDdl < ddlReached) {
+  if (lastDdl < DDL_VERSION) {
     setSetting('ch_ddl_version', String(ddlReached))
     console.warn(`[ClickHouse migration] DDL now at v${ddlReached}`)
   } else {
-    console.warn(`[ClickHouse migration] DDL v${ddlReached} already applied — skipping`)
+    console.warn(`[ClickHouse migration] DDL v${DDL_VERSION} already applied — skipping`)
   }
 
   // ── Data-repair mutations (fire-and-forget, run exactly once) ────────────
