@@ -26,7 +26,10 @@ export function looksLikeUrlFragment(password: string): boolean {
     || (password.match(/\//g) ?? []).length >= 3
 }
 
-const PADDED_COLON = /\s+:\s+/
+// The lookbehind lets a match start only at the beginning of a run of white space. Without it every position inside a run is a start, and a run of n characters
+// that is not followed by a colon costs n*n steps (one line of about 400,000 spaces held the importer's thread for minutes). A match that starts inside a run
+// implies one at the start of the run (same colon, same trailing white space), so the leftmost match, its index and its length are exactly what they were.
+const PADDED_COLON = /(?<!\s)\s+:\s+/
 const EMAIL_SHAPE = /^[^\s/:@]+@[^\s/:@]+\.[^\s/:@]+$/
 
 /**
