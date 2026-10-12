@@ -34,6 +34,9 @@ clickhouse:
   data_path: /var/lib/clickhouse
   # FREEZE + upload of a large table can take a while once you scale up.
   timeout: 4h
+  # A restore under another database name (the `verify` drill) writes a new replica path. The tool's default for it uses a {cluster} macro, which this
+  # server does not define ("No macro 'cluster' in config"); the macros here are {shard} and {replica}.
+  default_replica_path: "/clickhouse/tables/{shard}/{database}/{table}"
 
 s3:
   # access_key / secret_key / bucket / endpoint / region / path are injected from

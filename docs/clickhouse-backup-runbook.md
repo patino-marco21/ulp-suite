@@ -161,6 +161,30 @@ To restore: stop the app, copy a snapshot over `data/ulp.db` (delete `ulp.db-wal
 
 ---
 
+## S3-compatible targets (MinIO) and the first backup
+
+**Rehearsed on 2026-10-12** against a throwaway MinIO container with a small synthetic table (no credentials, torn down afterwards): `full`, `inc`
+(only the new part uploads), `list`, `status` and a partition-limited backup all worked, and the restore drill matched the live table row for row
+(equal row counts and equal sums of the content hash). The drill needed two fixes, both made: `clickhouse.default_replica_path` in
+`docker/clickhouse-backup/config.yml` (the tool's default uses a `{cluster}` macro this server does not define) and `--tables 'ulp.*'` in the wrapper's
+`verify` (a comma list together with `--restore-database-mapping` builds a pattern that matches no table).
+
+For MinIO and other self-hosted targets set `S3_FORCE_PATH_STYLE=true` (and `S3_DISABLE_SSL=true` for plain http) in `.env`; the compose service forwards both.
+
+The space guard refuses a real backup while free space minus the largest partition is below the floor (140.5 GiB on this disk), which is not the case for
+a long time on this laptop. The first real backup is the **closed months only**:
+
+```bash
+./scripts/clickhouse-backup.sh space                      # read the numbers
+BACKUP_TABLES=ulp.credentials BACKUP_PARTITIONS=202607,202608 BACKUP_FORCE=1 ./scripts/clickhouse-backup.sh full
+./scripts/clickhouse-backup.sh status && ./scripts/clickhouse-backup.sh verify
+```
+
+`BACKUP_FORCE=1` is justified here because the two closed months receive no writes, so a merge cannot pin their parts under the snapshot. The partition that
+the current import fills can be rebuilt from the originals (or from the side copy), so it does not need a backup of its own.
+
+---
+
 ## Real restore (actual disaster)
 
 ```bash

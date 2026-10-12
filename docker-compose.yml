@@ -224,6 +224,9 @@ services:
       S3_ENDPOINT: ${S3_ENDPOINT:-}
       S3_REGION: ${S3_REGION:-us-east-1}
       S3_PATH: ${S3_PATH:-clickhouse-backups/ulpsuite}
+      # Only needed for MinIO and other self-hosted S3 targets (path-style addressing, plain http). Valid booleans so an unset value is harmless.
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+      S3_DISABLE_SSL: ${S3_DISABLE_SSL:-false}
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./docker/clickhouse-backup/config.yml:/etc/clickhouse-backup/config.yml:ro

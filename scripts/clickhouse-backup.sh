@@ -21,6 +21,7 @@
 # Environment:
 #   BACKUP_TABLES        comma-separated db.table list to back up (default: the live ulp tables, see below)
 #   BACKUP_FORCE=1       skip the disk-space guard (you have read `space` and accept the risk)
+#   BACKUP_PARTITIONS    comma-separated partition ids to back up (for example 202607,202608: the closed months); needs BACKUP_TABLES to name ONE table
 #   BACKUP_MAX_AGE_HOURS `status` exits 1 when the newest backup is older than this (default 72)
 #   DISK_GUARD_MIN_FREE_BYTES / DISK_GUARD_MIN_FREE_RATIO   the same floor the app's disk guard uses
 #                        (default: the stricter of 50 GiB and 15% of the disk)
@@ -130,7 +131,7 @@ case "$cmd" in
     space_guard
     name="ulp-full-$(date -u +%Y%m%d-%H%M%S)"
     log "Creating FULL backup + uploading to S3 as: $name  (local copy is deleted after the upload)"
-    "${RUN[@]}" create_remote --delete-source --resumable --tables "$TABLES" "$name"
+    "${RUN[@]}" create_remote --delete-source --resumable --tables "$TABLES" ${BACKUP_PARTITIONS:+--partitions "$BACKUP_PARTITIONS"} "$name"
     record full "$name" true
     ok "Full backup complete: $name"
     log "Remote retention is pruned automatically (30 remote)."
@@ -143,11 +144,11 @@ case "$cmd" in
     name="ulp-inc-$(date -u +%Y%m%d-%H%M%S)"
     if [ -z "$base" ]; then
       warn "No remote backup found to diff from — falling back to a full backup."
-      "${RUN[@]}" create_remote --delete-source --resumable --tables "$TABLES" "$name"
+      "${RUN[@]}" create_remote --delete-source --resumable --tables "$TABLES" ${BACKUP_PARTITIONS:+--partitions "$BACKUP_PARTITIONS"} "$name"
       record full "$name" true
     else
       log "Creating INCREMENTAL backup $name (diff from $base) + uploading to S3"
-      "${RUN[@]}" create_remote --delete-source --resumable --diff-from-remote="$base" --tables "$TABLES" "$name"
+      "${RUN[@]}" create_remote --delete-source --resumable --diff-from-remote="$base" --tables "$TABLES" ${BACKUP_PARTITIONS:+--partitions "$BACKUP_PARTITIONS"} "$name"
       record inc "$name" true
     fi
     ok "Backup complete: $name"
@@ -192,7 +193,10 @@ case "$cmd" in
     base="$("${RUN[@]}" list remote 2>/dev/null | awk '{print $1}' | tail -n 1 || true)"
     [ -z "$base" ] && { fail "No remote backup to verify."; exit 1; }
     log "DR drill: restoring $base into ulp_verify (live ulp db is NOT touched)…"
-    "${RUN[@]}" restore_remote --rm --restore-database-mapping ulp:ulp_verify --tables "$TABLES" "$base"
+    # A half-downloaded local copy of an earlier run would be resumed and can fail: start clean. One 'ulp.*' pattern: with a comma list together with
+    # --restore-database-mapping clickhouse-backup 2.7.2 builds a pattern that matches no table (the backup holds only the selected tables anyway).
+    "${RUN[@]}" delete local "$base" >/dev/null 2>&1 || true
+    "${RUN[@]}" restore_remote --rm --restore-database-mapping ulp:ulp_verify --tables 'ulp.*' "$base"
     log "Counting restored rows…"
     "${CH[@]}" -q "SELECT 'ulp_verify.credentials' AS t, count() AS rows FROM ulp_verify.credentials"
     warn "Drill table left as ulp_verify for your inspection."
