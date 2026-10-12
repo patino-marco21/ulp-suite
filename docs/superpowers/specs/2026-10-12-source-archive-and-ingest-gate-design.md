@@ -276,3 +276,11 @@ the exact bytes (checked by sha256), so even `--replace` can be undone as long a
    the positional state machine of `parseULPStream`, and the refactor must give zero difference on the whole pile (`scripts/parser-diff.ts --whole`).
 3. Policy as data: a reason-coded quarantine, which the archive makes cheap (a policy change re-reads the archive instead of redoing anything).
 4. The old partitions: ~20M junk rows whose raw lines are gone; possibly rebuilt from the pile where it covers them (the coverage is not measured).
+
+## Results (archive rehearsal, 2026-10-12)
+
+Three pile files picked by size rank (1,073.7 MB, 126.8 MB and a few KB) were archived with 3 workers while a pile run was loading the machine: 1.12 GiB of plaintext became
+0.37 GiB of archive (3.06 x overall; 3.03 x, 3.38 x and 3.05 x per file). The `archive` run took 93.7 s (the 1 GB file on one worker dominates) with a peak of 339 MB of memory in
+the main process; `verify --all` took 8.95 s; the three restored files were identical to the originals (`cmp`), and the `zstd` binary decoded the largest archive to the original
+in 2.3 s. At 3.06 x the whole pile (140.3 GiB) is about 46 GiB; at the roughly 11 MB/s per worker seen here (busy machine) eight workers need about 27 minutes, at the 18 MB/s
+measured on an idle machine about 17.

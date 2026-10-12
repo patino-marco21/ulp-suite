@@ -75,10 +75,32 @@ repository writes its scratch files under `PILE_WORK_DIR`: point that at a scrat
    working tree's parser, so run it from a checkout of the commit that is deployed; against rows imported by an older parser it reports FAILs by design.
 3. Build the search dictionary by hand: `npx tsx scripts/build-search-dictionary.ts --skip-headroom-check` (about 4 minutes, +2.5 GiB; run 4's took 237 s), then `--status` says fresh.
 4. Cron lines after 05:00Z: `docker logs ulpsuite_app | grep -E "content-dedup\] cron|projection-scope\] cron"`; the dedup report must say `applied` false.
-5. Side copy: `nice -n 19 npx tsx scripts/extract-dropped-lines.ts --src "$HOME/Downloads/AyuGram Desktop" --out <dir with 10 GiB free> --workers 8`; compare the manifest
-   totals with the importer's `skipped`.
-6. Only then may the OWNER delete or move the originals (nobody else does), and the rollback images may be pruned one tag at a time (`docker rmi <tag>`; never an
-   unscoped prune: the daemon is shared with another project).
+5. Archive the pile (the archive holds everything the old side copy of the dropped lines held, and the stored lines too): `mkdir -p ~/ulp-archive` once, then
+   `nice -n 19 npx tsx scripts/archive-sources.ts archive --src "$HOME/Downloads/AyuGram Desktop" --workers 8` (about 17 minutes plus 2 of verification on an idle
+   machine; it needs 10 GiB plus twice the largest file free, and it never runs while a pile run is writing to the same disk). `status` shows the names, the
+   compression ratio and the `ulp.sources` rows that have no archive; `verify --all` decodes everything again. Nothing is removed by this step.
+6. Only then may the OWNER run the same command with `--replace`: each original, and the `inbox/done` names that are hardlinks of it, is removed only after its archive
+   was decoded again and matched, and never while a file is in flight in the inbox (see "The source archive" below). The rollback images may be pruned one tag at a
+   time (`docker rmi <tag>`; never an unscoped prune: the daemon is shared with another project).
+
+## The source archive
+
+`scripts/archive-sources.ts` keeps every source file as a verified zstd archive in `~/ulp-archive` (`ULP_ARCHIVE_DIR`; the directory must exist, the tool never creates it).
+It is outside the repository and the Docker build context, and `manifest.jsonl` holds file names, so it is never committed. The archive lives on the same disk as
+everything else: it protects against a parser or policy change, not against losing the disk (copy the directory to an external drive for that).
+
+| Command | What it does |
+|---|---|
+| `archive --src <dir> [--workers 8] [--only a,b] [--dry-run]` | archive every `.txt`, verify each archive by decoding it again, record it in `manifest.jsonl`, then fill the identity columns of `ulp.sources` (`--no-sources` skips that) |
+| `archive ... --replace [--include-unimported]` | also remove the original and its hardlinks under `inbox/done`, after confirming the archive against the original again |
+| `status` | names, replaced, compression ratio, `ulp.sources` rows without an archive |
+| `verify [--all \| --sample 3]` | decode archives again and compare with the manifest |
+| `restore <name\|id> --to <path>` | write the original bytes back (never overwrites; checks the sha256) |
+| `sources-sync` | (re)apply the `ulp.sources` identity columns for the archived names |
+
+`--replace` keeps an original (and says why) while a file is in flight in the inbox, when the file was modified in the last 10 minutes, or when the name is not in
+`ulp.sources` yet. `scripts/parser-diff.ts`, `scripts/pile/verify-file.ts` and `scripts/extract-dropped-lines.ts` read an archived name exactly like a file, so they keep
+working after `--replace`. For a new batch: archive it first (without `--replace`), import, verify, and replace when you decide.
 
 ## Rollback
 

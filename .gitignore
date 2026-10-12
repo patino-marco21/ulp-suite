@@ -28,6 +28,7 @@ uploads/
 data/
 /inbox/
 archive/
+ulp-archive/
 clickhouse-data/
 mysql-data/
 minio-data/
