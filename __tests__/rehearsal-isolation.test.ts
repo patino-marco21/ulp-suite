@@ -52,7 +52,7 @@ describe('docker-compose.rehearsal.yml shares nothing with the production stack'
 
   test('it does not build anything: it uses the image `docker compose build app` produced', () => {
     expect(body).not.toMatch(/^\s+build:/m)
-    expect(body).toContain('image: ulp-suite-app:latest')
+    expect(body).toContain('image: ${REHEARSAL_APP_IMAGE:-ulp-suite-app:latest}')
   })
 
   test('the secrets are required from the driver, never written in the file', () => {

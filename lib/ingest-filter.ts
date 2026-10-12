@@ -14,6 +14,8 @@
  * Knobs (env), evaluated noise-first, then hard tiers, keep overrides, and soft drops:
  *   INGEST_FILTER_HARD_DROP_TIERS - non-overridable tiers rejected before keep
  *                                   suffixes, e.g. "T3".
+ *   INGEST_FILTER_HARD_KEEP_COUNTRIES - T3 countries (two-letter codes of the FIRST T3 signal: e-mail provider or
+ *                                   suffix, else url TLD) that a hard drop does not apply to, e.g. "PL,CZ,SA".
  *   INGEST_FILTER_DROP_NOISE     — "true"/"1" to drop junk URLs at ingest, reusing
  *                                  the Declutter isNoiseUrl logic (IP / :port / .php /
  *                                  localhost / single-label host / non-web scheme).
@@ -29,8 +31,11 @@
  * Recommended policy (see .env.example):
  *   HARD_DROP_TIERS=T3 and DROP_NOISE=true (T1, T2, and untiered remain)
  */
-import { classifyTier, emailDomainOf, urlTldOf } from '@/lib/country-tiers'
+import { classifyTier, emailDomainOf, t3CountryOf, urlTldOf } from '@/lib/country-tiers'
 import { isNoiseUrl } from '@/lib/ulp-noise'
+
+/** The 15 T3 countries with a GDP per capita (PPP, World Bank 2024) of at least $40k: the compose default of INGEST_FILTER_HARD_KEEP_COUNTRIES. */
+export const DEFAULT_HARD_KEEP_COUNTRIES = 'SA,CZ,SI,LT,PL,EE,HR,RO,SK,RU,TR,LV,BG,PA,KZ'
 
 export interface SuffixSet {
   /** Email-domain suffixes (normalized with a leading '.'). */
@@ -50,6 +55,8 @@ export interface IngestDropPolicy {
   keep: SuffixSet
   /** Drop junk URLs (isNoiseUrl) at ingest — independent of country. */
   dropNoise: boolean
+  /** T3 countries (upper-case two-letter codes) that a hard drop does not apply to. Empty = no exception. */
+  hardKeepCountries: Set<string>
 }
 
 const VALID = new Set(['T1', 'T2', 'T3'])
@@ -59,6 +66,10 @@ function parseTierSet(raw: string | undefined): Set<string> {
     (raw ?? '')
       .split(',').map(t => t.trim().toUpperCase()).filter(t => VALID.has(t)),
   )
+}
+
+function parseCountrySet(raw: string | undefined): Set<string> {
+  return new Set((raw ?? '').split(',').map(c => c.trim().toUpperCase()).filter(c => /^[A-Z]{2}$/.test(c)))
 }
 
 function parseSuffixSet(raw: string | undefined): SuffixSet {
@@ -78,12 +89,21 @@ export function parseIngestPolicy(env: NodeJS.ProcessEnv = process.env): IngestD
     drop: parseSuffixSet(env.INGEST_FILTER_DROP_SUFFIXES),
     keep: parseSuffixSet(env.INGEST_FILTER_KEEP_SUFFIXES),
     dropNoise,
+    hardKeepCountries: parseCountrySet(env.INGEST_FILTER_HARD_KEEP_COUNTRIES),
   }
 }
 
 /** True when the policy would drop at least something (lets callers skip the work). */
 export function policyActive(p: IngestDropPolicy): boolean {
   return p.hardTiers.size > 0 || p.tiers.size > 0 || p.drop.suffixes.length > 0 || p.dropNoise
+}
+
+/** Is this credential hard-dropped: its tier is a hard-drop tier and, for T3, its country is not on the keep-list. */
+function hardDrops(p: IngestDropPolicy, email: string, url: string): boolean {
+  const tier = classifyTier(email, url)
+  if (tier === '' || !p.hardTiers.has(tier)) return false
+  if (tier === 'T3' && p.hardKeepCountries.size > 0 && p.hardKeepCountries.has(t3CountryOf(email, url))) return false
+  return true
 }
 
 /**
@@ -96,10 +116,7 @@ export function makeHardDropPredicate(
   p: IngestDropPolicy,
 ): ((email: string, url: string) => boolean) | undefined {
   if (p.hardTiers.size === 0) return undefined
-  return (email, url) => {
-    const tier = classifyTier(email, url)
-    return tier !== '' && p.hardTiers.has(tier)
-  }
+  return (email, url) => hardDrops(p, email, url)
 }
 
 /** Does this credential's email-suffix or URL-TLD fall in the given set? */
@@ -117,9 +134,8 @@ export function shouldDropAtIngest(email: string, url: string, domain: string, p
   // keep-override so a kept country can't rescue a chrome://, IP-host, .php, etc. row.
   if (p.dropNoise && isNoiseUrl(url, domain)) return true
 
-  const tier = classifyTier(email, url)
-  // Hard drops are policy invariants: keep suffixes cannot rescue these tiers.
-  if (tier !== '' && p.hardTiers.has(tier)) return true
+  // Hard drops are policy invariants: keep suffixes cannot rescue these tiers (a hard-keep COUNTRY is the only exception).
+  if (hardDrops(p, email, url)) return true
 
   // Keep-override wins over tier: an explicitly-kept country is never tier-dropped
   // (this is how T2/T3 wealthy countries survive a DROP_TIERS).
@@ -127,6 +143,7 @@ export function shouldDropAtIngest(email: string, url: string, domain: string, p
 
   if (p.tiers.size > 0) {
     // Untiered ('') is intentionally never tier-dropped.
+    const tier = classifyTier(email, url)
     if (tier !== '' && p.tiers.has(tier)) return true
   }
   if (matchesSuffixSet(email, url, p.drop)) return true

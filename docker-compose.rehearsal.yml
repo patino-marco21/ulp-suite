@@ -6,6 +6,7 @@
 # ./inbox or ./uploads. __tests__/rehearsal-isolation.test.ts fails if that ever stops being true.
 #
 # The app image is the one `docker compose build app` produced (ulp-suite-app:latest); this file never builds it.
+# REHEARSAL_APP_IMAGE=<tag> rehearses a candidate image without moving :latest.
 #
 #   npx tsx scripts/e2e-alert-rehearsal.ts            # brings it up, drives it, tears it down
 name: ulp-rehearsal
@@ -43,7 +44,7 @@ services:
       start_interval: 2s
 
   app:
-    image: ulp-suite-app:latest
+    image: ${REHEARSAL_APP_IMAGE:-ulp-suite-app:latest}
     container_name: ulprehearsal_app
     ports:
       - "127.0.0.1:3101:3000"
@@ -66,6 +67,7 @@ services:
       # The receiver is on the Docker network (a private address), which the webhook guard refuses by default.
       WEBHOOK_ALLOW_PRIVATE_HOSTS: "1"
       INGEST_FILTER_HARD_DROP_TIERS: "T3"
+      INGEST_FILTER_HARD_KEEP_COUNTRIES: ${REHEARSAL_INGEST_FILTER_HARD_KEEP_COUNTRIES-SA,CZ,SI,LT,PL,EE,HR,RO,SK,RU,TR,LV,BG,PA,KZ}
       CONTENT_DEDUP_APPLY: "false"
       # lib/import-runner.ts fails an import with no progress for this long. 30 s (the default is 20 minutes) so that
       # scripts/e2e-upload-resilience.ts can prove the watchdog by freezing ClickHouse for longer than that.
@@ -92,7 +94,7 @@ services:
         condition: service_healthy
 
   receiver:
-    image: ulp-suite-app:latest
+    image: ${REHEARSAL_APP_IMAGE:-ulp-suite-app:latest}
     container_name: ulprehearsal_receiver
     mem_limit: 256m
     entrypoint: ["/usr/local/bin/node", "/receiver.js"]

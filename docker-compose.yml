@@ -127,6 +127,9 @@ services:
       # Import filtering — optional, configured in .env. These must be forwarded
       # explicitly because Compose does not inject arbitrary .env keys.
       INGEST_FILTER_HARD_DROP_TIERS: ${INGEST_FILTER_HARD_DROP_TIERS:-T3}
+      # T3 countries the hard drop does not apply to (two-letter codes of the first T3 signal; empty = none). Default: the 15 T3 countries with a GDP per
+      # capita (PPP) of at least $40k. `${VAR-default}`: the default applies only when the variable is UNSET, so an explicit empty value in .env means none.
+      INGEST_FILTER_HARD_KEEP_COUNTRIES: ${INGEST_FILTER_HARD_KEEP_COUNTRIES-SA,CZ,SI,LT,PL,EE,HR,RO,SK,RU,TR,LV,BG,PA,KZ}
       INGEST_FILTER_DROP_NOISE: ${INGEST_FILTER_DROP_NOISE:-}
       INGEST_FILTER_DROP_TIERS: ${INGEST_FILTER_DROP_TIERS:-}
       INGEST_FILTER_KEEP_SUFFIXES: ${INGEST_FILTER_KEEP_SUFFIXES:-}

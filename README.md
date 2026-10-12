@@ -357,10 +357,12 @@ INGEST_FILTER_HARD_DROP_TIERS=T3   # default; keep suffixes cannot override this
 INGEST_FILTER_DROP_TIERS=          # no soft tier drops
 INGEST_FILTER_KEEP_SUFFIXES=
 INGEST_FILTER_DROP_NOISE=true   # also drop junk URLs (same isNoiseUrl as Declutter)
-# Saudi Arabia (.sa) is T3 and rejected; UAE (.ae) is T2 and retained.
+# T3 countries kept anyway (two-letter codes of the first T3 signal; default = the 15 with GDP per capita (PPP) >= $40k:
+# Saudi Arabia, Czechia, Slovenia, Lithuania, Poland, Estonia, Croatia, Romania, Slovakia, Russia, Türkiye, Latvia, Bulgaria, Panama, Kazakhstan):
+INGEST_FILTER_HARD_KEEP_COUNTRIES=SA,CZ,SI,LT,PL,EE,HR,RO,SK,RU,TR,LV,BG,PA,KZ   # empty = drop all of T3
 ```
 
-Evaluated noise-first → hard tier → keep → soft tier → suffix. Hard tiers are non-overridable. `DROP_NOISE` drops IP/`:port`/`.php`/`localhost`/single-label/non-web-scheme URLs at ingest regardless of country; `android://` is kept.
+Evaluated noise-first → hard tier → keep → soft tier → suffix. Hard tiers are non-overridable: `INGEST_FILTER_KEEP_SUFFIXES` cannot rescue them, and a hard-keep country (`INGEST_FILTER_HARD_KEEP_COUNTRIES`) is the only exception. The stored `country_tier` column is unchanged (kept rows are still labelled T3). `DROP_NOISE` drops IP/`:port`/`.php`/`localhost`/single-label/non-web-scheme URLs at ingest regardless of country; `android://` is kept.
 
 Companion scripts:
 
