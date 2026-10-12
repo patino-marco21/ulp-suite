@@ -8,16 +8,18 @@ values into a log, a commit or a doc.
 
 | Script | What it does |
 |---|---|
-| `feed.sh` | Hardlinks the pile's `.txt` files into `./inbox` smallest-first, two in flight; pauses under `FLOOR_GIB`, stops on a new file in `inbox/failed`. `DRY_RUN=1` prints the queue and stops. Never touches an original. |
+| `feed.sh` | Hardlinks the pile's `.txt` files into `./inbox` smallest-first, two in flight; pauses under `FLOOR_GIB`, stops on a new file in `inbox/failed`. `DRY_RUN=1` prints the queue and stops. Never touches an original. `SOURCE=archive` writes `.archiveref` files from the source archive instead (no original needed). `PREFLIGHT=1` skips a file the offline preflight says the quality gate would hold. A file the app holds (`inbox/held/`) is logged once as `HELD`; the run goes on. |
 | `reset.sh` | `check` (read-only) or `apply`: drop the partition the run filled, delete the pile's `ulp.sources` rows, unlink `inbox/done` names that are hardlinks of originals. Aborts while a file is in flight. |
 | `watch.sh` | One monitor for a run (feeder events, anomalies, a heartbeat). Run it under the Monitor tool. |
 | `global-checks.sh` | Read-only checks of the run's partition (duplicates, junk signature, `t.me/`, double-encoded text, empty fields, hash collisions with the older partitions). |
 | `jobs-summary.cjs` | One line (or one per job) from a COPY of `data/ulp.db`: files done / failed, rows new / known / skipped. |
 | `verify-file.ts` | Per-file exact recount: re-parses the original with the app's own parser and policy and compares with the job record and ClickHouse. |
+| `scripts/archive-queue.cjs` | The feeder's helper for `SOURCE=archive`: `list <archive dir>` and `write <archive dir> <name> <dest>`. |
 
 Environment: `ULP_REPO` (the checkout whose `./inbox` and `./data` are used; default: the checkout the script is in, so from a worktree set it to the primary
 checkout), `PILE_DIR` (default `$HOME/Downloads/AyuGram Desktop`), `PILE_WORK_DIR` (default `<repo>/.pile-work`, git-ignored), `CH_CONTAINER`
-(`ulpsuite_clickhouse`), `PARTITION` (`202610`, the partition the run fills), `FLOOR_GIB` (60), `IN_FLIGHT` (2). A script that was started from a worktree of the
+(`ulpsuite_clickhouse`), `PARTITION` (`202610`, the partition the run fills), `FLOOR_GIB` (60), `IN_FLIGHT` (2), `SOURCE` (`files`; `archive` feeds from the source archive in `ULP_ARCHIVE_DIR`, default `~/ulp-archive`), `PREFLIGHT` (0),
+`PREFLIGHT_CMD` (`npx tsx scripts/preflight.ts --quiet`, run from the checkout the script is in). A script that was started from a worktree of the
 repository writes its scratch files under `PILE_WORK_DIR`: point that at a scratch directory so the primary checkout stays clean.
 
 ## Preconditions of a redo
@@ -78,7 +80,7 @@ repository writes its scratch files under `PILE_WORK_DIR`: point that at a scrat
 5. Archive the pile (the archive holds everything the old side copy of the dropped lines held, and the stored lines too): `mkdir -p ~/ulp-archive` once, then
    `nice -n 19 npx tsx scripts/archive-sources.ts archive --src "$HOME/Downloads/AyuGram Desktop" --workers 8` (about 17 minutes plus 2 of verification on an idle
    machine; it needs 10 GiB plus twice the largest file free, and it never runs while a pile run is writing to the same disk). `status` shows the names, the
-   compression ratio and the `ulp.sources` rows that have no archive; `verify --all` decodes everything again. Nothing is removed by this step.
+   compression ratio and the `ulp.sources` rows that have no archive; `verify --all` decodes everything again. Nothing is removed by this step. Before importing a new batch run `scripts/preflight.ts` on it (see The quality gate).
 6. Only then may the OWNER run the same command with `--replace`: each original, and the `inbox/done` names that are hardlinks of it, is removed only after its archive
    was decoded again and matched, and never while a file is in flight in the inbox (see "The source archive" below). The rollback images may be pruned one tag at a
    time (`docker rmi <tag>`; never an unscoped prune: the daemon is shared with another project).
@@ -101,6 +103,38 @@ everything else: it protects against a parser or policy change, not against losi
 `--replace` keeps an original (and says why) while a file is in flight in the inbox, when the file was modified in the last 10 minutes, or when the name is not in
 `ulp.sources` yet. `scripts/parser-diff.ts`, `scripts/pile/verify-file.ts` and `scripts/extract-dropped-lines.ts` read an archived name exactly like a file, so they keep
 working after `--replace`. For a new batch: archive it first (without `--replace`), import, verify, and replace when you decide.
+
+## The quality gate
+
+The importer counts, while it stages a file, the rows that break a rule a correctly parsed row never breaks and the lines it could not split (`lib/ingest-quality-gate.ts`;
+design in `docs/superpowers/specs/2026-10-12-source-archive-and-ingest-gate-design.md`). A file is **held** before one row is stored when at least 20,000 lines were read and
+more than 2% of the stored rows break a rule, more than 5% of the lines were unsplit, or more than 25% are garbage; it is checked once after the first million lines (a bad 4 GB
+file costs a million lines, not the file) and once before the commit. A held file moves to `inbox/held/`, the job is logged as `held` with its report, the Inbox page lists it
+with the reasons, the counts, the kinds and the masked shapes (no text of the file), and Ingest Health shows how many are held.
+
+- **Read the reasons first.** A hold usually means the parser mis-reads a layout, not that the file is bad. Fix the parser and drop the file in again (move it from `inbox/held/` to `inbox/`; the next claim is gated again), or
+- **Release** it on the Inbox page when the file is what you want: it is imported once, the gate reports but does not hold it, and the audit log gets an `inbox.release` row.
+- `INGEST_QUALITY_GATE=warn` only reports; `off` switches it off (the Rollback of the gate release). A held file is never deleted by the app; delete it by hand when you do not want it.
+- **Before a batch:** `npx tsx scripts/preflight.ts <file or archived name>...` reads a sample (5 slices of 2 MiB; the whole file when it is at most 8 MiB) through the same parser and counters
+  and prints PASS / WARN / HOLD per file with the numbers, the kinds, the masked shapes of the rows that break a rule and of the lines no field split could read. Exit 1 when a file would be held.
+  `PREFLIGHT=1` makes the feeder do this for every file and skip (log `SKIP`) what would be held. Reading the whole pile takes about two minutes with four low-priority workers.
+- A ZIP entry that is held holds the whole archive (the entries before it stay imported; a Release re-imports the ZIP and the recorded entries are skipped by name).
+
+### Importing from the archive
+
+After `archive-sources ... --replace` there is no original to link. `SOURCE=archive scripts/pile/feed.sh` writes one `<name>.archiveref` per archived name into `./inbox` (the file is a few hundred
+bytes: id, name, size, sha256); the importer decodes the plaintext from `~/ulp-archive` (mounted read-only into the app at `/archive`), hashes it on the way to the parser and fails the job
+before the commit when the sha256 differs. `ulp.sources` records the original name with its size, sha256 and archive id; a file with the same name and another content is a new file, the same
+name and content stays blocked. No plaintext copy is made: `inbox/done` keeps only the references.
+
+### Deploy checklist of the gate release (one app deploy, after a pile run is complete and its checks are recorded)
+
+1. Nothing in `inbox/` or `inbox/processing/`; tag the running image first (`docker tag "$(docker inspect ulpsuite_app --format '{{.Image}}')" ulp-suite-app:rollback-<yyyymmdd>-<hhmm>z`).
+2. `test -d ~/ulp-archive || mkdir ~/ulp-archive` **as the owner, before `compose up`**: the compose file mounts it, and Docker creates a missing host directory owned by root.
+3. Build from the merged commit with `git archive` (as in Switchover step 2), run the rehearsals on the isolated stack: alert, upload-resilience, novelty (`--only=quality-gate,archive-ref` plus the full run), and the disk-filling ones.
+4. Recreate only the app with the compose file of the merged commit, anchored to the primary checkout's environment (Switchover step 3). The log must say `DDL v28 applied`; `docker exec ulpsuite_app ls /archive` lists the archive.
+5. Verify: `healthy 0`; the Inbox page shows no Held card; `npx tsx scripts/archive-sources.ts status` reports the names without an archive row; `sources-sync` fills the identity columns.
+6. Rollback: `INGEST_QUALITY_GATE=off` in `.env` and recreate the app, or the rollback image tag. DDL v28 is additive and stays.
 
 ## Rollback
 

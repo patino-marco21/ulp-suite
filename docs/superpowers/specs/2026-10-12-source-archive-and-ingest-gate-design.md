@@ -1,8 +1,10 @@
 # Source archive and ingest gate: design (2026-10-12)
 
-Status: Part 1 (the source archive: library, guards, CLI, readers, runbook) is BUILT and merged (plan `docs/superpowers/plans/2026-10-12-source-archive.md`); the importer's
-archive reference (`.archiveref`), the ingest gate (Part 2) and the DDL v28 are designed here and not built yet. The repository is public: this file holds numbers only,
-never file names, search terms or credential values.
+Status: Part 1 (the source archive: library, guards, CLI, readers, runbook) is BUILT and merged (plan `docs/superpowers/plans/2026-10-12-source-archive.md`). The importer's archive reference
+(`.archiveref`), the ingest quality gate (Part 2) and the DDL v28 are BUILT on branch `reversible-pipeline` (plan `docs/superpowers/plans/2026-10-12-ingest-quality-gate-and-archive-ref.md`) and
+ship in one app deploy after the pile run; the deviations decided while reading the code are listed in that plan (HTTP text uploads cannot answer 422 because the route replies before the import
+starts; the importer's report carries the shapes of the junk rows only, the preflight adds the shapes of unsplit lines; a held ZIP entry holds the whole archive; the importer writes the identity
+columns when it read from the archive). The repository is public: this file holds numbers only, never file names, search terms or credential values.
 
 ## Why
 

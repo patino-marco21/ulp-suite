@@ -26,6 +26,10 @@
  *   concurrent  UPLOAD_CONCURRENCY=2, two files that share 30,000 rows: written once
  *   gate        free disk under the ingest floor while staging: the import waits (its stage exists), resumes, writes each row once
  *   off         INGEST_NOVELTY_CHECK=off: the direct path, no stage tables, rows stored again as before
+ *   quality-gate  a file where 1 line in 20 breaks a rule is HELD (production defaults): zero rows stored, it waits in inbox/held with its report, Release imports it
+ *                 once, and the audit row exists. (The disk gate's scenario is called "gate".)
+ *   archive-ref   a file imported from the source archive through an .archiveref: same counts as the plain import, identity in ulp.sources, a same-name file with other
+ *                 content is a new file, a damaged archive fails before one row is committed, and no plaintext copy of the file appears in the inbox
  *
  *   docker compose build app
  *   npx tsx scripts/e2e-alert-rehearsal.ts --keep    # brings the rehearsal stack up (about 4 minutes) and leaves it running
@@ -37,7 +41,7 @@
  * fails, 2 when the stack is not ready or there is not enough room to run.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -695,6 +699,126 @@ async function directPath(): Promise<void> {
   check('no stage table was created', stageTableCount() === 0)
 }
 
+// ── quality gate and archive reference ─────────────────────────────────────────
+const inboxLs = (sub: string) => sh('docker', ['exec', APP, 'sh', '-c', `ls -1 /app/inbox/${sub} 2>/dev/null || true`]).split('\n').filter(Boolean)
+
+async function qualityGate(): Promise<void> {
+  console.log('\n9. The ingest quality gate holds a bad file, and Release imports it')
+  scanLog('before the quality-gate scenario')
+  if (!check('the rehearsal app restarted with the production defaults', await recreateApp())) return
+  const H = `e2e-qg-held-${RUN}.txt`
+  const junk = (i: number) => `https://shop${i % 500}.example-store.test/login:user${i}${RUN}@probe-mail.test:Pw://x${i}${RUN}`
+  const body = [...lines('Q', 0, 22_800), ...Array.from({ length: 1_200 }, (_, i) => junk(i))]
+
+  const held = await importLines(H, body)
+  check('a file where 1 line in 20 breaks a rule ends in error with the hold message', held.status === 'error' && /Held by the quality gate/.test(held.error ?? ''), brief(held))
+  check('...not one row of it was stored', rowsFor(H) === 0, `rows ${rowsFor(H)}`)
+  check('...it was not remembered as imported', sourceLine(H) === '', `[${sourceLine(H)}]`)
+  check('...no stage table is left behind', stageTableCount() === 0, `tables ${stageTableCount()}`)
+  check('...the file waits in inbox/held', inboxLs('held').includes(H), inboxLs('held').join(','))
+
+  const status = await api('GET', '/api/inbox/status')
+  const entry = (status.json?.held ?? []).find((f: any) => f.name === H)
+  check('the Inbox status lists it with the report of the hold', !!entry && entry.report?.level === 'hold' && entry.report?.junkPct >= 4.9 && entry.report?.kinds?.['password-has-scheme'] === 1_200, JSON.stringify(entry?.report ?? null).slice(0, 200))
+  const health = await api('GET', '/api/monitoring/ingest-health')
+  check('Ingest Health counts it', (health.json?.held?.count ?? 0) >= 1, JSON.stringify(health.json?.held))
+
+  const released = await api('POST', '/api/inbox/release', { filename: H })
+  check('Release moves the file back to the inbox', released.status === 200 && released.json?.moved?.[0] === H, JSON.stringify(released.json))
+  const done = await waitFor(async () => {
+    const s = await api('GET', '/api/inbox/status')
+    return (s.json?.done_recent ?? []).find((j: any) => j.filename === H && j.status === 'done')
+  }, 240_000, 2000)
+  check('the released file is imported: 24000 new rows, none known', !!done && done.imported === 24_000 && done.known === 0, JSON.stringify(done ?? null))
+  check('...with the gate verdict recorded as a hold that was released', !!done && done.gate_level === 'hold', JSON.stringify(done?.gate_level))
+  check('...all 24000 rows are in ClickHouse', rowsFor(H) === 24_000, `rows ${rowsFor(H)}`)
+  check('...and the file left inbox/held', !inboxLs('held').includes(H))
+
+  const audit = await api('GET', '/api/audit-logs?action=inbox.release&limit=5')
+  check('the audit log has the release', JSON.stringify(audit.json ?? {}).includes(H), JSON.stringify(audit.json ?? {}).slice(0, 160))
+
+  const again = await importLines(H, body)
+  check('the same name again is skipped by the duplicate guard, not held again', again.status === 'done' && again.imported === 0, brief(again))
+  scanLog('after the quality-gate scenario')
+}
+
+async function archiveRef(): Promise<void> {
+  console.log('\n10. An import from the source archive through an .archiveref')
+  scanLog('before the archive-ref scenario')
+  if (!check('the rehearsal app restarted with the production defaults', await recreateApp())) return
+  const PLAIN = `e2e-ar-plain-${RUN}.txt`
+  const FROM = `e2e-ar-arch-${RUN}.txt`
+  const OTHER = `e2e-ar-other-${RUN}.txt`
+  const DAMAGED = `e2e-ar-bad-${RUN}.txt`
+  const same = lines('R', 0, 30_000)
+
+  const plain = await importLines(PLAIN, same)
+  check('the file as plain text: 30000 new', plain.status === 'done' && plain.imported === 30_000 && plain.known === 0, brief(plain))
+
+  // The real archive tool, on the host, without ClickHouse and without --replace.
+  const srcDir = join(work, 'ar-src')
+  const archiveDir = join(work, 'ar-archive')
+  mkdirSync(srcDir)
+  mkdirSync(archiveDir)
+  // The archive tool leaves a file modified in the last 10 minutes alone (it may still be downloading): make the fixtures an hour old.
+  const hourAgo = new Date(Date.now() - 3_600_000)
+  const putOld = (name: string, ls: string[]) => { writeFileSync(join(srcDir, name), text(ls)); utimesSync(join(srcDir, name), hourAgo, hourAgo) }
+  putOld(FROM, same)
+  putOld(OTHER, lines('S', 0, 30_000))
+  putOld(DAMAGED, lines('T', 0, 5_000))
+  sh('npx', ['tsx', 'scripts/archive-sources.ts', 'archive', '--src', srcDir, '--out', archiveDir, '--workers', '1', '--no-sources'])
+  const manifest = new Map<string, any>(readFileSync(join(archiveDir, 'manifest.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l)).map((e: any) => [e.name, e]))
+  check('the archive tool archived the three files', manifest.size === 3, String(manifest.size))
+
+  sh('docker', ['exec', APP, 'rm', '-rf', '/archive'])
+  sh('docker', ['cp', archiveDir, `${APP}:/archive`])
+  const ref = (e: any) => JSON.stringify({ v: 1, id: e.id, name: e.name, size: e.size, sha256: e.sha256 }) + '\n'
+  const drop = (e: any) => sh('docker', ['exec', '-i', APP, 'sh', '-c', `cat > /app/inbox/${e.name}.archiveref`], process.env, ref(e))
+  const finished = (name: string) => waitFor(async () => {
+    const s = await api('GET', '/api/inbox/status')
+    return (s.json?.done_recent ?? []).find((j: any) => j.filename === `${name}.archiveref`)
+  }, 240_000, 2000)
+
+  drop(manifest.get(FROM))
+  const a = await finished(FROM)
+  check('the same content through an .archiveref: every row was already known (the archive yields the same bytes)', !!a && a.status === 'done' && a.imported === 0 && a.known === 30_000, JSON.stringify(a ?? null))
+  check('...ulp.sources has the original name with the size, the sha256 and the archive id', chQuery(`SELECT concat(toString(size), '|', sha256, '|', archive_id) FROM ulp.sources WHERE filename = '${FROM}'`) === `${manifest.get(FROM).size}|${manifest.get(FROM).sha256}|${manifest.get(FROM).id}`)
+  check('...the inbox holds the reference and no plaintext copy', inboxLs('done').includes(`${FROM}.archiveref`) && !inboxLs('done').includes(FROM) && !inboxLs('').includes(FROM))
+
+  drop(manifest.get(FROM))
+  const b = await waitFor(async () => {
+    const s = await api('GET', '/api/inbox/status')
+    return (s.json?.done_recent ?? []).filter((j: any) => j.filename === `${FROM}.archiveref`).length >= 2
+  }, 120_000, 2000)
+  check('the same name with the same content again is skipped', !!b)
+
+  drop(manifest.get(OTHER))
+  const o = await finished(OTHER)
+  check('another file through the archive: 30000 new rows', !!o && o.status === 'done' && o.imported === 30_000 && rowsFor(OTHER) === 30_000, JSON.stringify(o ?? null))
+
+  // A same-name file with other content is a new file: archive different content (another size, so the tool archives it again) under the first name and import it.
+  putOld(FROM, lines('U', 0, 10_000))
+  sh('npx', ['tsx', 'scripts/archive-sources.ts', 'archive', '--src', srcDir, '--out', archiveDir, '--workers', '1', '--no-sources', '--only', FROM])
+  const changed = readFileSync(join(archiveDir, 'manifest.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l)).filter((e: any) => e.name === FROM).pop()
+  sh('docker', ['exec', APP, 'rm', '-rf', '/archive'])
+  sh('docker', ['cp', archiveDir, `${APP}:/archive`])
+  check('the changed file has another content id', changed.id !== manifest.get(FROM).id)
+  const before = Number(chQuery(`SELECT count() FROM ulp.sources WHERE filename = '${FROM}'`))
+  drop(changed)
+  const c = await waitFor(async () => Number(chQuery(`SELECT count() FROM ulp.sources WHERE filename = '${FROM}'`)) > before, 240_000, 2000)
+  check('a same-name file with other content is a new file: imported, a second row in ulp.sources', !!c && rowsFor(FROM) === 10_000, `rows ${rowsFor(FROM)}`)
+
+  // A damaged archive fails before one row is committed.
+  const bad = manifest.get(DAMAGED)
+  sh('docker', ['exec', APP, 'sh', '-c', `printf '\\377' | dd of=/archive/${bad.id}.zst bs=1 seek=40 conv=notrunc 2>/dev/null`])
+  drop(bad)
+  const d = await finished(DAMAGED)
+  check('a damaged archive fails the job', !!d && d.status === 'failed', JSON.stringify(d ?? null))
+  check('...not one row of it was committed, and no stage table is left', rowsFor(DAMAGED) === 0 && stageTableCount() === 0, `rows ${rowsFor(DAMAGED)}, tables ${stageTableCount()}`)
+  check('...the reference waits in inbox/failed', inboxLs('failed').includes(`${DAMAGED}.archiveref`))
+  scanLog('after the archive-ref scenario')
+}
+
 // ── main ────────────────────────────────────────────────────────────────────────────────────────
 async function run(): Promise<number> {
   // The receiver runs the app image's node with its own entrypoint, so the image's health check (port 3000) always calls it
@@ -738,6 +862,8 @@ async function run(): Promise<number> {
   if (want('concurrent')) await concurrentFiles()
   if (want('gate') && !skipGate && !(await gateScenario())) return 2
   if (want('off')) await directPath()
+  if (want('quality-gate')) await qualityGate()
+  if (want('archive-ref')) await archiveRef()
 
   scanLog('at the end')
   await recreateApp() // leave the stack on the production defaults
