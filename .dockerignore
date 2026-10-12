@@ -74,3 +74,7 @@ coverage/
 # ─── Superpowers plugin cache ─────────────────────────────────────────────────
 .claude/
 cookies.txt
+
+# ─── Local tooling output (git-ignored, never part of the image) ─────────────
+.parser-baseline/
+.pile-work/
