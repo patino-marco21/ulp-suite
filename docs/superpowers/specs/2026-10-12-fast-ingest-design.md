@@ -20,11 +20,16 @@ Measured on 2026-10-12 (scratch tools and a throwaway ClickHouse; the live stack
    gzip of every insert body (`compression.request: true` in `lib/clickhouse.ts`, over loopback) 74k (15.1 us). Several processes scale: 4 -> 435k, 8 -> 831k,
    12 -> 917k lines/s on this 8-core, 16-thread machine while run 5 was loading it. The parser profile is flat (`parseLine` 16%, garbage collection 14%, the
    token hash 5%, nothing larger), so only a rewrite or many fast paths would speed up one thread.
-3. **The commit insert is under-parallelised.** `INSERT ... SELECT` into the live DDL (19 indexes, 3 projections, 12 derived columns), 4M rows: server defaults
-   137k rows/s (27.4 s); `max_insert_threads = 4` 399k rows/s (9.4 s, 33 CPU-seconds against 29); 4 statements on disjoint hash slabs 389k rows/s; 8 statements
-   506k rows/s (CPU-bound). Run 5's commit statements averaged 92k rows/s on about one core: 400M new rows would take about 72 minutes of commit time alone.
+3. **The commit insert is under-parallelised.** The exact commit statement (`INSERT ... SELECT ... WHERE <slab> AND content_key_hash NOT IN (known) LIMIT 1 BY
+   content_key_hash`) into the live DDL (19 indexes, 3 projections, 12 derived columns), 5.0M staged rows, 4.23M written: server defaults (`max_insert_threads` is 0)
+   142k rows/s (30.0 s, 31 CPU-seconds); `max_insert_threads = 4` 452k rows/s (9.4 s, 34 CPU-seconds); 8 threads 432k rows/s (no further gain). In a simpler 4M-row
+   test, 4 statements on disjoint hash slabs reached 389k rows/s and 8 statements 506k rows/s (CPU-bound). Run 5's commit statements averaged 92k rows/s on about one
+   core: 400M new rows would take about 72 minutes of commit time alone.
 4. **A bulk existence check is cheap.** 100M staged hashes against 200M existing ones: 28 CPU-seconds in 8 hash buckets (a grace-hash join: 49), against about
-   760 as 100 per-file scans of the same table (27x, and the gap grows with the table).
+   760 as 100 per-file scans of the same table (27x, and the gap grows with the table). The grouped form of the production statement (`known` filled by one
+   `IN (<stage 1> UNION ALL <stage 2> ...)`) for 8 files of 1M hashes against a 200M-row table: 14.7 CPU-seconds and 2.4 s, against 70.6 CPU-seconds and 9.7 s as
+   8 statements (4.8x), with the identical set of known hashes. The scan is most of a statement's cost (about 8 CPU-seconds at 200M rows, about 75 at 1.4B), so at
+   production size the saving approaches the group size.
 
 ## Decisions (owner, 2026-10-12)
 
@@ -50,7 +55,7 @@ archives and anything not on disk keep the in-process path.
   behaviour). Response compression is unchanged. Measured: 5.3 us of CPU per line, a third of the per-line cost.
 - **A2, parallel commit insert.** The commit `INSERT ... SELECT` (`commitInsertSql` in `lib/ingest-novelty.ts`) runs with `max_insert_threads` from
   `INGEST_COMMIT_INSERT_THREADS` (default 4, allowed 1-16), as a per-statement setting; the existence scan and the monitor queries are not touched. Measured
-  137k -> 399k rows/s. The memory guard (`lib/clickhouse-memory-guard.ts`) still runs before every slab.
+  142k -> 452k rows/s (3.2x, measured on the exact statement, `LIMIT 1 BY` included). The memory guard (`lib/clickhouse-memory-guard.ts`) still runs before every slab.
 - **A3, phase timings.** `processing_jobs` gets three additive columns, `parse_ms`, `check_ms` and `insert_ms` (`INTEGER NOT NULL DEFAULT 0`, idempotent
   `ALTER`s next to the `known` column in `lib/sqlite.ts`). They are filled from the `timings` accumulator `streamCredentialsToTable` already has and from the
   durations of the existence scan and the commit insert; `logJob` (`lib/processing-log.ts`) takes them as optional fields and
@@ -70,7 +75,8 @@ routes are separate bundles). `importThroughStage` calls `submitCommit(job)` ins
   file on an idle system commits at once, and a group of one runs today's `commitStage` unchanged. Groups therefore appear exactly when commits are the
   bottleneck, and their size follows the load.
 - **One existence scan per slab for the whole group.** Slabs are taken over the union of the stages' hashes (`content_key_hash % K = k`, K from the union's
-  row count and `INGEST_NOVELTY_SLAB_ROWS`). For slab k, `known` is filled by one statement, `SELECT DISTINCT content_key_hash FROM ulp.credentials WHERE
+  row count and `INGEST_GROUP_SLAB_ROWS`, default 50M because one set now serves many files and a 50M-hash set is about 1.2 GB of ClickHouse memory; a lone file keeps
+  `INGEST_NOVELTY_SLAB_ROWS`, 20M). For slab k, `known` is filled by one statement, `SELECT DISTINCT content_key_hash FROM ulp.credentials WHERE
   content_key_hash IN (<slab k of stage 1> UNION ALL <slab k of stage 2> ...)`, into one group table `zz_import_known_<group>`.
 - **The files are then committed in order, each excluding what the group already inserted.** A second group table, `zz_import_group_<group>`, holds the
   hashes inserted so far by earlier files for this slab. For file f: (1) `expected_f` = its slab's distinct hashes that are in neither `known` nor `group`;
@@ -88,8 +94,8 @@ routes are separate bundles). `importThroughStage` calls `submitCommit(job)` ins
 - **Progress.** Each file keeps its own `checking` / `inserting` events; while its group's scan runs it shows `checking`.
 - **Flags:** `INGEST_GROUP_COMMIT` (`off` default until rehearsed, then `on`), `INGEST_GROUP_MAX_FILES`, `INGEST_GROUP_MAX_ROWS`.
 
-Effect (measured pieces): the 87% of ClickHouse CPU that went to per-file scans falls by the group size (about 20x for a manual batch of 20 files), and a batch of
-tiny files costs one scan instead of one each. Groups only grow when several files are waiting to commit, which is the normal state of a manual batch and of a run
+Effect (measured pieces): the 87% of ClickHouse CPU that went to per-file scans falls by about the group size (4.8x measured for 8 files against a 200M-row table; at
+1.4B rows the scan dominates, so a manual batch of 20 files should see close to 20x), and a batch of tiny files costs one scan instead of one each. Groups only grow when several files are waiting to commit, which is the normal state of a manual batch and of a run
 with parse workers (step C); with one in-process parser and mid-size files the queue rarely builds, so B pays off most together with C.
 
 ## Interaction with the archive and gate spec
@@ -127,6 +133,11 @@ needs SQLite or Next, the build fails (an assertion on the bundle's inputs), so 
 its slot for staging and commit as today. A worker costs about 768 MB at most plus its batches (two of about 15-30 MB). Eight workers are about 6-7 GB in the worst
 case, so `docker-compose.yml` raises the app's `mem_limit` from 8g to 12g (ClickHouse keeps 20g; the machine has 31 GB) and documents the guidance next to
 `INGEST_PARSE_WORKERS`.
+
+**Scheduling.** The pile feeder (`scripts/pile/feed.sh`) feeds the smallest files first. With workers the makespan is set by the largest files: twelve ~3.9 GiB files
+take about 9 minutes each at one worker's speed (66M lines at 128k lines/s), so smallest-first leaves two waves of them at the end with idle workers. The feeder gets
+`ORDER=largest-first` (after a short smallest-first canary of its first few files, which keeps the early feedback of today's order). The order does not change the rows
+stored, but a credential that appears in several files is attributed to the first file in the order, so the run log records the order used.
 
 **Eligible files.** Plain text and CSV on disk: inbox files, and HTTP uploads (which spool to disk first). ZIP entries and anything else keep the in-process path.
 In development (`next dev`) and in the unit tests the pool is off.
@@ -166,6 +177,9 @@ All fixtures are synthetic (made-up hosts, logins and passwords).
 | Step A alone | a modest gain: the commit is 3x faster, the parse thread unchanged |
 | A + B | the hash-scan load falls ~20x, mostly a gain for small files and for contention |
 | A + B + C, 8 workers | about 1 h: parse about 45-50 minutes at 8 x 128k lines/s, overlapped with commits at about 400k rows/s (about 17 minutes of commit) |
+
+All the measurements above were taken with the 16 threads at about 2.95 GHz and a 85 C package temperature: the laptop throttles under sustained load (5.0 GHz is the
+single-core maximum), so the times are what this machine does today; better cooling raises the sustained clock.
 
 ## Risks
 
