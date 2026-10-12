@@ -49,3 +49,4 @@ docs/api
 cookies.txt
 *.cookie
 curl_cookies*.txt
+.parser-baseline/
