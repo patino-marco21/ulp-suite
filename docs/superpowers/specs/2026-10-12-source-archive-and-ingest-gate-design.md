@@ -157,11 +157,11 @@ compresses a 64 MiB frame at level 12 (128 MiB window, long-distance matching) a
 Node 24.16), so the pile takes about 17 minutes with 8 workers plus about 2 minutes of verification on an idle machine; the rehearsal confirms it on three
 real files.
 
-## Part 2: the ingest gate
+## Part 2: the ingest quality gate (not the disk gate)
 
 ### What it counts
 
-`lib/ingest-gate.ts` exports `classifyStoredRow(url, login, password): GateKind | null`, a pure function. The kinds are the invariants a correctly parsed row
+`lib/ingest-quality-gate.ts` exports `classifyStoredRow(url, login, password): GateKind | null`, a pure function. The kinds are the invariants a correctly parsed row
 never violates (the same ones as the probe that produced the numbers above):
 
 | Kind | A row has it when |
@@ -184,8 +184,8 @@ The cost is a few string tests per row; the plan measures it against a budget of
 - **junk** = rows with a kind / stored rows, **unsplit** = `no_fields` rejects / non-blank lines, **garbage** = `garbage` rejects / non-blank lines.
 - **Hold** when at least 20,000 lines were read and junk > 2% or unsplit > 5% or garbage > 25%. **Warn** when at least 20,000 lines were read and
   junk > 1% or unsplit > 2%. Under 20,000 lines the verdict is at most warn.
-- Environment: `INGEST_GATE` (`hold` default, `warn`, `off`), `INGEST_GATE_JUNK_PCT` (2), `INGEST_GATE_UNSPLIT_PCT` (5), `INGEST_GATE_GARBAGE_PCT` (25),
-  `INGEST_GATE_WARN_JUNK_PCT` (1), `INGEST_GATE_WARN_UNSPLIT_PCT` (2), `INGEST_GATE_MIN_LINES` (20000).
+- Environment: `INGEST_QUALITY_GATE` (`hold` default, `warn`, `off`), `INGEST_QUALITY_GATE_JUNK_PCT` (2), `INGEST_QUALITY_GATE_UNSPLIT_PCT` (5), `INGEST_QUALITY_GATE_GARBAGE_PCT` (25),
+  `INGEST_QUALITY_GATE_WARN_JUNK_PCT` (1), `INGEST_QUALITY_GATE_WARN_UNSPLIT_PCT` (2), `INGEST_QUALITY_GATE_MIN_LINES` (20000).
 
 Per-file distributions on the pile with the final parser (281 files of at least 50k lines): junk p50 0.21%, p90 0.54%, p99 3.1%; unsplit p50 0.26%, p90
 1.8%, p99 3.7%; garbage p50 1.1%, p90 5.0%, p99 18.6%. The hold rule would stop **6 of 281 files (0.18% of the lines)**; the warn rule flags 31 files
@@ -234,10 +234,10 @@ All fixtures are synthetic (made-up hosts, logins and passwords); no real creden
   archive is deleted and not recorded; an interrupted `.part` is ignored and removed; `zstd -dc` returns the plaintext (skipped when the binary is missing);
   `--replace` unlinks only same-inode names, refuses while `inbox/processing` holds a file, refuses a file younger than 10 minutes, and never touches
   `inbox/failed`.
-- `__tests__/ingest-gate.test.ts`: one fixture per kind; the thresholds, the 20,000-line minimum, the warn tier, `gate_errors`; row sets shaped like the output
+- `__tests__/ingest-quality-gate.test.ts`: one fixture per kind; the thresholds, the 20,000-line minimum, the warn tier, `gate_errors`; row sets shaped like the output
   of the two old defects (tag text inside passwords; a url line, a login line and a password line joined into one row) must be **held**, and row sets
   shaped like a clean file must pass. (The gate is a function of rows, so these are built as rows; the current parser no longer produces such rows.)
-- A `scripts/e2e-novelty-ingest.ts` scenario named `ingest-gate` (the name `gate` is the disk gate's): a normal file with `INGEST_GATE_JUNK_PCT` lowered ends
+- A `scripts/e2e-novelty-ingest.ts` scenario named `quality-gate` (the name `gate` is the disk gate's): a normal file with `INGEST_QUALITY_GATE_JUNK_PCT` lowered ends
   `held` with zero rows in `ulp.credentials`, Release imports it, and the audit row exists.
 - An end-to-end scenario `archive-ref` in `scripts/e2e-novelty-ingest.ts`: the same synthetic file imported from `inbox/` as plain text and through an
   `.archiveref` gives the same rows and the same job counts, a flipped bit in the archive fails the job before any row is committed, and no plaintext copy of the file
@@ -250,11 +250,11 @@ All fixtures are synthetic (made-up hosts, logins and passwords); no real creden
 
 1. Build on branch `reversible-pipeline` in its own worktree. Part 1 first: it is offline (scripts, a library, tests, docs) and touches nothing that runs.
 2. Part 1 merges to `main` with no deploy. `docs/pile-import-runbook.md` gets "archive before import" and the archive step in place of the side copy.
-3. After run 5 is complete and its checks are recorded: one app deploy carrying DDL v28 and the gate (`INGEST_GATE=hold`). The usual rules: nothing in
+3. After run 5 is complete and its checks are recorded: one app deploy carrying DDL v28 and the gate (`INGEST_QUALITY_GATE=hold`). The usual rules: nothing in
    `inbox/processing`, the rollback tag first, `docker compose` from the merged commit anchored to the primary checkout's environment.
 4. The owner reads `archive-sources status`, then runs `archive --replace` when ready.
 
-Rollback: `INGEST_GATE=off` or the image's rollback tag for the gate; DDL v28 is additive. The archive is additive until `--replace`, and `restore` rebuilds
+Rollback: `INGEST_QUALITY_GATE=off` or the image's rollback tag for the gate; DDL v28 is additive. The archive is additive until `--replace`, and `restore` rebuilds
 the exact bytes (checked by sha256), so even `--replace` can be undone as long as the archive directory exists.
 
 ## Risks
@@ -262,7 +262,7 @@ the exact bytes (checked by sha256), so even `--replace` can be undone as long a
 - **A bug in `--replace` loses data.** Mitigations: the independent decompress-and-hash before anything is unlinked, the unchanged-original check, per-file
   operation, a dry run, `--only` for a first small run, the owner starts it, and a restore drill before the first real use.
 - **The archive shares the disk with everything else.** It is not a backup. Copying `~/ulp-archive` to an external drive later is one command.
-- **False holds block a good file.** The thresholds come from the pile's own distribution, there is a warn tier, a Release button, and `INGEST_GATE=off`.
+- **False holds block a good file.** The thresholds come from the pile's own distribution, there is a warn tier, a Release button, and `INGEST_QUALITY_GATE=off`.
 - **False passes.** The gate only catches what its invariants encode; there is still no ground truth. The stage is the place to add a check later.
 - **Node's zstd binding** exposes the compression level, the window log, long-distance matching and worker threads (checked on Node 24.16); the plan keeps the
   `zstd` binary as a fallback behind the same interface.
