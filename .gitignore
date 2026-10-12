@@ -50,3 +50,4 @@ cookies.txt
 *.cookie
 curl_cookies*.txt
 .parser-baseline/
+.pile-work/
