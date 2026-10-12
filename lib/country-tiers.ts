@@ -288,7 +288,37 @@ export function buildCountryTierExpression(): string {
 // Reuses the SAME arrays above, so ingest-time tiering can never drift from the
 // ClickHouse country_tier column. Used by lib/ingest-filter.ts to drop low-tier
 // rows BEFORE insert (so they never cost storage / dedup / query compute).
+// The arrays are turned into Sets once: the old linear scans cost ~400 string
+// comparisons per call and were half of the parse time of a pile file.
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** The country of each Tier 3 mail provider (the headings of T3_EMAIL_PROVIDERS), for INGEST_FILTER_HARD_KEEP_COUNTRIES. */
+const T3_PROVIDER_COUNTRY: ReadonlyMap<string, string> = new Map([
+  ['mail.ru', 'RU'], ['yandex.ru', 'RU'], ['yandex.com', 'RU'], ['rambler.ru', 'RU'], ['bk.ru', 'RU'], ['list.ru', 'RU'], ['inbox.ru', 'RU'], ['ya.ru', 'RU'], ['lenta.ru', 'RU'], ['autorambler.ru', 'RU'],
+  ['qq.com', 'CN'], ['163.com', 'CN'], ['126.com', 'CN'], ['sina.com', 'CN'], ['sohu.com', 'CN'], ['yeah.net', 'CN'], ['foxmail.com', 'CN'], ['sina.cn', 'CN'], ['139.com', 'CN'], ['21cn.com', 'CN'], ['china.com', 'CN'],
+  ['yahoo.com.br', 'BR'], ['uol.com.br', 'BR'], ['bol.com.br', 'BR'], ['ig.com.br', 'BR'], ['terra.com.br', 'BR'], ['r7.com', 'BR'], ['globomail.com', 'BR'], ['oi.com.br', 'BR'],
+  ['rediffmail.com', 'IN'], ['sify.com', 'IN'], ['indiatimes.com', 'IN'], ['in.com', 'IN'],
+  ['wp.pl', 'PL'], ['o2.pl', 'PL'], ['onet.pl', 'PL'], ['interia.pl', 'PL'], ['poczta.fm', 'PL'], ['gazeta.pl', 'PL'],
+  ['seznam.cz', 'CZ'], ['centrum.cz', 'CZ'], ['email.cz', 'CZ'], ['atlas.cz', 'CZ'],
+  ['abv.bg', 'BG'], ['mail.bg', 'BG'], ['dir.bg', 'BG'],
+  ['yahoo.ro', 'RO'], ['mail.ro', 'RO'],
+  ['ukr.net', 'UA'], ['meta.ua', 'UA'], ['i.ua', 'UA'],
+  ['mynet.com', 'TR'], ['ttnet.net.tr', 'TR'], ['turk.net', 'TR'],
+  ['yahoo.com.vn', 'VN'], ['yahoo.co.id', 'ID'],
+  ['fibertel.com.ar', 'AR'], ['arnet.com.ar', 'AR'],
+  ['prodigy.net.mx', 'MX'],
+])
+
+/** Read-only view of the lists, for the tests and for the hard-keep policy. */
+export const TIER_LISTS = {
+  T1: { emailSuffixes: T1_EMAIL_SUFFIXES, emailProviders: T1_EMAIL_PROVIDERS, urlTlds: T1_URL_TLDS },
+  T2: { emailSuffixes: T2_EMAIL_SUFFIXES, emailProviders: T2_EMAIL_PROVIDERS, urlTlds: T2_URL_TLDS },
+  T3: { emailSuffixes: T3_EMAIL_SUFFIXES, emailProviders: T3_EMAIL_PROVIDERS, urlTlds: T3_URL_TLDS, providerCountry: T3_PROVIDER_COUNTRY },
+} as const
+
+const T1_SUFFIX_SET = new Set(T1_EMAIL_SUFFIXES), T1_PROVIDER_SET = new Set(T1_EMAIL_PROVIDERS), T1_TLD_SET = new Set(T1_URL_TLDS)
+const T2_SUFFIX_SET = new Set(T2_EMAIL_SUFFIXES), T2_PROVIDER_SET = new Set(T2_EMAIL_PROVIDERS), T2_TLD_SET = new Set(T2_URL_TLDS)
+const T3_SUFFIX_SET = new Set(T3_EMAIL_SUFFIXES), T3_PROVIDER_SET = new Set(T3_EMAIL_PROVIDERS), T3_TLD_SET = new Set(T3_URL_TLDS)
 
 /** Email domain (lowercased): everything after the last '@'. Mirrors the SQL ED. */
 export function emailDomainOf(email: string): string {
@@ -296,28 +326,41 @@ export function emailDomainOf(email: string): string {
   return at === -1 ? '' : email.slice(at + 1).toLowerCase()
 }
 
-/** Host of a URL: scheme/userinfo/port/path stripped, lowercased. */
+/** Host of a URL: scheme/userinfo/port/path stripped, lowercased. Scans by index instead of splitting. */
 function hostOf(url: string): string {
-  let s = url
-  const scheme = s.indexOf('://')
-  if (scheme !== -1) s = s.slice(scheme + 3)
-  s = s.split(/[/?#]/)[0]                          // drop path/query/fragment
-  const at = s.lastIndexOf('@')
-  if (at !== -1) s = s.slice(at + 1)               // drop userinfo
-  s = s.split(':')[0]                              // drop port
-  return s.toLowerCase()
+  let start = 0
+  const scheme = url.indexOf('://')
+  if (scheme !== -1) start = scheme + 3
+  let end = url.length
+  for (let i = start; i < url.length; i++) {
+    const c = url.charCodeAt(i)
+    if (c === 47 || c === 63 || c === 35) { end = i; break }       // / ? #
+  }
+  const at = url.lastIndexOf('@', end - 1)
+  if (at >= start) start = at + 1                                   // drop userinfo
+  for (let i = start; i < end; i++) {
+    if (url.charCodeAt(i) === 58) { end = i; break }                // drop the port
+  }
+  return url.slice(start, end).toLowerCase()
 }
 
 /** URL top-level domain (last dotted label of the host). Mirrors lower(topLevelDomain(url)). */
 export function urlTldOf(url: string): string {
   const h = hostOf(url)
-  if (!h.includes('.')) return ''
-  const parts = h.split('.')
-  return parts[parts.length - 1]
+  const dot = h.lastIndexOf('.')
+  return dot === -1 ? '' : h.slice(dot + 1)
 }
 
-function matchesEmail(ed: string, suffixes: string[], providers: string[]): boolean {
-  return suffixes.some(suf => ed.endsWith(suf)) || providers.includes(ed)
+/**
+ * Every suffix of the lists starts with '.', so `ed.endsWith(suffix)` holds exactly when the suffix equals one of the dot-suffixes of `ed`
+ * (".example.co.uk", ".co.uk", ".uk"): a handful of Set lookups instead of a scan of the whole list.
+ */
+function matchesEmail(ed: string, suffixes: ReadonlySet<string>, providers: ReadonlySet<string>): boolean {
+  if (providers.has(ed)) return true
+  for (let i = ed.indexOf('.'); i !== -1; i = ed.indexOf('.', i + 1)) {
+    if (suffixes.has(ed.slice(i))) return true
+  }
+  return false
 }
 
 /**
@@ -327,14 +370,32 @@ function matchesEmail(ed: string, suffixes: string[], providers: string[]): bool
  */
 export function classifyTier(email: string, url: string): Tier {
   const ed = emailDomainOf(email)
-  if (matchesEmail(ed, T1_EMAIL_SUFFIXES, T1_EMAIL_PROVIDERS)) return 'T1'
-  if (matchesEmail(ed, T2_EMAIL_SUFFIXES, T2_EMAIL_PROVIDERS)) return 'T2'
-  if (matchesEmail(ed, T3_EMAIL_SUFFIXES, T3_EMAIL_PROVIDERS)) return 'T3'
+  if (matchesEmail(ed, T1_SUFFIX_SET, T1_PROVIDER_SET)) return 'T1'
+  if (matchesEmail(ed, T2_SUFFIX_SET, T2_PROVIDER_SET)) return 'T2'
+  if (matchesEmail(ed, T3_SUFFIX_SET, T3_PROVIDER_SET)) return 'T3'
   const tld = urlTldOf(url)
-  if (T1_URL_TLDS.includes(tld)) return 'T1'
-  if (T2_URL_TLDS.includes(tld)) return 'T2'
-  if (T3_URL_TLDS.includes(tld)) return 'T3'
+  if (T1_TLD_SET.has(tld)) return 'T1'
+  if (T2_TLD_SET.has(tld)) return 'T2'
+  if (T3_TLD_SET.has(tld)) return 'T3'
   return ''
+}
+
+/**
+ * The country (upper-case two-letter code) of the FIRST Tier 3 signal classifyTier uses: the e-mail provider or e-mail suffix, else the url TLD.
+ * '' when classifyTier does not say T3. Used by the hard-keep policy (lib/ingest-filter.ts).
+ */
+export function t3CountryOf(email: string, url: string): string {
+  const ed = emailDomainOf(email)
+  if (matchesEmail(ed, T1_SUFFIX_SET, T1_PROVIDER_SET) || matchesEmail(ed, T2_SUFFIX_SET, T2_PROVIDER_SET)) return ''
+  const provider = T3_PROVIDER_COUNTRY.get(ed)
+  if (provider) return provider
+  for (let i = ed.indexOf('.'); i !== -1; i = ed.indexOf('.', i + 1)) {
+    const suffix = ed.slice(i)
+    if (T3_SUFFIX_SET.has(suffix)) return suffix.slice(1).toUpperCase()
+  }
+  const tld = urlTldOf(url)
+  if (T1_TLD_SET.has(tld) || T2_TLD_SET.has(tld)) return ''
+  return T3_TLD_SET.has(tld) ? tld.toUpperCase() : ''
 }
 
 /** All valid tier values (including empty = untiered) */
