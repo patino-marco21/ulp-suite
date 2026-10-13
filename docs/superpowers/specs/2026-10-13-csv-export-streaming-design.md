@@ -1,7 +1,7 @@
 # CSV export beyond 10,000 rows — Design
 
 Date: 2026-10-13
-Status: **written for the owner's review; nothing is built.** The owner approved the design in chat on 2026-10-13 and chose the direct streamed download over a background file. One detail below is a refinement of what was presented (the response starts when ClickHouse has its first rows, not before); it is marked. The repository is public: this file holds numbers only, never real addresses, file names or search terms.
+Status: **implemented on 2026-10-13** (plan `docs/superpowers/plans/2026-10-13-csv-export-streaming.md`). The owner approved the design in chat on 2026-10-13 and chose the direct streamed download over a background file. One detail is a refinement of what was presented (the response starts when ClickHouse has its first rows, not before). The repository is public: this file holds numbers only, never real addresses, file names or search terms.
 
 ## Why
 

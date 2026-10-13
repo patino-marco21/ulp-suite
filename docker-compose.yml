@@ -181,6 +181,7 @@ services:
       DEDUP_CRON_HOURS: ${DEDUP_CRON_HOURS:-24}
       DEDUP_CRON_HOUR_UTC: ${DEDUP_CRON_HOUR_UTC:-4}
       DEDUP_MIN_EXCESS: ${DEDUP_MIN_EXCESS:-1000}
+      DEDUP_STATS_MIN_FREE_BYTES: ${DEDUP_STATS_MIN_FREE_BYTES:-42949672960}
       CONTENT_DEDUP_BUCKET_COUNT: ${CONTENT_DEDUP_BUCKET_COUNT:-32}
       # Disk-space watcher (lib/disk-watch.ts) -- optional; forwarded explicitly (see above).
       # Empty values fall back to the defaults in code (check every 10 min; warn below the larger of

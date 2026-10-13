@@ -20,6 +20,7 @@ ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores 
 - **Credential search** — query by email, domain, URL, password, or breach name; separate terms with commas (every term must match) and put `-` in front of a term to exclude it
 - **Search in** — a dropdown beside the search box: *All fields* (the default), *Login (whole word)* (about 0.2 s on 1.8 billion rows) or *Login (contains)* (anywhere in the login, a scan of the login column, about 25 s). `login:name` in the box always means a whole word in the login, whatever the dropdown says (`-login:name` excludes). A full address (`name@host`) is an exact match that also tries the common capitalisations (`Name@host`, `NAME@HOST`); *Login (contains)* ignores case completely. Case is folded for ASCII letters only. A search for the literal text `login:…` now means the scope.
 - **Batch lookup** — paste up to 100 emails and get all matches in one request; CSV export
+- **Export** — CSV, ULP (`url:login:pass`), `login:pass` and NDJSON exports stream up to 1,000,000 rows (about 215 MiB as CSV) with a running row count on the button; JSON keeps 10,000. "Since last export" only moves when the file was not cut (a result of exactly 1,000,000 rows counts as possibly cut). A broad newest-first export can take about two minutes to start.
 - **Breach explorer** — browse all imported breach sources with credential counts and metadata
 
 ### Upload & Ingestion
@@ -358,6 +359,7 @@ The app supports scheduled or manual dedup — **report-only until you opt in**:
 CONTENT_DEDUP_APPLY=true   # allow the background ALTER … DELETE
 DEDUP_CRON_HOURS=24        # 0 disables the scheduled job
 DEDUP_MIN_EXCESS=1000      # skip the (heavy) rewrite below this many excess rows (the 1.39B-row deployment uses 14000000, ~1% of the table)
+DEDUP_STATS_MIN_FREE_BYTES=42949672960   # the daily duplicate count spills to disk (13.8 GiB at 1.84B rows); it skips itself with less free space than this (default 40 GiB)
 ```
 
 ### Ingest tier filter — permanently reject T3
