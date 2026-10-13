@@ -31,6 +31,7 @@ import {
   IMPORTED_PRESETS, epochSecondsToIso, localInputToUtcIso, utcEpochToLocalInput, utcIsoToDisplay,
   searchFingerprint, readMark, writeMark, markStorageKey, sinceLastExportWindow, markAfterExport, type ExportMark,
 } from "@/lib/imported-range-client"
+import { SEARCH_SCOPE_OPTIONS, SEARCH_SCOPE_PLACEHOLDERS, SEARCH_SCOPE_TITLE, type SearchScope } from '@/lib/search-scope'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -656,6 +657,7 @@ export default function CredentialsPage() {
 
   // Basic filters
   const [q, setQ]                     = useState('')
+  const [scope, setScope]               = useState<SearchScope>('all')
   const [domain, setDomain]           = useState('')
   const [breach, setBreach]           = useState('')
   const [loginType, setLoginType]     = useState('')
@@ -703,6 +705,7 @@ export default function CredentialsPage() {
     const ps = new URLSearchParams({ limit: String(effectiveLimit), sort: effectiveSort })
     if (cursor) ps.set('cursor', cursor)
     if (effectiveQ.trim())     ps.set('q', effectiveQ.trim())
+    if (scope !== 'all')       ps.set('scope', scope)
     if (effectiveDomain)       ps.set('domain', effectiveDomain)
     if (breach)             ps.set('breach', breach)
     if (loginType)          ps.set('login_type', loginType)
@@ -726,7 +729,7 @@ export default function CredentialsPage() {
     if (regexMode)          ps.set('regex', '1')
     return ps
   }, [
-    q, domain, breach, loginType, pwMask, isCorporate, urlScheme, tierInclude, tierExclude, excludeNoise, dedupe,
+    q, scope, domain, breach, loginType, pwMask, isCorporate, urlScheme, tierInclude, tierExclude, excludeNoise, dedupe,
     importedAfter, importedBefore, pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode,
     sortKey, limit,
   ])
@@ -799,7 +802,7 @@ export default function CredentialsPage() {
   const applyFilters = () => { resetCursor(); load(null) }
 
   const clearAll = () => {
-    setQ(''); setDomain(''); setBreach(''); setLoginType(''); setPwMask([])
+    setQ(''); setScope('all'); setDomain(''); setBreach(''); setLoginType(''); setPwMask([])
     setIsCorporate(false); setUrlScheme(''); setTierInclude([]); setTierExclude([])
     setImportedAfter(''); setImportedBefore(''); setPwLenMin(''); setPwLenMax('')
     setEmailDomainFilter(''); setSourceFileFilter(''); setUrlHostFilter('')
@@ -864,7 +867,7 @@ export default function CredentialsPage() {
 
   // "The same search" for the since-last-export memory: every field that narrows the rows, none of date, sort, format or page size.
   const markKey = markStorageKey(searchFingerprint({
-    q, domain, breach, loginType, pwMask, isCorporate, urlScheme, tierInclude, tierExclude, pwLenMin, pwLenMax,
+    q, scope: scope === 'all' ? '' : scope, domain, breach, loginType, pwMask, isCorporate, urlScheme, tierInclude, tierExclude, pwLenMin, pwLenMax,
     emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode, excludeNoise, dedupe,
   }))
   useEffect(() => { setExportMark(readMark(browserStorage(), markKey)) }, [markKey])
@@ -910,6 +913,7 @@ export default function CredentialsPage() {
         body: JSON.stringify({
           format:        exportFmt,
           query:         q,
+          scope,
           domain,
           breach_name:   breach,
           tier_include:  tierInclude.join(','),
@@ -969,7 +973,7 @@ export default function CredentialsPage() {
     } finally {
       setExportLoading(false)
     }
-  }, [q, domain, breach, tierInclude, tierExclude, loginType, pwMask, urlScheme, isCorporate, sortKey, exportFmt,
+  }, [q, scope, domain, breach, tierInclude, tierExclude, loginType, pwMask, urlScheme, isCorporate, sortKey, exportFmt,
       importedAfter, importedBefore, exportMark, markKey,
       pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode, excludeNoise, dedupe,
       toast])
@@ -979,7 +983,7 @@ export default function CredentialsPage() {
     t === 'T2' ? 'bg-blue-500/10 text-blue-600 border-blue-500/20' :
     t === 'T3' ? 'bg-amber-500/10 text-amber-600 border-amber-500/20' : ''
 
-  const hasBasicFilters = !!(q || domain || breach || loginType || pwMask.length || isCorporate || urlScheme || tierInclude.length || tierExclude.length)
+  const hasBasicFilters = !!(q || scope !== 'all' || domain || breach || loginType || pwMask.length || isCorporate || urlScheme || tierInclude.length || tierExclude.length)
   const hasAdvFilters   = !!(importedAfter || importedBefore || pwLenMin || pwLenMax || emailDomainFilter || sourceFileFilter || urlHostFilter || regexMode)
   const hasFilters      = hasBasicFilters || hasAdvFilters
 
@@ -1103,9 +1107,20 @@ export default function CredentialsPage() {
             value={q}
             onChange={e => setQ(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && applyFilters()}
-            placeholder={regexMode ? 'RE2 regex pattern…' : 'Search URL / email / password…'}
+            placeholder={regexMode ? 'RE2 regex pattern…' : SEARCH_SCOPE_PLACEHOLDERS[scope]}
             className="flex-1 font-mono text-sm h-8"
           />
+          <select
+            value={scope}
+            onChange={e => setScope(e.target.value as SearchScope)}
+            className={selectCls}
+            aria-label="Search in"
+            title={SEARCH_SCOPE_TITLE}
+          >
+            {SEARCH_SCOPE_OPTIONS.map(o => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
           <Input
             value={domain}
             onChange={e => setDomain(e.target.value)}
