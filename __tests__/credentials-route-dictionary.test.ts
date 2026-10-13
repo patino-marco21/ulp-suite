@@ -171,9 +171,9 @@ describe('GET /api/credentials — everything else is today\'s query, untouched'
     expect(plainTotals()).toHaveLength(1)
   })
 
+  // A single word is no longer in this list: it has its own plan on the same dictionary (credentials-route-words.test.ts).
   test.each([
     ['regex mode', 'q=ledger.com&regex=1'],
-    ['a single word', 'q=ledger'],
     ['two terms', 'q=ledger.com,trezor.io'],
     ['an @domain', 'q=@ledger.com'],
     ['a negated term', 'q=-ledger.com'],

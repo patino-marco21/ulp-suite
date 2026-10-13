@@ -21,9 +21,12 @@ import {
 import { runNewestFirst, dedupeRows } from "@/lib/newest-first"
 import {
   dictionaryTermFromQuery, resolveDictionaryCandidates, buildDictionaryRowsSql, buildDictionaryTotalsSql, type DictionaryCandidates,
+  wordTermFromQuery, resolveWordCandidates, wordTextBranch,
 } from "@/lib/search-dictionary-plan"
 import { substringNeedleFromQuery, resolveSubstringChoice, substringConjunct, type SubstringChoice } from "@/lib/search-substring-plan"
-import { runWithBudget, SUBSTRING_BUDGET_SECONDS, PLAN_PROJECTIONS_OFF } from "@/lib/search-plan-gate"
+import {
+  runWithBudget, probeTokenHits, wordRowsCandidatesFit, wordRowsGate, SUBSTRING_BUDGET_SECONDS, PLAN_PROJECTIONS_OFF, WORD_ROWS_BUDGET_SECONDS, WORD_TOTALS_BUDGET_SECONDS,
+} from "@/lib/search-plan-gate"
 
 export const dynamic = 'force-dynamic'
 
@@ -115,8 +118,8 @@ const DEDUPE_WINDOW_FACTOR = 3
  *   dedupe        '1'       collapse exact (url,email,password) duplicates (one row each)
  *   skip_totals   '1'       data query only: total / raw_total come back null
  *   totals_only   '1'       totals only (no rows): { total, raw_total, query_ms, timed_out, plan }
- *   dictionary    '0'       run the plain query even when the domain search dictionary could answer (parity tests, scripts)
- *   token_plans   '0'       run the plain query even when a token plan (the substring plan) could answer (parity tests, scripts)
+ *   dictionary    '0'       run the plain query even when the domain search dictionary could answer, which also switches the word plan off (parity tests, scripts)
+ *   token_plans   '0'       run the plain query even when a token plan (the substring plan, the word plan) could answer (parity tests, scripts)
  */
 export async function GET(request: NextRequest) {
   const user = await validateRequest(request)
@@ -294,6 +297,18 @@ export async function GET(request: NextRequest) {
     return (substringMemo ??= resolveSubstringChoice(substringNeedle))
   }
 
+  // Word plan (lib/search-dictionary-plan.ts): a search for exactly one word is answered from the two dictionaries of the domain search in three disjoint
+  // branches: the text indexes alone (the word as a whole token of the URL, login or password) and the hosts and e-mail domains that merely CONTAIN the
+  // word, which the dictionaries list. Totals whenever the candidates fit the dictionary caps; rows only for a rare word (lib/search-plan-gate.ts,
+  // wordRowsGate), because today's rows query stops after 200 rows and for a plentiful word the plan has to find 200 in each branch. null = this
+  // request keeps today's query. dictionary=0 and token_plans=0 force it.
+  const wordTerm = sp.get('dictionary') === '0' || sp.get('token_plans') === '0' ? null : wordTermFromQuery(q.trim(), regex, scope)
+  let wordMemo: Promise<DictionaryCandidates | null> | null = null
+  const getWordCandidates = (): Promise<DictionaryCandidates | null> => {
+    if (!wordTerm) return Promise.resolve(null)
+    return (wordMemo ??= resolveWordCandidates(wordTerm))
+  }
+
   try {
     const t0 = Date.now()
 
@@ -340,7 +355,7 @@ export async function GET(request: NextRequest) {
     const runPlainTotals = (): Promise<TotalsRows> => executeQuery(totalsSql(todaysTotals), params)
     // The same two numbers from the dictionary's candidates: one aggregate per disjoint branch, merged as aggregate states so the figure equals the
     // single scan's. Any failure falls back to the plain count (which breaks on a timeout instead of throwing, so there is nothing to re-raise).
-    let totalsPlan: 'dictionary' | 'substring' | 'plain' = 'plain'
+    let totalsPlan: 'dictionary' | 'words' | 'substring' | 'plain' = 'plain'
     const runTotals = async (): Promise<TotalsRows> => {
       const candidates = await getCandidates()
       if (candidates) {
@@ -353,6 +368,22 @@ export async function GET(request: NextRequest) {
             return answered
           } catch (err) {
             console.warn('[credentials] dictionary totals failed -- using the plain count:', err instanceof Error ? err.message : String(err))
+          }
+        }
+      }
+      // The word plan: three disjoint branches merged as aggregate states, within its own budget (an overrun throws, so it is today's count that runs).
+      const wordCandidates = await getWordCandidates()
+      if (wordCandidates) {
+        const text = wordTextBranch(whereRaw, qClause)
+        const sql = text && buildDictionaryTotalsSql({
+          whereRaw, dedupe, hasUserFilter, onlyIf: excludeNoise ? NOISE_FILTER : undefined, candidates: wordCandidates,
+          text, maxSeconds: WORD_TOTALS_BUDGET_SECONDS, overflow: 'throw',
+        })
+        if (sql) {
+          const outcome = await runWithBudget('word totals', () => executeQuery(sql, params) as Promise<TotalsRows>)
+          if (outcome.ok) {
+            totalsPlan = 'words'
+            return outcome.value
           }
         }
       }
@@ -434,7 +465,7 @@ export async function GET(request: NextRequest) {
     // 27,263 from the projection with the plain spelling). A window that reaches the older partition
     // (no projection there) keeps them: without them its base-table scan took 28 s instead of 17 s. Not ready (projection not rebuilt yet) or a window error that is not a timeout:
     // the plain query answers, as it always did. A timeout is not retried: the plain query would take at least as long.
-    let plan: 'windows' | 'plain' | 'dictionary' | 'substring' = 'plain'
+    let plan: 'windows' | 'plain' | 'dictionary' | 'words' | 'substring' = 'plain'
 
     // The rows from the dictionary's candidates (lib/search-dictionary-plan.ts), or the plain query when the term is not eligible, the dictionary is
     // not fresh, a cap is exceeded, or the plan fails for any reason but a timeout. A timeout is not retried: the plain query would take at least as long.
@@ -457,6 +488,26 @@ export async function GET(request: NextRequest) {
             const msg = err instanceof Error ? err.message : String(err)
             if (msg.includes('TIMEOUT_EXCEEDED') || msg.includes('timeout') || msg.includes('Timeout')) throw err
             console.warn('[credentials] dictionary plan failed -- using the plain query:', msg)
+          }
+        }
+      }
+      // The word plan, for a rare word only (the gate), within its own budget: an overrun or a failure runs today's query. The text indexes are probed only
+      // for a word whose candidates already fit, so a word that cannot qualify costs no extra query.
+      if (wordTerm) {
+        const wordCandidates = await getWordCandidates()
+        if (wordCandidates && wordRowsCandidatesFit(wordCandidates) && wordRowsGate(wordCandidates, await probeTokenHits(wordTerm.word))) {
+          const text = wordTextBranch(where, qClause)
+          const sql = text && buildDictionaryRowsSql({
+            where, cursorClause, orderBy, dedupe, dedupeInWindow,
+            rawCols: RAW_COLS, selectList: SELECT, sortMaxMemoryBytes: SORT_MAX_MEMORY_BYTES, normColsSetting: NORM_COLS_SETTING, candidates: wordCandidates,
+            text, maxSeconds: WORD_ROWS_BUDGET_SECONDS,
+          })
+          if (sql) {
+            const outcome = await runWithBudget('word rows', () => executeQuery(sql, dataParams) as Promise<unknown[]>)
+            if (outcome.ok) {
+              plan = 'words'
+              return outcome.value
+            }
           }
         }
       }
@@ -541,7 +592,7 @@ export async function GET(request: NextRequest) {
       query_ms,
       timed_out,
       sort:        sortKey,
-      // Which plan answered the rows: 'windows' (lib/newest-first.ts), 'dictionary' (lib/search-dictionary-plan.ts), 'substring' (lib/search-substring-plan.ts) or 'plain'.
+      // Which plan answered the rows: 'windows' (lib/newest-first.ts), 'dictionary' and 'words' (lib/search-dictionary-plan.ts), 'substring' (lib/search-substring-plan.ts) or 'plain'.
       plan,
     })
   } catch (error) {

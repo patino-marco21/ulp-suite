@@ -60,12 +60,14 @@ export const WORD_ROWS_BUDGET_SECONDS = 4
 /** The totals plan may take this long (the slowest measured took 8.7 s, today's 13-22 s); over it, today's count runs. */
 export const WORD_TOTALS_BUDGET_SECONDS = 12
 
+/** The first half of the rows gate, free of any query: the candidate sets are small. The route checks it before it spends the probe on the text indexes. */
+export function wordRowsCandidatesFit(c: { domains: string[]; emailDomains: string[] }, env: Env = process.env): boolean {
+  return c.domains.length <= wordRowsMaxDomains(env) && c.emailDomains.length <= wordRowsMaxEmailDomains(env)
+}
+
 /** Whether the rows request may use the word plan: the candidates and the text-index hit count (the capped probe; null = the probe failed) are all small. */
 export function wordRowsGate(c: { domains: string[]; emailDomains: string[] }, textHits: number | null, env: Env = process.env): boolean {
-  return textHits !== null
-    && textHits <= wordRowsMaxTextHits(env)
-    && c.domains.length <= wordRowsMaxDomains(env)
-    && c.emailDomains.length <= wordRowsMaxEmailDomains(env)
+  return textHits !== null && textHits <= wordRowsMaxTextHits(env) && wordRowsCandidatesFit(c, env)
 }
 
 const PROBE_TIMEOUT_SECONDS = 8

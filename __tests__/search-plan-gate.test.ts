@@ -5,7 +5,7 @@ vi.mock('@/lib/clickhouse', () => ({ executeQuery: vi.fn(), getClient: vi.fn() }
 import {
   searchTokenPlansEnabled, isTimeoutError, runWithBudget, probeTokenHits, resetSearchPlanGateCache,
   SUBSTRING_GATE_HITS, SUBSTRING_BUDGET_SECONDS, SUBSTRING_MAX_PROBES, PROBE_CAP_ROWS, PLAN_PROJECTIONS_OFF,
-  wordRowsMaxDomains, wordRowsMaxEmailDomains, wordRowsMaxTextHits, wordRowsGate, WORD_ROWS_BUDGET_SECONDS, WORD_TOTALS_BUDGET_SECONDS,
+  wordRowsMaxDomains, wordRowsMaxEmailDomains, wordRowsMaxTextHits, wordRowsCandidatesFit, wordRowsGate, WORD_ROWS_BUDGET_SECONDS, WORD_TOTALS_BUDGET_SECONDS,
 } from '@/lib/search-plan-gate'
 
 beforeEach(() => { resetSearchPlanGateCache() })
@@ -161,6 +161,13 @@ describe('the word plan\'s rows gate and budgets', () => {
     expect(wordRowsGate(cands(301, 100), 20_000, {})).toBe(false)
     expect(wordRowsGate(cands(300, 101), 20_000, {})).toBe(false)
     expect(wordRowsGate(cands(300, 100), 20_001, {})).toBe(false)
+  })
+
+  test('the candidate half of the gate needs no query: the route checks it before it probes the text indexes', () => {
+    expect(wordRowsCandidatesFit(cands(300, 100), {})).toBe(true)
+    expect(wordRowsCandidatesFit(cands(301, 100), {})).toBe(false)
+    expect(wordRowsCandidatesFit(cands(300, 101), {})).toBe(false)
+    expect(wordRowsCandidatesFit(cands(1000, 200), { SEARCH_WORD_ROWS_MAX_DOMAINS: '3000', SEARCH_WORD_ROWS_MAX_EMAIL_DOMAINS: '300' })).toBe(true)
   })
 
   test('a probe that failed (null) closes the gate: today\'s rows query runs', () => {
