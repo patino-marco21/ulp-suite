@@ -39,6 +39,35 @@ export const PROBE_CAP_ROWS = SUBSTRING_GATE_HITS + 1
  */
 export const PLAN_PROJECTIONS_OFF = 'optimize_use_projections = 0'
 
+// ── the word plan (plan 2026-10-13-word-search-plan.md) ──────────────────────────────────────────────────────────────────────
+
+function envInt(value: string | undefined, fallback: number): number {
+  if (value === undefined || value.trim() === '') return fallback
+  const n = Number(value)
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback
+}
+
+/**
+ * The rows of a single-word search come from the word plan only for a RARE word: today's rows query stops reading as soon as it has 200 rows, while the
+ * plan has to find 200 inside each of its three branches. The three numbers are the largest candidate sets and text-index hit count at which the plan
+ * still measured at least as fast as today's query; they are tunable by the environment (the calibration run of the plan raises them to measure).
+ */
+export const wordRowsMaxDomains = (env: Env = process.env): number => envInt(env.SEARCH_WORD_ROWS_MAX_DOMAINS, 300)
+export const wordRowsMaxEmailDomains = (env: Env = process.env): number => envInt(env.SEARCH_WORD_ROWS_MAX_EMAIL_DOMAINS, 100)
+export const wordRowsMaxTextHits = (env: Env = process.env): number => envInt(env.SEARCH_WORD_ROWS_MAX_TEXT_HITS, 20_000)
+/** The rows plan may take this long (today's rows query takes 10-17 s for a rare word); over it, today's query runs. */
+export const WORD_ROWS_BUDGET_SECONDS = 4
+/** The totals plan may take this long (the slowest measured took 8.7 s, today's 13-22 s); over it, today's count runs. */
+export const WORD_TOTALS_BUDGET_SECONDS = 12
+
+/** Whether the rows request may use the word plan: the candidates and the text-index hit count (the capped probe; null = the probe failed) are all small. */
+export function wordRowsGate(c: { domains: string[]; emailDomains: string[] }, textHits: number | null, env: Env = process.env): boolean {
+  return textHits !== null
+    && textHits <= wordRowsMaxTextHits(env)
+    && c.domains.length <= wordRowsMaxDomains(env)
+    && c.emailDomains.length <= wordRowsMaxEmailDomains(env)
+}
+
 const PROBE_TIMEOUT_SECONDS = 8
 const VERDICT_TTL_MS = 600_000
 const FAILURE_TTL_MS = 60_000

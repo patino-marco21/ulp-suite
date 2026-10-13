@@ -5,6 +5,7 @@ vi.mock('@/lib/clickhouse', () => ({ executeQuery: vi.fn(), getClient: vi.fn() }
 import {
   searchTokenPlansEnabled, isTimeoutError, runWithBudget, probeTokenHits, resetSearchPlanGateCache,
   SUBSTRING_GATE_HITS, SUBSTRING_BUDGET_SECONDS, SUBSTRING_MAX_PROBES, PROBE_CAP_ROWS, PLAN_PROJECTIONS_OFF,
+  wordRowsMaxDomains, wordRowsMaxEmailDomains, wordRowsMaxTextHits, wordRowsGate, WORD_ROWS_BUDGET_SECONDS, WORD_TOTALS_BUDGET_SECONDS,
 } from '@/lib/search-plan-gate'
 
 beforeEach(() => { resetSearchPlanGateCache() })
@@ -133,5 +134,40 @@ describe('probeTokenHits', () => {
     expect(run).toHaveBeenCalledTimes(520)
     await probeTokenHits('w0', { run })
     expect(run).toHaveBeenCalledTimes(521)
+  })
+})
+
+describe('the word plan\'s rows gate and budgets', () => {
+  const cands = (d: number, e: number) => ({ domains: Array.from({ length: d }, (_, i) => `d${i}.test`), emailDomains: Array.from({ length: e }, (_, i) => `e${i}.test`) })
+
+  test('the starting values (spec 2026-10-13) and their budgets', () => {
+    expect(wordRowsMaxDomains({})).toBe(300)
+    expect(wordRowsMaxEmailDomains({})).toBe(100)
+    expect(wordRowsMaxTextHits({})).toBe(20_000)
+    expect(WORD_ROWS_BUDGET_SECONDS).toBe(4)
+    expect(WORD_TOTALS_BUDGET_SECONDS).toBe(12)
+  })
+
+  test('the environment moves them; a junk value keeps the default', () => {
+    expect(wordRowsMaxDomains({ SEARCH_WORD_ROWS_MAX_DOMAINS: '3000' })).toBe(3000)
+    expect(wordRowsMaxEmailDomains({ SEARCH_WORD_ROWS_MAX_EMAIL_DOMAINS: '300' })).toBe(300)
+    expect(wordRowsMaxTextHits({ SEARCH_WORD_ROWS_MAX_TEXT_HITS: '50001' })).toBe(50_001)
+    for (const junk of ['', 'abc', '-5', 'NaN']) expect(wordRowsMaxDomains({ SEARCH_WORD_ROWS_MAX_DOMAINS: junk }), junk).toBe(300)
+  })
+
+  test('the gate: all three numbers at or under their limits', () => {
+    expect(wordRowsGate(cands(0, 0), 0, {})).toBe(true)
+    expect(wordRowsGate(cands(300, 100), 20_000, {})).toBe(true)
+    expect(wordRowsGate(cands(301, 100), 20_000, {})).toBe(false)
+    expect(wordRowsGate(cands(300, 101), 20_000, {})).toBe(false)
+    expect(wordRowsGate(cands(300, 100), 20_001, {})).toBe(false)
+  })
+
+  test('a probe that failed (null) closes the gate: today\'s rows query runs', () => {
+    expect(wordRowsGate(cands(1, 1), null, {})).toBe(false)
+  })
+
+  test('the gate reads the environment it is given', () => {
+    expect(wordRowsGate(cands(1000, 200), 30_000, { SEARCH_WORD_ROWS_MAX_DOMAINS: '3000', SEARCH_WORD_ROWS_MAX_EMAIL_DOMAINS: '300', SEARCH_WORD_ROWS_MAX_TEXT_HITS: '50001' })).toBe(true)
   })
 })
