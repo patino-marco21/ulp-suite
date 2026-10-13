@@ -35,7 +35,7 @@ describe('Credentials page — the imported window', () => {
     expect(doExport).toContain("res.headers.get('X-Export-Truncated') === '1'")
     expect(doExport).toContain('markAfterExport(')
     expect(doExport).toContain('writeMark(browserStorage(), markKey, next)')
-    expect(doExport).toContain('Export stopped at 10,000 rows')
+    expect(doExport).toContain("Export stopped at ${(cap > 0 ? cap : 10_000).toLocaleString('en-US')} rows")
   })
 
   test('the since-last-export memory is keyed by the search, not by dates, sort or format', () => {

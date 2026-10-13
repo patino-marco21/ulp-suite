@@ -32,6 +32,7 @@ import {
   searchFingerprint, readMark, writeMark, markStorageKey, sinceLastExportWindow, markAfterExport, type ExportMark,
 } from "@/lib/imported-range-client"
 import { SEARCH_SCOPE_OPTIONS, SEARCH_SCOPE_PLACEHOLDERS, SEARCH_SCOPE_TITLE, type SearchScope } from '@/lib/search-scope'
+import { readCountedStream } from '@/lib/export-stream-client'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -647,6 +648,8 @@ export default function CredentialsPage() {
   const [data, setData]               = useState<ApiResult | null>(null)
   const [loading, setLoading]         = useState(true)
   const [exportLoading, setExportLoading] = useState(false)
+  // Rows received so far by a streamed export (null until the first rows arrive).
+  const [exportRows, setExportRows]       = useState<number | null>(null)
   const [cursorStack, setCursorStack]     = useState<Array<string | null>>([])
   const [currentCursor, setCurrentCursor] = useState<string | null>(null)
   const resetCursor = () => { setCursorStack([]); setCurrentCursor(null) }
@@ -935,7 +938,18 @@ export default function CredentialsPage() {
         }),
       })
       if (!res.ok) throw new Error('Export failed')
-      const blob = await res.blob()
+      // A streamed export (X-Export-Cap) is read chunk by chunk and counted as it arrives; json comes back whole with its row count and
+      // truncation flag in headers.
+      const cap = Number(res.headers.get('X-Export-Cap') ?? 0) || 0
+      let blob: Blob
+      let streamedRows = 0
+      if (cap > 0 && res.body) {
+        const read = await readCountedStream(res.body, exportFmt === 'csv' ? 1 : 0, setExportRows)
+        blob = new Blob(read.chunks as BlobPart[], { type: res.headers.get('Content-Type') ?? 'text/plain' })
+        streamedRows = read.rows
+      } else {
+        blob = await res.blob()
+      }
       const url  = URL.createObjectURL(blob)
       const a    = document.createElement('a')
       a.href     = url
@@ -950,8 +964,8 @@ export default function CredentialsPage() {
 
       // Remember how far this search has been exported, but only when that keeps the chain gap-free (markAfterExport), and say so when the
       // 10,000-row cap cut the file: the rows between its last row and the window's end are not in it.
-      const truncated = res.headers.get('X-Export-Truncated') === '1'
-      const rows = Number(res.headers.get('X-Export-Rows') ?? 0) || 0
+      const truncated = cap > 0 ? streamedRows >= cap : res.headers.get('X-Export-Truncated') === '1'
+      const rows = cap > 0 ? streamedRows : Number(res.headers.get('X-Export-Rows') ?? 0) || 0
       const next = markAfterExport(
         exportMark,
         { lower: afterIso ? Date.parse(afterIso) / 1000 : null, upper: beforeIso ? Date.parse(beforeIso) / 1000 : null },
@@ -961,17 +975,18 @@ export default function CredentialsPage() {
       if (next) { writeMark(browserStorage(), markKey, next); setExportMark(next) }
       if (truncated) {
         toast({
-          title: 'Export stopped at 10,000 rows',
+          title: `Export stopped at ${(cap > 0 ? cap : 10_000).toLocaleString('en-US')} rows`,
           description: 'Narrow the imported window (or the search) to get the rest. "Since last export" was not moved.',
           variant: 'destructive',
         })
       } else {
-        toast({ title: 'Export started' })
+        toast({ title: cap > 0 ? `Exported ${rows.toLocaleString('en-US')} rows` : 'Export started' })
       }
     } catch {
       toast({ title: 'Export failed', variant: 'destructive' })
     } finally {
       setExportLoading(false)
+      setExportRows(null)
     }
   }, [q, scope, domain, breach, tierInclude, tierExclude, loginType, pwMask, urlScheme, isCorporate, sortKey, exportFmt,
       importedAfter, importedBefore, exportMark, markKey,
@@ -1084,7 +1099,7 @@ export default function CredentialsPage() {
                   ? <Loader2 className="h-3 w-3 animate-spin" />
                   : <Download className="h-3 w-3" />
                 }
-                Export
+                {exportLoading ? (exportRows === null ? 'Preparing…' : `${exportRows.toLocaleString('en-US')} rows`) : 'Export'}
               </Button>
             </div>
 
