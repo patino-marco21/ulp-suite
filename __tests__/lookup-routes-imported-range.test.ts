@@ -237,3 +237,18 @@ describe('GET /api/search (legacy, no UI caller) — imported_after / imported_b
     expect(calls).toHaveLength(0)
   })
 })
+
+describe('address searches keep the planner on the base table (v1 search and the legacy search)', () => {
+  test.each([
+    ['v1 search', v1Search, '/api/v1/search/credentials?q=ADDR'],
+    ['legacy search', legacySearch, '/api/search?q=ADDR'],
+  ] as const)('%s: both queries carry optimize_use_projections = 0 for an address, neither for a word', async (_name, handler, url) => {
+    await getUrl(handler, url.replace('ADDR', 'john@example.com'))
+    expect(queryCalls().length).toBeGreaterThanOrEqual(2)
+    for (const c of queryCalls()) expect(c.sql).toContain('optimize_use_projections = 0')
+    calls.length = 0
+    await getUrl(handler, url.replace('ADDR', 'maria'))
+    expect(queryCalls().length).toBeGreaterThanOrEqual(2)
+    for (const c of queryCalls()) expect(c.sql).not.toContain('optimize_use_projections')
+  })
+})

@@ -9,7 +9,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
 import { executeQuery } from "@/lib/clickhouse"
-import { parseULPQuery, buildULPWhere, isIndexNeutralSearch } from "@/lib/ulp-search"
+import { parseULPQuery, buildULPWhere, isIndexNeutralSearch, usesAddressIndex } from "@/lib/ulp-search"
+import { ADDRESS_LOOKUP_SETTING } from "@/lib/address-lookup"
 import { importedRangeFromSearchParams, importedRangeEchoIfSet, planImportedRange, importedRangeAndSql } from "@/lib/imported-range"
 import { decodeCursor, buildCursorWhere, encodeCursor } from "@/lib/cursor-pagination"
 
@@ -50,6 +51,8 @@ export async function GET(request: NextRequest) {
   try {
     const tokens = parseULPQuery(q)
     const { clause, params } = buildULPWhere(tokens)
+    // An address term is answered through idx_bf_email_lc, which only the base table can use (lib/address-lookup.ts).
+    const projectionOff = usesAddressIndex(tokens) ? `,\n                      ${ADDRESS_LOOKUP_SETTING}` : ''
     // The rows are ORDER BY imported_at DESC (a time-ordered query) and the count is an aggregate: both may use proj_imported_desc, but
     // only for a search whose predicates mean the same on a projection (lib/imported-range.ts, planImportedRange).
     const indexNeutral = isIndexNeutralSearch(tokens)
@@ -85,7 +88,7 @@ export async function GET(request: NextRequest) {
              SETTINGS optimize_trivial_count_query = 1,
                       max_execution_time = 300,
                       timeout_overflow_mode = 'break',
-                      use_query_cache = 0`,
+                      use_query_cache = 0${projectionOff}`,
             { ...params, ...totalRange.params }
           ),
       // Data: throw mode on timeout so we return a 408 instead of silent 0 rows
@@ -97,7 +100,7 @@ export async function GET(request: NextRequest) {
          ORDER BY imported_at DESC LIMIT {limit:UInt32}${usingCursor ? '' : ' OFFSET {offset:UInt32}'}
          SETTINGS max_execution_time = 300,
                   timeout_overflow_mode = 'throw',
-                  http_wait_end_of_query = 1`,
+                  http_wait_end_of_query = 1${projectionOff}`,
         { ...params, ...cursorParams, ...rowsRange.params, limit, ...(usingCursor ? {} : { offset }) }
       ),
     ])

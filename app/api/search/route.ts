@@ -1,7 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { executeQuery } from "@/lib/clickhouse"
 import { validateRequest } from "@/lib/auth"
-import { parseULPQuery, buildULPWhere, buildULPWhereRegex } from "@/lib/ulp-search"
+import { parseULPQuery, buildULPWhere, buildULPWhereRegex, usesAddressIndex } from "@/lib/ulp-search"
+import { ADDRESS_LOOKUP_SETTING } from "@/lib/address-lookup"
 import { importedRangeFromSearchParams, hasImportedRange, importedRangePlain, importedRangeAndSql } from "@/lib/imported-range"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
@@ -89,6 +90,8 @@ export async function GET(request: NextRequest) {
   const { clause, params: baseParams } = regexMode
     ? buildULPWhereRegex(tokens)
     : buildULPWhere(tokens)
+  // An address term is answered through idx_bf_email_lc, which only the base table can use (lib/address-lookup.ts).
+  const projectionOff = usesAddressIndex(tokens, regexMode) ? `,\n                  ${ADDRESS_LOOKUP_SETTING}` : ''
 
   // Extra WHERE fragments
   const extras: string[] = []
@@ -141,7 +144,7 @@ export async function GET(request: NextRequest) {
          SETTINGS optimize_trivial_count_query = 1,
                   max_execution_time = 300,
                   timeout_overflow_mode = 'break',
-                  use_query_cache = 0`,
+                  use_query_cache = 0${projectionOff}`,
         mergedParams
       ),
       executeQuery(
@@ -156,7 +159,7 @@ export async function GET(request: NextRequest) {
          SETTINGS max_execution_time = 300,
                   timeout_overflow_mode = 'throw',
                   http_wait_end_of_query = 1,
-                  ${NORM_COLS_SETTING}`,
+                  ${NORM_COLS_SETTING}${projectionOff}`,
         allParams
       ),
     ])

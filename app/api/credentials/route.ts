@@ -1,7 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { executeQuery } from "@/lib/clickhouse"
 import { validateRequest } from "@/lib/auth"
-import { parseULPQuery, buildULPWhere, buildULPWhereRegex, isIndexNeutralSearch } from "@/lib/ulp-search"
+import { parseULPQuery, buildULPWhere, buildULPWhereRegex, isIndexNeutralSearch, usesAddressIndex } from "@/lib/ulp-search"
+import { ADDRESS_LOOKUP_SETTING } from "@/lib/address-lookup"
 import { parseSearchScope } from "@/lib/search-scope"
 import { importedRangeFromSearchParams, hasImportedRange, importedRangePlain, planImportedRange } from "@/lib/imported-range"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
@@ -216,6 +217,9 @@ export async function GET(request: NextRequest) {
   // proj_imported_desc's key) is used only for an index-neutral search and a projection that is ready; with no lower bound this costs
   // nothing (no readiness query).
   const runMeta = (sql: string) => executeQuery(sql) as Promise<Array<Record<string, unknown>>>
+  // An address term is answered through idx_bf_email_lc, which only the base table can use (lib/address-lookup.ts).
+  const addressSearch = usesAddressIndex(searchTokens, regex)
+  const addressSettingLine = addressSearch ? `${ADDRESS_LOOKUP_SETTING},` : ''
   const indexNeutral = isIndexNeutralSearch(searchTokens, regex)
   const rowsRange = wantData
     ? await planImportedRange(importedRange, { shape: /^imported_at\b/.test(orderBy) ? 'time' : 'other', indexNeutral, run: runMeta })
@@ -310,7 +314,7 @@ export async function GET(request: NextRequest) {
            SETTINGS optimize_trivial_count_query = 1,
                     max_execution_time = 300,
                     timeout_overflow_mode = 'break',
-                    use_query_cache = 0${hasImportedRange(importedRange) ? '' : ',\n                    optimize_use_projections = 0'}`,
+                    use_query_cache = 0${hasImportedRange(importedRange) && !addressSearch ? '' : `,\n                    ${ADDRESS_LOOKUP_SETTING}`}`,
           params
         )
     // The same two numbers from the dictionary's candidates: one aggregate per disjoint branch, merged as aggregate states so the figure equals the
@@ -362,6 +366,7 @@ export async function GET(request: NextRequest) {
                   timeout_overflow_mode = 'throw',
                   http_wait_end_of_query = 1,
                   max_bytes_before_external_sort = ${SORT_MAX_MEMORY_BYTES},
+                  ${addressSettingLine}
                   ${NORM_COLS_SETTING}`
           : `SELECT ${SELECT}
          FROM (
@@ -376,6 +381,7 @@ export async function GET(request: NextRequest) {
                   timeout_overflow_mode = 'throw',
                   http_wait_end_of_query = 1,
                   max_bytes_before_external_sort = ${SORT_MAX_MEMORY_BYTES},
+                  ${addressSettingLine}
                   ${NORM_COLS_SETTING}`,
         dedupeInWindow ? { ...allParams, windowLimit: limit * DEDUPE_WINDOW_FACTOR } : allParams
       ) as Promise<unknown[]>

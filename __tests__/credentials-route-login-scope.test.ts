@@ -111,3 +111,31 @@ describe('GET /api/credentials — the domain dictionary shortcut stays out of t
     expect(calls.filter(isLookup)).toHaveLength(0)
   })
 })
+
+describe('GET /api/credentials — an address search keeps the planner on the base table', () => {
+  test('rows and totals carry optimize_use_projections = 0', async () => {
+    await get('q=john.smith@example.com&skip_totals=1&dedupe=0')
+    await get('q=john.smith@example.com&totals_only=1&dedupe=0')
+    const queries = calls.map(c => c.sql).filter(s => /FROM ulp\.credentials/.test(s))
+    expect(queries.length).toBeGreaterThanOrEqual(2)
+    for (const sql of queries) expect(sql).toContain('optimize_use_projections = 0')
+  })
+
+  test('the totals keep it when an imported range is set; a word search drops it there', async () => {
+    const range = 'imported_after=2026-08-28T23:30:00Z'
+    await get(`q=john.smith@example.com&${range}&totals_only=1&dedupe=0`)
+    const addressTotals = calls.map(c => c.sql).filter(s => /AS raw_total/.test(s))
+    expect(addressTotals.length).toBeGreaterThan(0)
+    expect(addressTotals.every(s => s.includes('optimize_use_projections = 0'))).toBe(true)
+    calls.length = 0
+    await get(`q=maria&${range}&totals_only=1&dedupe=0`)
+    expect(calls.map(c => c.sql).filter(s => /AS raw_total/.test(s)).some(s => s.includes('optimize_use_projections'))).toBe(false)
+  })
+
+  test("a word search keeps today's settings in its row query", async () => {
+    await get('q=maria&skip_totals=1&dedupe=0')
+    const rows = calls.map(c => c.sql).filter(s => /\) AS t\s/.test(s))
+    expect(rows.length).toBeGreaterThan(0)
+    for (const sql of rows) expect(sql).not.toContain('optimize_use_projections')
+  })
+})

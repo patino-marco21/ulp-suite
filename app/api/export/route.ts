@@ -1,7 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { executeQuery, getClient } from "@/lib/clickhouse"
 import { validateRequest } from "@/lib/auth"
-import { parseULPQuery, buildULPWhere, buildULPWhereRegex, isIndexNeutralSearch } from "@/lib/ulp-search"
+import { parseULPQuery, buildULPWhere, buildULPWhereRegex, isIndexNeutralSearch, usesAddressIndex } from "@/lib/ulp-search"
+import { ADDRESS_LOOKUP_SETTING } from "@/lib/address-lookup"
 import { parseSearchScope, type SearchScope } from "@/lib/search-scope"
 import { EXPORT_ROW_CAP, JSON_EXPORT_ROW_CAP, STREAM_FORMATS, createExportStream, type ExportRow, type StreamFormat } from "@/lib/export-stream"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
@@ -152,6 +153,8 @@ export async function POST(request: NextRequest) {
   const { clause, params: baseParams } = regex_mode
     ? buildULPWhereRegex(tokens)
     : buildULPWhere(tokens)
+  // An address term is answered through idx_bf_email_lc, which only the base table can use (lib/address-lookup.ts).
+  const projectionOff = usesAddressIndex(tokens, Boolean(regex_mode)) ? `, ${ADDRESS_LOOKUP_SETTING}` : ''
 
   const extras: string[] = []
   const mergedParams: Record<string, unknown> = { ...baseParams }
@@ -214,7 +217,7 @@ export async function POST(request: NextRequest) {
          ${dedupeLimitBy(dedupeOn)}
          LIMIT ${limit}
        ) AS t
-       ${exportSortSettings()}, ${NORM_COLS_SETTING}${extraSettings}`
+       ${exportSortSettings()}, ${NORM_COLS_SETTING}${extraSettings}${projectionOff}`
 
   const base = buildFilenameBase(breach_name, domain, incTiers, excTiers, loginTypes)
 

@@ -292,3 +292,14 @@ describe('the streaming formats honor the bound too', () => {
     expect(streamCalls[0].query_params).toMatchObject({ sprayDomain: 'binance.com' })
   })
 })
+
+describe('POST /api/export — an address search keeps the planner on the base table', () => {
+  test('the row query carries optimize_use_projections = 0 for an address and not for a word', async () => {
+    await post({ format: 'csv', query: 'john@example.com' })
+    expect(dataCall()!.sql).toContain('optimize_use_projections = 0')
+    calls.length = 0
+    streamCalls.length = 0
+    await post({ format: 'csv', query: 'maria' })
+    expect(dataCall()!.sql).not.toContain('optimize_use_projections')
+  })
+})
