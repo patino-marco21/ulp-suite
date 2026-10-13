@@ -25,6 +25,10 @@ Spec: `docs/superpowers/specs/2026-10-13-word-and-substring-search-plans-design.
 
 ---
 
+## Execution notes (2026-10-13, inline)
+
+Executed in this session, one check per step. Deviations from the text below: the live parity of Task 5 Step 4 ran in two passes (the 13 real texts, sorts domain A-Z and Newest first, page 1 and totals, Unique on; then two of the eligible texts with the email sort, pages 1 and 2, Unique on and off, to cover the cursor page and the bounded-window form), run in the background while the typecheck, lint and the full test suite ran; the post-deploy check of Task 7 Step 3 ran the same live test in process (the deployed app needs the owner's sign-in, which is never used), and the deployed image was checked for health, environment and the plan's presence in its route bundle. Results: gate green (tsc 0, eslint 0, 238 files / 3,493 tests); live parity 29/29 (first pass), 7/7 (second pass), 6/6 after the deploy; the 5 texts over the gate keep today's query; rows 0.6-10.4 s and totals 0.6-10.2 s against 34-57 s for today's query; deployed image `d12d21f8d982` (main e861f37), rollback tag `ulp-suite-app:rollback-20261013-1723z` (= `9f7b454a15b6`, the address-lookup image).
+
 ## Facts measured while writing this plan (2026-10-13, live table, 1.84B rows)
 
 - The capped probe `SELECT count() FROM (SELECT 1 ... WHERE <three leaves> LIMIT 50001)` takes 0.13 to 0.19 s for a token that matches millions of rows (1.5 billion included) and 0.27 to 0.31 s for a rare one. The unbounded count took 0.28 to 0.60 s, so the cap is for a bounded answer, not for survival.
@@ -56,7 +60,7 @@ Spec: `docs/superpowers/specs/2026-10-13-word-and-substring-search-plans-design.
 **Interfaces:**
 - Produces: `wordLeaves(param: string, col?: (name: string) => string): string` returns `hasToken(url, {param:String}) OR hasToken(email, {param:String}) OR hasToken(password, {param:String})`, the columns spelled by `col` (default: as is).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `__tests__/ulp-search-word-leaves.test.ts`:
 
@@ -87,12 +91,12 @@ describe('wordLeaves', () => {
 })
 ```
 
-- [ ] **Step 2: Run it to see it fail**
+- [x] **Step 2: Run it to see it fail**
 
 Run: `npx vitest run __tests__/ulp-search-word-leaves.test.ts 2>&1 | tail -15`
 Expected: FAIL, `wordLeaves is not a function` (3 failed).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `lib/ulp-search.ts`, directly above `export interface BuildULPWhereOptions {`, add:
 
@@ -121,12 +125,12 @@ with
       match = `(${wordLeaves(p, col)} OR url_host LIKE {${lp}:String} OR email_domain LIKE {${lp}:String})`
 ```
 
-- [ ] **Step 4: Run the new test and every test that pins the search SQL**
+- [x] **Step 4: Run the new test and every test that pins the search SQL**
 
 Run: `npx vitest run __tests__/ulp-search-word-leaves.test.ts __tests__/ulp-search.test.ts __tests__/ulp-search-address.test.ts __tests__/ulp-search-login-build.test.ts __tests__/login-scope-parity.live.test.ts 2>&1 | tail -12`
 Expected: all pass (the live file is skipped without its flag).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/ulp-search.ts __tests__/ulp-search-word-leaves.test.ts
@@ -152,7 +156,7 @@ git commit -m "refactor(search): wordLeaves, the one spelling of a word's three 
   - `probeTokenHits(token: string, deps?: GateDeps): Promise<number | null>` (null = the probe failed; a number is capped at `PROBE_CAP_ROWS`)
   - `resetSearchPlanGateCache(): void`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/search-plan-gate.test.ts`:
 
@@ -296,12 +300,12 @@ describe('probeTokenHits', () => {
 })
 ```
 
-- [ ] **Step 2: Run it to see it fail**
+- [x] **Step 2: Run it to see it fail**
 
 Run: `npx vitest run __tests__/search-plan-gate.test.ts 2>&1 | tail -10`
 Expected: FAIL, cannot resolve `@/lib/search-plan-gate`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Create `lib/search-plan-gate.ts`:
 
@@ -426,16 +430,16 @@ export function probeTokenHits(word: string, deps: GateDeps = {}): Promise<numbe
 }
 ```
 
-- [ ] **Step 4: Run it to see it pass**
+- [x] **Step 4: Run it to see it pass**
 
 Run: `npx vitest run __tests__/search-plan-gate.test.ts 2>&1 | tail -12`
 Expected: all pass.
 
-- [ ] **Step 5: Mutation check (the cache test must have teeth)**
+- [x] **Step 5: Mutation check (the cache test must have teeth)**
 
 Temporarily change `VERDICT_TTL_MS = 600_000` to `0` in `lib/search-plan-gate.ts`, run `npx vitest run __tests__/search-plan-gate.test.ts 2>&1 | grep -E "✓|×|FAIL|passed|failed" | head`, confirm the ten-minute and share tests FAIL, then restore the value and re-run: all pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/search-plan-gate.ts __tests__/search-plan-gate.test.ts
@@ -459,7 +463,7 @@ git commit -m "feat(search): the token-plan gate (kill switch, budget helper, ca
   - `resolveSubstringChoice(needle: string, deps?: GateDeps): Promise<SubstringChoice | null>`
   - `SUBSTRING_PARAM = 'sbt'`, `substringConjunct(token: string): { sql: string; params: Record<string, string> }` where `sql` starts with ` AND (` and ends with `)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/search-substring-plan.test.ts`:
 
@@ -628,12 +632,12 @@ describe('substringConjunct', () => {
 })
 ```
 
-- [ ] **Step 2: Run it to see it fail**
+- [x] **Step 2: Run it to see it fail**
 
 Run: `npx vitest run __tests__/search-substring-plan.test.ts 2>&1 | tail -10`
 Expected: FAIL, cannot resolve `@/lib/search-substring-plan`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Create `lib/search-substring-plan.ts`:
 
@@ -729,16 +733,16 @@ export function substringConjunct(token: string): { sql: string; params: Record<
 }
 ```
 
-- [ ] **Step 4: Run it to see it pass**
+- [x] **Step 4: Run it to see it pass**
 
 Run: `npx vitest run __tests__/search-substring-plan.test.ts 2>&1 | tail -12`
 Expected: all pass.
 
-- [ ] **Step 5: Mutation check on the rule**
+- [x] **Step 5: Mutation check on the rule**
 
 Temporarily change `if (start === 0 || end === needle.length) continue` to `if (false) continue` and `isHardSeparator` to `c => true`; run the file; confirm the "either end", "wildcard" and "non-ASCII" tests FAIL; restore both; re-run: all pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/search-substring-plan.ts __tests__/search-substring-plan.test.ts
@@ -758,7 +762,7 @@ git commit -m "feat(search): the substring plan (rarest whole word of a LIKE tex
 - Consumes: Tasks 2 and 3.
 - Produces: `GET /api/credentials` answers with `plan: 'substring'` (rows) and `plan: 'substring'` (totals_only) when the plan answered; `token_plans=0` forces today's query.
 
-- [ ] **Step 1: Write the failing route tests**
+- [x] **Step 1: Write the failing route tests**
 
 Create `__tests__/credentials-route-substring.test.ts`:
 
@@ -1020,12 +1024,12 @@ describe('GET /api/credentials — everything else is today\'s query, untouched'
 })
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `npx vitest run __tests__/credentials-route-substring.test.ts 2>&1 | tail -25`
 Expected: the "plan" tests FAIL (the route does not know the plan yet: `plan` is `plain`, no `{sbt:String}` query); the "everything else" tests mostly pass already.
 
-- [ ] **Step 3: Update the one source pin that the refactor moves**
+- [x] **Step 3: Update the one source pin that the refactor moves**
 
 In `__tests__/credentials-route.test.ts`, test `does not drop the existing execution-time/timeout settings`, replace
 
@@ -1043,7 +1047,7 @@ with
     expect(getFn).toContain(`timeout_overflow_mode = 'throw'`)
 ```
 
-- [ ] **Step 4: Implement in the route**
+- [x] **Step 4: Implement in the route**
 
 All edits are in `app/api/credentials/route.ts`.
 
@@ -1189,16 +1193,16 @@ import { runWithBudget, SUBSTRING_BUDGET_SECONDS, PLAN_PROJECTIONS_OFF } from "@
 
 (h) Update the two comments on the `plan` field: the one above `runDataQuery` ("The rows from the dictionary's candidates ...") gets the sentence `After that comes the substring plan (rarest whole word of a LIKE text), with its own 15 s budget; an overrun or failure there is not a 408, the plain query runs.`, and the response comment becomes `// Which plan answered the rows: 'windows' (lib/newest-first.ts), 'dictionary' (lib/search-dictionary-plan.ts), 'substring' (lib/search-substring-plan.ts) or 'plain'.`
 
-- [ ] **Step 5: Run the new tests and every route test**
+- [x] **Step 5: Run the new tests and every route test**
 
 Run: `npx vitest run __tests__/credentials-route-substring.test.ts __tests__/credentials-route.test.ts __tests__/credentials-route-dictionary.test.ts __tests__/credentials-route-totals.test.ts __tests__/credentials-route-login-scope.test.ts __tests__/credentials-route-newest-first.test.ts __tests__/credentials-route-imported-range.test.ts __tests__/credentials-route-dedupe-window.test.ts __tests__/cursor-raw-columns.test.ts __tests__/ulp-normalize-setting.test.ts __tests__/credential-browse-defaults.test.ts 2>&1 | tail -15`
 Expected: all pass. A failure in an older file means the refactor changed today's SQL text: fix the route (not the old test) unless it is the one pin of Step 3.
 
-- [ ] **Step 6: Mutation checks**
+- [x] **Step 6: Mutation checks**
 
 (1) In the route temporarily drop the `${x.conjunct}` from the rows template (leave `''`): the "SQL is today's plus the conjunct" and the cursor tests must FAIL; restore. (2) Temporarily change `overflow: 'throw'` in the substring totals call to `'break'`: the totals SQL test must FAIL; restore. Re-run the new file: all pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add app/api/credentials/route.ts __tests__/credentials-route.test.ts __tests__/credentials-route-substring.test.ts
@@ -1215,7 +1219,7 @@ git commit -m "feat(search): the credentials route answers a LIKE text through i
 **Interfaces:**
 - Consumes: the route (Task 4), `resolveSubstringChoice`, `wholeTokens`, `SEARCH_INDEX_DEFINITIONS`.
 
-- [ ] **Step 1: Write the test**
+- [x] **Step 1: Write the test**
 
 Create `__tests__/substring-plan-parity.live.test.ts`:
 
@@ -1429,16 +1433,16 @@ describe.skipIf(!LIVE)('the whole-token rule agrees with ClickHouse', () => {
 })
 ```
 
-- [ ] **Step 2: Run the rule checks first (no big queries)**
+- [x] **Step 2: Run the rule checks first (no big queries)**
 
 Run: `SSP_PARITY=1 SSP_NEEDLES='/zzqxnonexistent/page.php' npx vitest run __tests__/substring-plan-parity.live.test.ts -t "token" 2>&1 | tail -25`
 Expected: the index test and the property test pass; the property line shows several thousand pairs, over 500 matched, over 50 with a whole word, 0 failures.
 
-- [ ] **Step 3: Mutation check of the property test**
+- [x] **Step 3: Mutation check of the property test**
 
 Temporarily change `isHardSeparator` in `lib/search-substring-plan.ts` to `c => true` and drop the end-of-needle check; re-run Step 2: the property test must FAIL with a "is not a token" line; restore both; re-run: pass. (Scratch tables `ulp.zz_ssp_*` are dropped by the test; confirm with `docker exec ulpsuite_clickhouse clickhouse-client -q "SELECT count() FROM system.tables WHERE database='ulp' AND name LIKE 'zz\\_%'"` printing 0.)
 
-- [ ] **Step 4: Run the full parity on the owner's real texts (read-only, in the background)**
+- [x] **Step 4: Run the full parity on the owner's real texts (read-only, in the background)**
 
 The owner's texts come from the shell environment (the 13 distinct LIKE texts of the last 14 days are in the scratchpad file `needles.txt`, one per line, in LIKE form with the percent signs; strip those):
 
@@ -1449,7 +1453,7 @@ npx vitest run __tests__/substring-plan-parity.live.test.ts > /tmp/claude-1000/-
 ```
 Expected: it takes about 30 minutes (each eligible text is compared against today's 35 to 42 s query, rows and totals, in two sorts; texts with no word under the gate are skipped and listed). End state: every test passes, the timing table shows the plan between 0.4 and about 11 s with `plan` = `substring`, the skipped lines list the texts that keep today's query. A FAIL (a different page, a different total, a plan slower than 1.2 times plain plus 1 s) is a bug in the plan or its gate: stop and fix before going on.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add __tests__/substring-plan-parity.live.test.ts
@@ -1463,7 +1467,7 @@ git commit -m "test(search): live parity for the substring plan, and the whole-t
 **Files:**
 - Modify: `README.md`, `.env.example`, `docker-compose.yml`, the spec's status line, this plan's boxes.
 
-- [ ] **Step 1: Configuration**
+- [x] **Step 1: Configuration**
 
 `docker-compose.yml`, after `SEARCH_DICT_SETTLE_SECONDS: ${SEARCH_DICT_SETTLE_SECONDS:-}` in the app service:
 
@@ -1482,7 +1486,7 @@ git commit -m "test(search): live parity for the substring plan, and the whole-t
 # SEARCH_TOKEN_PLANS=1
 ```
 
-- [ ] **Step 2: README**
+- [x] **Step 2: README**
 
 In `README.md`:
 
@@ -1506,11 +1510,11 @@ A search for one text that contains a special character (a path such as `/ledger
 | Substring search (one text with a special character, such as a path) | 35-42 s before; 0.4-11 s when a whole word of the text matches at most 50,000 rows, otherwise unchanged. The response's `plan` says `substring` |
 ```
 
-- [ ] **Step 3: Spec and plan status**
+- [x] **Step 3: Spec and plan status**
 
 At the top of `docs/superpowers/specs/2026-10-13-word-and-substring-search-plans-design.md` change the Status line to say: B (the substring plan) implemented in `docs/superpowers/plans/2026-10-13-substring-search-plan.md`, A (the word plan) still design only; add under "Components" one sentence that the route's SQL templates take the plan's additions (the deviation above). Tick every box in this plan.
 
-- [ ] **Step 4: The whole gate (run once)**
+- [x] **Step 4: The whole gate (run once)**
 
 ```bash
 npx tsc --noEmit; echo "tsc exit $?"
@@ -1519,7 +1523,7 @@ npx vitest run 2>&1 | tail -15
 ```
 Expected: `tsc exit 0`, `eslint exit 0`, vitest: all files passed, 0 failed. Any failure: fix it before going on (a test that pinned the old behaviour is updated; nothing is skipped).
 
-- [ ] **Step 5: Commit and push**
+- [x] **Step 5: Commit and push**
 
 ```bash
 git add README.md .env.example docker-compose.yml docs/superpowers/specs/2026-10-13-word-and-substring-search-plans-design.md docs/superpowers/plans/2026-10-13-substring-search-plan.md
@@ -1534,7 +1538,7 @@ Expected: CI (typecheck, test, lint, build) green on the pushed head (`gh run li
 
 **Files:** none new.
 
-- [ ] **Step 1: Rollback tag, then build the candidate from the merged commit**
+- [x] **Step 1: Rollback tag, then build the candidate from the merged commit**
 
 ```bash
 STAMP=$(date -u +%Y%m%d-%H%Mz)
@@ -1546,7 +1550,7 @@ DOCKER_CONFIG="$SCRATCH/dockercfg" docker build -t ulp-suite-app:substring-candi
 ```
 Expected: the build ends with the image tagged `ulp-suite-app:substring-candidate`; `ulp-suite-app:latest` is untouched (production keeps running the old image).
 
-- [ ] **Step 2: Deploy `app` only**
+- [x] **Step 2: Deploy `app` only**
 
 ```bash
 export DOCKER_CONFIG=/tmp/claude-1000/-home-cole-ulp-suite/396dc453-5b14-4986-b7f4-a8869a04bbb3/scratchpad/dockercfg
@@ -1555,10 +1559,10 @@ docker compose -p ulp-suite -f /home/cole/ulp-suite/docker-compose.yml --project
 ```
 Expected: the app container is recreated (about 30 s); `docker inspect ulpsuite_app --format '{{.State.Health.Status}} {{.RestartCount}}'` reads `healthy 0`; `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/login` reads 200; the container env has `SEARCH_TOKEN_PLANS=` empty (on) and still `CONTENT_DEDUP_APPLY=false`; the deployed bundle contains the plan (`docker exec ulpsuite_app sh -c 'grep -rl token_plans /app/.next/server/app/api/credentials | head -1'` prints a file).
 
-- [ ] **Step 3: Live parity at the deployed commit (read-only)**
+- [x] **Step 3: Live parity at the deployed commit (read-only)**
 
 Re-run the quick form of Task 5 Step 4 on three of the owner's texts (one near the gate, one rare, one that is skipped) with `SSP_PAGES=1 SSP_SORTS=domain_asc`, and the two rule checks of Task 5 Step 2. Expected: all pass.
 
-- [ ] **Step 4: Record it**
+- [x] **Step 4: Record it**
 
 Set the spec's status line to `B implemented and deployed locally on 2026-10-13` with the commit, image id and rollback tag; update the memory notes (`project_search_levers_measured_2026_10_13.md`, the ledger, `MEMORY.md`) with what shipped, the live numbers and the follow-ups (lever A, the word plan; the owner trying a substring search in the browser); commit and push the docs (`docs(search): ...`).

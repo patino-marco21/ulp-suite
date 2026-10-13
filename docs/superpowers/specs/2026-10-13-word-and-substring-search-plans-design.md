@@ -1,7 +1,7 @@
 # Faster word and substring searches — Design
 
 Date: 2026-10-13
-Status: design, written for the owner's review. Nothing in this document is built. The repository is public: this file holds numbers only, never search terms or addresses (needles are numbered, words are generic).
+Status: B (the substring plan) is implemented and deployed locally on 2026-10-13 (plan: `docs/superpowers/plans/2026-10-13-substring-search-plan.md`; main e861f37, image `d12d21f8d982`, rollback tag `rollback-20261013-1723z`); see "B as deployed" under Rollout. A (the word plan) is design only: nothing of it is built. The repository is public: this file holds numbers only, never search terms or addresses (needles are numbered, words are generic).
 
 ## Why
 
@@ -66,11 +66,13 @@ Two traps found while measuring, both pinned by tests below: `optimize_use_proje
 
 ## Components
 
-`lib/search-plan-gate.ts` (the kill switch, the budgets and thresholds, a small TTL cache of probe counts, `runWithBudget(run, budgetSeconds)` that turns a budget timeout into "use today's query"); `lib/search-substring-plan.ts` (needle parsing, token choice, the two SQL builders); `lib/search-dictionary-plan.ts` (word terms: eligibility, candidates for words, branches T, H, E, the rows gate); `lib/ulp-search.ts` (export the word-leaves builder so T and the legacy clause share it); `app/api/credentials/route.ts` (plan selection and fallback for rows and totals, next to the dictionary plan); README and the `plan` documentation.
+`lib/search-plan-gate.ts` (the kill switch, the budgets and thresholds, a small TTL cache of probe counts, `runWithBudget(run, budgetSeconds)` that turns a budget timeout into "use today's query"); `lib/search-substring-plan.ts` (needle parsing, token choice, the two SQL builders); `lib/search-dictionary-plan.ts` (word terms: eligibility, candidates for words, branches T, H, E, the rows gate); `lib/ulp-search.ts` (export the word-leaves builder so T and the legacy clause share it); `app/api/credentials/route.ts` (plan selection and fallback for rows and totals, next to the dictionary plan); README and the `plan` documentation. (As built for B, two details differ: the route's own two SQL templates take the plan's additions as parameters and `lib/search-substring-plan.ts` supplies only the conjunct, so the plan is today's query by construction; and the budget is the `max_execution_time` in the plan's SQL, with `runWithBudget(label, run)` turning its timeout into the fallback.)
 
 ## Rollout
 
 Build B first (larger gain, one query, no dictionaries), then A, as two plans of one spec. Each: tests, the whole gate, the live parity script on the real table, the isolated-stack rehearsal for A (it needs the dictionaries), deploy `app` only with the rollback tag set first. No materialize step.
+
+**B as deployed (2026-10-13).** Live parity on the 13 real texts, run through the real route against the real table, plan against `token_plans=0`, cold caches, Unique on: 8 texts passed the gate (the same 8 as in the measurements above) and 5 kept today's query. For the 8, the rows page and the totals were identical to today's on every sort (domain A-Z, Newest first, email A-Z), page 1 and page 2 with the cursor, Unique on and off. Timings, today's query against the plan: rarest word with 126 to 1,158 hits 35-57 s against 0.6-1.4 s; 3,617 hits 34-41 s against 0.9-1.6 s; 21,643 hits 34-46 s against 2.7-3.4 s; 39,772 hits 34-43 s against 9.6-10.4 s. The Newest-first sort adds the 0.5-0.8 s the time windows take before they hand off. The text-index check on a scratch table with the production DDL showed the tokenizer cuts at exactly the 98 ASCII non-alphanumeric characters, and 5,600 generated (text, haystack) pairs (5,118 matched by LIKE, 682 with a whole word) had every whole word as a token of the matching haystack; the same test reports 2,501 violations when the rule is loosened. The probe (a count capped at 50,001 through the text indexes) took 0.13-0.6 s.
 
 ## Tests
 
