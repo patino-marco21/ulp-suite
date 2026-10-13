@@ -1,5 +1,7 @@
 # Source Archive Implementation Plan
 
+> **Status (2026-10-13):** executed inline on 2026-10-12 and merged to main (3486a3a). The tool ran on the real pile that night (504 files archived and verified) and the owner replaced 485 originals on 2026-10-13. The checkboxes below were not ticked as the work went on: the git log is the record.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Keep every source file as a verified, compressed, content-addressed archive that every offline tool can read, and give the owner a command that replaces an original only after its archive has been decoded again and proven identical.

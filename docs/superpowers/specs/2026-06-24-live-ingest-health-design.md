@@ -1,7 +1,7 @@
 # Live Ingest Health — Design
 
 **Date:** 2026-06-24
-**Status:** Approved (design); pending implementation plan
+**Status:** Implemented (shipped 2026-06-25: `lib/ingest-metrics.ts` a7bd571, `components/ingest-health-panel.tsx` daf128f)
 **Scope:** Add the one missing piece of "item 4" — a live ingestion-bottleneck view:
 parser-rows/s vs insert-rows/s (the parse-bound/insert-bound answer) plus
 ClickHouse merge-pressure signals (active parts, active merges, memory).

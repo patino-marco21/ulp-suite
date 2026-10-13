@@ -1,7 +1,7 @@
 # Parser-time T3 early-drop — Design
 
 **Date:** 2026-06-24
-**Status:** Approved (design); pending implementation plan
+**Status:** Implemented (shipped 2026-06-24, commit 953d843: the hard-tier drop bails inside `parseLine`, see `shouldHardDrop` in `lib/ulp-parser.ts`)
 **Scope:** Move the hard-tier (T3) ingest drop from the post-batch filter into the
 parser, bailing at the earliest point a row can be classified — so T3 rows cost
 the bare minimum of parse work and nothing downstream.

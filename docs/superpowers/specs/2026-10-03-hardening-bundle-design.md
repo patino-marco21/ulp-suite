@@ -1,6 +1,6 @@
 # Hardening bundle — design (2026-10-03)
 
-Status: **designed, plan written 2026-10-11 (`docs/superpowers/plans/2026-10-11-hardening-bundle.md`), not built.** H4's Actions pin and part of H6 shipped with the disk-safety release; the plan adds a start-up sweep retry. Companion to `2026-10-03-domain-search-dictionary-design.md` (the search speed-up, built first). Every
+Status: **implemented and deployed 2026-10-11** (plan `docs/superpowers/plans/2026-10-11-hardening-bundle.md`, merged to main with head ec1eda5; the in-range dependency refresh, Task 8, shipped with the parser v6 release on 2026-10-12). H4's Actions pin and part of H6 had shipped earlier with the disk-safety release; the plan added a start-up sweep retry. Companion to `2026-10-03-domain-search-dictionary-design.md` (the search speed-up, built first). Every
 finding below was checked against the code and the running app on 2026-10-03; nothing here touches ClickHouse data.
 
 ## What is wrong

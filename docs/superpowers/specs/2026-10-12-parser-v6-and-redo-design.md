@@ -1,7 +1,6 @@
 # Parser v6, three speed fixes and a T3 keep-list: design and the redo of the pile import (2026-10-12)
 
-Status: **implemented on 2026-10-12** (branch parser-v6, merged to main; last code commit 435ec3e); **not yet deployed, the redo waits for run 4 and the
-owner's go.** The owner approved this design ("Go"); the measured outcome of the build is in "Results" at the end. Written after a review of what the parser
+Status: **implemented on 2026-10-12** (branch parser-v6, merged to main; last code commit 435ec3e); **deployed 2026-10-12 13:56Z (parser v6.1, after the owner's go); the redo (run 5) finished 21:34Z with 504 of 504 files.** The owner approved this design ("Go"); the measured outcome of the build is in "Results" at the end. Written after a review of what the parser
 still gets wrong, requested by the owner before the 140 GiB of original files are touched. Every number in the sections before "Results" comes from a
 read-only survey of the pile (a sample of 4.5 GiB, 76.7M lines, taken
 as 2 MiB slices from all 504 files and extrapolated by file size; accuracy a few percent) and from the live table. No source file names, search terms or

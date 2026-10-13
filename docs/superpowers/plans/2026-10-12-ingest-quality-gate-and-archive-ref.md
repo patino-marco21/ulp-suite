@@ -1,5 +1,7 @@
 # Ingest Quality Gate and Archive Reference Implementation Plan
 
+> **Status (2026-10-13):** executed inline on 2026-10-12, merged to main (9c63dff, CI green) and deployed that evening at 22:25Z after the isolated-stack rehearsals. The checkboxes below were not ticked as the work went on: the git log is the record.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stop a bad file before one of its rows is stored (a quality gate with a hold, a Release and an offline preflight), and let the importer read a file straight from the source archive (an `.archiveref` in the inbox), so that a parser or policy change never again means re-importing by hand.

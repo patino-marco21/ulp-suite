@@ -1,7 +1,7 @@
 # Import Throughput Foundation — Design
 
 **Date:** 2026-06-23
-**Status:** Approved (design); pending implementation plan
+**Status:** Implemented (shipped June 2026: `UPLOAD_CONCURRENCY` in `lib/upload-queue.ts`, parse/insert pipelining in `lib/import-runner.ts` and `lib/upload-processor.ts`, the benchmark harness `scripts/benchmark-import.ts`, f3f8059)
 **Scope:** Sub-project A of a larger import-performance effort. The remaining
 sub-projects (B: tuning knobs, C: parser-time T3 drop, D: import observability)
 get their own spec → plan → build cycles.

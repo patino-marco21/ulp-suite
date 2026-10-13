@@ -1,5 +1,7 @@
 # Hardening Bundle Implementation Plan
 
+> **Status (2026-10-13):** executed inline on 2026-10-11, merged to main (head ec1eda5) and deployed the same day; the in-range dependency refresh (Task 8) shipped with the parser v6 release (47bae5d). The checkboxes below were not ticked as the work went on: the git log is the record.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close what is still open of `docs/superpowers/specs/2026-10-03-hardening-bundle-design.md` (a CSV export that can run formulas in a spreadsheet, a CSP that allows `eval` and a stray CDN, an unsanitized third-party HTML description, a CI that never builds the app plus no Dependabot, 27 packages behind their own version ranges) and fix two small things found since (two undocumented memory-guard variables; the start-up stage-table sweep giving up when ClickHouse is not accepting connections yet).
