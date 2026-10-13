@@ -11,6 +11,7 @@
  *
  * Every term is unique per run (the run id is in the name), so a re-run on the same stack does not pass vacuously. Exit 0 when every check passes,
  * 1 when one fails, 2 when the stack is not ready.
+ * Sections [8] to [10] rehearse the SINGLE-WORD plan (lib/search-dictionary-plan.ts, wordTermFromQuery) on the same dictionary; --words-only skips [2] to [7].
  */
 import { execFileSync } from 'node:child_process'
 
@@ -28,6 +29,11 @@ const TERM = `probe-wallet-${RUN}.test`
 const CAP_TERM = `cap-probe-${RUN}.test`
 const FIT_TERM = `fit-probe-${RUN}.test`
 const BYTES_TERM = `bytes-probe-${RUN}.test`
+// single words (letters and digits only: they must be eligible for the word plan)
+const WORD = `wq${RUN}`
+const GATE_WORD = `gw${RUN}`
+const CAPW_WORD = `cw${RUN}`
+const WORDS_ONLY = process.argv.includes('--words-only')
 
 const results: Array<{ ok: boolean; label: string }> = []
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
@@ -117,6 +123,36 @@ function seed(): void {
   insert(`SELECT concat('https://b', toString(number), '-', repeat('x', 50), '.${BYTES_TERM}/'), concat('b', toString(number), '@mail.test'), 'pw', concat('b', toString(number), '-', repeat('x', 50), '.${BYTES_TERM}'), ${src('bytes')}, '' FROM numbers(2000)`)
 }
 
+function seedWords(): void {
+  const src = (name: string) => `'seedw-${RUN}-${name}'`
+  const W = WORD
+  const U = WORD.toUpperCase()
+  // the word as a token of the host (T and D both reach these rows), the same in capitals (the text index finds it, a case-sensitive hasToken would not)
+  insert(`SELECT 'https://${W}.test/login', concat('user', toString(number), '@mail-', toString(number % 7), '.test'), concat('Pw-', toString(number), '-Aa1!'), '${W}.test', ${src('host')}, '' FROM numbers(300)`)
+  insert(`SELECT 'https://${U}.TEST/Login', concat('mixed', toString(number), '@mail.test'), concat('Mx-', toString(number)), '${W}.test', ${src('mixedurl')}, '' FROM numbers(20)`)
+  // the word INSIDE a longer host (not a token: only HOST sees it, so only H), and the same host under a blank domain (the empty domain must stay in D)
+  insert(`SELECT 'https://my${W}shop.test/', concat('s', toString(number), '@mail.test'), concat('Sh-', toString(number)), 'my${W}shop.test', ${src('inner')}, '' FROM numbers(20)`)
+  insert(`SELECT 'https://my${W}shop.test/', concat('b', toString(number), '@mail.test'), concat('Bd-', toString(number)), '', ${src('blankdomain')}, '' FROM numbers(5)`)
+  // the word only as a token of the path, of the password (also in capitals), of the login: T alone
+  insert(`SELECT 'https://other-site.test/${W}/signin', concat('pt', toString(number), '@mail.test'), concat('Pt-', toString(number)), 'other-site.test', ${src('path')}, '' FROM numbers(20)`)
+  insert(`SELECT 'https://unrelated.test/', concat('p', toString(number), '@mail.test'), 'my-${W}-pass', 'unrelated.test', ${src('pw')}, '' FROM numbers(10)`)
+  insert(`SELECT 'https://unrelated.test/', concat('P', toString(number), '@mail.test'), 'MY-${U}-PASS', 'unrelated.test', ${src('pwcaps')}, '' FROM numbers(10)`)
+  insert(`SELECT 'https://unrelated.test/', concat('${W}.user', toString(number), '@mail.test'), concat('Lg-', toString(number)), 'unrelated.test', ${src('login')}, '' FROM numbers(10)`)
+  // rows only branch E reaches: the word inside an e-mail domain on an unrelated site, a blank domain, a NON-ASCII e-mail domain (reverse() is bytewise)
+  insert(`SELECT 'https://other-site.test/', concat('x', toString(number), '@mail-${W}shop.test'), concat('Xe-', toString(number)), 'other-site.test', ${src('email')}, '' FROM numbers(25)`)
+  insert(`SELECT '', concat('y', toString(number), '@mail-${W}shop.test'), concat('Ye-', toString(number)), '', ${src('blankemail')}, '' FROM numbers(5)`)
+  insert(`SELECT 'https://other-site.test/', concat('z', toString(number), '@${W}shop.пример'), concat('Ze-', toString(number)), 'other-site.test', ${src('nonascii')}, '' FROM numbers(5)`)
+  // duplicates (Unique collapses them), noise (Declutter hides it), controls
+  insert(`SELECT 'https://${W}.test/login', concat('user', toString(number), '@mail-', toString(number % 7), '.test'), concat('Pw-', toString(number), '-Aa1!'), '${W}.test', ${src('dup')}, '' FROM numbers(10)`)
+  insert(`SELECT 'http://192.0.2.9/${W}/admin.php', concat('n', toString(number), '@mail.test'), concat('Nz-', toString(number)), '192.0.2.9', ${src('noise')}, '' FROM numbers(10)`)
+  insert(`SELECT 'https://unrelated.test/', concat('c', toString(number), '@mail.test'), concat('Cn-', toString(number)), 'unrelated.test', ${src('control')}, '' FROM numbers(200)`)
+  // the gates: GATE_DOMAINS candidate domains (over the rows gate, SEARCH_WORD_ROWS_MAX_DOMAINS, which was 300 when this was written, and under the dictionary
+  // cap of 3,000: totals from the plan, rows from today's query; raise it if the gate's limit is ever raised to 400 or more) and 3,200 (over the cap)
+  const GATE_DOMAINS = 400
+  insert(`SELECT concat('https://g', toString(number), '.${GATE_WORD}.test/'), concat('g', toString(number), '@mail.test'), 'pw', concat('g', toString(number), '.${GATE_WORD}.test'), ${src('gate')}, '' FROM numbers(${GATE_DOMAINS})`)
+  insert(`SELECT concat('https://c', toString(number), '.${CAPW_WORD}.test/'), concat('c', toString(number), '@mail.test'), 'pw', concat('c', toString(number), '.${CAPW_WORD}.test'), ${src('capw')}, '' FROM numbers(3200)`)
+}
+
 async function main(): Promise<number> {
   console.log(`run ${RUN}: term ${TERM}`)
   const ready = await waitFor(async () => (await fetch(`${BASE}/api/auth/check-users`)).status === 200, 20_000)
@@ -125,13 +161,17 @@ async function main(): Promise<number> {
 
   console.log('\n[1] seed, and the app builds the dictionary by itself')
   seed()
+  seedWords()
   info('rows seeded for the main term', chQuery(`SELECT count() FROM ulp.credentials WHERE source_file LIKE 'seed-${RUN}-%' AND (url_host LIKE '%${TERM}%' OR email_domain LIKE '%${TERM}%')`))
+  await waitFor(async () => { const d = await dictState(); return d && d.state !== 'fresh' ? d : null }, 30_000, 500) // the inserts make an existing dictionary stale
+  await sleep(3500) // past the 3 s freshness cache
   const first = await waitFresh()
   check('the cron built the dictionary on a fresh install', !!first, JSON.stringify(await dictState()))
   if (!first) return 1
   info('dictionary', `${first.pairRows} host pairs, ${first.emailRows} email domains, ${first.bytes} bytes, built ${first.builtAt}`)
   check('Ingest Health reports its size', first.pairRows > 0 && first.emailRows > 0 && first.bytes > 0)
 
+  if (!WORDS_ONLY) {
   console.log('\n[2] the dictionary plan returns exactly what the plain query returns')
   for (const sort of ['domain_asc', 'email_asc', 'pw_len_desc', 'imported_desc']) {
     for (const dedupe of [1, 0]) {
@@ -168,6 +208,59 @@ async function main(): Promise<number> {
   check('...and its rows are identical to the plain query\'s', JSON.stringify(fit.pages[0]?.results) === JSON.stringify((await walk(FIT_TERM, 'domain_asc', 1, true)).pages[0]?.results))
   const bytes = await walk(BYTES_TERM, 'domain_asc', 1, false)
   check('2,000 long domains (over the 90,000-byte list cap): today\'s query answers', bytes.pages[0]?.plan === 'plain', String(bytes.pages[0]?.plan))
+  }
+
+  console.log('\n[8] the single-word plan returns exactly what the plain query returns')
+  for (const sort of ['domain_asc', 'email_asc', 'pw_len_desc', 'imported_desc']) {
+    for (const dedupe of [1, 0]) {
+      const plain = await walk(WORD, sort, dedupe, true)
+      const planned = await walk(WORD, sort, dedupe, false)
+      const label = `${WORD}: ${sort}, Unique ${dedupe}: ${plain.pages.length} pages`
+      if (plain.error || planned.error) { check(label, false, plain.error ?? planned.error ?? ''); continue }
+      const same = plain.pages.length === planned.pages.length
+        && plain.pages.every((p, i) => JSON.stringify(p.results) === JSON.stringify(planned.pages[i].results) && p.next_cursor === planned.pages[i].next_cursor)
+      check(`${label}, rows and cursors identical`, same)
+      const expected = sort === 'imported_desc' ? ['words', 'windows'] : ['words']
+      check(`${sort}, Unique ${dedupe}: answered by the ${expected.join(' or ')} plan`, expected.includes(planned.pages[0].plan), String(planned.pages[0].plan))
+    }
+  }
+  for (const [dedupe, noise] of [[1, 1], [0, 0], [1, 0]]) {
+    const qs = `&dedupe=${dedupe}&exclude_noise=${noise}&totals_only=1`
+    const t1 = await api(`/api/credentials?q=${encodeURIComponent(WORD)}${qs}`)
+    const t0 = await api(`/api/credentials?q=${encodeURIComponent(WORD)}${qs}&dictionary=0`)
+    check(`the totals equal the plain query's, both numbers (Unique ${dedupe}, Declutter ${noise})`, t1.body?.total === t0.body?.total && t1.body?.raw_total === t0.body?.raw_total, `${JSON.stringify(t1.body)} vs ${JSON.stringify(t0.body)}`)
+    check('...the plan counted, today\'s query did not', t1.body?.plan === 'words' && t0.body?.plan === 'plain', `${t1.body?.plan} / ${t0.body?.plan}`)
+  }
+
+  console.log('\n[9] the rows each branch alone can reach are found, and none is counted twice')
+  const everyWord = (await walk(WORD, 'email_asc', 0, false)).pages.flatMap(p => p.results as any[])
+  const plainWordTotal = Number((await api(`/api/credentials?q=${encodeURIComponent(WORD)}&exclude_noise=1&dedupe=0&totals_only=1&dictionary=0`)).body?.total)
+  check('no row is returned twice or missed: the plan\'s list has exactly as many rows as today\'s count says', everyWord.length === plainWordTotal, `${everyWord.length} rows against today's total ${plainWordTotal}`)
+  check('a row whose host holds the word as a token', everyWord.some(r => r.domain === `${WORD}.test`))
+  check('a row whose URL has the word in capitals (the text index is case-insensitive, a plain hasToken is not)', everyWord.some(r => String(r.url).includes(WORD.toUpperCase())))
+  check('a row whose PASSWORD has the word in capitals', everyWord.some(r => String(r.password) === `MY-${WORD.toUpperCase()}-PASS`))
+  check('a row whose host merely CONTAINS the word', everyWord.some(r => r.domain === `my${WORD}shop.test`))
+  check('a row with a blank domain whose host contains the word (the empty domain stays in the candidate list)', everyWord.some(r => r.domain === '' && String(r.url).includes(`my${WORD}shop`)))
+  check('a row on an unrelated site whose e-mail domain contains the word', everyWord.some(r => r.domain === 'other-site.test' && String(r.email).endsWith(`@mail-${WORD}shop.test`)))
+  check('a row with a blank domain and such an e-mail domain', everyWord.some(r => r.domain === '' && String(r.email).endsWith(`@mail-${WORD}shop.test`)))
+  check('a row with a non-ASCII e-mail domain (reverse() is bytewise)', everyWord.some(r => String(r.email).endsWith('.пример')))
+  check('a row with the word in its path only', everyWord.some(r => r.domain === 'other-site.test' && String(r.url).includes(`/${WORD}/`)))
+  check('a row with the word in its login only', everyWord.some(r => String(r.email).startsWith(`${WORD}.user`)))
+
+  console.log('\n[10] the rows gate and the caps')
+  const gateRows = await walk(GATE_WORD, 'domain_asc', 1, false)
+  check('400 candidate domains (over the rows gate): today\'s query answers the rows', gateRows.pages[0]?.plan === 'plain', String(gateRows.pages[0]?.plan))
+  check('...with the same rows', JSON.stringify(gateRows.pages[0]?.results) === JSON.stringify((await walk(GATE_WORD, 'domain_asc', 1, true)).pages[0]?.results))
+  const gateTotals = await api(`/api/credentials?q=${encodeURIComponent(GATE_WORD)}&exclude_noise=1&dedupe=1&totals_only=1`)
+  const gateTotalsPlain = await api(`/api/credentials?q=${encodeURIComponent(GATE_WORD)}&exclude_noise=1&dedupe=1&totals_only=1&dictionary=0`)
+  check('...but the totals come from the plan, with the same numbers', gateTotals.body?.plan === 'words' && gateTotals.body?.total === gateTotalsPlain.body?.total && gateTotals.body?.raw_total === gateTotalsPlain.body?.raw_total, `${JSON.stringify(gateTotals.body)} vs ${JSON.stringify(gateTotalsPlain.body)}`)
+  const capRows = await walk(CAPW_WORD, 'domain_asc', 1, false)
+  const capTotals = await api(`/api/credentials?q=${encodeURIComponent(CAPW_WORD)}&exclude_noise=1&dedupe=1&totals_only=1`)
+  check('3,200 candidate domains (over the dictionary cap): today\'s query answers rows and totals', capRows.pages[0]?.plan === 'plain' && capTotals.body?.plan === 'plain', `${capRows.pages[0]?.plan} / ${capTotals.body?.plan}`)
+  const off = await api(`/api/credentials?q=${encodeURIComponent(WORD)}&exclude_noise=1&dedupe=1&totals_only=1&token_plans=0`)
+  check('token_plans=0 forces today\'s query', off.body?.plan === 'plain', String(off.body?.plan))
+
+  if (!WORDS_ONLY) {
 
   console.log('\n[5] new data: the plan steps aside until the app has rebuilt, and no row is missed')
   const lateHost = `late.${TERM}`
@@ -219,6 +312,7 @@ async function main(): Promise<number> {
   }
   check(`${requests} totals requests across the stale, rebuild and swap: every one succeeded with the right numbers`, wrong === 0 && requests > 10, `${wrong} wrong of ${requests}`)
   check('both plans answered during the run', plans.has('plain') && plans.has('dictionary'), [...plans].join(','))
+  }
 
   const failed = results.filter(r => !r.ok)
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`)
