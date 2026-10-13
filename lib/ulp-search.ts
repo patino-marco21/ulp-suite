@@ -160,11 +160,42 @@ export function loginWords(value: string): string[] {
   return Array.from(new Set(asciiLower(value).match(/[a-z0-9\u0080-\uffff]+/g) ?? []))
 }
 
-/** A full address as an exact match on the login (bloom filter on `email`). Its parameters are added to `params`. */
+/** Upper-cases the first letter of every run of ASCII letters and digits and lower-cases the rest ("john.smith" -> "John.Smith"). */
+function titleCase(s: string): string {
+  return s.replace(/[A-Za-z0-9]+/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+}
+
+/**
+ * The casings an address is commonly stored in. Logins are kept as typed, so about 5% of the e-mail logins have an uppercase letter and
+ * `email = lower(value)` cannot see them. The bloom filter on `email` probes all of these at the cost of one: the value lowercased (first);
+ * ALL UPPER; First letter only; Title Case local part; UPPER local part; Capitalised domain. Together they cover about two thirds of the
+ * mixed-case addresses; "Login (contains)" is the complete route. At most six values, without repeats.
+ */
+export function emailCasings(value: string): string[] {
+  const lower = value.toLowerCase()
+  const at = lower.indexOf('@')
+  if (at < 1) return [lower]
+  const local = lower.slice(0, at)
+  const domain = lower.slice(at + 1)
+  const first = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
+  return Array.from(new Set([
+    lower,
+    lower.toUpperCase(),
+    first(lower),
+    `${titleCase(local)}@${domain}`,
+    `${local.toUpperCase()}@${domain}`,
+    `${local}@${first(domain)}`,
+  ]))
+}
+
+/** A full address as an exact match on the login (bloom filter on `email`) that also tries the common casings. Its parameters are added to `params`. */
 function exactAddressMatch(token: ParsedToken, i: number, params: Record<string, unknown>): string {
-  const ep = `exactemail${i}`
-  params[ep] = token.value.toLowerCase()
-  return `(email = {${ep}:String})`
+  const names = emailCasings(token.value).map((casing, j) => {
+    const name = j === 0 ? `exactemail${i}` : `exactemail${i}c${j}`
+    params[name] = casing
+    return `{${name}:String}`
+  })
+  return names.length === 1 ? `(email = ${names[0]})` : `(email IN (${names.join(', ')}))`
 }
 
 /**

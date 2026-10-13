@@ -234,10 +234,10 @@ describe('buildULPWhere — token type SQL generation', () => {
     expect(paramValues).toContain('hunter2')
   })
 
-  test('email_full type → exact email = {param:String} (bloom_filter accelerated)', () => {
+  test('email_full type → exact email IN (...) over the common casings (bloom_filter accelerated)', () => {
     const tokens = parseULPQuery('john@gmail.com')
     const { clause, params } = buildULPWhere(tokens)
-    expect(clause).toContain('email =')
+    expect(clause).toContain('email IN (')
     // Must NOT contain LIKE (would bypass index)
     expect(clause).not.toContain('LIKE')
     // Value is lowercased
@@ -245,12 +245,13 @@ describe('buildULPWhere — token type SQL generation', () => {
     expect(paramValues).toContain('john@gmail.com')
   })
 
-  test('email_full lowercases the value in params', () => {
+  test('email_full puts the lowercased value first and probes the common casings after it', () => {
     const tokens = parseULPQuery('JOHN@GMAIL.COM')
     const { params } = buildULPWhere(tokens)
-    const paramValues = Object.values(params)
-    expect(paramValues).toContain('john@gmail.com')
-    expect(paramValues).not.toContain('JOHN@GMAIL.COM')
+    expect(params.exactemail0).toBe('john@gmail.com')
+    // ALL UPPER is one of the deliberate casings; an arbitrary mixed case is not
+    expect(Object.values(params)).toContain('JOHN@GMAIL.COM')
+    expect(Object.values(params)).not.toContain('jOhN@GmAiL.CoM')
   })
 
   test('email_dom type → email_domain = OR domain =', () => {
@@ -471,7 +472,8 @@ describe('parseULPQuery + buildULPWhere integration', () => {
   test('full email search generates correct params count', () => {
     const tokens = parseULPQuery('alice@example.com')
     const { params } = buildULPWhere(tokens)
-    expect(Object.keys(params)).toHaveLength(1)
+    // alice@example.com has five distinct casings: lower, UPPER, First, UPPER local, Capitalised domain
+    expect(Object.keys(params)).toHaveLength(5)
   })
 
   test('email_dom search generates one param for the domain', () => {
@@ -481,14 +483,14 @@ describe('parseULPQuery + buildULPWhere integration', () => {
     expect(Object.values(params)[0]).toBe('example.com')
   })
 
-  test('three-term AND query generates four params (token type uses two)', () => {
+  test('three-term AND query generates eight params (token type uses two, an address five)', () => {
     // @gmail.com → email_dom  → 1 param
     // hunter2   → token      → 2 params (lowercase value for hasToken, LIKE pattern for url_host/email_domain)
-    // alice@…   → email_full → 1 param
-    // Total: 4 params
+    // alice@…   → email_full → 5 params (its distinct casings)
+    // Total: 8 params
     const tokens = parseULPQuery('@gmail.com, hunter2, alice@gmail.com')
     const { params } = buildULPWhere(tokens)
-    expect(Object.keys(params)).toHaveLength(4)
+    expect(Object.keys(params)).toHaveLength(8)
   })
 
   test('clause is valid ClickHouse-compatible SQL fragment', () => {
