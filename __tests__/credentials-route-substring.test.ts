@@ -245,6 +245,20 @@ describe('GET /api/credentials — everything else is today\'s query, untouched'
     expect(plainTotals()).toHaveLength(1)
   })
 
+  test('a plan that ran over its budget is not tried again for ten minutes: the next requests go straight to today\'s query', async () => {
+    planDataError = TIMEOUT()
+    planTotalsError = TIMEOUT()
+    await get(`q=${NEEDLE}&skip_totals=1`)
+    await get(`q=${NEEDLE}&totals_only=1`)
+    expect(planRows()).toHaveLength(1)
+    expect(planTotals()).toHaveLength(1)
+    calls.length = 0
+    expect((await (await get(`q=${NEEDLE}&skip_totals=1`)).json()).plan).toBe('plain')
+    expect((await (await get(`q=${NEEDLE}&totals_only=1`)).json()).plan).toBe('plain')
+    expect(planRows()).toHaveLength(0)
+    expect(planTotals()).toHaveLength(0)
+  })
+
   test('if today\'s query then also times out, that is the same 408 as without the plan', async () => {
     planDataError = TIMEOUT()
     plainDataError = new Error('Code: 159. DB::Exception: Timeout exceeded: TIMEOUT_EXCEEDED')

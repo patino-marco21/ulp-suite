@@ -8,7 +8,7 @@ let dataRows: Array<Record<string, unknown>> = []
 let totalsRow: Record<string, unknown> = { total: '11', raw_total: '12' }
 let hostDomains: string[] = ['ledger.com', 'app.ledger.com']
 let emailDomains: string[] = ['ledger.com']
-let textHits = 1532
+let emailRows = 71
 let planDataError: Error | null = null
 let planTotalsError: Error | null = null
 let plainDataError: Error | null = null
@@ -25,7 +25,7 @@ vi.mock('@/lib/clickhouse', () => ({
     calls.push({ sql, params })
     if (/FROM ulp\.search_host_dict/.test(sql)) return hostDomains.map(domain => ({ domain }))
     if (/FROM ulp\.search_emaildomain_dict/.test(sql)) return emailDomains.map(email_domain => ({ email_domain }))
-    if (/SELECT count\(\) AS hits FROM/.test(sql)) return [{ hits: String(textHits) }]
+    if (/SELECT count\(\) AS rows FROM ulp\.credentials WHERE reverse\(email_domain\)/.test(sql)) return [{ rows: String(emailRows) }]
     if (/system\.projections/.test(sql)) return [{ defined: 0, parts: 1, with_projection: 0 }] // Newest-first windows NOT ready
     if (/AS raw_total/.test(sql)) {
       if (planTotalsError && /part_total/.test(sql)) throw planTotalsError
@@ -52,7 +52,7 @@ import { NextRequest } from 'next/server'
 import { GET } from '@/app/api/credentials/route'
 import { encodeCursor } from '@/lib/cursor-pagination'
 import { resetDictionaryPlanCache } from '@/lib/search-dictionary-plan'
-import { resetSearchPlanGateCache, wordRowsMaxDomains, wordRowsMaxEmailDomains, wordRowsMaxTextHits } from '@/lib/search-plan-gate'
+import { resetSearchPlanGateCache, wordRowsMaxDomains, wordRowsMaxEmailRows, wordTotalsMaxEmailRows } from '@/lib/search-plan-gate'
 import { resetNewestFirstReadyCache } from '@/lib/newest-first'
 
 const row = (n: number) => ({
@@ -61,7 +61,7 @@ const row = (n: number) => ({
   imported_at: '2026-08-28 23:34:14', password_length: 4,
 })
 const lookups = () => calls.filter(c => /FROM ulp\.search_(host|emaildomain)_dict/.test(c.sql))
-const probes = () => calls.filter(c => /SELECT count\(\) AS hits FROM/.test(c.sql))
+const probes = () => calls.filter(c => /SELECT count\(\) AS rows FROM ulp\.credentials WHERE reverse\(email_domain\)/.test(c.sql))
 const planRows = () => calls.filter(c => /\) AS t\s/.test(c.sql) && isPlanRows(c.sql))
 const plainRows = () => calls.filter(c => /\) AS t\s/.test(c.sql) && !isPlanRows(c.sql))
 const planTotals = () => calls.filter(c => /AS raw_total/.test(c.sql) && /part_total/.test(c.sql))
@@ -77,7 +77,7 @@ beforeEach(() => {
   totalsRow = { total: '11', raw_total: '12' }
   hostDomains = ['ledger.com', 'app.ledger.com']
   emailDomains = ['ledger.com']
-  textHits = 1532
+  emailRows = 71
   planDataError = planTotalsError = plainDataError = null
   dictStatus = fresh()
   resetDictionaryPlanCache()
@@ -89,7 +89,7 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllEnvs(); warnSpy.mockRestore() })
 
 describe('GET /api/credentials — a single word, answered through the text indexes and the dictionaries', () => {
-  test('the page\'s rows request and totals request are both answered by the plan, share ONE set of lookups and ONE probe', async () => {
+  test('the page\'s rows request and totals request are both answered by the plan, share ONE set of lookups and ONE count of the e-mail rows', async () => {
     const [rowsRes, totalsRes] = await Promise.all([
       get('q=ledger&skip_totals=1&exclude_noise=1&dedupe=1'),
       get('q=ledger&totals_only=1&exclude_noise=1&dedupe=1'),
@@ -107,7 +107,7 @@ describe('GET /api/credentials — a single word, answered through the text inde
     expect(plainTotals()).toHaveLength(0)
   })
 
-  test('the rows SQL: H and E keep the legacy predicate and exclude the leaves, T has the leaves alone; the budget is 4 s', async () => {
+  test('the rows SQL: H and E keep the legacy predicate and exclude the leaves, T has the leaves alone; the budget is 8 s', async () => {
     await get('q=ledger&skip_totals=1&dedupe=1&exclude_noise=1&limit=50')
     const { sql, params } = planRows()[0]
     expect(sql).toContain('url_host LIKE {tlk0:String}') // the legacy predicate is still there (H and E)
@@ -115,7 +115,7 @@ describe('GET /api/credentials — a single word, answered through the text inde
     expect(sql).toContain("AND domain NOT IN ['app.ledger.com','ledger.com'] AND NOT (hasToken(url, {tok0:String})")
     expect(sql).toContain('AND (hasToken(url, {tok0:String}) OR hasToken(email, {tok0:String}) OR hasToken(password, {tok0:String})) AND is_noise = 0')
     expect(sql).toContain('ORDER BY domain ASC')
-    expect(sql).toMatch(/\) AS t\s+SETTINGS max_execution_time = 4,/)
+    expect(sql).toMatch(/\) AS t\s+SETTINGS max_execution_time = 8,/)
     expect(params).toMatchObject({ tok0: 'ledger', tlk0: '%ledger%', limit: 50 })
     expect(params).not.toHaveProperty('windowLimit')
   })
@@ -153,7 +153,6 @@ describe('GET /api/credentials — a single word, answered through the text inde
   test('no candidate at all: a single branch, the text indexes alone, still through the plan', async () => {
     hostDomains = []
     emailDomains = []
-    textHits = 0
     const body = await (await get('q=ledger&skip_totals=1')).json()
     expect(body.plan).toBe('words')
     const { sql } = planRows()[0]
@@ -171,12 +170,11 @@ describe('GET /api/credentials — a single word, answered through the text inde
   })
 })
 
-describe('GET /api/credentials — the rows gate: totals still use the plan, rows keep today\'s query', () => {
+describe('GET /api/credentials — the gates: the totals and the rows are decided separately', () => {
   test.each([
-    ['more candidate domains than the gate', () => { hostDomains = names(wordRowsMaxDomains() + 1, 'd') }, 0],
-    ['more candidate e-mail domains than the gate', () => { emailDomains = names(wordRowsMaxEmailDomains() + 1, 'e') }, 0],
-    ['more text-index hits than the gate', () => { textHits = wordRowsMaxTextHits() + 1 }, 1],
-  ])('%s', async (_name, arrange, probed) => {
+    ['more candidate domains than the rows gate', () => { hostDomains = names(wordRowsMaxDomains() + 1, 'd') }],
+    ['more rows behind the e-mail domains than the rows gate', () => { emailRows = wordRowsMaxEmailRows() + 1 }],
+  ])('%s: the totals still come from the plan, the rows from today\'s query', async (_name, arrange) => {
     arrange()
     const rowsBody = await (await get('q=ledger&skip_totals=1')).json()
     const totalsBody = await (await get('q=ledger&totals_only=1')).json()
@@ -184,21 +182,49 @@ describe('GET /api/credentials — the rows gate: totals still use the plan, row
     expect(totalsBody).toMatchObject({ plan: 'words', total: 11, raw_total: 12 })
     expect(plainRows()).toHaveLength(1)
     expect(planRows()).toHaveLength(0)
-    expect(probes()).toHaveLength(probed) // a word whose candidates already miss the gate costs no probe of the text indexes
   })
 
-  test('exactly at the three limits the rows plan still runs', async () => {
-    hostDomains = names(wordRowsMaxDomains(), 'd')
-    emailDomains = names(wordRowsMaxEmailDomains(), 'e')
-    textHits = wordRowsMaxTextHits()
-    expect((await (await get('q=ledger&skip_totals=1')).json()).plan).toBe('words')
+  test('too many candidate domains: the rows request does not even count the e-mail rows (the totals request does, once)', async () => {
+    hostDomains = names(wordRowsMaxDomains() + 1, 'd')
+    await get('q=ledger&skip_totals=1')
+    expect(probes()).toHaveLength(0)
+    await get('q=ledger&totals_only=1')
+    expect(probes()).toHaveLength(1)
   })
 
-  test('a probe that fails closes the rows gate and nothing else', async () => {
-    textHits = Number.NaN // the mock answers hits: 'NaN', which the probe rejects as "not a count"
-    const rowsBody = await (await get('q=ledger&skip_totals=1')).json()
-    expect(rowsBody.plan).toBe('plain')
+  test('more rows behind the e-mail domains than the totals gate: today\'s query for the totals and for the rows', async () => {
+    emailRows = wordTotalsMaxEmailRows() + 1
+    expect((await (await get('q=ledger&skip_totals=1')).json()).plan).toBe('plain')
+    expect((await (await get('q=ledger&totals_only=1')).json()).plan).toBe('plain')
+    expect(planRows()).toHaveLength(0)
+    expect(planTotals()).toHaveLength(0)
+  })
+
+  test('between the two limits: the totals use the plan, the rows do not', async () => {
+    emailRows = wordRowsMaxEmailRows() + 1
+    expect(emailRows).toBeLessThanOrEqual(wordTotalsMaxEmailRows())
+    expect((await (await get('q=ledger&skip_totals=1')).json()).plan).toBe('plain')
     expect((await (await get('q=ledger&totals_only=1')).json()).plan).toBe('words')
+  })
+
+  test('exactly at the limits the plan still runs, rows and totals', async () => {
+    hostDomains = names(wordRowsMaxDomains(), 'd')
+    emailRows = wordRowsMaxEmailRows()
+    expect((await (await get('q=ledger&skip_totals=1')).json()).plan).toBe('words')
+    expect((await (await get('q=ledger&totals_only=1')).json()).plan).toBe('words')
+  })
+
+  test('no candidate e-mail domain: nothing is counted and the plan runs', async () => {
+    emailDomains = []
+    expect((await (await get('q=ledger&skip_totals=1')).json()).plan).toBe('words')
+    expect((await (await get('q=ledger&totals_only=1')).json()).plan).toBe('words')
+    expect(probes()).toHaveLength(0)
+  })
+
+  test('a count that fails closes both gates: today\'s query for the rows and for the totals', async () => {
+    emailRows = Number.NaN // the mock answers rows: 'NaN', which the probe rejects as "not a count"
+    expect((await (await get('q=ledger&skip_totals=1')).json()).plan).toBe('plain')
+    expect((await (await get('q=ledger&totals_only=1')).json()).plan).toBe('plain')
   })
 })
 
@@ -286,6 +312,22 @@ describe('GET /api/credentials — everything else is today\'s query, untouched'
     const totalsRes = await get('q=ledger&totals_only=1')
     expect(totalsRes.status).toBe(200)
     expect(await totalsRes.json()).toMatchObject({ success: true, total: 11, plan: 'plain' })
+  })
+
+  test('a plan that ran over its budget is not tried again for ten minutes: the next requests of that search go straight to today\'s query', async () => {
+    planDataError = TIMEOUT()
+    planTotalsError = TIMEOUT()
+    await get('q=ledger&skip_totals=1')
+    await get('q=ledger&totals_only=1')
+    expect(planRows()).toHaveLength(1)
+    expect(planTotals()).toHaveLength(1)
+    calls.length = 0
+    expect((await (await get('q=ledger&skip_totals=1')).json()).plan).toBe('plain')
+    expect((await (await get('q=ledger&totals_only=1')).json()).plan).toBe('plain')
+    expect(planRows()).toHaveLength(0)
+    expect(planTotals()).toHaveLength(0)
+    expect(plainRows()).toHaveLength(1)
+    expect(plainTotals()).toHaveLength(1)
   })
 
   test('if today\'s query then also times out, that is the same 408 as without the plan', async () => {

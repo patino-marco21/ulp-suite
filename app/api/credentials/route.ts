@@ -25,7 +25,8 @@ import {
 } from "@/lib/search-dictionary-plan"
 import { substringNeedleFromQuery, resolveSubstringChoice, substringConjunct, type SubstringChoice } from "@/lib/search-substring-plan"
 import {
-  runWithBudget, probeTokenHits, wordRowsCandidatesFit, wordRowsGate, SUBSTRING_BUDGET_SECONDS, PLAN_PROJECTIONS_OFF, WORD_ROWS_BUDGET_SECONDS, WORD_TOTALS_BUDGET_SECONDS,
+  runWithBudget, probeEmailDomainRows, wordRowsMaxDomains, wordRowsGate, wordTotalsGate,
+  SUBSTRING_BUDGET_SECONDS, PLAN_PROJECTIONS_OFF, WORD_ROWS_BUDGET_SECONDS, WORD_TOTALS_BUDGET_SECONDS,
 } from "@/lib/search-plan-gate"
 
 export const dynamic = 'force-dynamic'
@@ -299,14 +300,22 @@ export async function GET(request: NextRequest) {
 
   // Word plan (lib/search-dictionary-plan.ts): a search for exactly one word is answered from the two dictionaries of the domain search in three disjoint
   // branches: the text indexes alone (the word as a whole token of the URL, login or password) and the hosts and e-mail domains that merely CONTAIN the
-  // word, which the dictionaries list. Totals whenever the candidates fit the dictionary caps; rows only for a rare word (lib/search-plan-gate.ts,
-  // wordRowsGate), because today's rows query stops after 200 rows and for a plentiful word the plan has to find 200 in each branch. null = this
-  // request keeps today's query. dictionary=0 and token_plans=0 force it.
+  // word, which the dictionaries list. Totals whenever the rows behind the matching e-mail domains are few (wordTotalsGate); rows only for a word with few
+  // candidate domains AND few such rows (wordRowsGate): the calibration in lib/search-plan-gate.ts says why. null = this request keeps today's query.
+  // dictionary=0 and token_plans=0 force it.
   const wordTerm = sp.get('dictionary') === '0' || sp.get('token_plans') === '0' ? null : wordTermFromQuery(q.trim(), regex, scope)
   let wordMemo: Promise<DictionaryCandidates | null> | null = null
   const getWordCandidates = (): Promise<DictionaryCandidates | null> => {
     if (!wordTerm) return Promise.resolve(null)
     return (wordMemo ??= resolveWordCandidates(wordTerm))
+  }
+  // How many rows have a matching e-mail domain: the cost driver of the plan's e-mail branch, which both gates read (lib/search-plan-gate.ts). 0 without
+  // a candidate e-mail domain (no query); null when the probe failed.
+  let wordEmailRowsMemo: Promise<number | null> | null = null
+  const getWordEmailRows = (c: DictionaryCandidates): Promise<number | null> => {
+    if (!wordTerm) return Promise.resolve(null)
+    if (c.emailDomains.length === 0) return Promise.resolve(0)
+    return (wordEmailRowsMemo ??= probeEmailDomainRows(wordTerm.word, c.emailRevLiteral))
   }
 
   try {
@@ -373,14 +382,14 @@ export async function GET(request: NextRequest) {
       }
       // The word plan: three disjoint branches merged as aggregate states, within its own budget (an overrun throws, so it is today's count that runs).
       const wordCandidates = await getWordCandidates()
-      if (wordCandidates) {
+      if (wordCandidates && wordTerm && wordTotalsGate(await getWordEmailRows(wordCandidates))) {
         const text = wordTextBranch(whereRaw, qClause)
         const sql = text && buildDictionaryTotalsSql({
           whereRaw, dedupe, hasUserFilter, onlyIf: excludeNoise ? NOISE_FILTER : undefined, candidates: wordCandidates,
           text, maxSeconds: WORD_TOTALS_BUDGET_SECONDS, overflow: 'throw',
         })
         if (sql) {
-          const outcome = await runWithBudget('word totals', () => executeQuery(sql, params) as Promise<TotalsRows>)
+          const outcome = await runWithBudget('word totals', () => executeQuery(sql, params) as Promise<TotalsRows>, `word-totals:${wordTerm.word}`)
           if (outcome.ok) {
             totalsPlan = 'words'
             return outcome.value
@@ -394,7 +403,7 @@ export async function GET(request: NextRequest) {
         const outcome = await runWithBudget('substring totals', () => executeQuery(
           totalsSql({ conjunct: conjunct.sql, maxSeconds: SUBSTRING_BUDGET_SECONDS, overflow: 'throw', settingsTail: `,\n                    ${PLAN_PROJECTIONS_OFF}` }),
           { ...params, ...conjunct.params },
-        ) as Promise<TotalsRows>)
+        ) as Promise<TotalsRows>, `substring-totals:${choice.token}`)
         if (outcome.ok) {
           totalsPlan = 'substring'
           return outcome.value
@@ -491,11 +500,11 @@ export async function GET(request: NextRequest) {
           }
         }
       }
-      // The word plan, for a rare word only (the gate), within its own budget: an overrun or a failure runs today's query. The text indexes are probed only
-      // for a word whose candidates already fit, so a word that cannot qualify costs no extra query.
+      // The word plan, for a word with few candidate domains and few rows behind its e-mail domains only (the gate), within its own budget: an overrun or
+      // a failure runs today's query. The rows behind the e-mail domains are counted only for a word whose candidate domains already fit.
       if (wordTerm) {
         const wordCandidates = await getWordCandidates()
-        if (wordCandidates && wordRowsCandidatesFit(wordCandidates) && wordRowsGate(wordCandidates, await probeTokenHits(wordTerm.word))) {
+        if (wordCandidates && wordCandidates.domains.length <= wordRowsMaxDomains() && wordRowsGate(wordCandidates, await getWordEmailRows(wordCandidates))) {
           const text = wordTextBranch(where, qClause)
           const sql = text && buildDictionaryRowsSql({
             where, cursorClause, orderBy, dedupe, dedupeInWindow,
@@ -503,7 +512,7 @@ export async function GET(request: NextRequest) {
             text, maxSeconds: WORD_ROWS_BUDGET_SECONDS,
           })
           if (sql) {
-            const outcome = await runWithBudget('word rows', () => executeQuery(sql, dataParams) as Promise<unknown[]>)
+            const outcome = await runWithBudget('word rows', () => executeQuery(sql, dataParams) as Promise<unknown[]>, `word-rows:${wordTerm.word}`)
             if (outcome.ok) {
               plan = 'words'
               return outcome.value
@@ -517,7 +526,7 @@ export async function GET(request: NextRequest) {
         const outcome = await runWithBudget('substring rows', () => executeQuery(
           dataSql({ conjunct: conjunct.sql, maxSeconds: SUBSTRING_BUDGET_SECONDS, settingsLine: `${PLAN_PROJECTIONS_OFF},` }),
           { ...dataParams, ...conjunct.params },
-        ) as Promise<unknown[]>)
+        ) as Promise<unknown[]>, `substring-rows:${choice.token}`)
         if (outcome.ok) {
           plan = 'substring'
           return outcome.value
