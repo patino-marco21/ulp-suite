@@ -34,8 +34,20 @@ The first measurement used a scratch table with only the new index. The table th
 | three addresses with `IN (...)` | 2,431, 0.238 s | 2,432, 0.434 s | 2,432, 0.280 s | |
 
 * The old lookup is fast because the primary key and the text index on `email` do most of the pruning (EXPLAIN for a rare address: 732, 642, then 1 granule). The new predicate can use neither, so the bloom filter alone does the work (27 of 732 granules for an absent address, 3.7%, close to the filter's 5% false-positive rate), and with projections off it is as fast. The new counts equal the full scan in every row. The most frequent address shows the recall gap at its worst: the old lookup found none of its 32,028 stored rows.
-* **With projections enabled the new form is about 17 times slower** (0.42 s against 0.024 s; about 16 s against 1 s at 1.84B rows). Given a projection to choose from, the planner reads the whole projection (it counts marks and does not credit the skip index's pruning) and never uses `idx_bf_email_lc`. So every query that compares `lower(email)` must run with `optimize_use_projections = 0` (below, "Projections").
+* **On this copy, where every part carries `proj_imported_desc`, the new form with projections enabled is about 17 times slower** (0.42 s against 0.024 s). Given a projection to choose from, the planner can read the whole projection (it counts marks and does not credit the skip index's pruning) and then never uses `idx_bf_email_lc`. So every query that compares `lower(email)` runs with `optimize_use_projections = 0` (below, "Projections"). **Measured on the live table afterwards (see "Result on the live table"), the two are indistinguishable today** because `proj_imported_desc` exists only on the newest partition there; the setting is insurance, not a measured fix for the live table.
 * `MATERIALIZE INDEX` on the settled copy took 2.7 s and added 47 MiB (the new part directories hardlink every file they do not change). It took about 2 minutes while 53 small parts were still merging, because a mutation waits for the merges that involve its parts. `SYSTEM STOP MERGES` stops mutations too (a mutation started with merges stopped never finishes), so merges are never stopped around a materialize.
+
+## Result on the live table (2026-10-13, after the index was materialized)
+
+`scripts/materialize-address-index.sh` took 3 min 10 s for the three partitions (63 s, 21 s, 104 s), free disk dipped from 160 to 158 GiB, the index is 1.18 GiB, and an address that cannot exist selects 1,146 of 28,396 granules (4.0%). Counts and times on 1.84B rows (query cache off):
+
+| Address | old: `email = lower(a)` | new, projections on | new, projections off | scan, no skip indexes |
+|---|---|---|---|---|
+| stored with capitals, 1 row | 0 rows, 0.63 s | 1 row, 0.79 s | 1 row, 0.79 s | 1 row, 15.4 s |
+| a frequent address | 1,369 rows, 0.55 s | 1,421 rows, 1.22 s | 1,421 rows, 1.19 s | 1,421 rows, 15.4 s |
+| absent | 0, 0.20 s | 0, 0.83 s | 0, 0.76 s | |
+
+The new counts equal the scan; the old lookup missed 52 of the frequent address's 1,421 rows. The new form is 0.2 to 0.6 s slower than the old one (the primary key and the text index no longer help) and about 13 to 20 times faster than a scan.
 
 ## What the owner sees
 

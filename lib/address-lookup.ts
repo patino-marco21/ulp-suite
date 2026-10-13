@@ -20,9 +20,11 @@ export const ADDRESS_INDEX_EXPR = 'lower(email)'
 export const ADDRESS_INDEX_TYPE = 'bloom_filter(0.05)'
 
 /**
- * Every query that compares lower(email) must carry this setting. Given a projection to choose from, the planner reads the whole projection
- * (it counts marks and does not credit the skip index's pruning) and never uses idx_bf_email_lc: on a 46M-row copy of the table with all its
- * indexes and projections an absent address took 0.42 s that way and 0.021 s with the setting (about 16 s against 1 s at 1.84B rows).
+ * Every query that compares lower(email) carries this setting. Given a projection to choose from, the planner can read the whole projection
+ * (it counts marks and does not credit the skip index's pruning) and then never uses idx_bf_email_lc. Measured on a 46M-row copy of the table in
+ * which every part carried proj_imported_desc: an absent address took 0.42 s that way and 0.021 s with the setting. On the live table today the
+ * projection exists only on the newest partition and the two are indistinguishable (0.79 s both, 2026-10-13), so the setting is insurance for the
+ * day the projection is restored on more partitions and for query shapes that were not measured. It costs nothing.
  */
 export const ADDRESS_LOOKUP_SETTING = 'optimize_use_projections = 0'
 
