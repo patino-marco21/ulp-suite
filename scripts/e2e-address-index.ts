@@ -159,7 +159,8 @@ async function main(): Promise<number> {
     const up2 = await waitFor('candidate app healthy', appHealthy, 300_000)
     check('the candidate app started', !!up2)
     if (!up2) return 1
-    const logs = sh('docker', ['logs', APP], envFor(CANDIDATE_IMAGE))
+    // The app logs its migration notices with console.warn (stderr), and `docker logs` hands the container's stderr back on stderr: merge both.
+    const logs = sh('bash', ['-c', `docker logs ${APP} 2>&1`], envFor(CANDIDATE_IMAGE))
     check('the log says DDL v29 applied', /DDL v29 applied/.test(logs))
     check('idx_bf_email_lc is now defined on lower(email)', chQuery("SELECT expr FROM system.data_skipping_indices WHERE database='ulp' AND table='credentials' AND name='idx_bf_email_lc'") === 'lower(email)')
     await login()
