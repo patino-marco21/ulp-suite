@@ -35,7 +35,8 @@ describe('GET /api/check — a lookup that runs out of time is an error, never "
     expect(sql).toContain("timeout_overflow_mode = 'throw'")
     expect(sql).not.toContain("timeout_overflow_mode = 'break'")
     expect(sql).toContain('http_wait_end_of_query = 1')
-    expect(sql).toContain('WHERE email = {email:String}')
+    expect(sql).toContain('WHERE lower(email) = lower({email:String})')
+    expect(sql).toContain('optimize_use_projections = 0')
   })
 
   test('a ClickHouse timeout becomes 503 with a retry hint, and says nothing about whether the address was found', async () => {

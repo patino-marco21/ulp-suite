@@ -12,6 +12,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
 import { executeQuery } from "@/lib/clickhouse"
+import { ADDRESS_LOOKUP_SETTING, addressEquals } from "@/lib/address-lookup"
 import { importedRangeFromSearchParams, importedRangeEchoIfSet, importedRangePlain, importedRangeAndSql } from "@/lib/imported-range"
 
 export const dynamic = 'force-dynamic'
@@ -56,9 +57,9 @@ export async function GET(request: NextRequest) {
       results = await executeQuery(
         `SELECT url, email, domain, source_file, imported_at
          FROM ulp.credentials
-         WHERE email = {email:String}${rangeAnd}
+         WHERE ${addressEquals('email')}${rangeAnd}
          ORDER BY imported_at DESC LIMIT 100
-         ${SETTINGS}`,
+         ${SETTINGS}, ${ADDRESS_LOOKUP_SETTING}`,
         { email, ...rangeSql.params }
       )
       const response = NextResponse.json({ success: true, found: results.length > 0, email, count: results.length, results, ...importedRangeEchoIfSet(importedRange) })

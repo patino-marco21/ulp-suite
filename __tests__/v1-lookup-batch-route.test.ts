@@ -47,9 +47,10 @@ describe('POST /api/v1/lookup/batch — filters on raw columns, normalizes only 
     await post({ emails: ['Jane@Example.com', 'bob@example.org'] })
     expect(calls).toHaveLength(1)
     const { sql, params } = calls[0]
-    expect(inner(sql)).toContain('WHERE email IN ({email0:String}, {email1:String})')
-    expect(inner(sql)).toContain('ORDER BY email ASC, imported_at DESC')
-    expect(inner(sql)).toContain('LIMIT {cap:UInt32} BY email')
+    expect(inner(sql)).toContain('WHERE lower(email) IN (lower({email0:String}), lower({email1:String}))')
+    expect(inner(sql)).toContain('ORDER BY lower(email) ASC, imported_at DESC')
+    expect(inner(sql)).toContain('LIMIT {cap:UInt32} BY lower(email)')
+    expect(sql).toContain('optimize_use_projections = 0')
     expect(params).toMatchObject({ email0: 'jane@example.com', email1: 'bob@example.org', cap: 50 })
   })
 
@@ -60,6 +61,7 @@ describe('POST /api/v1/lookup/batch — filters on raw columns, normalizes only 
     expect(inner(sql)).toContain('WHERE domain IN ({domain0:String})')
     expect(inner(sql)).toContain('ORDER BY domain ASC, imported_at DESC')
     expect(inner(sql)).toContain('LIMIT {cap:UInt32} BY domain')
+    expect(sql).not.toContain('optimize_use_projections')
     expect(params).toMatchObject({ domain0: 'trezor.io', cap: 50 })
   })
 
@@ -77,12 +79,12 @@ describe('POST /api/v1/lookup/batch — filters on raw columns, normalizes only 
   })
 
   test.each([
-    ['emails', ['a@b.co'], 'email'],
-    ['domains', ['b.co'], 'domain'],
-  ])('%s: the final order is re-stated on the outer select (a LIMIT BY result order is not relied on)', async (kind, values, col) => {
+    ['emails', ['a@b.co'], 'lower(t.email)'],
+    ['domains', ['b.co'], 't.domain'],
+  ])('%s: the final order is re-stated on the outer select (a LIMIT BY result order is not relied on)', async (kind, values, key) => {
     await post({ [kind]: values })
     const { sql } = calls[0]
-    expect(sql.slice(sql.indexOf(') AS t'))).toContain(`ORDER BY t.${col} ASC, t.imported_at DESC`)
+    expect(sql.slice(sql.indexOf(') AS t'))).toContain(`ORDER BY ${key} ASC, t.imported_at DESC`)
   })
 
   test('the 30 s cap throws (no partial rows) and waits for the whole result, so a timeout never yields garbled JSON', async () => {
@@ -101,7 +103,7 @@ describe('POST /api/v1/lookup/batch — filters on raw columns, normalizes only 
   test('emails and domains are two queries, one each', async () => {
     await post({ emails: ['a@b.co'], domains: ['b.co'] })
     expect(calls).toHaveLength(2)
-    expect(calls[0].sql).toContain('WHERE email IN')
+    expect(calls[0].sql).toContain('WHERE lower(email) IN')
     expect(calls[1].sql).toContain('WHERE domain IN')
   })
 })
@@ -109,7 +111,7 @@ describe('POST /api/v1/lookup/batch — filters on raw columns, normalizes only 
 describe('POST /api/v1/lookup/batch — response shape is unchanged', () => {
   test('rows are matched back to each requested key, case-insensitively, and misses are reported as not found', async () => {
     rowsFor = sql =>
-      sql.includes('WHERE email IN')
+      sql.includes('WHERE lower(email) IN')
         ? [
             { email: 'jane@example.com', url: 'https://x.example', password: 'p1', domain: 'x.example', source_file: 'a', breach_name: 'A', imported_at: '2026-01-02 00:00:00' },
             { email: 'jane@example.com', url: 'https://y.example', password: 'p2', domain: 'y.example', source_file: 'a', breach_name: 'A', imported_at: '2026-01-01 00:00:00' },

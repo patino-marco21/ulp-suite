@@ -18,6 +18,7 @@
 
 import { NextRequest, NextResponse } from "next/server"
 import { executeQuery } from "@/lib/clickhouse"
+import { ADDRESS_LOOKUP_SETTING, addressEquals } from "@/lib/address-lookup"
 import { checkLimit } from "@/lib/rate-limiter"
 import { trustedClientIp } from "@/lib/client-ip"
 
@@ -98,8 +99,9 @@ export async function GET(request: NextRequest) {
   inFlight++
   try {
     // Return breach names + domains only — NO passwords exposed.
-    // email has a bloom_filter skip index — point lookup is fast even at 1.39B rows
-    // (measured 2026-09-30: 0.3-1.2 s for ordinary addresses, ~22 s for a very popular one).
+    // lower(email) has a bloom_filter skip index (idx_bf_email_lc, lib/address-lookup.ts) — a point lookup is fast even at 1.84B rows
+    // (measured 2026-09-30 with the old index on email: 0.3-1.2 s for ordinary addresses, ~22 s for a very popular one) and finds every
+    // stored casing of the address. The projection setting keeps the planner on the base table, the only place the index is used.
     //
     // 'throw', not 'break': 'break' returns whatever had been read when the deadline hit -- a
     // truncated newest-500 list (verified 2026-10-01 with a 3 s cap on a popular address: 500 rows
@@ -113,11 +115,11 @@ export async function GET(request: NextRequest) {
          domain,
          imported_at
        FROM ulp.credentials
-       WHERE email = {email:String}
+       WHERE ${addressEquals("email")}
        ORDER BY imported_at DESC
        LIMIT 500
        SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw',
-                http_wait_end_of_query = 1, use_query_cache = 0`,
+                http_wait_end_of_query = 1, use_query_cache = 0, ${ADDRESS_LOOKUP_SETTING}`,
       { email: rawEmail }
     ) as Array<{ breach_name: string; domain: string; imported_at: string }>
 

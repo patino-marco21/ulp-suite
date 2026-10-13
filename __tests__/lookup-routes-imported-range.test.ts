@@ -149,7 +149,7 @@ describe('GET /api/v1/lookup — imported_after / imported_before', () => {
 
   test('by email and by domain', async () => {
     const byEmail = await (await getUrl(v1Lookup, `/api/v1/lookup?email=a@b.co&imported_after=${encodeURIComponent(AFTER)}`)).json()
-    expect(calls[0].sql).toContain(`WHERE email = {email:String} AND ${PLAIN_AFTER}`)
+    expect(calls[0].sql).toContain(`WHERE lower(email) = lower({email:String}) AND ${PLAIN_AFTER}`)
     expect(calls[0].params).toMatchObject({ email: 'a@b.co', impAfter: AFTER_EPOCH })
     expect(byEmail.imported_after).toBe(AFTER)
     calls.length = 0
@@ -158,9 +158,17 @@ describe('GET /api/v1/lookup — imported_after / imported_before', () => {
     expect(calls[0].params).toMatchObject({ domain: 'b.co', impBefore: BEFORE_EPOCH })
   })
 
+  test('the email lookup runs with projections off; the domain lookup keeps its settings', async () => {
+    await getUrl(v1Lookup, '/api/v1/lookup?email=a@b.co')
+    expect(calls[0].sql).toContain('optimize_use_projections = 0')
+    calls.length = 0
+    await getUrl(v1Lookup, '/api/v1/lookup?domain=b.co')
+    expect(calls[0].sql).not.toContain('optimize_use_projections')
+  })
+
   test('no bound: unchanged', async () => {
     await getUrl(v1Lookup, '/api/v1/lookup?email=a@b.co')
-    expect(calls[0].sql).toContain('WHERE email = {email:String}\n')
+    expect(calls[0].sql).toContain('WHERE lower(email) = lower({email:String})\n')
     expect(calls[0].sql).not.toContain('impAfter')
   })
 })
@@ -179,7 +187,7 @@ describe.each([
   test('both the email lookup and the domain lookup carry the bound beside the key, and the result echoes it', async () => {
     const body = await (await postJson(handler, url, { emails: ['A@b.co'], domains: ['b.co'], imported_after: AFTER, imported_before: BEFORE })).json()
     expect(calls).toHaveLength(2)
-    expect(calls[0].sql).toContain(`WHERE email IN ({email0:String}) AND ${PLAIN_AFTER} AND ${PLAIN_BEFORE}`)
+    expect(calls[0].sql).toContain(`WHERE lower(email) IN (lower({email0:String})) AND ${PLAIN_AFTER} AND ${PLAIN_BEFORE}`)
     expect(calls[1].sql).toContain(`WHERE domain IN ({domain0:String}) AND ${PLAIN_AFTER} AND ${PLAIN_BEFORE}`)
     for (const c of calls) expect(c.params).toMatchObject({ impAfter: AFTER_EPOCH, impBefore: BEFORE_EPOCH, cap: 50 })
     expect(calls[0].params).toMatchObject({ email0: 'a@b.co' })
@@ -188,7 +196,7 @@ describe.each([
 
   test('no bound: the SQL and the response shape are what they were', async () => {
     const body = await (await postJson(handler, url, { emails: ['a@b.co'] })).json()
-    expect(calls[0].sql).toContain('WHERE email IN ({email0:String})\n')
+    expect(calls[0].sql).toContain('WHERE lower(email) IN (lower({email0:String}))\n')
     expect(calls[0].sql).not.toContain('impAfter')
     expect(body).not.toHaveProperty('imported_after')
   })

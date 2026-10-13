@@ -14,6 +14,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { validateRequest } from "@/lib/auth"
 import { executeQuery } from "@/lib/clickhouse"
+import { ADDRESS_INDEX_EXPR, ADDRESS_LOOKUP_SETTING, addressIn } from "@/lib/address-lookup"
 import { parseImportedRange, importedRangeEchoIfSet, importedRangePlain, importedRangeAndSql } from "@/lib/imported-range"
 export const dynamic = "force-dynamic"
 
@@ -75,22 +76,22 @@ export async function POST(request: NextRequest) {
 
   try {
     // ── Email lookups ──────────────────────────────────────────────────────
-    // Raw email column: bloom_filter(0.05) provides fast granule pruning.
-    // NORM_EMAIL_EXPR in WHERE defeated the index — raw column is correct now.
-    // LIMIT {cap:UInt32} BY email guarantees up to RESULTS_CAP rows per queried
-    // address, fixing the starvation bug where one hot email filled the global cap.
+    // Index on lower(email) (idx_bf_email_lc, lib/address-lookup.ts): bloom_filter(0.05) prunes granules and every stored casing of an address matches.
+    // NORM_EMAIL_EXPR in WHERE defeated the index — the raw column is correct. LIMIT {cap:UInt32} BY lower(email) guarantees up to RESULTS_CAP rows per
+    // queried address (in any casing), fixing the starvation bug where one hot email filled the global cap. The projection setting keeps the planner
+    // on the base table, the only place the index is used.
     if (emails.length > 0) {
-      const emailList = emails.map((_, i) => `{email${i}:String}`).join(", ")
+      const emailNames = emails.map((_, i) => `email${i}`)
       const emailParams: Record<string, string | number> = {}
       emails.forEach((e, i) => { emailParams[`email${i}`] = e.toLowerCase() })
 
       const rows = await executeQuery(
         `SELECT email, password, url, domain, source_file, breach_name, imported_at
          FROM ulp.credentials
-         WHERE email IN (${emailList})${rangeAnd}
-         ORDER BY email ASC, imported_at DESC
-         LIMIT {cap:UInt32} BY email
-         ${SETTINGS}`,
+         WHERE ${addressIn(emailNames)}${rangeAnd}
+         ORDER BY ${ADDRESS_INDEX_EXPR} ASC, imported_at DESC
+         LIMIT {cap:UInt32} BY ${ADDRESS_INDEX_EXPR}
+         ${SETTINGS}, ${ADDRESS_LOOKUP_SETTING}`,
         { ...emailParams, ...rangeSql.params, cap: RESULTS_CAP }
       ) as Array<{
         email: string; password: string; url: string; domain: string
@@ -99,7 +100,7 @@ export async function POST(request: NextRequest) {
 
       for (const email of emails) {
         const lc   = email.toLowerCase()
-        const hits = rows.filter(r => r.email === lc)
+        const hits = rows.filter(r => r.email.toLowerCase() === lc)
         results[email] = { found: hits.length > 0, count: hits.length, results: hits }
       }
     }
