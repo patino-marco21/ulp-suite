@@ -26,6 +26,10 @@ Spec: `docs/superpowers/specs/2026-10-13-case-insensitive-address-lookup-design.
 
 ---
 
+## Execution notes (2026-10-13, inline)
+
+Executed in this session, one check per step. Deviations from the text below: `usesAddressIndex` and its tests landed in Task 2 with the builder (Task 5 only wires the routes); the guard test was committed with Task 4, when it could first pass; the rehearsal seeds ONE part (`STOP MERGES` blocks mutations, see Global Constraints) and its granule threshold is 25% because the seed has only about 23 granules; `docker logs` returns the app's `console.warn` on stderr, so the rehearsal reads both streams; and after the full-scale measurement the projection setting is described as insurance, not as a fix for the live table (README, spec and the code comment say so). Results: gate green (tsc 0, eslint 0, 234 files / 3,427 tests); rehearsal 27/27; live `scripts/materialize-address-index.sh` 3 min 10 s, +0 GiB net, index 1.18 GiB; deployed image `9f7b454a15b6`; live parity 9/9 (address lookups 703-741 ms, counts equal to the full scan).
+
 ## File Structure
 
 - Create `lib/address-lookup.ts`: expression, index name/type, `addressEquals`, `addressDiffers`, `addressIn`, `addressIndexAddSql`, `addressIndexDropSql`. Pure strings, no imports (tsx loads it from the script).
@@ -49,7 +53,7 @@ Spec: `docs/superpowers/specs/2026-10-13-case-insensitive-address-lookup-design.
 - Produces (used by every later task): from `@/lib/address-lookup`: `ADDRESS_INDEX_NAME = 'idx_bf_email_lc'`, `ADDRESS_INDEX_EXPR = 'lower(email)'`, `ADDRESS_INDEX_TYPE = 'bloom_filter(0.05)'`, `ADDRESS_LOOKUP_SETTING = 'optimize_use_projections = 0'`, `addressEquals(param: string): string`, `addressDiffers(param: string): string`, `addressIn(params: string[]): string`, `addressIndexAddSql(table: string): string`, `addressIndexDropSql(table: string): string`.
 - Produces: `ddlVersionToRecord(sourcesIdentityFailed: boolean, addressIndexFailed?: boolean): number`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/address-lookup.test.ts`:
 
@@ -142,12 +146,12 @@ In `__tests__/search-index-definitions.test.ts` change the first test and add on
   })
 ```
 
-- [ ] **Step 2: Run the tests and see them fail**
+- [x] **Step 2: Run the tests and see them fail**
 
 Run: `npx vitest run __tests__/address-lookup.test.ts __tests__/ddl-version-record.test.ts __tests__/search-index-definitions.test.ts`
 Expected: FAIL (`Cannot find module '@/lib/address-lookup'`, version 28 instead of 29, 5 names instead of 6).
 
-- [ ] **Step 3: Create the module**
+- [x] **Step 3: Create the module**
 
 Create `lib/address-lookup.ts`:
 
@@ -206,7 +210,7 @@ export function addressIndexDropSql(table: string): string {
 }
 ```
 
-- [ ] **Step 4: Add the definition**
+- [x] **Step 4: Add the definition**
 
 In `lib/search-index-definitions.ts`, add the import under the header comment (before `export interface SearchIndexDefinition`):
 
@@ -225,7 +229,7 @@ and append as the last element of `SEARCH_INDEX_DEFINITIONS` (after the `idx_ngr
   },
 ```
 
-- [ ] **Step 5: DDL v29**
+- [x] **Step 5: DDL v29**
 
 In `lib/clickhouse-migrations.ts`:
 
@@ -285,7 +289,7 @@ export function ddlVersionToRecord(sourcesIdentityFailed: boolean, addressIndexF
 
 (d) Replace `const ddlReached = ddlVersionToRecord(sourcesIdentityFailed)` with `const ddlReached = ddlVersionToRecord(sourcesIdentityFailed, addressIndexFailed)`, and in the comment above it change "A failed v28 keeps the recorded version below it" to "A failed v28 or v29 keeps the recorded version below it".
 
-- [ ] **Step 6: The alert rehearsal pins the version**
+- [x] **Step 6: The alert rehearsal pins the version**
 
 In `scripts/e2e-alert-rehearsal.ts` replace
 
@@ -301,12 +305,12 @@ with
     check('idx_bf_email_lc exists on a fresh install and indexes lower(email)', addressIndex === 'lower(email)', `got ${addressIndex}`)
 ```
 
-- [ ] **Step 7: Run the tests and see them pass**
+- [x] **Step 7: Run the tests and see them pass**
 
 Run: `npx vitest run __tests__/address-lookup.test.ts __tests__/ddl-version-record.test.ts __tests__/search-index-definitions.test.ts __tests__/content-dedup.test.ts __tests__/sources-identity.test.ts`
 Expected: PASS (content-dedup derives its expectation from `SEARCH_INDEX_DEFINITIONS.length`).
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add lib/address-lookup.ts __tests__/address-lookup.test.ts lib/search-index-definitions.ts __tests__/search-index-definitions.test.ts lib/clickhouse-migrations.ts __tests__/ddl-version-record.test.ts scripts/e2e-alert-rehearsal.ts
@@ -326,7 +330,7 @@ git commit -m "feat(address): DDL v29 adds a bloom filter on lower(email); one m
 - Consumes: `addressEquals` from `@/lib/address-lookup` (Task 1).
 - Produces: for an `email_full` token (scopes `all` and `login`) `buildULPWhere` returns clause `(lower(email) = lower({exactemailN:String}))` and `params.exactemailN` = the value as typed. `emailCasings` no longer exists.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/ulp-search-address.test.ts`:
 
@@ -434,12 +438,12 @@ In `__tests__/ulp-search-login-build.test.ts` replace the test `a full address k
   })
 ```
 
-- [ ] **Step 2: Run the tests and see them fail**
+- [x] **Step 2: Run the tests and see them fail**
 
 Run: `npx vitest run __tests__/ulp-search-address.test.ts __tests__/ulp-search.test.ts __tests__/credentials-route-login-scope.test.ts __tests__/ulp-search-login-build.test.ts`
 Expected: FAIL (the clause is still `email IN (...)`).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `lib/ulp-search.ts`:
 
@@ -496,12 +500,12 @@ with
       // value without scanning them.  No LIKE fallback: substring search on emails would bypass the index and force a full table scan.
 ```
 
-- [ ] **Step 4: Run the tests and see them pass**
+- [x] **Step 4: Run the tests and see them pass**
 
 Run: `npx vitest run __tests__/ulp-search-address.test.ts __tests__/ulp-search.test.ts __tests__/credentials-route-login-scope.test.ts __tests__/ulp-search-login-build.test.ts __tests__/ulp-search-login-parse.test.ts`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A lib/ulp-search.ts __tests__/ulp-search-address.test.ts __tests__/ulp-search.test.ts __tests__/credentials-route-login-scope.test.ts __tests__/ulp-search-login-build.test.ts __tests__/ulp-search-casings.test.ts
@@ -521,7 +525,7 @@ git commit -m "feat(search): a full address matches in any case through lower(em
 - Consumes: `addressEquals`, `addressIn`, `ADDRESS_INDEX_EXPR` from `@/lib/address-lookup`.
 - Produces: single lookups use `lower(email) = lower({email:String})`; batch lookups use `lower(email) IN (lower({email0:String}), ...)`, `ORDER BY lower(email) ASC, imported_at DESC`, `LIMIT {cap:UInt32} BY lower(email)`, and the result for each queried address is the rows whose lowercased login equals it.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Update `__tests__/check-route-timeout.test.ts`: replace `expect(sql).toContain('WHERE email = {email:String}')` with these two lines:
 
@@ -694,12 +698,12 @@ describe('no exact-address lookup compares the raw email column', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests and see them fail**
+- [x] **Step 2: Run the tests and see them fail**
 
 Run: `npx vitest run __tests__/check-route-timeout.test.ts __tests__/lookup-routes-imported-range.test.ts __tests__/v1-lookup-batch-route.test.ts __tests__/lookup-batch-address-case.test.ts __tests__/address-lookup-guard.test.ts`
 Expected: FAIL (the routes still compare the raw column; the guard lists check, v1 lookup, both batch routes and `lib/related-queries.ts` is not listed yet because it compares `email = {email:String}` too — see Task 4).
 
-- [ ] **Step 3: Implement the four routes**
+- [x] **Step 3: Implement the four routes**
 
 `app/api/check/route.ts`: add `import { ADDRESS_LOOKUP_SETTING, addressEquals } from "@/lib/address-lookup"` next to the other `@/lib` imports; in the same query's `SETTINGS` change `use_query_cache = 0` to `use_query_cache = 0, ${ADDRESS_LOOKUP_SETTING}`; replace the two comment lines
 
@@ -793,12 +797,12 @@ and update the comment above it to: `// Index on lower(email) (idx_bf_email_lc):
 
 with the comment above it updated to say `lower(email)` (index idx_bf_email_lc) instead of "bloom_filter(0.05) on email".
 
-- [ ] **Step 4: Run the tests and see them pass**
+- [x] **Step 4: Run the tests and see them pass**
 
 Run: `npx vitest run __tests__/check-route-timeout.test.ts __tests__/check-route-ip-trust.test.ts __tests__/lookup-routes-imported-range.test.ts __tests__/v1-lookup-batch-route.test.ts __tests__/lookup-batch-address-case.test.ts`
 Expected: PASS. (`__tests__/address-lookup-guard.test.ts` still fails on `lib/related-queries.ts` until Task 4; that is expected here.)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/api/check/route.ts app/api/v1/lookup/route.ts app/api/lookup/batch/route.ts app/api/v1/lookup/batch/route.ts __tests__/check-route-timeout.test.ts __tests__/lookup-routes-imported-range.test.ts __tests__/v1-lookup-batch-route.test.ts __tests__/lookup-batch-address-case.test.ts __tests__/address-lookup-guard.test.ts
@@ -816,7 +820,7 @@ git commit -m "feat(lookup): check, v1 lookup and both batch lookups match an ad
 - Consumes: `addressEquals`, `addressDiffers` from `@/lib/address-lookup`.
 - Produces: `RELATED_BY_EMAIL_SQL` filters `lower(email) = lower({email:String})`; `RELATED_BY_DOMAIN_SQL` and `RELATED_BY_PASSWORD_SQL` exclude the same login with `lower(email) != lower({email:String})`.
 
-- [ ] **Step 1: Update the test expectations (they fail first)**
+- [x] **Step 1: Update the test expectations (they fail first)**
 
 In `__tests__/related-queries.test.ts` replace the `buckets` array with:
 
@@ -840,12 +844,12 @@ describe('related queries — the projection setting', () => {
 })
 ```
 
-- [ ] **Step 2: Run and see it fail**
+- [x] **Step 2: Run and see it fail**
 
 Run: `npx vitest run __tests__/related-queries.test.ts`
 Expected: FAIL on the three `the inner query filters raw stored columns` tests and on the projection-setting test.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `lib/related-queries.ts` add `import { ADDRESS_LOOKUP_SETTING, addressDiffers, addressEquals } from '@/lib/address-lookup'` under the existing import; change `function relatedQuery(where: string): string {` to `function relatedQuery(where: string, extraSettings = ''): string {` and the last line of its template, `     SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1, use_query_cache = 0, ${NORM_COLS_SETTING}\``, to end with `${NORM_COLS_SETTING}${extraSettings}\``; then replace the three exports with:
 
@@ -862,12 +866,12 @@ export const RELATED_BY_PASSWORD_SQL = relatedQuery(`password = {password:String
 
 Add one sentence to the file's header comment, before `Params:`: `The login comparisons are case-insensitive (lib/address-lookup.ts): lower(email) is the indexed expression, written identically here.` And in the same comment replace the fragment `` `SELECT ${NORM_COLS} ... WHERE email = {email:String}` `` with `` `SELECT ${NORM_COLS} ... WHERE lower(email) = lower({email:String})` `` (the guard test of Task 3 would otherwise flag the old text).
 
-- [ ] **Step 4: Run and see it pass**
+- [x] **Step 4: Run and see it pass**
 
 Run: `npx vitest run __tests__/related-queries.test.ts __tests__/related-route-failures.test.ts __tests__/address-lookup-guard.test.ts`
 Expected: PASS (the guard is now clean across `app/api` and `lib`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/related-queries.ts __tests__/related-queries.test.ts
@@ -888,7 +892,7 @@ git commit -m "feat(related): the same-login bucket and the exclusions ignore le
 
 Why: Task 3 and 4 queries are address queries by construction. A search query is one only when the text has an address term, and a word or domain search must keep today's settings (the Credentials route disables projections only when no imported range is set, and the other three never did).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `__tests__/ulp-search-address.test.ts` change the import to `import { buildULPWhere, parseULPQuery, usesAddressIndex } from '@/lib/ulp-search'` and append:
 
@@ -980,12 +984,12 @@ describe('POST /api/export — an address search keeps the planner on the base t
 })
 ```
 
-- [ ] **Step 2: Run and see them fail**
+- [x] **Step 2: Run and see them fail**
 
 Run: `npx vitest run __tests__/ulp-search-address.test.ts __tests__/credentials-route-login-scope.test.ts __tests__/lookup-routes-imported-range.test.ts __tests__/export-route-imported-range.test.ts`
 Expected: FAIL (`usesAddressIndex` is not exported; the routes do not carry the setting).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `lib/ulp-search.ts`, right after `isIndexNeutralSearch`:
 
@@ -1028,12 +1032,12 @@ and in BOTH plain row templates (the `dedupeInWindow` one and the other) add a l
 
 `app/api/export/route.ts`: import both; after the `const { clause, params: baseParams } = regex_mode ? ... : buildULPWhere(tokens)` statement add `const projectionOff = usesAddressIndex(tokens, Boolean(regex_mode)) ? `, ${ADDRESS_LOOKUP_SETTING}` : ''`; in `rowsSql` change the last line to `${exportSortSettings()}, ${NORM_COLS_SETTING}${extraSettings}${projectionOff}`.
 
-- [ ] **Step 4: Run and see them pass**
+- [x] **Step 4: Run and see them pass**
 
 Run: `npx vitest run __tests__/ulp-search-address.test.ts __tests__/credentials-route-login-scope.test.ts __tests__/lookup-routes-imported-range.test.ts __tests__/export-route-imported-range.test.ts __tests__/search-route-split.test.ts __tests__/cursor-raw-columns.test.ts __tests__/ulp-normalize-setting.test.ts; npx tsc --noEmit; echo "tsc exit $?"`
 Expected: PASS and `tsc exit 0`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/ulp-search.ts app/api/credentials/route.ts app/api/search/route.ts app/api/v1/search/credentials/route.ts app/api/export/route.ts __tests__/ulp-search-address.test.ts __tests__/credentials-route-login-scope.test.ts __tests__/lookup-routes-imported-range.test.ts __tests__/export-route-imported-range.test.ts
@@ -1051,7 +1055,7 @@ git commit -m "feat(address): searches with an address term keep the planner on 
 - Consumes: `addressIndexAddSql`, `ADDRESS_INDEX_EXPR` through `tsx` (Task 1).
 - Produces: env `APPLY`, `MIN_FREE_GIB` (130), `ABORT_FREE_GIB` (120), `POLL_SECONDS` (5), `MAX_MINUTES` (60), `MAX_SELECTED_PCT` (10), `CLICKHOUSE_CONTAINER` (`ulpsuite_clickhouse`); exit codes 0 / 2 precondition / 4 disk / 5 timeout / 6 failed or index unused.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `__tests__/materialize-address-index-script.test.ts`:
 
@@ -1232,12 +1236,12 @@ describe('scripts/materialize-address-index.sh', () => {
 })
 ```
 
-- [ ] **Step 2: Run and see it fail**
+- [x] **Step 2: Run and see it fail**
 
 Run: `npx vitest run __tests__/materialize-address-index-script.test.ts`
 Expected: FAIL (the script does not exist).
 
-- [ ] **Step 3: Write the script**
+- [x] **Step 3: Write the script**
 
 Create `scripts/materialize-address-index.sh`:
 
@@ -1452,12 +1456,12 @@ echo "$INDEX is materialized on every partition. It is now safe to deploy the im
 
 Then `chmod +x scripts/materialize-address-index.sh`.
 
-- [ ] **Step 4: Run and see it pass**
+- [x] **Step 4: Run and see it pass**
 
 Run: `npx vitest run __tests__/materialize-address-index-script.test.ts`
 Expected: PASS (11 tests; each runs the script against the stub).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/materialize-address-index.sh __tests__/materialize-address-index-script.test.ts
@@ -1471,7 +1475,7 @@ git commit -m "feat(address): supervised script that materializes the lower(emai
 **Files:**
 - Modify: `README.md`, `app/docs/page.tsx`, `docs/superpowers/specs/2026-10-13-login-search-scope-design.md`, `__tests__/login-scope-parity.live.test.ts`
 
-- [ ] **Step 1: README**
+- [x] **Step 1: README**
 
 (a) In the *Search in* bullet (README line 21) replace "A full address (`name@host`) is an exact match that also tries the common capitalisations (`Name@host`, `NAME@HOST`); *Login (contains)* ignores case completely. Case is folded for ASCII letters only." with "A full address (`name@host`) is an exact match that ignores letter case, so every stored casing of it is found (about 0.4-2 s). Case is folded for ASCII letters only."
 
@@ -1487,18 +1491,18 @@ DDL v29 adds the index definition; parts written before it need `bash scripts/ma
 
 (c) In the performance table row `Exact domain / email lookup` change the first cell to `Exact domain / email lookup (an address matches in any letter case)`.
 
-- [ ] **Step 2: API docs page**
+- [x] **Step 2: API docs page**
 
 In `app/docs/page.tsx`:
 - line 523: after `Quick lookup to check if an email or domain exists. Returns summary statistics without full credential data.` append ` An email matches in any letter case; each returned row shows the login as stored.`
 - line 681: replace `Each email lookup uses the bloom-filter skip index for fast exact matching.` with `Each email lookup uses a bloom-filter skip index for fast exact matching that ignores letter case.`
 - line 757: replace `Email addresses are lowercased automatically before matching` with `Email addresses match in any letter case (rows come back as stored)`.
 
-- [ ] **Step 3: The login-scope spec note**
+- [x] **Step 3: The login-scope spec note**
 
 At the top of the section `## The e-mail casing probe (included; the owner can strike this section)` of `docs/superpowers/specs/2026-10-13-login-search-scope-design.md` add the line: `> **Superseded 2026-10-13 (later the same day):** an index on lower(email) makes the exact match complete and just as fast, so the probe was removed; see docs/superpowers/specs/2026-10-13-case-insensitive-address-lookup-design.md.`
 
-- [ ] **Step 4: Tighten the live parity test**
+- [x] **Step 4: Tighten the live parity test**
 
 In `__tests__/login-scope-parity.live.test.ts` update the header line
 
@@ -1552,12 +1556,12 @@ and replace the last test of the file (`the address casing probe finds at least 
   }, 30 * 60_000)
 ```
 
-- [ ] **Step 5: Run what can run offline**
+- [x] **Step 5: Run what can run offline**
 
 Run: `npx vitest run __tests__/address-lookup-guard.test.ts __tests__/ulp-search-address.test.ts && npx tsc --noEmit; echo "tsc exit $?"`
 Expected: tests PASS; `tsc exit 0` (the live test is skipped without `LSP_PARITY=1`, but it must still compile).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add README.md app/docs/page.tsx docs/superpowers/specs/2026-10-13-login-search-scope-design.md __tests__/login-scope-parity.live.test.ts
@@ -1574,7 +1578,7 @@ git commit -m "docs(address): README, API docs and the live parity test for the 
 **Interfaces:**
 - Consumes: `scripts/materialize-address-index.sh` (Task 6), the rehearsal stack `docker-compose.rehearsal.yml`, env `PREVIOUS_IMAGE` (required, a pre-v29 image), `CANDIDATE_IMAGE` (default `ulp-suite-app:address-candidate`).
 
-- [ ] **Step 1: Write the script**
+- [x] **Step 1: Write the script**
 
 Create `scripts/e2e-address-index.ts`:
 
@@ -1794,12 +1798,12 @@ async function main(): Promise<number> {
 main().then(code => process.exit(code), err => { console.error(err); process.exit(1) })
 ```
 
-- [ ] **Step 2: Type-check and lint it**
+- [x] **Step 2: Type-check and lint it**
 
 Run: `npx tsc --noEmit; echo "tsc exit $?"; npx eslint scripts/e2e-address-index.ts; echo "eslint exit $?"`
 Expected: both exit 0.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add scripts/e2e-address-index.ts
@@ -1812,7 +1816,7 @@ git commit -m "test(address): upgrade-path rehearsal of the lower(email) index o
 
 **Files:** none new; this task runs the rollout of the spec.
 
-- [ ] **Step 1: The whole local gate (run once)**
+- [x] **Step 1: The whole local gate (run once)**
 
 ```bash
 npx tsc --noEmit; echo "tsc exit $?"
@@ -1821,14 +1825,14 @@ npx vitest run 2>&1 | tail -15
 ```
 Expected: `tsc exit 0`, `eslint exit 0`, vitest: all files passed, 0 failed. Any failure: fix it before going on (a test that pinned the old behaviour is updated; nothing is skipped).
 
-- [ ] **Step 2: Merge and push**
+- [x] **Step 2: Merge and push**
 
 ```bash
 git push origin main
 ```
 Expected: CI (typecheck, test, lint, build) green on the pushed head (`gh run list --limit 1`).
 
-- [ ] **Step 3: Rollback tag, then build the candidate from the merged commit**
+- [x] **Step 3: Rollback tag, then build the candidate from the merged commit**
 
 ```bash
 STAMP=$(date -u +%Y%m%d-%H%Mz)
@@ -1840,14 +1844,14 @@ DOCKER_CONFIG="$SCRATCH/dockercfg" docker build -t ulp-suite-app:address-candida
 ```
 Expected: the build ends with the image tagged `ulp-suite-app:address-candidate`; `ulp-suite-app:latest` is untouched (production keeps running the old image).
 
-- [ ] **Step 4: Rehearse the upgrade path on the isolated stack**
+- [x] **Step 4: Rehearse the upgrade path on the isolated stack**
 
 ```bash
 PREVIOUS_IMAGE=ulp-suite-app:latest npx tsx scripts/e2e-address-index.ts
 ```
 Expected: every check PASS, `N/N checks passed`, exit 0, the stack torn down. A FAIL is investigated and fixed (new commit, re-merge, rebuild) before touching the live table.
 
-- [ ] **Step 5: Materialize on the live table (supervised)**
+- [x] **Step 5: Materialize on the live table (supervised)**
 
 ```bash
 bash scripts/materialize-address-index.sh            # dry run: reads the state, changes nothing
@@ -1857,7 +1861,7 @@ df -h / | tail -1                                      # free space after
 ```
 Expected: the dry run exits 0; the apply ends with `is materialized on every partition`, the EXPLAIN line selects at most 10% of the granules, the index size is about 1.2 GiB, and free disk dips by no more than a few GiB. Stop and investigate on any non-zero exit.
 
-- [ ] **Step 6: Deploy `app` only**
+- [x] **Step 6: Deploy `app` only**
 
 ```bash
 export DOCKER_CONFIG=/tmp/claude-1000/-home-cole-ulp-suite/396dc453-5b14-4986-b7f4-a8869a04bbb3/scratchpad/dockercfg
@@ -1866,13 +1870,13 @@ docker compose -p ulp-suite -f /home/cole/ulp-suite/docker-compose.yml --project
 ```
 Expected: the app container is recreated (about 30 s); `docker logs ulpsuite_app 2>&1 | grep -E "DDL v29|DDL now at"` shows `DDL v29 applied` and `DDL now at v29`; `docker inspect ulpsuite_app --format '{{.State.Health.Status}} {{.RestartCount}}'` reads `healthy 0`; `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/login` reads 200; the container env still has `CONTENT_DEDUP_APPLY=false`.
 
-- [ ] **Step 7: Live parity and timing (read-only)**
+- [x] **Step 7: Live parity and timing (read-only)**
 
 ```bash
 LSP_PARITY=1 npx vitest run __tests__/login-scope-parity.live.test.ts 2>&1 | tail -25
 ```
 Expected: all tests pass, including `a full address finds every stored casing, exactly the complete answer, through the index` (each lookup under 3 s, the EXPLAIN selects at most 10% of the granules).
 
-- [ ] **Step 8: Record it**
+- [x] **Step 8: Record it**
 
 Set the spec's status line to `implemented and deployed locally on 2026-10-13` with the commit, image id and rollback tag; add the plan's boxes as ticked; commit and push the docs (`docs(address): ...`). Update the memory notes (`project_search_levers_measured_2026_10_13.md`, the ledger) with what shipped, the live numbers and the follow-ups (search levers A and B, the owner trying the address lookups in the browser).

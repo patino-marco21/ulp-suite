@@ -1,7 +1,7 @@
 # Case-insensitive exact-address lookup — Design
 
 Date: 2026-10-13
-Status: design, written for the owner's review. Nothing in this document is built. The repository is public: this file holds numbers only, never search terms or addresses.
+Status: **implemented and deployed locally on 2026-10-13** (plan `docs/superpowers/plans/2026-10-13-case-insensitive-address-lookup.md`; main `96dcc5b`; image `9f7b454a15b6`; rollback tag `ulp-suite-app:rollback-20261013-1525z` = `662399b8886f`). The owner approved the design in chat ("Go ahead", then "Continue" after the written spec). What differs from the approved text: the projection setting is insurance on the live table (see "Result on the live table"), and the upgrade rehearsal seeds one part instead of stopping merges. The repository is public: this file holds numbers only, never search terms or addresses.
 
 ## Why
 
