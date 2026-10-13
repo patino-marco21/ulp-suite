@@ -7,7 +7,7 @@
  * the same split app/api/credentials/route.ts and app/api/export/route.ts use.
  *
  * WHY THE SPLIT: NORM_COLS aliases url, email, password and domain. In a single-level
- * `SELECT ${NORM_COLS} ... WHERE email = {email:String}` those aliases shadow the stored
+ * `SELECT ${NORM_COLS} ... WHERE lower(email) = lower({email:String})` those aliases shadow the stored
  * columns inside WHERE, so the filter is evaluated on the normalized expression instead of
  * the column and neither the primary key (domain, email, imported_at) nor the bloom-filter
  * skip indexes can prune. The planner then scans proj_imported_desc newest-first looking for
@@ -36,10 +36,14 @@
  * shows the first 25 by (domain, email) rather than the 25 newest; they still display newest
  * first (the outer ORDER BY), and a bucket with <= 25 matches is returned complete either way.
  *
+ * The login comparisons are case-insensitive (lib/address-lookup.ts): lower(email) is the indexed expression, written identically here, and the
+ * same-login bucket carries ADDRESS_LOOKUP_SETTING so the planner stays on the base table, the only place idx_bf_email_lc is used.
+ *
  * Params: {email:String}, {domain:String}, {password:String} -- see the route for which
  * bucket binds which.
  */
 import { NORM_COLS, NORM_COLS_SETTING } from '@/lib/ulp-normalize'
+import { ADDRESS_LOOKUP_SETTING, addressDiffers, addressEquals } from '@/lib/address-lookup'
 
 /** Rows per bucket. */
 export const RELATED_LIMIT = 25
@@ -53,7 +57,7 @@ const OUTER_COLS = `${NORM_COLS}, breach_name, country_tier, login_type, importe
 /** The primary-key prefix -- the one sort the table gives away for free (see the file comment). */
 const SAMPLE_ORDER_BY = 'domain, email'
 
-function relatedQuery(where: string): string {
+function relatedQuery(where: string, extraSettings = ''): string {
   // The outer ORDER BY re-sorts <= RELATED_LIMIT rows for display; it also spares the display
   // order from depending on how ClickHouse streams a subquery's rows into the outer SELECT.
   return `SELECT ${OUTER_COLS}
@@ -65,14 +69,14 @@ function relatedQuery(where: string): string {
        LIMIT ${RELATED_LIMIT}
      ) AS t
      ORDER BY imported_at DESC
-     SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1, use_query_cache = 0, ${NORM_COLS_SETTING}`
+     SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1, use_query_cache = 0, ${NORM_COLS_SETTING}${extraSettings}`
 }
 
-/** Same login on other rows -- cross-domain reuse of one account. */
-export const RELATED_BY_EMAIL_SQL = relatedQuery('email = {email:String}')
+/** Same login on other rows -- cross-domain reuse of one account, whatever the letter case it was stored in (idx_bf_email_lc, which needs the base table). */
+export const RELATED_BY_EMAIL_SQL = relatedQuery(addressEquals('email'), `, ${ADDRESS_LOOKUP_SETTING}`)
 
-/** Other logins on the same domain -- exposure breadth. */
-export const RELATED_BY_DOMAIN_SQL = relatedQuery('domain = {domain:String} AND email != {email:String}')
+/** Other logins on the same domain -- exposure breadth. The same login in another case is not "other". */
+export const RELATED_BY_DOMAIN_SQL = relatedQuery(`domain = {domain:String} AND ${addressDiffers('email')}`)
 
-/** Other accounts using the exact same password. */
-export const RELATED_BY_PASSWORD_SQL = relatedQuery('password = {password:String} AND email != {email:String}')
+/** Other accounts using the exact same password. The same login in another case is not "other". */
+export const RELATED_BY_PASSWORD_SQL = relatedQuery(`password = {password:String} AND ${addressDiffers('email')}`)

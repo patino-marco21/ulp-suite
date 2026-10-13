@@ -23,9 +23,9 @@ function splitInnerOuter(sql: string): { inner: string; outer: string } {
 const placeholders = (sql: string) => [...new Set([...sql.matchAll(/\{(\w+):/g)].map(m => m[1]))].sort()
 
 const buckets = [
-  { name: 'by_email', sql: RELATED_BY_EMAIL_SQL, where: 'WHERE email = {email:String}', params: ['email'] },
-  { name: 'by_domain', sql: RELATED_BY_DOMAIN_SQL, where: 'WHERE domain = {domain:String} AND email != {email:String}', params: ['domain', 'email'] },
-  { name: 'by_password', sql: RELATED_BY_PASSWORD_SQL, where: 'WHERE password = {password:String} AND email != {email:String}', params: ['email', 'password'] },
+  { name: 'by_email', sql: RELATED_BY_EMAIL_SQL, where: 'WHERE lower(email) = lower({email:String})', params: ['email'] },
+  { name: 'by_domain', sql: RELATED_BY_DOMAIN_SQL, where: 'WHERE domain = {domain:String} AND lower(email) != lower({email:String})', params: ['domain', 'email'] },
+  { name: 'by_password', sql: RELATED_BY_PASSWORD_SQL, where: 'WHERE password = {password:String} AND lower(email) != lower({email:String})', params: ['email', 'password'] },
 ]
 
 describe.each(buckets)('related queries — $name (alias-shadowing regression: 78/78 queries hit the 30 s cap with 0 rows)', ({ sql, where, params }) => {
@@ -93,5 +93,13 @@ describe('related route — runs the shared split queries', () => {
     expect(source).toContain('executeQuery(RELATED_BY_EMAIL_SQL, { email })')
     expect(source).toContain('executeQuery(RELATED_BY_DOMAIN_SQL, { domain, email })')
     expect(source).toContain('executeQuery(RELATED_BY_PASSWORD_SQL, { password, email })')
+  })
+})
+
+describe('related queries — the projection setting', () => {
+  test('only the same-login bucket carries it (it is the one that uses the lower(email) index)', () => {
+    expect(RELATED_BY_EMAIL_SQL).toContain('optimize_use_projections = 0')
+    expect(RELATED_BY_DOMAIN_SQL).not.toContain('optimize_use_projections')
+    expect(RELATED_BY_PASSWORD_SQL).not.toContain('optimize_use_projections')
   })
 })
