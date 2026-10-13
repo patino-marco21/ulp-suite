@@ -21,6 +21,22 @@ On a throwaway MergeTree table of 36,693,958 `email` values taken from the live 
 | `email = <lowercased stored address>` for an address stored with capitals | 0 rows |
 | `lower(email) = <same address>` | 1 row, 0.013 s, 91 of 4,480 granules read (2.0%, with ClickHouse's default false-positive rate of 0.025; the live indexes use 0.05, so expect about 5%) |
 
+## Measured while building (2026-10-13, after the owner approved the design)
+
+The first measurement used a scratch table with only the new index. The table the app queries also has the primary key `(domain, email, imported_at)`, a text index on `email`, 18 other skip indexes, 64k-row granules and three projections, so the design was tested again on a scratch copy with all of them (MergeTree instead of Replicated; 46M rows = a 1/40 sample of the live rows, 732 granules, merges settled; dropped afterwards). Counts and times only:
+
+| Address | old: `email = lower(a)` | new, default settings | new, `optimize_use_projections = 0` | scan, no skip indexes |
+|---|---|---|---|---|
+| stored only with capitals, 1 row | 0 rows, 0.009 s | 1 row, 0.407 s | 1 row, 0.024 s | 0.438 s |
+| 2,431 rows | 2,431, 0.184 s | 2,431, 0.407 s | 2,431, 0.250 s | 0.379 s |
+| the most frequent address, 32,028 rows | **0 rows**, 0.015 s | 32,028, 0.404 s | 32,028, 0.054 s | 0.404 s |
+| absent | 0, 0.009 s | 0, 0.420 s | 0, 0.026 s | 0.376 s |
+| three addresses with `IN (...)` | 2,431, 0.238 s | 2,432, 0.434 s | 2,432, 0.280 s | |
+
+* The old lookup is fast because the primary key and the text index on `email` do most of the pruning (EXPLAIN for a rare address: 732, 642, then 1 granule). The new predicate can use neither, so the bloom filter alone does the work (27 of 732 granules for an absent address, 3.7%, close to the filter's 5% false-positive rate), and with projections off it is as fast. The new counts equal the full scan in every row. The most frequent address shows the recall gap at its worst: the old lookup found none of its 32,028 stored rows.
+* **With projections enabled the new form is about 17 times slower** (0.42 s against 0.024 s; about 16 s against 1 s at 1.84B rows). Given a projection to choose from, the planner reads the whole projection (it counts marks and does not credit the skip index's pruning) and never uses `idx_bf_email_lc`. So every query that compares `lower(email)` must run with `optimize_use_projections = 0` (below, "Projections").
+* `MATERIALIZE INDEX` on the settled copy took 2.7 s and added 47 MiB (the new part directories hardlink every file they do not change). It took about 2 minutes while 53 small parts were still merging, because a mutation waits for the merges that involve its parts. `SYSTEM STOP MERGES` stops mutations too (a mutation started with merges stopped never finishes), so merges are never stopped around a materialize.
+
 ## What the owner sees
 
 * An address typed in any case finds every stored casing of it, in the search box (all fields and both login scopes), on the Check endpoint, in the API lookups (single and batch) and in the related panel. Each stored row is shown as stored, so a lookup can return `John@Gmail.com` and `john@gmail.com` rows side by side. Counts for such addresses rise by the share of rows that were invisible before (about 5% overall).
@@ -42,6 +58,8 @@ On a throwaway MergeTree table of 36,693,958 `email` values taken from the live 
 * `/api/lookup/batch` and `/api/v1/lookup/batch`: `lower(email) IN (lower({email0:String}), ...)`, `ORDER BY lower(email) ASC, imported_at DESC`, `LIMIT {cap} BY lower(email)` (the per-address cap now holds across casings), and the result for each queried address is the rows whose lowercased login equals it.
 * Related panel (`lib/related-queries.ts`): "same login" is `lower(email) = lower({email})`; the "same domain" and "same password" buckets exclude the same login the same way (`lower(email) != lower({email})`), so one account never appears as its own "other".
 
+**Projections.** `lib/address-lookup.ts` exports `ADDRESS_LOOKUP_SETTING = 'optimize_use_projections = 0'`, and every query that compares `lower(email)` carries it: always in the four lookup routes and the related panel (their queries are address queries by construction); in the search routes only when the search has an address term (`usesAddressIndex(tokens)` in `lib/ulp-search.ts`: an `email_full` term outside Login (contains)), so searches for words and domains keep today's settings: the Credentials route (its totals query also when an imported range is set, and both row templates), the legacy `/api/search`, `/api/v1/search/credentials` and the row export. Not touched: the Newest-first window queries (they read `proj_imported_desc` by design and hand off to the plain query, which carries the setting), the dictionary plan (domain terms only) and the e-mail, domain, mask and spray list exports.
+
 **Where the data stands.** Nothing is rewritten: stored logins keep their casing, the index and the queries are the only changes. A rollback is the previous image; the extra index is harmless to it.
 
 ## Rollout
@@ -59,7 +77,7 @@ On a throwaway MergeTree table of 36,693,958 `email` values taken from the live 
 
 ## Risks
 
-* A skip index built on an expression is ignored when the query's expression differs in any way. Mitigations: one shared constant, the guard test, the EXPLAIN check in the script and in the live test.
+* A skip index built on an expression is ignored when the query's expression differs in any way, and it is bypassed when the planner reads a projection instead. Mitigations: one shared constant for the expression and one for the setting, the guard tests, route tests that assert the setting, the EXPLAIN check (run with projections off) in the script and in the live test, and a timing bound (under 3 s) in the live test.
 * The mutation could rewrite more than index files. It is run one partition at a time with a free-space watchdog, starting with the smaller partition, and the disk figures are printed.
 * Installs without the materialized index still answer correctly, only by scanning (13 to 30 s; `/api/check`, which stops at 30 s, can time out). The README names the one command that fixes it.
 * Behaviour change for API clients: a lookup can now return several casings of the same address. The API docs say so.
