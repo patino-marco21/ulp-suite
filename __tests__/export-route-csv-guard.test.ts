@@ -9,7 +9,7 @@ vi.mock('@/lib/clickhouse', () => ({
     if (/system\.projections/.test(sql)) return [{ defined: 1, parts: 1, with_projection: 1, covered_from: 1_786_000_000 }]
     return tableRows
   }),
-  getClient: () => ({ query: async () => ({ stream: () => (async function* () {})() }) }),
+  getClient: () => ({ query: async () => ({ stream: () => (async function* () { yield tableRows.map(r => ({ json: () => r })) })() }) }),
 }))
 
 import { NextRequest } from 'next/server'
@@ -38,7 +38,7 @@ describe('POST /api/export — CSV formula guard', () => {
     expect(dataLine).toContain(`"'-12345"`)
     expect(dataLine).toContain(`"'@cmd"`)
     const ulp = await (await post({ format: 'ulp' })).text()
-    expect(ulp).toBe('@cmd:-12345:=HYPERLINK("http://x.test","c")')
+    expect(ulp).toBe('@cmd:-12345:=HYPERLINK("http://x.test","c")\n')
   })
 
   test('csv_guard:false gives the old bytes', async () => {

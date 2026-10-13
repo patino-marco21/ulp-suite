@@ -19,7 +19,9 @@ vi.mock('@/lib/clickhouse', () => ({
   getClient: () => ({
     query: async (opts: { query: string; query_params?: Record<string, unknown> }) => {
       streamCalls.push({ query: opts.query, query_params: opts.query_params ?? {} })
-      return { stream: () => (async function* () { yield streamRows.map(r => ({ json: () => r })) })() }
+      // the row-level export (csv, ulp, userpass, ndjson) is the one query with the ") AS t" wrapper; the list formats read streamRows
+      const rows = /\) AS t\s/.test(opts.query) ? tableRows : streamRows
+      return { stream: () => (async function* () { yield rows.map(r => ({ json: () => r })) })() }
     },
   }),
 }))
@@ -38,7 +40,13 @@ const KEY_HI = `${IMPORTED_KEY_EXPR} < {impKeyHi:Int64}`
 const post = (body: Record<string, unknown>) =>
   POST(new NextRequest('http://localhost/api/export', { method: 'POST', body: JSON.stringify(body) }))
 const get = (qs: string) => GET(new NextRequest(`http://localhost/api/export?${qs}`))
-const dataCall = () => calls.find(c => /\) AS t\s/.test(c.sql))
+// The row-level SQL: json goes through executeQuery, the streamed formats through the client's stream.
+const dataCall = () => {
+  const viaExecute = calls.find(c => /\) AS t\s/.test(c.sql))
+  if (viaExecute) return viaExecute
+  const viaStream = streamCalls.find(c => /\) AS t\s/.test(c.query))
+  return viaStream ? { sql: viaStream.query, params: viaStream.query_params } : undefined
+}
 const tableRow = (n: number) => ({
   url: `https://s${n}.example/login`, email: `u${n}@mail.com`, password: `pw${n}`, domain: `s${n}.example`,
   source_file: 'f.txt', breach_name: '', country_tier: '', login_type: 'email', password_length: '4', password_mask: 'alphanumeric',
@@ -95,8 +103,10 @@ describe('POST /api/export — the imported-range bound', () => {
     expect(res.headers.get('Content-Disposition')).toBe('attachment; filename="ulp-export.csv"')
     expect(res.headers.get('X-Export-Imported-After')).toBeNull()
     expect(res.headers.get('X-Export-Imported-Before')).toBeNull()
-    expect(res.headers.get('X-Export-Truncated')).toBe('0')
-    expect(res.headers.get('X-Export-Rows')).toBe('1')
+    // a streamed export cannot know its row count or truncation before the body: the page counts the rows against the cap
+    expect(res.headers.get('X-Export-Cap')).toBe('1000000')
+    expect(res.headers.get('X-Export-Truncated')).toBeNull()
+    expect(res.headers.get('X-Export-Rows')).toBeNull()
   })
 
   test('the file name and headers record the window', async () => {
@@ -159,39 +169,56 @@ describe('POST /api/export — which searches get the projection form', () => {
   })
 })
 
-describe('POST /api/export — the 10,000-row cap says so', () => {
+describe('POST /api/export — the json export keeps the 10,000-row cap and says so', () => {
   test('the main query asks for one row more than the cap', async () => {
-    await post({ format: 'csv' })
+    await post({ format: 'json' })
     expect(dataCall()!.sql).toContain('LIMIT 10001')
   })
 
   test('fewer rows than the cap: complete', async () => {
     tableRows = Array.from({ length: 3 }, (_, i) => tableRow(i))
-    const res = await post({ format: 'ulp' })
+    const res = await post({ format: 'json' })
     expect(res.headers.get('X-Export-Truncated')).toBe('0')
     expect(res.headers.get('X-Export-Rows')).toBe('3')
-    expect((await res.text()).split('\n')).toHaveLength(3)
+    expect(JSON.parse(await res.text())).toHaveLength(3)
   })
 
   test('exactly the cap: still complete (the extra row never arrived)', async () => {
     tableRows = Array.from({ length: 10_000 }, (_, i) => tableRow(i))
-    const res = await post({ format: 'userpass' })
+    const res = await post({ format: 'json' })
     expect(res.headers.get('X-Export-Truncated')).toBe('0')
     expect(res.headers.get('X-Export-Rows')).toBe('10000')
   })
 
   test('one row over the cap: trimmed to the cap and flagged', async () => {
     tableRows = Array.from({ length: 10_001 }, (_, i) => tableRow(i))
-    const res = await post({ format: 'userpass' })
+    const res = await post({ format: 'json' })
     expect(res.headers.get('X-Export-Truncated')).toBe('1')
     expect(res.headers.get('X-Export-Rows')).toBe('10000')
-    expect((await res.text()).split('\n')).toHaveLength(10_000)
+    expect(JSON.parse(await res.text())).toHaveLength(10_000)
+  })
+})
+
+describe('POST /api/export — the streamed formats take up to a million rows', () => {
+  test('the query asks for exactly the streaming cap and carries the longer time limit', async () => {
+    await post({ format: 'csv' })
+    const { sql } = dataCall()!
+    expect(sql).toContain('LIMIT 1000000')
+    expect(sql).not.toContain('LIMIT 1000001')
+    expect(sql).toContain('max_execution_time = 600')
   })
 
-  test('csv: the header line plus the capped rows', async () => {
+  test('csv is the header line plus every row, and past 10,000 rows nothing is cut', async () => {
     tableRows = Array.from({ length: 10_001 }, (_, i) => tableRow(i))
-    const text = await (await post({ format: 'csv' })).text()
-    expect(text.split('\n')).toHaveLength(10_001) // header + 10,000
+    const res = await post({ format: 'csv' })
+    expect(res.headers.get('X-Export-Cap')).toBe('1000000')
+    expect((await res.text()).split('\n')).toHaveLength(10_003) // header + 10,001 rows + the empty piece after the last newline
+  })
+
+  test('ulp and userpass are one newline-terminated line per row', async () => {
+    tableRows = Array.from({ length: 3 }, (_, i) => tableRow(i))
+    expect(await (await post({ format: 'ulp' })).text()).toBe(tableRows.map(r => `${r.url}:${r.email}:${r.password}\n`).join(''))
+    expect(await (await post({ format: 'userpass' })).text()).toBe(tableRows.map(r => `${r.email}:${r.password}\n`).join(''))
   })
 })
 

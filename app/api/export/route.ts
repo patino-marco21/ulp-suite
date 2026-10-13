@@ -3,11 +3,11 @@ import { executeQuery, getClient } from "@/lib/clickhouse"
 import { validateRequest } from "@/lib/auth"
 import { parseULPQuery, buildULPWhere, buildULPWhereRegex, isIndexNeutralSearch } from "@/lib/ulp-search"
 import { parseSearchScope, type SearchScope } from "@/lib/search-scope"
+import { EXPORT_ROW_CAP, JSON_EXPORT_ROW_CAP, STREAM_FORMATS, createExportStream, type ExportRow, type StreamFormat } from "@/lib/export-stream"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS, NORM_COLS_SETTING } from "@/lib/ulp-normalize"
 import { noiseWhere } from "@/lib/ulp-noise"
-import { csvCell } from "@/lib/csv-safe"
 import { dedupeLimitBy } from "@/lib/ulp-dedupe"
 import { exportGroupBySettings, exportSortSettings } from "@/lib/clickhouse-query-limits"
 import {
@@ -71,10 +71,9 @@ const SELECT = `${NORM_COLS},
   url_scheme, is_corporate_email, email_domain,
   url_host, password_entropy_band, imported_at`
 
-// The non-streaming formats (csv, json, ndjson, ulp, userpass) return at most this many rows. The query asks for ONE MORE, so an export that
-// was cut can say so (X-Export-Truncated) instead of looking complete: an incremental workflow that moves its imported-after cutoff past a
-// silently cut export loses the rows in between.
-const EXPORT_ROW_CAP = 10_000
+// Row caps and the streaming of csv, ulp, userpass and ndjson live in lib/export-stream.ts: EXPORT_ROW_CAP (a million) for the streamed
+// formats, JSON_EXPORT_ROW_CAP (10,000) for json, which is still one array built in memory. A streamed response cannot carry its row
+// count or a truncation flag before the body, so it sends X-Export-Cap and the page counts the rows it receives against it.
 
 /** Metadata-only queries (the imported-range planner's readiness check). */
 const runMeta = (sql: string) => executeQuery(sql) as Promise<Array<Record<string, unknown>>>
@@ -203,66 +202,45 @@ export async function POST(request: NextRequest) {
     return streamUniqueList('domain', clause, allExtras, mergedParams, breach_name, domain, incTiers, excTiers, loginTypes, importedRange)
   }
 
-  try {
-    const fetched = await executeQuery(
-      // Split into an inner (raw columns, ORDER BY, LIMIT) and outer (NORM_COLS)
-      // query — see RAW_COLS above for why. exportSortSettings() covers the
-      // dedupe + non-domain-sort case — see the comment above SORT_MAP.
-      `SELECT ${SELECT}
+  // One SQL for every row-level format. Split into an inner (raw columns, ORDER BY, LIMIT) and outer (NORM_COLS) query — see RAW_COLS above
+  // for why. exportSortSettings() covers the dedupe + non-domain-sort case — see the comment above SORT_MAP.
+  const rowsSql = (limit: number, extraSettings = '') =>
+    `SELECT ${SELECT}
        FROM (
          SELECT ${RAW_COLS}
          FROM ulp.credentials
          WHERE ${clause}${allExtras}
          ORDER BY ${orderBy}
          ${dedupeLimitBy(dedupeOn)}
-         LIMIT ${EXPORT_ROW_CAP + 1}
+         LIMIT ${limit}
        ) AS t
-       ${exportSortSettings()}, ${NORM_COLS_SETTING}`,
-      mergedParams
-    ) as Array<Record<string, string>>
+       ${exportSortSettings()}, ${NORM_COLS_SETTING}${extraSettings}`
+
+  const base = buildFilenameBase(breach_name, domain, incTiers, excTiers, loginTypes)
+
+  // csv, ulp, userpass and ndjson stream up to EXPORT_ROW_CAP rows (an unknown format has always been a ulp file).
+  if (format !== 'json') {
+    const streamFormat: StreamFormat = (STREAM_FORMATS as readonly string[]).includes(format) ? (format as StreamFormat) : 'ulp'
+    const [contentType, ext] = streamFormat === 'csv' ? ['text/csv', 'csv']
+      : streamFormat === 'ndjson' ? ['application/x-ndjson', 'ndjson']
+      : ['text/plain', 'txt']
+    return streamRows(request, streamFormat, rowsSql(EXPORT_ROW_CAP, ', max_execution_time = 600'), mergedParams, csv_guard !== false, {
+      'Content-Type': `${contentType}; charset=utf-8`,
+      'Content-Disposition': `attachment; filename="${base}${importedWindowTag(importedRange)}.${ext}"`,
+      'X-Export-Cap': String(EXPORT_ROW_CAP),
+      ...importedWindowHeaders(importedRange),
+    })
+  }
+
+  try {
+    const fetched = await executeQuery(rowsSql(JSON_EXPORT_ROW_CAP + 1), mergedParams) as Array<Record<string, string>>
     // One row more than the cap came back: the export was cut. Hand over the cap and say so.
-    const truncated = fetched.length > EXPORT_ROW_CAP
-    const rows = truncated ? fetched.slice(0, EXPORT_ROW_CAP) : fetched
-
-    let content: string
-    let contentType: string
-    let ext: string
-
-    if (format === 'json') {
-      content = JSON.stringify(rows, null, 2)
-      contentType = 'application/json'
-      ext = 'json'
-    } else if (format === 'ndjson') {
-      content = rows.map(r => JSON.stringify(r)).join('\n')
-      contentType = 'application/x-ndjson'
-      ext = 'ndjson'
-    } else if (format === 'csv') {
-      const guard = csv_guard !== false
-      content = 'url,email,password,domain,source_file,breach_name,country_tier,login_type,password_length,password_mask,url_scheme,is_corporate_email,email_domain,url_host,password_entropy_band,imported_at\n' +
-        rows.map(r => [
-          r.url, r.email, r.password, r.domain, r.source_file, r.breach_name,
-          r.country_tier, r.login_type, r.password_length, r.password_mask,
-          r.url_scheme, r.is_corporate_email, r.email_domain,
-          r.url_host, r.password_entropy_band, r.imported_at,
-        ].map(value => csvCell(value, guard)).join(',')).join('\n')
-      contentType = 'text/csv'
-      ext = 'csv'
-    } else if (format === 'userpass') {
-      content = rows.map(r => `${r.email}:${r.password}`).join('\n')
-      contentType = 'text/plain'
-      ext = 'txt'
-    } else {
-      // ulp format: url:email:password
-      content = rows.map(r => `${r.url}:${r.email}:${r.password}`).join('\n')
-      contentType = 'text/plain'
-      ext = 'txt'
-    }
-
-    const base = buildFilenameBase(breach_name, domain, incTiers, excTiers, loginTypes)
-    return new NextResponse(content, {
+    const truncated = fetched.length > JSON_EXPORT_ROW_CAP
+    const rows = truncated ? fetched.slice(0, JSON_EXPORT_ROW_CAP) : fetched
+    return new NextResponse(JSON.stringify(rows, null, 2), {
       headers: {
-        'Content-Type': `${contentType}; charset=utf-8`,
-        'Content-Disposition': `attachment; filename="${base}${importedWindowTag(importedRange)}.${ext}"`,
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${base}${importedWindowTag(importedRange)}.json"`,
         'X-Export-Rows': String(rows.length),
         'X-Export-Truncated': truncated ? '1' : '0',
         ...importedWindowHeaders(importedRange),
@@ -504,4 +482,29 @@ function buildFilenameBase(
   if (breach_name) return `breach-${breach_name}${tierTag}${ltTag}`
   if (domain)      return `ulp-export-${domain}${tierTag}${ltTag}`
   return `ulp-export${tierTag}${ltTag}`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stream: the row-level formats (csv, ulp, userpass, ndjson)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** ClickHouse's row batches as plain objects. Stopping the loop (a closed tab, the cap) destroys the ClickHouse stream. */
+async function* rowBatches(stream: AsyncIterable<Array<{ json(): unknown }>>): AsyncGenerator<ExportRow[]> {
+  for await (const rows of stream) yield rows.map(r => r.json() as ExportRow)
+}
+
+/**
+ * Starts the query and answers once ClickHouse has begun to answer, so a query that fails (memory, timeout) is a clean 500 and not a broken
+ * file; from then on the rows are written as they arrive, no faster than the browser reads them. A closed tab aborts the query.
+ */
+async function streamRows(
+  request: NextRequest, format: StreamFormat, sql: string, params: Record<string, unknown>, guard: boolean, headers: Record<string, string>,
+): Promise<NextResponse> {
+  try {
+    const resultSet = await getClient().query({ query: sql, query_params: params, format: 'JSONEachRow', abort_signal: request.signal })
+    return new NextResponse(createExportStream(rowBatches(resultSet.stream<ExportRow>()), { format, guard }), { headers })
+  } catch (error) {
+    console.error('Export error:', error)
+    return NextResponse.json({ success: false, error: 'Export failed' }, { status: 500 })
+  }
 }

@@ -47,9 +47,12 @@ describe('export route — POST main query avoids inlining NORM_COLS with ORDER 
     expect(inner).toContain('RAW_COLS')
     expect(inner).not.toContain('NORM_COLS')
     expect(inner).toContain('ORDER BY')
-    // One row more than the cap, so a cut export can say so (X-Export-Truncated); the route trims it back to EXPORT_ROW_CAP.
-    expect(inner).toContain('LIMIT ${EXPORT_ROW_CAP + 1}')
-    expect(source).toContain('const EXPORT_ROW_CAP = 10_000')
+    // One SQL builder for every row-level format: the json export asks for one row more than its cap (so a cut file can say so), the
+    // streamed formats ask for the streaming cap (both caps live in lib/export-stream.ts).
+    expect(inner).toContain('LIMIT ${limit}')
+    expect(postFn).toContain('rowsSql(JSON_EXPORT_ROW_CAP + 1)')
+    expect(postFn).toContain('rowsSql(EXPORT_ROW_CAP')
+    expect(source).not.toContain('const EXPORT_ROW_CAP')
 
     // NORM_COLS must appear in the outer SELECT (before the inner subquery starts),
     // applied only to the already-bounded (LIMIT cap + 1) result — not evaluated
