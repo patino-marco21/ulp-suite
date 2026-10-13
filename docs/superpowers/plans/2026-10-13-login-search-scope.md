@@ -1212,6 +1212,8 @@ In `app/api/export/route.ts`:
   if (format === 'spray')    return streamSprayList(query, domain, breach_name, incTiers, excTiers, loginTypes, importedRange, scope)
 ```
 
+(d2) The GET handler also calls the spray list, with an empty query: change `return streamSprayList('', domain, '', incTiers, excTiers, loginTypes, parsedRange.range)` to end `parsedRange.range, 'all')` (no search text, so there is no scope to carry; `npx tsc --noEmit` finds this call site if it is missed).
+
 (e) Replace the first `const tokens = parseULPQuery(query)` (in POST) with `const tokens = parseULPQuery(query, scope)`.
 
 (f) In `streamSprayList`, change the last parameter line `  range: ImportedRange,` to

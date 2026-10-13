@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server"
 import { executeQuery, getClient } from "@/lib/clickhouse"
 import { validateRequest } from "@/lib/auth"
 import { parseULPQuery, buildULPWhere, buildULPWhereRegex, isIndexNeutralSearch } from "@/lib/ulp-search"
+import { parseSearchScope, type SearchScope } from "@/lib/search-scope"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
 import { NORM_COLS, NORM_COLS_SETTING } from "@/lib/ulp-normalize"
@@ -96,7 +97,7 @@ export async function GET(request: NextRequest) {
   if (!parsedRange.ok) return NextResponse.json({ success: false, error: parsedRange.error }, { status: 400 })
 
   if (format === 'wordlist') return streamWordlist(incTiers, excTiers, loginTypes, parsedRange.range)
-  if (format === 'spray')    return streamSprayList('', domain, '', incTiers, excTiers, loginTypes, parsedRange.range)
+  if (format === 'spray')    return streamSprayList('', domain, '', incTiers, excTiers, loginTypes, parsedRange.range, 'all')
 
   return NextResponse.json({ success: false, error: "Use POST for other formats" }, { status: 400 })
 }
@@ -128,6 +129,7 @@ export async function POST(request: NextRequest) {
     source_file  = '',
     sort         = 'imported_desc',
     regex_mode   = false,
+    scope: scopeRaw = 'all',
     exclude_noise = '',
     dedupe        = '',
     csv_guard     = true,
@@ -140,12 +142,14 @@ export async function POST(request: NextRequest) {
   const parsedRange = parseImportedRange({ imported_after, imported_before, date_from, date_to })
   if (!parsedRange.ok) return NextResponse.json({ success: false, error: parsedRange.error }, { status: 400 })
   const importedRange = parsedRange.range
+  const scope = parseSearchScope(scopeRaw)
+  if (scope === null) return NextResponse.json({ success: false, error: 'scope must be all, login or login_contains' }, { status: 400 })
 
   if (format === 'wordlist') return streamWordlist(incTiers, excTiers, loginTypes, importedRange)
-  if (format === 'spray')    return streamSprayList(query, domain, breach_name, incTiers, excTiers, loginTypes, importedRange)
+  if (format === 'spray')    return streamSprayList(query, domain, breach_name, incTiers, excTiers, loginTypes, importedRange, scope)
 
   // Build WHERE for non-streaming formats
-  const tokens = parseULPQuery(query)
+  const tokens = parseULPQuery(query, scope)
   const { clause, params: baseParams } = regex_mode
     ? buildULPWhereRegex(tokens)
     : buildULPWhere(tokens)
@@ -430,9 +434,10 @@ function streamSprayList(
   query: string, domain: string, breach_name: string,
   incTiers: string[], excTiers: string[], loginTypes: string[],
   range: ImportedRange,
+  scope: SearchScope,
 ): NextResponse {
   const encoder        = new TextEncoder()
-  const tokens         = parseULPQuery(query)
+  const tokens         = parseULPQuery(query, scope)
   const { clause, params } = buildULPWhere(tokens)
   const domainExtra    = domain      ? ' AND domain = {sprayDomain:String}' : ''
   const breachExtra    = breach_name ? ' AND breach_name = {sprayBreach:String}' : ''
