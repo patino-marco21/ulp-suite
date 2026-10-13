@@ -10,6 +10,7 @@ import { buildFreeWebmailInClause } from './webmail-providers'
 import { NOISE_EXPR } from './ulp-noise'
 import { dbGet, dbRun } from './sqlite'
 import { SEARCH_INDEX_DEFINITIONS } from './search-index-definitions'
+import { addressIndexAddSql } from './address-lookup'
 import {
   IMPORTED_DESC_PROJECTION_BODY,
   buildAddDomainRevProjectionSql,
@@ -250,12 +251,19 @@ let migrationsDone = false
 // v28: ulp.sources gets the identity of the file a row came from: size, sha256, archive_id (docs/superpowers/specs/2026-10-12-source-archive-and-ingest-gate-design.md).
 //      ADD COLUMN IF NOT EXISTS on a table of a few hundred rows, metadata only. scripts/archive-sources.ts fills them for the names it archived; the importer
 //      writes them for a file it read from the source archive, and the duplicate-file guard compares the sha256 when both sides have one.
-const DDL_VERSION = 28
+// v29: idx_bf_email_lc, a bloom filter on lower(email) (docs/superpowers/specs/2026-10-13-case-insensitive-address-lookup-design.md). Logins are stored as typed (5.4% have a
+//      capital), so `email = lower(value)` missed them; every exact-address lookup now compares `lower(email) = lower(value)` and this index prunes it the way idx_bf_email pruned the
+//      exact match. ADD INDEX IF NOT EXISTS is metadata only: parts written from now on carry the index. Existing parts get it with MATERIALIZE INDEX, NOT fired here (see v23: start-up
+//      must not be coupled to a mutation): scripts/materialize-address-index.sh, supervised, BEFORE the image whose queries depend on it is deployed. Until then a lookup is correct but scans.
+//      The queries depend on the index, so a failed ADD is not recorded as done and the next start tries again.
+const DDL_VERSION = 29
 const DDL_BEFORE_SOURCES_IDENTITY = 27
+const DDL_BEFORE_ADDRESS_INDEX = 28
 
-/** The DDL version to record after a run: a failed v28 ALTER (ulp.sources identity columns) is not recorded as done, so the next start tries it again. */
-export function ddlVersionToRecord(sourcesIdentityFailed: boolean): number {
-  return sourcesIdentityFailed ? DDL_BEFORE_SOURCES_IDENTITY : DDL_VERSION
+/** The DDL version to record after a run: a failed v28 ALTER (ulp.sources identity columns) or a failed v29 ADD INDEX is not recorded as done, so the next start tries it again. */
+export function ddlVersionToRecord(sourcesIdentityFailed: boolean, addressIndexFailed = false): number {
+  if (sourcesIdentityFailed) return DDL_BEFORE_SOURCES_IDENTITY
+  return addressIndexFailed ? DDL_BEFORE_ADDRESS_INDEX : DDL_VERSION
 }
 
 /** v26: swap country_tier's MATERIALIZED expression (metadata only; see the DDL_VERSION comment above). */
@@ -1072,8 +1080,21 @@ export async function runClickHouseMigrations(): Promise<void> {
     }
   }
 
-  // A failed v28 keeps the recorded version below it, so the next start runs the ALTER again: an import from the archive needs the columns.
-  const ddlReached = ddlVersionToRecord(sourcesIdentityFailed)
+  // v29 — idx_bf_email_lc (see DDL_VERSION comment above). ADD INDEX IF NOT EXISTS is metadata only and idempotent (the supervised script may have added it first). The lookup
+  // queries depend on the index, so a failure is not recorded as done: the next start runs it again. Existing parts: scripts/materialize-address-index.sh, never from here.
+  let addressIndexFailed = false
+  if (lastDdl < 29) {
+    try {
+      await client.exec({ query: addressIndexAddSql('ulp.credentials') })
+      console.warn('[ClickHouse migration] DDL v29 applied (idx_bf_email_lc on lower(email) -- existing parts need scripts/materialize-address-index.sh)')
+    } catch (err) {
+      addressIndexFailed = true
+      console.error('[ClickHouse migration] v29: ADD INDEX idx_bf_email_lc -- FAILED (tried again at the next start):', err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  // A failed v28 or v29 keeps the recorded version below it, so the next start runs the ALTER again: an import from the archive needs the v28 columns, the lookups the v29 index.
+  const ddlReached = ddlVersionToRecord(sourcesIdentityFailed, addressIndexFailed)
   if (lastDdl < DDL_VERSION) {
     setSetting('ch_ddl_version', String(ddlReached))
     console.warn(`[ClickHouse migration] DDL now at v${ddlReached}`)

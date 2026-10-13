@@ -15,6 +15,8 @@
  * for why each index exists and how its parameters were chosen.
  */
 
+import { ADDRESS_INDEX_NAME, addressIndexAddSql, addressIndexDropSql } from '@/lib/address-lookup'
+
 export interface SearchIndexDefinition {
   /** Index name, matching the name used in the CREATE/ALTER TABLE statement. */
   name: string
@@ -59,5 +61,11 @@ export const SEARCH_INDEX_DEFINITIONS: SearchIndexDefinition[] = [
     dropIndexSql: table => `ALTER TABLE ${table} DROP INDEX IF EXISTS idx_ngram_email_domain`,
     addIndexSql: table => `ALTER TABLE ${table} ADD INDEX IF NOT EXISTS idx_ngram_email_domain
       email_domain TYPE ngrambf_v1(4, 8192, 4, 0) GRANULARITY 1`,
+  },
+  {
+    // Case-insensitive exact-address lookup (lib/address-lookup.ts): a bloom filter on lower(email).
+    name: ADDRESS_INDEX_NAME,
+    dropIndexSql: addressIndexDropSql,
+    addIndexSql: addressIndexAddSql,
   },
 ]

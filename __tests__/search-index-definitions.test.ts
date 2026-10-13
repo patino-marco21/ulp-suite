@@ -2,7 +2,7 @@ import { describe, test, expect } from 'vitest'
 import { SEARCH_INDEX_DEFINITIONS } from '@/lib/search-index-definitions'
 
 describe('SEARCH_INDEX_DEFINITIONS', () => {
-  test('has exactly the 5 indexes search depends on, in a stable order', () => {
+  test('has exactly the 6 indexes search depends on, in a stable order', () => {
     const names = SEARCH_INDEX_DEFINITIONS.map(d => d.name)
     expect(names).toEqual([
       'idx_inv_url',
@@ -10,7 +10,16 @@ describe('SEARCH_INDEX_DEFINITIONS', () => {
       'idx_inv_password',
       'idx_ngram_url_host',
       'idx_ngram_email_domain',
+      'idx_bf_email_lc',
     ])
+  })
+
+  test('idx_bf_email_lc is a bloom filter on the lower(email) expression, 0.05 like idx_bf_email', () => {
+    const def = SEARCH_INDEX_DEFINITIONS.find(d => d.name === 'idx_bf_email_lc')!
+    expect(def.addIndexSql('ulp.credentials')).toBe(
+      'ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_bf_email_lc lower(email) TYPE bloom_filter(0.05) GRANULARITY 1',
+    )
+    expect(def.dropIndexSql('ulp.credentials_cdedup_auto')).toBe('ALTER TABLE ulp.credentials_cdedup_auto DROP INDEX IF EXISTS idx_bf_email_lc')
   })
 
   test('idx_inv_* use the text() type with splitByNonAlpha, on their matching column', () => {
