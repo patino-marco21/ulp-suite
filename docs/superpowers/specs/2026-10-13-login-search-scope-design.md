@@ -49,6 +49,8 @@ The term types stay as `parseULPQuery` classifies them today. What changes is th
 
 ## The e-mail casing probe (included; the owner can strike this section)
 
+> **Superseded 2026-10-13 (later the same day):** an index on lower(email) makes the exact match complete and just as fast, so the probe was removed; see docs/superpowers/specs/2026-10-13-case-insensitive-address-lookup-design.md.
+
 Finding: 54,493,387 of 1,013,574,274 e-mail-shaped logins (5.4%) are stored with uppercase letters, because logins are kept as typed, while the exact-address lookup compares with `lower(value)`. On three real mixed-case addresses it found 117 of 138 rows, 1 of 2 and 163 of 209.
 
 A complete case-insensitive exact match through the text index costs about 11 s for a common local part (`maria@`, `info@`, `admin@`: 10.9 to 11.9 s against 0.4 to 1.3 s today), which breaks the "e-mail lookups must be fast" rule. So the probe tries the common casings through the same bloom filter instead:

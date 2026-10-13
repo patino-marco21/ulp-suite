@@ -520,7 +520,7 @@ export default function DocsPage() {
                   <code className="text-lg font-mono text-foreground">/api/v1/lookup</code>
                 </div>
                 <CardDescription className="text-muted-foreground mt-2">
-                  Quick lookup to check if an email or domain exists. Returns summary statistics without full credential data.
+                  Quick lookup to check if an email or domain exists. Returns summary statistics without full credential data. An email matches in any letter case; each returned row shows the login as stored.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
@@ -678,7 +678,7 @@ export default function DocsPage() {
                   <code className="text-lg font-mono text-foreground">/api/v1/lookup/batch</code>
                 </div>
                 <CardDescription className="text-muted-foreground mt-2">
-                  Submit up to 100 email and/or domain queries in a single API call. Returns a results map keyed by query string. Each email lookup uses the bloom-filter skip index for fast exact matching.
+                  Submit up to 100 email and/or domain queries in a single API call. Returns a results map keyed by query string. Each email lookup uses a bloom-filter skip index for fast exact matching that ignores letter case.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
@@ -754,7 +754,7 @@ export default function DocsPage() {
                   </div>
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                    Email addresses are lowercased automatically before matching
+                    Email addresses match in any letter case (rows come back as stored)
                   </div>
                 </div>
               </CardContent>

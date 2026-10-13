@@ -10,7 +10,7 @@ import { describe, expect, test, vi } from 'vitest'
  *                                                                 with a "~" next to the word are cut differently by the index)
  *   dotted name   every word whole, then position(lower(email), phrase) > 0
  *   contains      position(lower(email), lower(w)) > 0
- *   casing probe  at least what `email = lower(address)` finds, at most what `lower(email) = address` finds (the complete answer)
+ *   address       exactly what `lower(email) = lower(address)` finds with the skip indexes switched off (the complete answer), and at least what `email = lower(address)` finds
  *
  *   LSP_PARITY=1 npx vitest run __tests__/login-scope-parity.live.test.ts
  *   LSP_PARITY=1 LSP_TERMS=term1,term2 LSP_DOTTED=a.b LSP_ADDRESSES=5 npx vitest run __tests__/login-scope-parity.live.test.ts
@@ -50,9 +50,9 @@ async function routed(qs: string): Promise<{ rawTotal: number; ms: number }> {
   return { rawTotal: Number(body.raw_total), ms }
 }
 
-async function reference(where: string, params: Record<string, unknown> = {}): Promise<number> {
+async function reference(where: string, params: Record<string, unknown> = {}, extraSettings = ''): Promise<number> {
   const { getClient } = await import('@/lib/clickhouse')
-  const rs = await getClient().query({ query: `SELECT count() AS n FROM ulp.credentials WHERE ${where} ${SETTINGS}`, query_params: params, format: 'JSONEachRow' })
+  const rs = await getClient().query({ query: `SELECT count() AS n FROM ulp.credentials WHERE ${where} ${SETTINGS}${extraSettings}`, query_params: params, format: 'JSONEachRow' })
   const rows = (await rs.json()) as Array<{ n: string }>
   return Number(rows[0].n)
 }
@@ -95,7 +95,7 @@ describe.skipIf(!LIVE)('login search scope parity on the live table', () => {
     for (const row of body.results) expect(String(row.email).toLowerCase()).toContain(w.toLowerCase())
   }, 30 * 60_000)
 
-  test('the address casing probe finds at least the lowercase lookup and at most the complete answer', async () => {
+  test('a full address finds every stored casing, exactly the complete answer, through the index', async () => {
     const { getClient } = await import('@/lib/clickhouse')
     const rs = await getClient().query({
       query: `SELECT DISTINCT lower(email) AS a FROM ulp.credentials WHERE _partition_id = '202610' AND position(email, '@') > 0 AND email != lower(email) AND cityHash64(email) % 20000 = 7 LIMIT {n:UInt32}`,
@@ -105,11 +105,21 @@ describe.skipIf(!LIVE)('login search scope parity on the live table', () => {
     expect(addresses.length).toBeGreaterThan(0)
     for (const a of addresses) {
       const before = await reference('email = {a:String}', { a })
-      const probe = await routed(`q=${encodeURIComponent(a)}`)
-      const complete = await reference('lower(email) = {a:String}', { a })
-      console.log(`address | lowercase lookup ${before} | probe ${probe.rawTotal} in ${probe.ms} ms | complete ${complete}`)
-      expect(probe.rawTotal).toBeGreaterThanOrEqual(before)
-      expect(probe.rawTotal).toBeLessThanOrEqual(complete)
+      const viaRoute = await routed(`q=${encodeURIComponent(a)}`)
+      // The complete answer is computed WITHOUT the skip indexes, so the index cannot vouch for itself.
+      const complete = await reference('lower(email) = lower({a:String})', { a }, ', use_skip_indexes = 0')
+      const explain = await (await getClient().query({
+        query: 'EXPLAIN indexes = 1 SELECT count() FROM ulp.credentials WHERE lower(email) = lower({a:String}) SETTINGS optimize_use_projections = 0',
+        query_params: { a }, format: 'TSVRaw',
+      })).text()
+      const lines = explain.split('\n')
+      const g = /Granules:\s*(\d+)\/(\d+)/.exec(lines.slice(lines.findIndex(l => l.includes('Name: idx_bf_email_lc'))).find(l => /Granules:/.test(l)) ?? '')
+      console.log(`address | lowercase lookup ${before} | route ${viaRoute.rawTotal} in ${viaRoute.ms} ms | complete ${complete} | granules ${g?.[1]}/${g?.[2]}`)
+      expect(viaRoute.rawTotal).toBe(complete)
+      expect(viaRoute.rawTotal).toBeGreaterThanOrEqual(before)
+      expect(viaRoute.ms).toBeLessThan(3000)
+      expect(explain).toContain('idx_bf_email_lc')
+      expect(Number(g?.[1]) * 10).toBeLessThanOrEqual(Number(g?.[2]))
     }
   }, 30 * 60_000)
 })

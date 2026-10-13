@@ -18,7 +18,7 @@ ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores 
 
 ### Search & Discovery
 - **Credential search** — query by email, domain, URL, password, or breach name; separate terms with commas (every term must match) and put `-` in front of a term to exclude it
-- **Search in** — a dropdown beside the search box: *All fields* (the default), *Login (whole word)* (about 0.2 s on 1.8 billion rows) or *Login (contains)* (anywhere in the login, a scan of the login column, about 25 s). `login:name` in the box always means a whole word in the login, whatever the dropdown says (`-login:name` excludes). A full address (`name@host`) is an exact match that also tries the common capitalisations (`Name@host`, `NAME@HOST`); *Login (contains)* ignores case completely. Case is folded for ASCII letters only. A search for the literal text `login:…` now means the scope.
+- **Search in** — a dropdown beside the search box: *All fields* (the default), *Login (whole word)* (about 0.2 s on 1.8 billion rows) or *Login (contains)* (anywhere in the login, a scan of the login column, about 25 s). `login:name` in the box always means a whole word in the login, whatever the dropdown says (`-login:name` excludes). A full address (`name@host`) is an exact match that ignores letter case, so every stored casing of it is found (about 0.4-2 s). Case is folded for ASCII letters only. A search for the literal text `login:…` now means the scope.
 - **Batch lookup** — paste up to 100 emails and get all matches in one request; CSV export
 - **Export** — CSV, ULP (`url:login:pass`), `login:pass` and NDJSON exports stream up to 1,000,000 rows (about 215 MiB as CSV) with a running row count on the button; JSON keeps 10,000. "Since last export" only moves when the file was not cut (a result of exactly 1,000,000 rows counts as possibly cut). A broad newest-first export can take about two minutes to start.
 - **Breach explorer** — browse all imported breach sources with credential counts and metadata
@@ -341,6 +341,12 @@ A search for one domain, such as `ledger.com`, matches the site, its subdomains,
 - `/api/credentials?...&dictionary=0` forces the original query for one request, and a response says which plan answered in `plan` (`dictionary`, `windows` or `plain`).
 - The tables are derived data: `scripts/clickhouse-backup.sh` leaves them out, and dropping them is always safe.
 
+### Case-insensitive address lookup
+
+Logins are stored as typed (about 5% of e-mail logins contain a capital), so an exact match on the raw column would miss them. Every exact-address lookup (a full address in the search box, `/api/check`, `/api/v1/lookup`, both batch lookups and the related panel) compares `lower(email) = lower(value)`, which finds every stored casing; each row is shown as stored, so one address can come back in several casings. A bloom-filter index on `lower(email)` (`idx_bf_email_lc`, DDL v29, about 1.2 GiB on 1.8 billion rows) keeps it as fast as the old exact match (0.4-2 s). Case is folded for ASCII letters only. The queries also run with `optimize_use_projections = 0` (`lib/address-lookup.ts`): given a projection to choose from, ClickHouse reads the projection whole and never uses the index.
+
+DDL v29 adds the index definition; parts written before it need `bash scripts/materialize-address-index.sh` (a dry run unless `APPLY=1`; one partition at a time, a few minutes, with a free-disk watchdog that kills the mutation under 120 GiB). Run it before deploying a version that depends on the index, and never with `SYSTEM STOP MERGES` in effect (that stops mutations too). An install without it still answers correctly but scans the table (13-30 s; `/api/check` can time out).
+
 ### Content deduplication (storage)
 
 `(url,email,password)` duplicates accumulate when the same credential arrives across different combolist files — ignoring URL scheme and a trailing slash, same as the browser's Unique toggle above; email/password stay exact. To remove them from storage:
@@ -437,7 +443,7 @@ Reference deployment: 1.39 billion rows, one 32 GB laptop (cold timings, measure
 | Insert throughput | ~1–2M rows/min on laptop SSD (single-process) |
 | Peak heap per 500K-row batch | ~100 MB (array in memory before insert) |
 | Dedup Set cap (direct path only) | 2M entries → ~440 MB max (prevents OOM on huge files); novelty-aware ingest dedups in the stage table, exactly, for any file size |
-| Exact domain / email lookup | 0.03–1.3 s cold (bloom filters + primary key); a very popular value such as `admin@gmail.com` takes 7–23 s |
+| Exact domain / email lookup (an address matches in any letter case) | 0.03–1.3 s cold (bloom filters + primary key); a very popular value such as `admin@gmail.com` takes 7–23 s |
 | Browse / search, default sort (domain A-Z) | 5-14 s for the rows (read in primary-key order, stops after 200 matches); the total is a separate query (4-17 s) that arrives after the rows |
 | "Newest first" | 0.1-1 s for a plain browse, a popular domain or word, a tier/password filter or a date range inside the newest import (it was 18-76 s); a rare term, a term with no match, or a date range older than the projection is answered by the plain scan, 14-27 s. Run as time windows on `proj_imported_desc`: `lib/newest-first.ts`, `docs/superpowers/specs/2026-10-01-newest-first-windows-design.md`. The response's `plan` says which one answered |
 | Other sorts (email, password length) | 18-45 s: every matching row is read and sorted |
