@@ -53,7 +53,12 @@
  *
  *   like       — contains special chars that break token splitting
  *                → LIKE '%value%' full scan (unavoidable; rare in practice)
+ *
+ * Scopes (lib/search-scope.ts): a term is looked up in every column ('all', the default), as a whole word in the login ('login') or anywhere in the
+ * login ('login_contains'). A `login:` prefix on a term always means 'login'. buildLoginMatch has the SQL of the two login scopes.
  */
+import type { SearchScope } from '@/lib/search-scope'
+export type { SearchScope } from '@/lib/search-scope'
 
 export interface ParsedToken {
   negate: boolean
@@ -61,51 +66,62 @@ export interface ParsedToken {
   value: string
   /** For email_full and email_dom: the lowercased domain part after @ */
   emailDomain?: string
+  /** Where the term is looked up: every column, a whole word in the login, or anywhere in the login. */
+  scope: SearchScope
 }
 
-export function parseULPQuery(raw: string): ParsedToken[] {
+/** A term that starts with this is a whole-word lookup in the login, whatever the default scope is. */
+const LOGIN_PREFIX = /^login:/i
+
+/** The type of a term (and the domain of an address) by the shape of its value. The scope is not part of it. */
+function classifyTerm(value: string, negate: boolean): Omit<ParsedToken, 'scope'> {
+  if (value.includes('@')) {
+    const atIdx     = value.indexOf('@')
+    const localPart = value.slice(0, atIdx)
+    const rawDomain = value.slice(atIdx + 1)
+    const emailDomain = rawDomain
+      .replace(/^www\./, '')
+      .split('/')[0]
+      .toLowerCase()
+
+    if (localPart.length > 0 && emailDomain.length > 0) {
+      // Full email: john@gmail.com → exact bloom-filter lookup
+      return { negate, type: 'email_full', value, emailDomain }
+    }
+    // Domain-only: @gmail.com → email_domain index
+    return { negate, type: 'email_dom', value, emailDomain }
+  }
+
+  // Pure word token (alphanumeric + hyphen only) → hasToken()
+  if (/^[\w-]+$/.test(value)) return { negate, type: 'token', value }
+
+  // Domain-shaped: two or more dot-separated labels (word chars/hyphens only)
+  // → domain/host matching (see buildULPWhere's 'domain' branch for why this
+  // is NOT routed through hasToken() -- it throws on any needle containing a
+  // separator character, dots included). IP-shaped values like 192.168.1.1
+  // also match this pattern and are intentionally included: domain =
+  // '192.168.1.1' is a correct, useful lookup for IP-hosted credentials, and
+  // this branch never touches hasToken() so there's no separator-character
+  // error risk either way.
+  if (/^[\w-]+(\.[\w-]+)+$/.test(value)) return { negate, type: 'domain', value }
+
+  return { negate, type: 'like', value }
+}
+
+export function parseULPQuery(raw: string, defaultScope: SearchScope = 'all'): ParsedToken[] {
   return raw
     .split(',')
     .map(s => s.trim())
     .filter(Boolean)
     .map(s => {
       const negate = s.startsWith('-') && s.length > 1
-      const value  = (negate ? s.slice(1).trim() : s).trim()
-
-      if (value.includes('@')) {
-        const atIdx     = value.indexOf('@')
-        const localPart = value.slice(0, atIdx)
-        const rawDomain = value.slice(atIdx + 1)
-        const emailDomain = rawDomain
-          .replace(/^www\./, '')
-          .split('/')[0]
-          .toLowerCase()
-
-        if (localPart.length > 0 && emailDomain.length > 0) {
-          // Full email: john@gmail.com → exact bloom-filter lookup
-          return { negate, type: 'email_full' as const, value, emailDomain }
-        } else {
-          // Domain-only: @gmail.com → email_domain index
-          return { negate, type: 'email_dom' as const, value, emailDomain }
-        }
+      let value = (negate ? s.slice(1).trim() : s).trim()
+      let scope = defaultScope
+      if (LOGIN_PREFIX.test(value)) {
+        scope = 'login'
+        value = value.replace(LOGIN_PREFIX, '').trim()
       }
-
-      // Pure word token (alphanumeric + hyphen only) → hasToken()
-      const isCleanToken = /^[\w-]+$/.test(value)
-      if (isCleanToken) return { negate, type: 'token' as const, value }
-
-      // Domain-shaped: two or more dot-separated labels (word chars/hyphens only)
-      // → domain/host matching (see buildULPWhere's 'domain' branch for why this
-      // is NOT routed through hasToken() -- it throws on any needle containing a
-      // separator character, dots included). IP-shaped values like 192.168.1.1
-      // also match this pattern and are intentionally included: domain =
-      // '192.168.1.1' is a correct, useful lookup for IP-hosted credentials, and
-      // this branch never touches hasToken() so there's no separator-character
-      // error risk either way.
-      const isDomainShaped = /^[\w-]+(\.[\w-]+)+$/.test(value)
-      if (isDomainShaped) return { negate, type: 'domain' as const, value }
-
-      return { negate, type: 'like' as const, value }
+      return { ...classifyTerm(value, negate), scope }
     })
     .filter(t => t.value.length > 0)
 }
