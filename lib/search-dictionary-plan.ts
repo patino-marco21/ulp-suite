@@ -266,22 +266,31 @@ function offsetFilter(c: DictionaryCandidates): string {
 }
 
 interface Branch {
-  /** ANDed onto the route's WHERE. */
+  /** Replaces the route's WHERE for this branch (branch T reads the word's text-index leaves alone); absent: the route's WHERE, used verbatim. */
+  where?: string
+  /** ANDed onto the WHERE. */
   conjunct: string
   /** Appended to the branch's SELECT. */
   settings: string
 }
 
-function branchesFor(c: DictionaryCandidates): Branch[] {
+/** The word plan reads the base table in T and H: a projection part has no text index, so `hasToken` there is the case-SENSITIVE plain function. */
+const BASE_TABLE_ONLY = ' SETTINGS optimize_use_projections = 0'
+/** Branch E: the PREWHERE move fails with a `_part_offset` filter on ClickHouse 26.3; projections stay ON for its sub-select. */
+const OFFSET_BRANCH_SETTINGS = ' SETTINGS optimize_move_to_prewhere = 0, query_plan_optimize_lazy_materialization = 0'
+
+function branchesFor(c: DictionaryCandidates, text?: TextBranch): Branch[] {
   const out: Branch[] = []
   const hasDomains = c.domains.length > 0
-  if (hasDomains) out.push({ conjunct: ` AND domain IN ${c.domainsLiteral}`, settings: '' })
+  const exclude = text?.exclude ?? ''
+  if (hasDomains) out.push({ conjunct: ` AND domain IN ${c.domainsLiteral}${exclude}`, settings: text ? BASE_TABLE_ONLY : '' })
   if (c.emailDomains.length > 0) {
     out.push({
-      conjunct: `${hasDomains ? ` AND domain NOT IN ${c.domainsLiteral}` : ''} AND ${offsetFilter(c)}`,
-      settings: ' SETTINGS optimize_move_to_prewhere = 0, query_plan_optimize_lazy_materialization = 0',
+      conjunct: `${hasDomains ? ` AND domain NOT IN ${c.domainsLiteral}` : ''}${exclude} AND ${offsetFilter(c)}`,
+      settings: OFFSET_BRANCH_SETTINGS,
     })
   }
+  if (text) out.push({ where: text.where, conjunct: '', settings: BASE_TABLE_ONLY })
   return out
 }
 
@@ -301,6 +310,10 @@ export interface RowsSqlInput {
   sortMaxMemoryBytes: number
   normColsSetting: string
   candidates: DictionaryCandidates
+  /** The word plan: branch T and the exclusion that keeps the three disjoint (wordTextBranch). Absent for a domain term. */
+  text?: TextBranch
+  /** The plan's own time limit in seconds (it throws over it, and the caller runs today's query); absent: today's 300. */
+  maxSeconds?: number
 }
 
 /**
@@ -310,18 +323,19 @@ export interface RowsSqlInput {
  * {windowLimit:UInt32}, which the route already binds.
  */
 export function buildDictionaryRowsSql(a: RowsSqlInput): string | null {
-  const branches = branchesFor(a.candidates)
+  if (a.text && a.text.where === a.where) return null // the search was not replaced: T would repeat the other branches
+  const branches = branchesFor(a.candidates, a.text)
   if (branches.length === 0) return null
   const branchLimit = a.dedupeInWindow ? '{windowLimit:UInt32}' : '{limit:UInt32}'
   const branchDedupe = a.dedupeInWindow ? '' : dedupeLimitBy(a.dedupe)
   const select = (b: Branch) => `SELECT ${a.rawCols}, content_key_hash
 FROM ulp.credentials
-WHERE ${a.where}${a.cursorClause}${b.conjunct}
+WHERE ${b.where ?? a.where}${a.cursorClause}${b.conjunct}
 ORDER BY ${a.orderBy}
 ${branchDedupe}
 LIMIT ${branchLimit}${b.settings}`
   const merged = union(branches.map(select))
-  const settings = `SETTINGS max_execution_time = 300,
+  const settings = `SETTINGS max_execution_time = ${a.maxSeconds ?? 300},
          timeout_overflow_mode = 'throw',
          http_wait_end_of_query = 1,
          max_bytes_before_external_sort = ${a.sortMaxMemoryBytes},
@@ -361,6 +375,12 @@ export interface TotalsSqlInput {
   /** The Declutter condition (`is_noise = 0`) when it is on: it lives inside the aggregate, as in the legacy totals. */
   onlyIf?: string
   candidates: DictionaryCandidates
+  /** The word plan (wordTextBranch over the route's whereRaw). Absent for a domain term. */
+  text?: TextBranch
+  /** The plan's own time limit in seconds; absent: today's 300. */
+  maxSeconds?: number
+  /** What an overrun does: 'break' returns the partial count (today's), 'throw' fails so that the caller can run today's query. */
+  overflow?: 'break' | 'throw'
 }
 
 /**
@@ -368,17 +388,18 @@ export interface TotalsSqlInput {
  * (lib/ulp-dedupe.ts dedupeCountPartial) so the number equals the legacy single scan's. Null as buildDictionaryRowsSql.
  */
 export function buildDictionaryTotalsSql(a: TotalsSqlInput): string | null {
-  const branches = branchesFor(a.candidates)
+  if (a.text && a.text.where === a.whereRaw) return null // the search was not replaced: T would repeat the other branches
+  const branches = branchesFor(a.candidates, a.text)
   if (branches.length === 0) return null
   const { partial, combine } = dedupeCountPartial(a.dedupe, a.hasUserFilter, a.onlyIf)
   const select = (b: Branch) => `SELECT ${partial} AS part_total, count() AS part_rows
 FROM ulp.credentials
-WHERE ${a.whereRaw}${b.conjunct}${b.settings}`
+WHERE ${b.where ?? a.whereRaw}${b.conjunct}${b.settings}`
   const sql = `SELECT ${combine('part_total')} AS total, sum(part_rows) AS raw_total
 FROM (${union(branches.map(select))})
 SETTINGS optimize_trivial_count_query = 1,
-         max_execution_time = 300,
-         timeout_overflow_mode = 'break',
+         max_execution_time = ${a.maxSeconds ?? 300},
+         timeout_overflow_mode = '${a.overflow ?? 'break'}',
          use_query_cache = 0`
   return sql.length <= DICTIONARY_SQL_MAX_CHARS ? sql : null
 }
