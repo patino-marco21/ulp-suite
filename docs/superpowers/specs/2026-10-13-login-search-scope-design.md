@@ -1,7 +1,7 @@
 # Login-only search scope — Design
 
 Date: 2026-10-13
-Status: **written for the owner's review; nothing is built.** The owner chose the behaviour in chat on 2026-10-13 (two login choices; "anywhere in the login" for the slower one) and said "Continue" to the design, including the e-mail casing probe, which is a separable section below. The repository is public: this file holds numbers only, never real addresses, file names or search terms.
+Status: **implemented on 2026-10-13** (plan `docs/superpowers/plans/2026-10-13-login-search-scope.md`). The owner chose the behaviour in chat on 2026-10-13 (two login choices; "anywhere in the login" for the slower one) and approved the design, including the e-mail casing probe. The repository is public: this file holds numbers only, never real addresses, file names or search terms.
 
 ## Why
 

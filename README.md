@@ -17,7 +17,8 @@ ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores 
 ## Features
 
 ### Search & Discovery
-- **Credential search** — query by email, domain, URL, password, or breach name; combine terms with AND (`+`), OR (`,`), NOT (`-`)
+- **Credential search** — query by email, domain, URL, password, or breach name; separate terms with commas (every term must match) and put `-` in front of a term to exclude it
+- **Search in** — a dropdown beside the search box: *All fields* (the default), *Login (whole word)* (about 0.2 s on 1.8 billion rows) or *Login (contains)* (anywhere in the login, a scan of the login column, about 25 s). `login:name` in the box always means a whole word in the login, whatever the dropdown says (`-login:name` excludes). A full address (`name@host`) is an exact match that also tries the common capitalisations (`Name@host`, `NAME@HOST`); *Login (contains)* ignores case completely. Case is folded for ASCII letters only. A search for the literal text `login:…` now means the scope.
 - **Batch lookup** — paste up to 100 emails and get all matches in one request; CSV export
 - **Breach explorer** — browse all imported breach sources with credential counts and metadata
 
