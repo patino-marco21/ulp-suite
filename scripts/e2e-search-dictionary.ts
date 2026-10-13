@@ -123,6 +123,19 @@ function seed(): void {
   insert(`SELECT concat('https://b', toString(number), '-', repeat('x', 50), '.${BYTES_TERM}/'), concat('b', toString(number), '@mail.test'), 'pw', concat('b', toString(number), '-', repeat('x', 50), '.${BYTES_TERM}'), ${src('bytes')}, '' FROM numbers(2000)`)
 }
 
+/**
+ * A FRESH rehearsal stack can boot the app before ClickHouse accepts connections on the network (docker's health check passes against the temporary server that
+ * runs the init scripts on localhost), and the app's DDL migrations then fail with ECONNREFUSED, are swallowed as "non-fatal" and are recorded as done: the table has
+ * NO text indexes, and `hasToken` is the case-SENSITIVE plain function. The word plan's three branches agree on a mixed-case row only through the indexes, so the
+ * rehearsal puts the production indexes in itself and checks that they are there.
+ */
+function ensureTextIndexes(): void {
+  for (const col of ['url', 'email', 'password']) {
+    chQuery(`ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_inv_${col} ${col} TYPE text(tokenizer = splitByNonAlpha, preprocessor = lower(${col})) GRANULARITY 1`)
+    chQuery(`ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_inv_${col} SETTINGS mutations_sync = 2`)
+  }
+}
+
 function seedWords(): void {
   const src = (name: string) => `'seedw-${RUN}-${name}'`
   const W = WORD
@@ -158,6 +171,10 @@ async function main(): Promise<number> {
   const ready = await waitFor(async () => (await fetch(`${BASE}/api/auth/check-users`)).status === 200, 20_000)
   if (!ready) { console.error('the rehearsal stack is not answering on 3101; start it with scripts/e2e-alert-rehearsal.ts --keep'); return 2 }
   await login()
+
+  ensureTextIndexes()
+  const textIndexes = Number(chQuery(`SELECT count() FROM system.data_skipping_indices WHERE database = 'ulp' AND table = 'credentials' AND name IN ('idx_inv_url', 'idx_inv_email', 'idx_inv_password')`))
+  check('the stack has the production text indexes (hasToken is case-insensitive through them, which the word plan relies on)', textIndexes === 3, String(textIndexes))
 
   console.log('\n[1] seed, and the app builds the dictionary by itself')
   seed()
@@ -240,7 +257,12 @@ async function main(): Promise<number> {
   check('a row whose URL has the word in capitals (the text index is case-insensitive, a plain hasToken is not)', everyWord.some(r => String(r.url).includes(WORD.toUpperCase())))
   check('a row whose PASSWORD has the word in capitals', everyWord.some(r => String(r.password) === `MY-${WORD.toUpperCase()}-PASS`))
   check('a row whose host merely CONTAINS the word', everyWord.some(r => r.domain === `my${WORD}shop.test`))
-  check('a row with a blank domain whose host contains the word (the empty domain stays in the candidate list)', everyWord.some(r => r.domain === '' && String(r.url).includes(`my${WORD}shop`)))
+  // A row with a URL and no domain is junk (is_noise = 1): Declutter hides it, so it is looked for with Declutter off, plan against today's query.
+  const noisyPage = async (legacy: boolean) => (await api(`/api/credentials?q=${encodeURIComponent(WORD)}&limit=200&exclude_noise=0&sort=email_asc&dedupe=0&skip_totals=1${legacy ? '&dictionary=0' : ''}`)).body
+  const noisyPlan = await noisyPage(false)
+  const noisyPlain = await noisyPage(true)
+  check('with Declutter off, the plan and today\'s query return the same first page', JSON.stringify(noisyPlan?.results) === JSON.stringify(noisyPlain?.results) && noisyPlan?.plan === 'words', `${noisyPlan?.plan} / ${noisyPlain?.plan}`)
+  check('a row with a blank domain whose host contains the word (the empty domain stays in the candidate list; Declutter hides it)', (noisyPlan?.results ?? []).some((r: any) => /^b\d@mail\.test$/.test(String(r.email)) && String(r.url).includes(`my${WORD}shop`)))
   check('a row on an unrelated site whose e-mail domain contains the word', everyWord.some(r => r.domain === 'other-site.test' && String(r.email).endsWith(`@mail-${WORD}shop.test`)))
   check('a row with a blank domain and such an e-mail domain', everyWord.some(r => r.domain === '' && String(r.email).endsWith(`@mail-${WORD}shop.test`)))
   check('a row with a non-ASCII e-mail domain (reverse() is bytewise)', everyWord.some(r => String(r.email).endsWith('.пример')))
