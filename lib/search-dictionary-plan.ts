@@ -20,11 +20,23 @@
  *  - `optimize_use_projections = 0` around the offset sub-select destroys its pruning (9-16 s instead of 0.3-1 s), so the sub-select pins
  *    projections on and names the projection.
  *
+ * The same dictionaries answer a search for ONE WORD (plan 2026-10-13-word-search-plan.md). Its legacy predicate is `P = L or HOST or EMAILDOM`,
+ * with L the three text-index leaves (wordLeaves in lib/ulp-search.ts), HOST = url_host LIKE '%w%' and EMAILDOM = email_domain LIKE '%w%'. L alone is
+ * answered by the text indexes in 0.2-0.3 s however many rows match, so the plan splits P into three DISJOINT branches, each the route's WHERE and
+ * keyset clause with one more conjunct:
+ *   T: the search replaced by L                        (the text indexes)
+ *   H: P AND domain IN D AND NOT L                     (primary key on `domain`)
+ *   E: P AND domain NOT IN D AND NOT L AND offsets     (rows of the e-mail-domain candidates, through proj_email_domain_rev)
+ * HOST can only hold inside D (D lists the domain of every dictionary pair whose host contains w), so H and E cover every row P admits that L does not.
+ * T and H read the base table only (`optimize_use_projections = 0` on the branch): a projection part has no text index, so there `hasToken` is the
+ * plain, case-SENSITIVE function and `NOT L` would disagree with T. E keeps projections ON (turning them off made it 4x slower, 9.4 s against 2.3 s,
+ * on 2026-10-13) and every EXPLAIN showed it reading the base table.
+ *
  * The candidate lists are written into the SQL as literals (lib/clickhouse-literals.ts): a URL parameter above 128 KiB is refused by
  * ClickHouse and the body limit is max_query_size (256 KiB), so the lists are capped by count AND by bytes.
  */
 import { executeQuery } from '@/lib/clickhouse'
-import { parseULPQuery, buildULPWhere } from '@/lib/ulp-search'
+import { parseULPQuery, buildULPWhere, wordLeaves } from '@/lib/ulp-search'
 import type { SearchScope } from '@/lib/search-scope'
 import { dedupeLimitBy, dedupeCountPartial } from '@/lib/ulp-dedupe'
 import { chStringArrayLiteral, chReversedArrayLiteral } from '@/lib/clickhouse-literals'
@@ -33,6 +45,7 @@ import {
   getSearchDictionaryStatus, searchDictionaryEnabled, searchDictMaxDomains, searchDictMaxEmailDomains, HOST_DICT_TABLE, EMAIL_DICT_TABLE,
   type DictionaryStatus, type Run,
 } from '@/lib/search-dictionary'
+import { searchTokenPlansEnabled } from '@/lib/search-plan-gate'
 
 export const DOMAINS_LITERAL_MAX_BYTES = 90_000
 export const EMAIL_LITERAL_MAX_BYTES = 20_000
@@ -71,6 +84,54 @@ export function dictionaryTermFromQuery(q: string, regex: boolean, scope: Search
   const { dom0, domsuf0, domlk0 } = params
   if (typeof dom0 !== 'string' || typeof domsuf0 !== 'string' || typeof domlk0 !== 'string') return null
   return { exact: dom0, suffix: domsuf0, like: domlk0 }
+}
+
+// ── the word ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+export interface WordTerm {
+  /** The lowercase word, ASCII letters and digits only: buildULPWhere's `tok0`. */
+  word: string
+  /** `url_host LIKE like` and `email_domain LIKE like`, i.e. `%word%`: buildULPWhere's `tlk0`. */
+  like: string
+}
+
+/**
+ * The word, when the whole search is exactly one positive, non-regex term of the `token` type looked up in every column and made of ASCII letters and
+ * digits only; null for everything else (a domain, an address, several terms, negation, regex, a login scope, a text with a special character, a word
+ * with a hyphen or underscore), which keeps today's query. The values come out of buildULPWhere's own parameters so they cannot drift from it.
+ */
+export function wordTermFromQuery(q: string, regex: boolean, scope: SearchScope = 'all'): WordTerm | null {
+  if (regex) return null
+  const tokens = parseULPQuery(q, scope)
+  if (tokens.length !== 1) return null
+  const [token] = tokens
+  if (token.type !== 'token' || token.negate || token.scope !== 'all') return null
+  const { tok0, tlk0 } = buildULPWhere(tokens).params
+  if (typeof tok0 !== 'string' || typeof tlk0 !== 'string' || !/^[a-z0-9]+$/.test(tok0) || tlk0 !== `%${tok0}%`) return null
+  return { word: tok0, like: tlk0 }
+}
+
+export interface TextBranch {
+  /** The WHERE with the word's search replaced by its three text-index leaves alone: branch T. */
+  where: string
+  /** ` AND NOT (leaves)`: the other branches exclude what T reads, which makes the three disjoint. */
+  exclude: string
+}
+
+/** The parameter buildULPWhere gives the first (here the only) term: the leaves are written over it. */
+const WORD_PARAM = 'tok0'
+
+/**
+ * The word plan's additions to `base`, the route's `where` or `whereRaw`, whose search is `qClause` (buildULPWhere's clause, which the route wraps in
+ * parentheses). null when `base` does not contain that clause exactly once: T would then repeat the other branches and a row would be counted twice, so
+ * the caller runs today's query.
+ */
+export function wordTextBranch(base: string, qClause: string): TextBranch | null {
+  const clause = `(${qClause})`
+  const at = base.indexOf(clause)
+  if (at < 0 || base.indexOf(clause, at + clause.length) >= 0) return null
+  const leaves = wordLeaves(WORD_PARAM)
+  return { where: base.replace(clause, () => `(${leaves})`), exclude: ` AND NOT (${leaves})` }
 }
 
 // ── the candidates ──────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -118,6 +179,20 @@ async function projectionIsReady(run: Run, now: () => number): Promise<boolean> 
   return value
 }
 
+/** The shared end of both lookups: sort, apply the caps, write the literals, check the projection. */
+async function finishCandidates(domainRows: string[], emailRows: string[], run: Run, deps: PlannerDeps, now: () => number): Promise<DictionaryCandidates | null> {
+  const domains = [...new Set(domainRows)].sort()
+  const emailDomains = [...emailRows].sort()
+  if (domains.length > searchDictMaxDomains() || emailDomains.length > searchDictMaxEmailDomains()) return null
+
+  const domainsLiteral = chStringArrayLiteral(domains)
+  const emailRevLiteral = chReversedArrayLiteral(emailDomains)
+  if (Buffer.byteLength(domainsLiteral, 'utf8') > DOMAINS_LITERAL_MAX_BYTES || Buffer.byteLength(emailRevLiteral, 'utf8') > EMAIL_LITERAL_MAX_BYTES) return null
+
+  if (emailDomains.length > 0 && !(await (deps.projectionReady ?? (() => projectionIsReady(run, now)))())) return null
+  return { domains, emailDomains, empty: domains.length === 0 && emailDomains.length === 0, domainsLiteral, emailRevLiteral }
+}
+
 async function lookupCandidates(term: DictionaryTerm, run: Run, deps: PlannerDeps, now: () => number): Promise<DictionaryCandidates | null> {
   const maxDomains = searchDictMaxDomains()
   const maxEmail = searchDictMaxEmailDomains()
@@ -128,36 +203,37 @@ async function lookupCandidates(term: DictionaryTerm, run: Run, deps: PlannerDep
     run(SQL_BY_HOST, { like: term.like, cap: maxDomains + 1 }),
     run(SQL_BY_EMAIL, { like: term.like, cap: maxEmail + 1 }),
   ])
-  const domains = [...new Set([...exact, ...suffix, ...host].map(r => String(r.domain)))].sort()
-  const emailDomains = email.map(r => String(r.email_domain)).sort()
-  if (domains.length > maxDomains || emailDomains.length > maxEmail) return null
-
-  const domainsLiteral = chStringArrayLiteral(domains)
-  const emailRevLiteral = chReversedArrayLiteral(emailDomains)
-  if (Buffer.byteLength(domainsLiteral, 'utf8') > DOMAINS_LITERAL_MAX_BYTES || Buffer.byteLength(emailRevLiteral, 'utf8') > EMAIL_LITERAL_MAX_BYTES) return null
-
-  if (emailDomains.length > 0 && !(await (deps.projectionReady ?? (() => projectionIsReady(run, now)))())) return null
-  return { domains, emailDomains, empty: domains.length === 0 && emailDomains.length === 0, domainsLiteral, emailRevLiteral }
+  return finishCandidates([...exact, ...suffix, ...host].map(r => String(r.domain)), email.map(r => String(r.email_domain)), run, deps, now)
 }
 
-/**
- * The candidates for a term, or null when today's query should run (feature off, dictionary not fresh, a cap exceeded, the projection missing,
- * the lookup failed). Cached per (dictionary fingerprint, term) for ten minutes, a failure for one; concurrent callers share the one lookup.
- */
-export async function resolveDictionaryCandidates(term: DictionaryTerm, deps: PlannerDeps = {}): Promise<DictionaryCandidates | null> {
+/** A word has no `domain = x` branch: only the hosts and the e-mail domains that contain it. */
+async function lookupWordCandidates(term: WordTerm, run: Run, deps: PlannerDeps, now: () => number): Promise<DictionaryCandidates | null> {
+  const [host, email] = await Promise.all([
+    run(SQL_BY_HOST, { like: term.like, cap: searchDictMaxDomains() + 1 }),
+    run(SQL_BY_EMAIL, { like: term.like, cap: searchDictMaxEmailDomains() + 1 }),
+  ])
+  return finishCandidates(host.map(r => String(r.domain)), email.map(r => String(r.email_domain)), run, deps, now)
+}
+
+/** The cached lookup shared by both kinds of term; `termKey` keeps their answers apart. */
+async function resolveCached(
+  termKey: string,
+  lookup: (run: Run, deps: PlannerDeps, now: () => number) => Promise<DictionaryCandidates | null>,
+  deps: PlannerDeps,
+): Promise<DictionaryCandidates | null> {
   if (!searchDictionaryEnabled()) return null
   const run: Run = deps.run ?? executeQuery
   const now = deps.now ?? Date.now
   const status = await (deps.status ?? (() => getSearchDictionaryStatus(run)))()
   if (status.state !== 'fresh' || !status.fingerprint) return null
 
-  const key = `${status.fingerprint}\u0000${term.exact}`
+  const key = `${status.fingerprint}\u0000${termKey}`
   const t = now()
   const hit = cache.get(key)
   if (hit && t - hit.at < hit.ttl) return hit.value
 
   const entry: CacheEntry = { at: t, ttl: VERDICT_TTL_MS, value: Promise.resolve(null) }
-  entry.value = lookupCandidates(term, run, deps, now).catch((err: unknown) => {
+  entry.value = lookup(run, deps, now).catch((err: unknown) => {
     entry.ttl = FAILURE_TTL_MS
     console.warn('[search-dictionary] candidate lookup failed -- using the plain query:', err instanceof Error ? err.message : String(err))
     return null
@@ -166,6 +242,20 @@ export async function resolveDictionaryCandidates(term: DictionaryTerm, deps: Pl
   cache.set(key, entry)
   while (cache.size > CACHE_MAX_TERMS) cache.delete(cache.keys().next().value as string)
   return entry.value
+}
+
+/**
+ * The candidates for a term, or null when today's query should run (feature off, dictionary not fresh, a cap exceeded, the projection missing,
+ * the lookup failed). Cached per (dictionary fingerprint, term) for ten minutes, a failure for one; concurrent callers share the one lookup.
+ */
+export function resolveDictionaryCandidates(term: DictionaryTerm, deps: PlannerDeps = {}): Promise<DictionaryCandidates | null> {
+  return resolveCached(term.exact, (run, d, now) => lookupCandidates(term, run, d, now), deps)
+}
+
+/** The same for a word; also null when the token plans are switched off (SEARCH_TOKEN_PLANS). `empty` then means "no candidate": branch T may still match. */
+export function resolveWordCandidates(term: WordTerm, deps: PlannerDeps = {}): Promise<DictionaryCandidates | null> {
+  if (!searchTokenPlansEnabled()) return Promise.resolve(null)
+  return resolveCached(`word\u0000${term.word}`, (run, d, now) => lookupWordCandidates(term, run, d, now), deps)
 }
 
 // ── the SQL ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
