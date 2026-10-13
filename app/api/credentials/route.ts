@@ -22,6 +22,8 @@ import { runNewestFirst, dedupeRows } from "@/lib/newest-first"
 import {
   dictionaryTermFromQuery, resolveDictionaryCandidates, buildDictionaryRowsSql, buildDictionaryTotalsSql, type DictionaryCandidates,
 } from "@/lib/search-dictionary-plan"
+import { substringNeedleFromQuery, resolveSubstringChoice, substringConjunct, type SubstringChoice } from "@/lib/search-substring-plan"
+import { runWithBudget, SUBSTRING_BUDGET_SECONDS, PLAN_PROJECTIONS_OFF } from "@/lib/search-plan-gate"
 
 export const dynamic = 'force-dynamic'
 
@@ -114,6 +116,7 @@ const DEDUPE_WINDOW_FACTOR = 3
  *   skip_totals   '1'       data query only: total / raw_total come back null
  *   totals_only   '1'       totals only (no rows): { total, raw_total, query_ms, timed_out, plan }
  *   dictionary    '0'       run the plain query even when the domain search dictionary could answer (parity tests, scripts)
+ *   token_plans   '0'       run the plain query even when a token plan (the substring plan) could answer (parity tests, scripts)
  */
 export async function GET(request: NextRequest) {
   const user = await validateRequest(request)
@@ -280,6 +283,17 @@ export async function GET(request: NextRequest) {
     return (candidatesMemo ??= resolveDictionaryCandidates(dictionaryTerm))
   }
 
+  // Substring plan (lib/search-substring-plan.ts): a search for exactly one text with a special character in it (a path, a colon pair, a space) is a LIKE
+  // scan of url, email and password that reads every granule (35-80 s). When one whole word of the text is rare in the text indexes, that word is ANDed
+  // on as a prunable condition (the same rows, order, cursors and totals, 0.4-11 s). null = this request keeps today's query. The rows request and the
+  // totals request the page sends together share the probes (lib/search-plan-gate.ts).
+  const substringNeedle = sp.get('token_plans') === '0' ? null : substringNeedleFromQuery(q.trim(), regex, scope)
+  let substringMemo: Promise<SubstringChoice | null> | null = null
+  const getSubstringChoice = (): Promise<SubstringChoice | null> => {
+    if (!substringNeedle) return Promise.resolve(null)
+    return (substringMemo ??= resolveSubstringChoice(substringNeedle))
+  }
+
   try {
     const t0 = Date.now()
 
@@ -307,19 +321,26 @@ export async function GET(request: NextRequest) {
     // (active from the user profile) is combined with timeout_overflow_mode='break'.
     // Partial/timed-out counts must not be cached anyway -- they are not the real count.
     type TotalsRows = Array<{ total?: unknown; raw_total?: unknown }>
-    const runPlainTotals = (): Promise<TotalsRows> => executeQuery(
-          `SELECT ${dedupeCountExpr(dedupe, hasUserFilter, excludeNoise ? NOISE_FILTER : undefined)} AS total,
+    // The totals query with what a plan may change in it (today's query changes nothing): a conjunct ANDed onto the search, the time limit, whether an
+    // overrun breaks (a partial count) or throws (a plan's budget, after which today's query runs), and the planner settings.
+    interface TotalsShape { conjunct: string; maxSeconds: number; overflow: 'break' | 'throw'; settingsTail: string }
+    const todaysTotals: TotalsShape = {
+      conjunct: '',
+      maxSeconds: 300,
+      overflow: 'break',
+      settingsTail: hasImportedRange(importedRange) && !addressSearch ? '' : `,\n                    ${ADDRESS_LOOKUP_SETTING}`,
+    }
+    const totalsSql = (x: TotalsShape): string => `SELECT ${dedupeCountExpr(dedupe, hasUserFilter, excludeNoise ? NOISE_FILTER : undefined)} AS total,
                   count() AS raw_total
-           FROM ulp.credentials WHERE ${whereRaw}
+           FROM ulp.credentials WHERE ${whereRaw}${x.conjunct}
            SETTINGS optimize_trivial_count_query = 1,
-                    max_execution_time = 300,
-                    timeout_overflow_mode = 'break',
-                    use_query_cache = 0${hasImportedRange(importedRange) && !addressSearch ? '' : `,\n                    ${ADDRESS_LOOKUP_SETTING}`}`,
-          params
-        )
+                    max_execution_time = ${x.maxSeconds},
+                    timeout_overflow_mode = '${x.overflow}',
+                    use_query_cache = 0${x.settingsTail}`
+    const runPlainTotals = (): Promise<TotalsRows> => executeQuery(totalsSql(todaysTotals), params)
     // The same two numbers from the dictionary's candidates: one aggregate per disjoint branch, merged as aggregate states so the figure equals the
     // single scan's. Any failure falls back to the plain count (which breaks on a timeout instead of throwing, so there is nothing to re-raise).
-    let totalsPlan: 'dictionary' | 'plain' = 'plain'
+    let totalsPlan: 'dictionary' | 'substring' | 'plain' = 'plain'
     const runTotals = async (): Promise<TotalsRows> => {
       const candidates = await getCandidates()
       if (candidates) {
@@ -335,26 +356,43 @@ export async function GET(request: NextRequest) {
           }
         }
       }
+      // The substring plan: today's count plus the rarest whole word, within its own budget (an overrun throws, so it is today's count that runs).
+      const choice = await getSubstringChoice()
+      if (choice) {
+        const conjunct = substringConjunct(choice.token)
+        const outcome = await runWithBudget('substring totals', () => executeQuery(
+          totalsSql({ conjunct: conjunct.sql, maxSeconds: SUBSTRING_BUDGET_SECONDS, overflow: 'throw', settingsTail: `,\n                    ${PLAN_PROJECTIONS_OFF}` }),
+          { ...params, ...conjunct.params },
+        ) as Promise<TotalsRows>)
+        if (outcome.ok) {
+          totalsPlan = 'substring'
+          return outcome.value
+        }
+      }
       return runPlainTotals()
     }
     const totalsPromise: Promise<TotalsRows | null> = !wantTotals ? Promise.resolve(null) : runTotals()
 
-    const runPlainDataQuery = (): Promise<unknown[]> => executeQuery(
-        // Data query uses throw so a timeout produces a clear error (caught below)
-        // rather than silently returning 0 rows (timeout_overflow_mode=break with
-        // ORDER BY does not flush the sort buffer — ClickHouse issue #52234).
-        //
-        // Split into an inner (raw columns, ORDER BY, LIMIT) and outer (NORM_COLS)
-        // query — see RAW_COLS above for why. Wrapping NORM_COLS around the inner
-        // query instead of inlining it keeps proj_imported_desc usable.
-        dedupeInWindow
-          ? `SELECT ${SELECT}
+    // The data query, with what a plan may change in it (today's query changes nothing): a conjunct ANDed onto the WHERE, the time limit and the planner
+    // settings. Everything else (the columns, ORDER BY, de-duplication, LIMIT, the other settings) is shared, so a plan cannot drift from today's query.
+    //
+    // Data query uses throw so a timeout produces a clear error (caught below)
+    // rather than silently returning 0 rows (timeout_overflow_mode=break with
+    // ORDER BY does not flush the sort buffer — ClickHouse issue #52234).
+    //
+    // Split into an inner (raw columns, ORDER BY, LIMIT) and outer (NORM_COLS)
+    // query — see RAW_COLS above for why. Wrapping NORM_COLS around the inner
+    // query instead of inlining it keeps proj_imported_desc usable.
+    interface DataShape { conjunct: string; maxSeconds: number; settingsLine: string }
+    const todaysData: DataShape = { conjunct: '', maxSeconds: 300, settingsLine: addressSettingLine }
+    const dataSql = (x: DataShape): string => dedupeInWindow
+      ? `SELECT ${SELECT}
          FROM (
            SELECT ${RAW_COLS}
            FROM (
              SELECT ${RAW_COLS}, content_key_hash
              FROM ulp.credentials
-             WHERE ${where}${cursorClause}
+             WHERE ${where}${x.conjunct}${cursorClause}
              ORDER BY ${orderBy}
              LIMIT {windowLimit:UInt32}
            )
@@ -362,29 +400,29 @@ export async function GET(request: NextRequest) {
            ${dedupeLimitBy(true)}
            LIMIT {limit:UInt32}
          ) AS t
-         SETTINGS max_execution_time = 300,
+         SETTINGS max_execution_time = ${x.maxSeconds},
                   timeout_overflow_mode = 'throw',
                   http_wait_end_of_query = 1,
                   max_bytes_before_external_sort = ${SORT_MAX_MEMORY_BYTES},
-                  ${addressSettingLine}
+                  ${x.settingsLine}
                   ${NORM_COLS_SETTING}`
-          : `SELECT ${SELECT}
+      : `SELECT ${SELECT}
          FROM (
            SELECT ${RAW_COLS}
            FROM ulp.credentials
-           WHERE ${where}${cursorClause}
+           WHERE ${where}${x.conjunct}${cursorClause}
            ORDER BY ${orderBy}
            ${dedupeLimitBy(dedupe)}
            LIMIT {limit:UInt32}
          ) AS t
-         SETTINGS max_execution_time = 300,
+         SETTINGS max_execution_time = ${x.maxSeconds},
                   timeout_overflow_mode = 'throw',
                   http_wait_end_of_query = 1,
                   max_bytes_before_external_sort = ${SORT_MAX_MEMORY_BYTES},
-                  ${addressSettingLine}
-                  ${NORM_COLS_SETTING}`,
-        dedupeInWindow ? { ...allParams, windowLimit: limit * DEDUPE_WINDOW_FACTOR } : allParams
-      ) as Promise<unknown[]>
+                  ${x.settingsLine}
+                  ${NORM_COLS_SETTING}`
+    const dataParams = dedupeInWindow ? { ...allParams, windowLimit: limit * DEDUPE_WINDOW_FACTOR } : allParams
+    const runPlainDataQuery = (): Promise<unknown[]> => executeQuery(dataSql(todaysData), dataParams) as Promise<unknown[]>
 
     // "Newest first" as exact time windows over proj_imported_desc (lib/newest-first.ts: 18-45 s -> well under a second for a
     // term that is not rare). The same filters, ordering, cursor and de-duplication as the plain query; only a predicate on the
@@ -396,10 +434,12 @@ export async function GET(request: NextRequest) {
     // 27,263 from the projection with the plain spelling). A window that reaches the older partition
     // (no projection there) keeps them: without them its base-table scan took 28 s instead of 17 s. Not ready (projection not rebuilt yet) or a window error that is not a timeout:
     // the plain query answers, as it always did. A timeout is not retried: the plain query would take at least as long.
-    let plan: 'windows' | 'plain' | 'dictionary' = 'plain'
+    let plan: 'windows' | 'plain' | 'dictionary' | 'substring' = 'plain'
 
     // The rows from the dictionary's candidates (lib/search-dictionary-plan.ts), or the plain query when the term is not eligible, the dictionary is
     // not fresh, a cap is exceeded, or the plan fails for any reason but a timeout. A timeout is not retried: the plain query would take at least as long.
+    // After that comes the substring plan (rarest whole word of a LIKE text) with its own 15 s budget; an overrun or failure there is not a 408, the plain
+    // query runs.
     const runDataQuery = async (): Promise<unknown[]> => {
       const candidates = await getCandidates()
       if (candidates) {
@@ -418,6 +458,18 @@ export async function GET(request: NextRequest) {
             if (msg.includes('TIMEOUT_EXCEEDED') || msg.includes('timeout') || msg.includes('Timeout')) throw err
             console.warn('[credentials] dictionary plan failed -- using the plain query:', msg)
           }
+        }
+      }
+      const choice = await getSubstringChoice()
+      if (choice) {
+        const conjunct = substringConjunct(choice.token)
+        const outcome = await runWithBudget('substring rows', () => executeQuery(
+          dataSql({ conjunct: conjunct.sql, maxSeconds: SUBSTRING_BUDGET_SECONDS, settingsLine: `${PLAN_PROJECTIONS_OFF},` }),
+          { ...dataParams, ...conjunct.params },
+        ) as Promise<unknown[]>)
+        if (outcome.ok) {
+          plan = 'substring'
+          return outcome.value
         }
       }
       return runPlainDataQuery()
@@ -489,7 +541,7 @@ export async function GET(request: NextRequest) {
       query_ms,
       timed_out,
       sort:        sortKey,
-      // Which plan answered the rows: 'windows' (lib/newest-first.ts), 'dictionary' (lib/search-dictionary-plan.ts) or 'plain'.
+      // Which plan answered the rows: 'windows' (lib/newest-first.ts), 'dictionary' (lib/search-dictionary-plan.ts), 'substring' (lib/search-substring-plan.ts) or 'plain'.
       plan,
     })
   } catch (error) {

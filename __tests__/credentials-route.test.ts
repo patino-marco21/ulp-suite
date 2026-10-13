@@ -22,7 +22,9 @@ describe('credentials route — dedupe + non-domain-sort memory cap (MEMORY_LIMI
   })
 
   test('does not drop the existing execution-time/timeout settings', () => {
-    expect(getFn).toContain('max_execution_time = 300')
+    // Today's queries keep the 300 s limit; a token plan passes a shorter one through the same template (credentials-route-substring.test.ts).
+    expect(getFn).toMatch(/maxSeconds:\s*300/)
+    expect(getFn).toContain('max_execution_time = ${x.maxSeconds}')
     expect(getFn).toContain(`timeout_overflow_mode = 'throw'`)
   })
 })
