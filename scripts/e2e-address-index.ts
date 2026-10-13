@@ -164,6 +164,7 @@ async function main(): Promise<number> {
     check('idx_bf_email_lc is now defined on lower(email)', chQuery("SELECT expr FROM system.data_skipping_indices WHERE database='ulp' AND table='credentials' AND name='idx_bf_email_lc'") === 'lower(email)')
     await login()
     const g0 = granules()
+    info('granules an impossible address reads, before the script', g0 ? `${g0.selected} of ${g0.initial}` : 'unknown')
     check('the part written before the upgrade does not carry the index: an impossible address still reads every granule (and there are enough granules to tell)', !!g0 && g0.initial >= 20 && g0.selected === g0.initial, JSON.stringify(g0))
     const early = await api('GET', `/api/check?email=${encodeURIComponent(TYPED[1])}`)
     check('already correct (it scans): /api/check finds all five rows (five breaches) for the UPPERCASE spelling', early.json?.found === true && early.json?.breach_count === 5, JSON.stringify(early.json).slice(0, 200))
@@ -176,6 +177,7 @@ async function main(): Promise<number> {
     const applied = sh('bash', ['scripts/materialize-address-index.sh'], { ...scriptEnv, APPLY: '1' })
     check('APPLY=1 materializes the index and its own EXPLAIN check passes', /is materialized on every partition/.test(applied), applied.split('\n').slice(-4).join(' | '))
     const g1 = granules()
+    info('granules an impossible address reads, after the script', g1 ? `${g1.selected} of ${g1.initial}` : 'unknown')
     check('an impossible address now reads at most 25% of the granules (about 5% is the filter itself)', !!g1 && g1.initial >= 20 && g1.selected * 4 <= g1.initial, JSON.stringify(g1))
 
     console.log('5. The routes, with the address typed in three ways')
