@@ -40,7 +40,7 @@ export const PROBE_CAP_ROWS = SUBSTRING_GATE_HITS + 1
  */
 export const PLAN_PROJECTIONS_OFF = 'optimize_use_projections = 0'
 
-// ── the word plan (plan 2026-10-13-word-search-plan.md, calibrated on 39 real words) ────────────────────────────────────────
+// ── the word plan (plan 2026-10-13-word-search-plan.md, calibrated on 38 real words) ────────────────────────────────────────
 
 function envInt(value: string | undefined, fallback: number): number {
   if (value === undefined || value.trim() === '') return fallback
@@ -49,7 +49,7 @@ function envInt(value: string | undefined, fallback: number): number {
 }
 
 /**
- * Which requests the word plan answers. Measured on the live table (1.84B rows, 2026-10-13, 39 words inside the dictionary caps, domain A-Z, cold):
+ * Which requests the word plan answers. Measured on the live table (1.84B rows, 2026-10-13, 38 words inside the dictionary caps, domain A-Z, cold):
  * its three branches cost very differently. T (the text indexes) took 0.5-2.6 s and H (the hosts that contain the word) 0.1-3.1 s for every word with
  * at most 300 candidate domains. E (the e-mail domains that contain the word) took 0.3-1.0 s when at most about 200 rows have such an e-mail domain,
  * 2-8 s for about 400 to 900 rows, 6-26 s from about 1,400 to 7,900: it fetches each row from the base table by position, because proj_email_domain_rev

@@ -26,6 +26,10 @@ Spec: `docs/superpowers/specs/2026-10-13-word-and-substring-search-plans-design.
 
 ---
 
+## Execution notes (2026-10-13, inline)
+
+Executed in this session, one check per step. Deviations from the text below, all recorded with their evidence in "Calibration result" above: the rows gate is (candidate domains, rows behind the candidate e-mail domains) instead of (domains, e-mail domains, text hits), with its own probe `probeEmailDomainRows` in place of the text-hit probe on the word path, a totals gate was added, the rows budget is 8 s, and `runWithBudget` remembers an overrun per plan and word (the substring plan uses it too); the live test takes `SWP_EXTRA` for extra query parameters and its totals expectation follows the totals gate. Two older route tests pinned the old single-word path and were updated (a word no longer "never touches the dictionary"; the date-range contrast of the login-scope test forces today's query with `token_plans=0`). The first calibration run reported "finished" lines whose pass or fail marker my monitor filter had stripped: 10 of 21 words had in fact FAILED, all on the rows plan's own 4 s budget with the gate deliberately open, each with rows identical to today's (the fallback worked), which is what led to measuring with the budgets raised. The rehearsal's first full run failed 2 of 79 checks: a stack whose app started before ClickHouse accepted connections had NO text indexes (see the spec), and a blank-domain row is junk that Declutter hides; the script now installs and verifies the production text indexes itself and looks for that row with Declutter off (81 of 81). Results: gate green (tsc 0, eslint 0, 241 files / 3,590 tests); live parity 25/25 with the shipped gates, 7/7 (Newest first), 5/5 (cursor page, e-mail sort, Unique off), 6/6 after the deploy; deployed image `24720d7788c3` (main d252e5d), rollback tag `ulp-suite-app:rollback-20261013-2023z` (= `d12d21f8d982`, the substring-plan image).
+
 ## Facts measured while writing this plan (2026-10-13, live table, 1.84B rows, dictionary fresh)
 
 - The owner's one-word searches of the last 14 days (`system.query_log`): 17 distinct words. Ten are common words over the dictionary caps (3,001 candidate domains or more): they keep their path (several are answered in 0.3 to 0.9 s by the Newest-first windows). Seven are inside the caps: six of them rare (candidates 0 to 123 domains and 0 to 27 e-mail domains, 0 to 1,532 text hits) with logged times of 26 to 150 s, and one with 1,649 domains, 212 e-mail domains and 3,975 hits (so totals only). Two of the rare ones match nothing at all.
@@ -37,7 +41,7 @@ Spec: `docs/superpowers/specs/2026-10-13-word-and-substring-search-plans-design.
 
 ## Calibration result (2026-10-13, Task 5) — the gate in this plan's text was replaced
 
-The starting gate below (candidate domains, candidate e-mail domains, text-index hits; rows budget 4 s) did not survive the measurement. 39 words inside the dictionary caps were run through the real route (domain A-Z, page 1, Unique on, cold caches, rows and totals, identical results in every run) with the gates relaxed and both budgets raised to 60 s, then branch by branch: the owner's 7 rare or mid-size words, 16 public brand words, and 16 institution-like words found through the e-mail dictionary to fill the gaps.
+The starting gate below (candidate domains, candidate e-mail domains, text-index hits; rows budget 4 s) did not survive the measurement. 38 words inside the dictionary caps were run through the real route (domain A-Z, page 1, Unique on, cold caches, rows and totals, identical results in every run) with the gates relaxed and both budgets raised to 60 s, then branch by branch: the owner's 7 rare or mid-size words, 16 public brand words, and 16 institution-like words found through the e-mail dictionary to fill the gaps.
 
 - **What does not predict the cost:** the number of candidate e-mail domains (words with 30, 32, 40, 51 and 59 of them won 4-7 times; words with 32, 36 and 37 lost 1.4-2 times) and the text-index hit count (97,000 hits won 2.3 times, 1,800 hits lost). The text probe is gone from the word path.
 - **What does:** branch E reads each row of the matching e-mail domains from the base table by position (`proj_email_domain_rev` holds `_part_offset` only), so its cost follows the number of ROWS behind those domains: 0.3-1.0 s for up to about 200 rows (nine words), 2-8 s for 400 to 900, 6-26 s from 1,400 to 7,900. Branches T (0.5-2.6 s) and H (0.1-3.1 s) stayed cheap for every word with at most 300 candidate domains. One probe through the projection counts those rows in 0.1-0.4 s (`probeEmailDomainRows`).
@@ -71,7 +75,7 @@ The starting gate below (candidate domains, candidate e-mail domains, text-index
   - `wordTextBranch(base: string, qClause: string): TextBranch | null`
   - `resolveWordCandidates(term: WordTerm, deps?: PlannerDeps): Promise<DictionaryCandidates | null>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/search-word-plan.test.ts`:
 
@@ -289,12 +293,12 @@ describe('resolveWordCandidates', () => {
 })
 ```
 
-- [ ] **Step 2: Run it to see it fail**
+- [x] **Step 2: Run it to see it fail**
 
 Run: `npx vitest run __tests__/search-word-plan.test.ts 2>&1 | tail -12`
 Expected: FAIL (`wordTermFromQuery`, `wordTextBranch` and `resolveWordCandidates` are not exported).
 
-- [ ] **Step 3: Implement in `lib/search-dictionary-plan.ts`**
+- [x] **Step 3: Implement in `lib/search-dictionary-plan.ts`**
 
 (a) Extend the header comment: directly before the line ` * The candidate lists are written into the SQL as literals (lib/clickhouse-literals.ts)` insert:
 
@@ -454,12 +458,12 @@ export function resolveWordCandidates(term: WordTerm, deps: PlannerDeps = {}): P
 }
 ```
 
-- [ ] **Step 4: Run the new tests and the existing dictionary tests**
+- [x] **Step 4: Run the new tests and the existing dictionary tests**
 
 Run: `npx vitest run __tests__/search-word-plan.test.ts __tests__/search-dictionary-plan.test.ts __tests__/credentials-route-dictionary.test.ts __tests__/search-dictionary.test.ts 2>&1 | tail -10`
 Expected: all pass (the refactor must not change the domain plan's behaviour).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/search-dictionary-plan.ts __tests__/search-word-plan.test.ts
@@ -478,7 +482,7 @@ git commit -m "feat(search): the word term, its text branch and its dictionary c
 - Consumes: `TextBranch`, `wordTextBranch` (Task 1).
 - Produces: `RowsSqlInput` gains `text?: TextBranch` and `maxSeconds?: number`; `TotalsSqlInput` gains `text?: TextBranch`, `maxSeconds?: number` and `overflow?: 'break' | 'throw'`. Without them both builders return exactly the SQL they returned before.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `__tests__/search-word-plan-sql.test.ts`:
 
@@ -648,12 +652,12 @@ describe('buildDictionaryTotalsSql for a word', () => {
 })
 ```
 
-- [ ] **Step 2: Run it to see it fail**
+- [x] **Step 2: Run it to see it fail**
 
 Run: `npx vitest run __tests__/search-word-plan-sql.test.ts 2>&1 | tail -12`
 Expected: FAIL (the builders ignore `text`).
 
-- [ ] **Step 3: Implement in `lib/search-dictionary-plan.ts`**
+- [x] **Step 3: Implement in `lib/search-dictionary-plan.ts`**
 
 (a) Replace the `Branch` interface, `branchesFor` and the `union` helper with:
 
@@ -726,16 +730,16 @@ In `buildDictionaryTotalsSql`: replace `const branches = branchesFor(a.candidate
 ```
 change `WHERE ${a.whereRaw}${b.conjunct}${b.settings}` to `WHERE ${b.where ?? a.whereRaw}${b.conjunct}${b.settings}`, and in the outer SETTINGS replace `max_execution_time = 300,` with `max_execution_time = ${a.maxSeconds ?? 300},` and `timeout_overflow_mode = 'break',` with `timeout_overflow_mode = '${a.overflow ?? 'break'}',`.
 
-- [ ] **Step 4: Run the new tests and the existing builder tests**
+- [x] **Step 4: Run the new tests and the existing builder tests**
 
 Run: `npx vitest run __tests__/search-word-plan-sql.test.ts __tests__/search-dictionary-plan.test.ts __tests__/credentials-route-dictionary.test.ts 2>&1 | tail -10`
 Expected: all pass.
 
-- [ ] **Step 5: Mutation check**
+- [x] **Step 5: Mutation check**
 
 Temporarily change `if (text) out.push({ where: text.where, conjunct: '', settings: BASE_TABLE_ONLY })` to `if (false) ...` and `exclude` to `''` in `branchesFor`; run `npx vitest run __tests__/search-word-plan-sql.test.ts 2>&1 | grep -E "×|Tests "` and confirm the branch, exclusion and count tests FAIL; restore both; re-run: all pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/search-dictionary-plan.ts __tests__/search-word-plan-sql.test.ts
@@ -753,7 +757,7 @@ git commit -m "feat(search): the three-branch SQL of the word plan (text indexes
 **Interfaces:**
 - Produces: `wordRowsMaxDomains(env?)`, `wordRowsMaxEmailDomains(env?)`, `wordRowsMaxTextHits(env?)` (environment `SEARCH_WORD_ROWS_MAX_DOMAINS`, `SEARCH_WORD_ROWS_MAX_EMAIL_DOMAINS`, `SEARCH_WORD_ROWS_MAX_TEXT_HITS`; defaults 300, 100, 20,000), `wordRowsGate(c: { domains: string[]; emailDomains: string[] }, textHits: number | null, env?): boolean`, `WORD_ROWS_BUDGET_SECONDS = 4`, `WORD_TOTALS_BUDGET_SECONDS = 12`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `__tests__/search-plan-gate.test.ts` add to the import list `wordRowsMaxDomains, wordRowsMaxEmailDomains, wordRowsMaxTextHits, wordRowsGate, WORD_ROWS_BUDGET_SECONDS, WORD_TOTALS_BUDGET_SECONDS`, and append:
 
@@ -794,12 +798,12 @@ describe('the word plan\'s rows gate and budgets', () => {
 })
 ```
 
-- [ ] **Step 2: Run it to see it fail**
+- [x] **Step 2: Run it to see it fail**
 
 Run: `npx vitest run __tests__/search-plan-gate.test.ts 2>&1 | tail -8`
 Expected: FAIL (the new names are not exported).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `lib/search-plan-gate.ts`, after the `PLAN_PROJECTIONS_OFF` constant add:
 
@@ -834,12 +838,12 @@ export function wordRowsGate(c: { domains: string[]; emailDomains: string[] }, t
 }
 ```
 
-- [ ] **Step 4: Run it to see it pass**
+- [x] **Step 4: Run it to see it pass**
 
 Run: `npx vitest run __tests__/search-plan-gate.test.ts 2>&1 | tail -6`
 Expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/search-plan-gate.ts __tests__/search-plan-gate.test.ts
@@ -858,7 +862,7 @@ git commit -m "feat(search): the word plan's rows gate (tunable by the environme
 - Consumes: Tasks 1 to 3.
 - Produces: `GET /api/credentials` answers with `plan: 'words'` (rows, and `totals_only`) when the word plan answered; `dictionary=0` and `token_plans=0` force today's query.
 
-- [ ] **Step 1: Write the failing route tests**
+- [x] **Step 1: Write the failing route tests**
 
 Create `__tests__/credentials-route-words.test.ts`:
 
@@ -1162,12 +1166,12 @@ describe('GET /api/credentials — everything else is today\'s query, untouched'
 })
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `npx vitest run __tests__/credentials-route-words.test.ts 2>&1 | grep -E "×|Tests |Test Files" | head -30`
 Expected: the plan tests FAIL (the route does not know the word plan: `plan` is `plain`); most of the "everything else" tests already pass.
 
-- [ ] **Step 3: Implement in the route**
+- [x] **Step 3: Implement in the route**
 
 All edits are in `app/api/credentials/route.ts`.
 
@@ -1264,16 +1268,16 @@ with
 
 (g) The comment above the response's `plan`: `'dictionary' (lib/search-dictionary-plan.ts), 'substring' (lib/search-substring-plan.ts) or 'plain'` becomes `'dictionary' and 'words' (lib/search-dictionary-plan.ts), 'substring' (lib/search-substring-plan.ts) or 'plain'`.
 
-- [ ] **Step 4: Run the new tests and every route test**
+- [x] **Step 4: Run the new tests and every route test**
 
 Run: `npx vitest run __tests__/credentials-route-words.test.ts __tests__/credentials-route-substring.test.ts __tests__/credentials-route.test.ts __tests__/credentials-route-dictionary.test.ts __tests__/credentials-route-totals.test.ts __tests__/credentials-route-login-scope.test.ts __tests__/credentials-route-newest-first.test.ts __tests__/credentials-route-imported-range.test.ts __tests__/credentials-route-dedupe-window.test.ts __tests__/cursor-raw-columns.test.ts __tests__/ulp-normalize-setting.test.ts 2>&1 | grep -E "×|FAIL|Tests |Test Files"`
 Expected: all pass. A failure in an older file means the route changed today's SQL: fix the route, not the old test.
 
-- [ ] **Step 5: Mutation checks**
+- [x] **Step 5: Mutation checks**
 
 (1) In the route replace `wordRowsGate(wordCandidates, wordHits)` by `true`: the three rows-gate tests must FAIL; restore. (2) Replace `wordTextBranch(whereRaw, qClause)` in `runTotals` by `wordTextBranch(whereRaw, 'x')`: the totals tests must FAIL (they fall back to the plain count); restore. Re-run the new file: all pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/api/credentials/route.ts __tests__/credentials-route-words.test.ts
@@ -1291,7 +1295,7 @@ git commit -m "feat(search): the credentials route answers a single word through
 **Interfaces:**
 - Consumes: the route, `wordTermFromQuery`, `resolveWordCandidates`, `probeTokenHits`, `wordRowsGate`.
 
-- [ ] **Step 1: Write the live test**
+- [x] **Step 1: Write the live test**
 
 Create `__tests__/word-plan-parity.live.test.ts`:
 
@@ -1422,16 +1426,16 @@ describe.skipIf(!LIVE)('word plan parity on the live table', () => {
 })
 ```
 
-- [ ] **Step 2: Smoke run with the invented word**
+- [x] **Step 2: Smoke run with the invented word**
 
 Run: `SWP_PARITY=1 SWP_WORDS=zzqxnonexistent npx vitest run __tests__/word-plan-parity.live.test.ts 2>&1 | grep -aE "✓|×|Tests |scenario|\| words|\| plain|skipped|over the dictionary"`
 Expected: the dictionary test and both sort scenarios pass; the table shows `words` for rows and totals with plan times under 1 s against 10 to 17 s plain. If the dictionary is not fresh, build it first (`npx tsx scripts/build-search-dictionary.ts`).
 
-- [ ] **Step 3: Choose the calibration words (shell environment only)**
+- [x] **Step 3: Choose the calibration words (shell environment only)**
 
 The calibration set is about 20 words: the owner's words that sit inside the caps (from the query log, in the scratchpad file `words.txt`; their statistics come from `wordstats.py`) plus about 12 public or generic words that spread the three numbers. Compute `|D|`, `|E|` and the capped text hits of a candidate list with `python3 /tmp/claude-1000/-home-cole-ulp-suite/396dc453-5b14-4986-b7f4-a8869a04bbb3/scratchpad/wordstats2.py w1 w2 ...` and keep words so that the set contains at least: three with `|D|` of 20 or less; three with `|D|` between 100 and 600 and few hits; three with 5,000 to 50,000 hits; two with `|D|` above 600 (up to the 3,000 cap). Write the final comma list into `$SC/calib-words.txt` (never into the repository).
 
-- [ ] **Step 4: Run the calibration (read-only, in the background, about 15 minutes)**
+- [x] **Step 4: Run the calibration (read-only, in the background, about 15 minutes)**
 
 ```bash
 SC=/tmp/claude-1000/-home-cole-ulp-suite/396dc453-5b14-4986-b7f4-a8869a04bbb3/scratchpad
@@ -1441,7 +1445,7 @@ npx vitest run __tests__/word-plan-parity.live.test.ts > $SC/swp-calib.log 2>&1;
 ```
 Expected: every scenario passes (identical rows and totals). The table at the end lists, per word, `|D|`, `|E|`, the hits, the plain and plan milliseconds for the rows page and for the totals.
 
-- [ ] **Step 5: Fix the three defaults from the table**
+- [x] **Step 5: Fix the three defaults from the table**
 
 Rule: the gate may admit a word only if the plan's rows were at most 1.2 times today's rows plus one second. Take every row of the table whose rows plan won by that rule; the limits are the largest `|D|` (rounded down to the nearest 50), `|E|` (nearest 25) and hits (nearest 1,000) such that every measured word at or below ALL THREE limits won. If the starting values 300 / 100 / 20,000 already satisfy the rule and the wins extend well beyond them, raise the limits to the measured edge; if a loss sits inside them, lower the limit that excludes it. Write the three new numbers into `wordRowsMaxDomains`, `wordRowsMaxEmailDomains`, `wordRowsMaxTextHits` (and into `Global Constraints` above and the README text of Task 7), update the test `the starting values` in `__tests__/search-plan-gate.test.ts` and the boundary cases of `the gate` test, and add to the comment above the three functions a compact table of the measured points (no words: `|D|`, `|E|`, hits, today's rows seconds, plan rows seconds).
 
@@ -1449,7 +1453,7 @@ If the new domain limit is 400 or more, raise `GATE_DOMAINS` in Task 6's seed (i
 
 If the totals column shows ANY word whose totals plan took more than 1.2 times today's totals plus one second, stop: that is a design change (a totals gate) and goes back to the owner.
 
-- [ ] **Step 6: Re-run with the DEFAULT gates on all words, both sorts**
+- [x] **Step 6: Re-run with the DEFAULT gates on all words, both sorts**
 
 ```bash
 SC=/tmp/claude-1000/-home-cole-ulp-suite/396dc453-5b14-4986-b7f4-a8869a04bbb3/scratchpad
@@ -1458,7 +1462,7 @@ npx vitest run __tests__/word-plan-parity.live.test.ts > $SC/swp-final.log 2>&1;
 ```
 Expected: exit 0: identical results everywhere, the plan never more than 1.2 times plus one second slower, rows on `words` exactly for the words that pass the gate.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add __tests__/word-plan-parity.live.test.ts lib/search-plan-gate.ts __tests__/search-plan-gate.test.ts
@@ -1474,7 +1478,7 @@ git commit -m "test(search): live parity for the word plan; the rows gate calibr
 
 The rehearsal stack has a fresh table whose `proj_imported_desc` covers every part, which is the situation the live table is not in today: it is where a mixed-case row would show a disagreement between the text-index `NOT L` and a case-sensitive plain `hasToken`, and where a planner that chose a projection for T or H would make the branches overlap.
 
-- [ ] **Step 1: Add the word scenarios**
+- [x] **Step 1: Add the word scenarios**
 
 In `scripts/e2e-search-dictionary.ts`:
 
@@ -1595,12 +1599,12 @@ with
   check('token_plans=0 forces today\'s query', off.body?.plan === 'plain', String(off.body?.plan))
 ```
 
-- [ ] **Step 2: Typecheck and lint the script**
+- [x] **Step 2: Typecheck and lint the script**
 
 Run: `npx tsc --noEmit; echo "tsc exit $?"; npx eslint scripts/e2e-search-dictionary.ts; echo "eslint exit $?"`
 Expected: both exit 0.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add scripts/e2e-search-dictionary.ts
@@ -1614,7 +1618,7 @@ git commit -m "test(search): rehearsal scenarios for the single-word plan (mixed
 **Files:**
 - Modify: `README.md`, `.env.example`, `docker-compose.yml`, the spec's status line, this plan's boxes.
 
-- [ ] **Step 1: Configuration**
+- [x] **Step 1: Configuration**
 
 `docker-compose.yml`, after the `SEARCH_TOKEN_PLANS` line of the app service:
 
@@ -1636,15 +1640,15 @@ git commit -m "test(search): rehearsal scenarios for the single-word plan (mixed
 # SEARCH_WORD_ROWS_MAX_TEXT_HITS=20000
 ```
 
-- [ ] **Step 2: README**
+- [x] **Step 2: README**
 
 (1) In the dictionary section change "(`dictionary`, `windows`, `substring` or `plain`)" to "(`dictionary`, `words`, `windows`, `substring` or `plain`)". (2) Directly above `### Faster substring searches (speed)` add a section `### Faster single-word searches (speed)` that says: what a one-word search looks at (the whole word in URL, login and password, and the word inside hosts and e-mail domains) and why it was slow (an OR of five parts that no index can prune together: 13-22 s for the totals and 10-17 s for the first rows of a rare word, 26-150 s as logged while the machine was busy); what the page does now (three disjoint parts: the text indexes for the word as a token, and the dictionaries of the domain search for the hosts and e-mail domains that contain it; the original test stays in every part, so rows, order, cursors and totals are the same, compared exactly on real searches); the numbers (totals 13 s to 0.3-1.2 s for a rare word and 14-22 s to 6-9 s for words with thousands of matches; rows 10-17 s to 0.1-2 s for a rare word) taken from the calibration table; what stays as it was (rows of a plentiful word, words over the dictionary caps, words with a hyphen or underscore, the Newest-first windows first); the safety net (4 s budget for rows, 12 s for totals, then the original query; any error the same); and the switches (`SEARCH_TOKEN_PLANS=0`, `SEARCH_DICTIONARY=0`, `dictionary=0` and `token_plans=0` per request, the three `SEARCH_WORD_ROWS_*` limits). (3) In the performance table add a row after the substring row: `| Single-word search | totals 13-22 s before; 0.3-9 s inside the dictionary caps. Rows: 10-17 s before; 0.1-2 s for a rare word (the three limits above), otherwise unchanged. The response's `plan` says `words` |`.
 
-- [ ] **Step 3: Spec and plan status**
+- [x] **Step 3: Spec and plan status**
 
 Set the spec's Status line to say that A (the word plan) is implemented per `docs/superpowers/plans/2026-10-13-word-search-plan.md` and, after the roll-out, deployed; add a "A as deployed" paragraph under Rollout with the calibration table's summary and the live numbers. Tick every box in this plan.
 
-- [ ] **Step 4: The whole gate (run once)**
+- [x] **Step 4: The whole gate (run once)**
 
 ```bash
 npx tsc --noEmit; echo "tsc exit $?"
@@ -1653,7 +1657,7 @@ npx vitest run 2>&1 | tail -15
 ```
 Expected: `tsc exit 0`, `eslint exit 0`, vitest: all files passed, 0 failed.
 
-- [ ] **Step 5: Commit and push**
+- [x] **Step 5: Commit and push**
 
 ```bash
 git add README.md .env.example docker-compose.yml docs/superpowers/specs/2026-10-13-word-and-substring-search-plans-design.md docs/superpowers/plans/2026-10-13-word-search-plan.md
@@ -1668,7 +1672,7 @@ Expected: CI (typecheck, test, lint, build) green on the pushed head (`gh run li
 
 **Files:** none new.
 
-- [ ] **Step 1: Rollback tag, then build the candidate from the pushed commit**
+- [x] **Step 1: Rollback tag, then build the candidate from the pushed commit**
 
 ```bash
 STAMP=$(date -u +%Y%m%d-%H%Mz)
@@ -1680,7 +1684,7 @@ DOCKER_CONFIG="$SCRATCH/dockercfg" docker build -t ulp-suite-app:word-candidate 
 ```
 Expected: the image is tagged `ulp-suite-app:word-candidate`; `ulp-suite-app:latest` is untouched.
 
-- [ ] **Step 2: Rehearse the candidate on the isolated stack (about 15 minutes)**
+- [x] **Step 2: Rehearse the candidate on the isolated stack (about 15 minutes)**
 
 ```bash
 export REHEARSAL_APP_IMAGE=ulp-suite-app:word-candidate
@@ -1689,7 +1693,7 @@ npx tsx scripts/e2e-search-dictionary.ts           # sections [1] to [10]
 ```
 Expected: every check PASS, `N/N checks passed`, exit 0. Then tear the stack down with the `docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v` line from the script header (it wants the four `REHEARSAL_*` variables set to any value). A FAIL is investigated and fixed (new commit, re-push, rebuild the candidate, re-rehearse) before anything touches the live app. `--words-only` re-runs just sections [8] to [10] on a stack that is still up.
 
-- [ ] **Step 3: Deploy `app` only**
+- [x] **Step 3: Deploy `app` only**
 
 ```bash
 export DOCKER_CONFIG=/tmp/claude-1000/-home-cole-ulp-suite/396dc453-5b14-4986-b7f4-a8869a04bbb3/scratchpad/dockercfg
@@ -1698,10 +1702,10 @@ docker compose -p ulp-suite -f /home/cole/ulp-suite/docker-compose.yml --project
 ```
 Expected (after the inbox and ClickHouse are checked idle first): the app container is recreated (about 30 s); `docker inspect ulpsuite_app --format '{{.State.Health.Status}} {{.RestartCount}}'` reads `healthy 0`; `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/login` reads 200; the container env still has `CONTENT_DEDUP_APPLY=false`; the route bundle contains the plan (`docker exec ulpsuite_app sh -c 'grep -rl "word rows" /app/.next/server/app/api/credentials | head -1'` prints a file).
 
-- [ ] **Step 4: Live parity at the deployed commit (read-only)**
+- [x] **Step 4: Live parity at the deployed commit (read-only)**
 
 Run the final form of Task 5 Step 6 on the owner's words that sit inside the caps and on two words over them, one sort, one page, plus the invented absent word. Expected: all pass.
 
-- [ ] **Step 5: Record it**
+- [x] **Step 5: Record it**
 
 Set the spec's status line to `A implemented and deployed locally on <date>` with the commit, image id and rollback tag; update the memory notes (`project_search_levers_measured_2026_10_13.md`, the ledger, `MEMORY.md`) with what shipped, the calibration table, the live numbers and the follow-ups (the owner trying a one-word search in the browser; the common words that stay on today's query because of the dictionary caps); commit and push the docs (`docs(search): ...`).

@@ -138,7 +138,7 @@ describe('probeTokenHits', () => {
   })
 })
 
-describe('the word plan\'s gates and budgets (calibrated on 39 real words: plan 2026-10-13-word-search-plan.md)', () => {
+describe('the word plan\'s gates and budgets (calibrated on 38 real words: plan 2026-10-13-word-search-plan.md)', () => {
   const dom = (n: number) => Array.from({ length: n }, (_, i) => `d${i}.test`)
 
   test('the calibrated values and the budgets', () => {
