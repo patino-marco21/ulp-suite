@@ -222,6 +222,16 @@ function buildLoginMatch(
   return { match: `(${parts.join(' AND ')})`, params }
 }
 
+/**
+ * The three text-index leaves of a word: `hasToken` on url, email and password (the `text()` indexes answer them, case-insensitively, through their
+ * lower() preprocessor). `col` spells the column: a projection has no text index, so a query that reads one writes `lower(col)`
+ * (BuildULPWhereOptions.caseInsensitiveTokens). The word search and the token plans (lib/search-substring-plan.ts) build their leaves here, so the
+ * spellings cannot drift apart.
+ */
+export function wordLeaves(param: string, col: (name: string) => string = name => name): string {
+  return `hasToken(${col('url')}, {${param}:String}) OR hasToken(${col('email')}, {${param}:String}) OR hasToken(${col('password')}, {${param}:String})`
+}
+
 export interface BuildULPWhereOptions {
   /**
    * Write word-token predicates over the lowercased column (`hasToken(lower(url), tok)`): the same case-insensitive match the text index's
@@ -287,7 +297,7 @@ export function buildULPWhere(tokens: ParsedToken[], opts: BuildULPWhereOptions 
       const lower = token.value.toLowerCase()
       params[p] = lower
       params[lp] = `%${lower.replace(/_/g, '\\_')}%`
-      match = `(hasToken(${col('url')}, {${p}:String}) OR hasToken(${col('email')}, {${p}:String}) OR hasToken(${col('password')}, {${p}:String}) OR url_host LIKE {${lp}:String} OR email_domain LIKE {${lp}:String})`
+      match = `(${wordLeaves(p, col)} OR url_host LIKE {${lp}:String} OR email_domain LIKE {${lp}:String})`
 
     } else if (token.type === 'domain') {
       // Domain-shaped (e.g. "ledger.com"): matches the canonical site column
