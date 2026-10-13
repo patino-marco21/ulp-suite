@@ -131,12 +131,83 @@ export function parseULPQuery(raw: string, defaultScope: SearchScope = 'all'): P
  * such as proj_imported_desc). Word tokens do not: `hasToken(col, tok)` on the base table is answered from the text index, whose
  * preprocessor is `lower(col)` (case-INSENSITIVE), but a projection part has no text index, so there it runs as the plain function on the
  * stored text (case-SENSITIVE) and silently drops mixed-case matches. LIKE-fallback tokens and regexes are not vouched for either.
- * Domain, email and @domain terms compare whole columns, and no query at all has nothing to differ on.
+ * Domain, email and @domain terms compare whole columns, and no query at all has nothing to differ on. A Login (contains) term is a plain function of
+ * the login column, the same in either copy; a Login (whole word) word or phrase uses hasToken and is not neutral (an address or @host in a login
+ * scope is).
  */
 export function isIndexNeutralSearch(tokens: ParsedToken[], regexMode = false): boolean {
   if (tokens.length === 0) return true
   if (regexMode) return false
-  return tokens.every(t => t.type === 'domain' || t.type === 'email_full' || t.type === 'email_dom')
+  return tokens.every(t => {
+    if (t.type === 'email_full' || t.type === 'email_dom') return true
+    if (t.scope === 'login_contains') return true
+    if (t.scope === 'login') return false
+    return t.type === 'domain'
+  })
+}
+
+/** Most words of a value that become a hasToken each in a whole-word login search; the phrase check enforces the rest. */
+const MAX_LOGIN_WORDS = 8
+
+/** Lowercases A-Z only: ClickHouse's lower() and the text index's preprocessor fold ASCII case and leave every other letter as it is. */
+const asciiLower = (s: string): string => s.replace(/[A-Z]+/g, m => m.toLowerCase())
+
+/**
+ * The words of a value the way the text index cuts a login (splitByNonAlpha): maximal runs of ASCII letters and digits and of non-ASCII
+ * characters, ASCII-lowercased, without repeats.
+ */
+export function loginWords(value: string): string[] {
+  return Array.from(new Set(asciiLower(value).match(/[a-z0-9\u0080-\uffff]+/g) ?? []))
+}
+
+/** A full address as an exact match on the login (bloom filter on `email`). Its parameters are added to `params`. */
+function exactAddressMatch(token: ParsedToken, i: number, params: Record<string, unknown>): string {
+  const ep = `exactemail${i}`
+  params[ep] = token.value.toLowerCase()
+  return `(email = {${ep}:String})`
+}
+
+/**
+ * The SQL of a term whose scope is a login scope: only the login column (`email`) is looked at, and for @host its domain column.
+ *   login           a word: hasToken on the text index; a dotted or special value: every word of it, then the phrase itself
+ *   login_contains  a case-insensitive substring scan of the login column
+ *   either          an address keeps the exact match (whole word) or is a substring (contains); @host is email_domain = host
+ */
+function buildLoginMatch(
+  token: ParsedToken, i: number, col: (name: string) => string,
+): { match: string; params: Record<string, unknown> } {
+  const params: Record<string, unknown> = {}
+
+  if (token.type === 'email_dom') {
+    const p = `edom${i}`
+    params[p] = (token.emailDomain ?? '').toLowerCase()
+    return { match: `(email_domain = {${p}:String})`, params }
+  }
+
+  if (token.scope === 'login_contains') {
+    const p = `lc${i}`
+    params[p] = token.value
+    return { match: `(positionCaseInsensitive(email, {${p}:String}) > 0)`, params }
+  }
+
+  if (token.type === 'email_full') return { match: exactAddressMatch(token, i, params), params }
+
+  const words = loginWords(token.value)
+  if (words.length === 1 && words[0] === asciiLower(token.value)) {
+    const p = `lw${i}`
+    params[p] = words[0]
+    return { match: `(hasToken(${col('email')}, {${p}:String}))`, params }
+  }
+
+  const parts = words.slice(0, MAX_LOGIN_WORDS).map((w, j) => {
+    const p = `lw${i}_${j}`
+    params[p] = w
+    return `hasToken(${col('email')}, {${p}:String})`
+  })
+  const pp = `lp${i}`
+  params[pp] = token.value
+  parts.push(`positionCaseInsensitive(email, {${pp}:String}) > 0`)
+  return { match: `(${parts.join(' AND ')})`, params }
 }
 
 export interface BuildULPWhereOptions {
@@ -157,14 +228,16 @@ export function buildULPWhere(tokens: ParsedToken[], opts: BuildULPWhereOptions 
   tokens.forEach((token, i) => {
     let match: string
 
-    if (token.type === 'email_full') {
-      // Exact match on the lowercased email.
-      // Hits bloom_filter(email) skip index — skips granules that can't contain
-      // the value without scanning them.  No LIKE fallback: substring search
-      // on emails would bypass the index and force a full table scan.
-      const ep = `exactemail${i}`
-      params[ep] = token.value.toLowerCase()
-      match = `(email = {${ep}:String})`
+    if (token.scope === 'login' || token.scope === 'login_contains') {
+      // A login scope: only the login column is looked at (buildLoginMatch).
+      const built = buildLoginMatch(token, i, col)
+      Object.assign(params, built.params)
+      match = built.match
+
+    } else if (token.type === 'email_full') {
+      // Exact match (exactAddressMatch). Hits the bloom_filter(email) skip index — skips granules that can't contain the value without
+      // scanning them.  No LIKE fallback: substring search on emails would bypass the index and force a full table scan.
+      match = exactAddressMatch(token, i, params)
 
     } else if (token.type === 'email_dom') {
       // @gmail.com → search the EMAIL domain column (stored lowercase).
@@ -255,7 +328,10 @@ export function buildULPWhereRegex(tokens: ParsedToken[]): { clause: string; par
   tokens.forEach((token, i) => {
     const p = `rp${i}`
     params[p] = token.value
-    const match = `(match(url, {${p}:String}) OR match(email, {${p}:String}) OR match(password, {${p}:String}))`
+    // A login scope looks at the login column only.
+    const match = token.scope === 'all'
+      ? `(match(url, {${p}:String}) OR match(email, {${p}:String}) OR match(password, {${p}:String}))`
+      : `(match(email, {${p}:String}))`
     conditions.push(token.negate ? `NOT ${match}` : match)
   })
 
