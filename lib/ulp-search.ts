@@ -42,10 +42,12 @@
  *                   confirmed live — so a dotted value can never be passed to it.
  *
  *   email_full — full email e.g. john@gmail.com
- *                → email = lower(value)
- *                   Hits the bloom_filter(email) skip index for O(1) granule
- *                   pruning.  No LIKE fallback — substring search on emails
- *                   would bypass the index and scan every granule.
+ *                → lower(email) = lower(value)
+ *                   Hits the bloom_filter(lower(email)) skip index (idx_bf_email_lc,
+ *                   lib/address-lookup.ts) for granule pruning, and finds every stored
+ *                   casing of the address (logins are kept as typed).  No LIKE
+ *                   fallback — substring search on emails would bypass the index
+ *                   and scan every granule.
  *
  *   email_dom  — @-prefix only e.g. @gmail.com
  *                → email_domain = value (bloom_filter accelerated)
@@ -59,6 +61,7 @@
  */
 import type { SearchScope } from '@/lib/search-scope'
 export type { SearchScope } from '@/lib/search-scope'
+import { addressEquals } from '@/lib/address-lookup'
 
 export interface ParsedToken {
   negate: boolean
@@ -146,6 +149,15 @@ export function isIndexNeutralSearch(tokens: ParsedToken[], regexMode = false): 
   })
 }
 
+/**
+ * True when a term of the search is answered through the lower(email) index (idx_bf_email_lc), so the query must also carry
+ * ADDRESS_LOOKUP_SETTING (lib/address-lookup.ts): with a projection to choose from the planner reads it whole and never uses the index.
+ * Login (contains) is a substring scan of the login column and regex mode has its own clause; neither uses it.
+ */
+export function usesAddressIndex(tokens: ParsedToken[], regexMode = false): boolean {
+  return !regexMode && tokens.some(t => t.type === 'email_full' && t.scope !== 'login_contains')
+}
+
 /** Most words of a value that become a hasToken each in a whole-word login search; the phrase check enforces the rest. */
 const MAX_LOGIN_WORDS = 8
 
@@ -160,42 +172,11 @@ export function loginWords(value: string): string[] {
   return Array.from(new Set(asciiLower(value).match(/[a-z0-9\u0080-\uffff]+/g) ?? []))
 }
 
-/** Upper-cases the first letter of every run of ASCII letters and digits and lower-cases the rest ("john.smith" -> "John.Smith"). */
-function titleCase(s: string): string {
-  return s.replace(/[A-Za-z0-9]+/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-}
-
-/**
- * The casings an address is commonly stored in. Logins are kept as typed, so about 5% of the e-mail logins have an uppercase letter and
- * `email = lower(value)` cannot see them. The bloom filter on `email` probes all of these at the cost of one: the value lowercased (first);
- * ALL UPPER; First letter only; Title Case local part; UPPER local part; Capitalised domain. Together they cover about two thirds of the
- * mixed-case addresses; "Login (contains)" is the complete route. At most six values, without repeats.
- */
-export function emailCasings(value: string): string[] {
-  const lower = value.toLowerCase()
-  const at = lower.indexOf('@')
-  if (at < 1) return [lower]
-  const local = lower.slice(0, at)
-  const domain = lower.slice(at + 1)
-  const first = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
-  return Array.from(new Set([
-    lower,
-    lower.toUpperCase(),
-    first(lower),
-    `${titleCase(local)}@${domain}`,
-    `${local.toUpperCase()}@${domain}`,
-    `${local}@${first(domain)}`,
-  ]))
-}
-
-/** A full address as an exact match on the login (bloom filter on `email`) that also tries the common casings. Its parameters are added to `params`. */
+/** A full address as an exact match on the login that ignores case (bloom filter on lower(email), lib/address-lookup.ts). Its parameter is added to `params`. */
 function exactAddressMatch(token: ParsedToken, i: number, params: Record<string, unknown>): string {
-  const names = emailCasings(token.value).map((casing, j) => {
-    const name = j === 0 ? `exactemail${i}` : `exactemail${i}c${j}`
-    params[name] = casing
-    return `{${name}:String}`
-  })
-  return names.length === 1 ? `(email = ${names[0]})` : `(email IN (${names.join(', ')}))`
+  const name = `exactemail${i}`
+  params[name] = token.value
+  return `(${addressEquals(name)})`
 }
 
 /**
@@ -266,8 +247,8 @@ export function buildULPWhere(tokens: ParsedToken[], opts: BuildULPWhereOptions 
       match = built.match
 
     } else if (token.type === 'email_full') {
-      // Exact match (exactAddressMatch). Hits the bloom_filter(email) skip index — skips granules that can't contain the value without
-      // scanning them.  No LIKE fallback: substring search on emails would bypass the index and force a full table scan.
+      // Exact match that ignores case (exactAddressMatch). Hits the bloom_filter(lower(email)) skip index — skips granules that can't contain the
+      // value without scanning them.  No LIKE fallback: substring search on emails would bypass the index and force a full table scan.
       match = exactAddressMatch(token, i, params)
 
     } else if (token.type === 'email_dom') {

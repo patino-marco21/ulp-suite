@@ -82,10 +82,10 @@ describe('GET /api/credentials — scope', () => {
     expect(allSql()).not.toContain('match(url, {rp0:String})')
   })
 
-  test('a full address probes the common casings', async () => {
-    await get('q=john.smith@example.com&skip_totals=1&dedupe=0')
-    expect(allSql()).toContain('email IN (')
-    expect(Object.values(allParams())).toContain('JOHN.SMITH@EXAMPLE.COM')
+  test('a full address is an exact match that ignores case', async () => {
+    await get('q=John.Smith@example.com&skip_totals=1&dedupe=0')
+    expect(allSql()).toContain('lower(email) = lower({exactemail0:String})')
+    expect(allParams().exactemail0).toBe('John.Smith@example.com')
   })
 
   test('an unknown scope is a 400 and runs nothing', async () => {

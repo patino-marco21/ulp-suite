@@ -57,9 +57,9 @@ describe('buildULPWhere — Login (whole word)', () => {
     expect(params).toEqual({ edom0: 'example.com' })
   })
 
-  test('a full address keeps an exact match on the login', () => {
+  test('a full address is an exact match on the login that ignores case', () => {
     const { clause, params } = build('john@example.com', 'login')
-    expect(clause).toContain('email')
+    expect(clause).toBe('(lower(email) = lower({exactemail0:String}))')
     expect(clause).not.toContain('hasToken')
     expect(params.exactemail0).toBe('john@example.com')
   })
