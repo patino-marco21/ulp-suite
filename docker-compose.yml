@@ -204,6 +204,8 @@ services:
       SEARCH_DICT_MAX_EMAIL_DOMAINS: ${SEARCH_DICT_MAX_EMAIL_DOMAINS:-}
       SEARCH_DICT_CRON_MINUTES: ${SEARCH_DICT_CRON_MINUTES:-}
       SEARCH_DICT_SETTLE_SECONDS: ${SEARCH_DICT_SETTLE_SECONDS:-}
+      # Token plans (lib/search-plan-gate.ts) -- optional. Empty = on. SEARCH_TOKEN_PLANS=0 runs every search with the original query.
+      SEARCH_TOKEN_PLANS: ${SEARCH_TOKEN_PLANS:-}
     volumes:
       - ./uploads:/app/uploads
       - ./data:/app/data

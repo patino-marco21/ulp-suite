@@ -338,7 +338,7 @@ A search for one domain, such as `ledger.com`, matches the site, its subdomains,
 - The tables are rebuilt automatically after imports (a tick every `SEARCH_DICT_CRON_MINUTES`, once the data has been quiet for `SEARCH_DICT_SETTLE_SECONDS`). While one is stale or missing, searches simply use the slower original query. Ingest Health shows its state.
 - First build, by hand and watched (about 2.5 minutes, 2 GiB; run it before relying on it): `npx tsx scripts/build-search-dictionary.ts` (the header of the script shows the `CLICKHOUSE_HOST` to use from the host).
 - `SEARCH_DICTIONARY=0` switches it off (no rebuild needed). `SEARCH_DICT_MAX_DOMAINS` (3000) and `SEARCH_DICT_MAX_EMAIL_DOMAINS` (300) bound how many candidates one term may have; above them the original query runs (popular terms such as `google.com`).
-- `/api/credentials?...&dictionary=0` forces the original query for one request, and a response says which plan answered in `plan` (`dictionary`, `windows` or `plain`).
+- `/api/credentials?...&dictionary=0` forces the original query for one request, and a response says which plan answered in `plan` (`dictionary`, `windows`, `substring` or `plain`).
 - The tables are derived data: `scripts/clickhouse-backup.sh` leaves them out, and dropping them is always safe.
 
 ### Case-insensitive address lookup
@@ -346,6 +346,14 @@ A search for one domain, such as `ledger.com`, matches the site, its subdomains,
 Logins are stored as typed (about 5% of e-mail logins contain a capital), so an exact match on the raw column would miss them. Every exact-address lookup (a full address in the search box, `/api/check`, `/api/v1/lookup`, both batch lookups and the related panel) compares `lower(email) = lower(value)`, which finds every stored casing; each row is shown as stored, so one address can come back in several casings. A bloom-filter index on `lower(email)` (`idx_bf_email_lc`, DDL v29, about 1.2 GiB on 1.8 billion rows) keeps it as fast as the old exact match (0.4-2 s). Case is folded for ASCII letters only. The queries also run with `optimize_use_projections = 0` (`lib/address-lookup.ts`): given a projection to choose from, ClickHouse can read the projection whole and then never uses the index (17 times slower on a test copy where every part had the projection; not visible on the live table today, where only the newest partition has one, so this is insurance).
 
 DDL v29 adds the index definition; parts written before it need `bash scripts/materialize-address-index.sh` (a dry run unless `APPLY=1`; one partition at a time, a few minutes, with a free-disk watchdog that kills the mutation under 120 GiB). Run it before deploying a version that depends on the index, and never with `SYSTEM STOP MERGES` in effect (that stops mutations too). An install without it still answers correctly but scans the table (13-30 s; `/api/check` can time out).
+
+### Faster substring searches (speed)
+
+A search for one text that contains a special character (a path such as `/ledger/login.php`, a pair such as `user:pass`, anything with a space) cannot use a word index: it is a plain substring scan of the URL, the login and the password, which read about 95 GiB (35-80 s). The page now takes the whole words inside the text (`ledger` and `login` in the example; a word at either end of the text could be part of a longer one, so it does not count), counts each one through the text indexes in about 0.3 s, and when the rarest has at most 50,000 hits it adds that word as one more condition to the same query. The original substring test stays in the query, so the rows, order, cursors and totals are the same (compared exactly on real searches); only rows that cannot match are skipped: 0.4-11 s instead of 35-42 s in the measurements. A text with no whole word, or whose words are all common, runs the original query.
+
+- A plan query has a 15 s budget; over it, or on any error, the original query runs (the page never shows a time-out because of the plan).
+- `SEARCH_TOKEN_PLANS=0` switches it off (no rebuild needed). `/api/credentials?...&token_plans=0` forces the original query for one request, and the response's `plan` says `substring` when the plan answered.
+- Design and measurements: `docs/superpowers/specs/2026-10-13-word-and-substring-search-plans-design.md`.
 
 ### Content deduplication (storage)
 
@@ -444,6 +452,7 @@ Reference deployment: 1.39 billion rows, one 32 GB laptop (cold timings, measure
 | Peak heap per 500K-row batch | ~100 MB (array in memory before insert) |
 | Dedup Set cap (direct path only) | 2M entries → ~440 MB max (prevents OOM on huge files); novelty-aware ingest dedups in the stage table, exactly, for any file size |
 | Exact domain / email lookup (an address matches in any letter case) | 0.03–1.3 s cold (bloom filters + primary key); a very popular value such as `admin@gmail.com` takes 7–23 s |
+| Substring search (one text with a special character, such as a path) | 35-42 s before; 0.4-11 s when a whole word of the text matches at most 50,000 rows, otherwise unchanged. The response's `plan` says `substring` |
 | Browse / search, default sort (domain A-Z) | 5-14 s for the rows (read in primary-key order, stops after 200 matches); the total is a separate query (4-17 s) that arrives after the rows |
 | "Newest first" | 0.1-1 s for a plain browse, a popular domain or word, a tier/password filter or a date range inside the newest import (it was 18-76 s); a rare term, a term with no match, or a date range older than the projection is answered by the plain scan, 14-27 s. Run as time windows on `proj_imported_desc`: `lib/newest-first.ts`, `docs/superpowers/specs/2026-10-01-newest-first-windows-design.md`. The response's `plan` says which one answered |
 | Other sorts (email, password length) | 18-45 s: every matching row is read and sorted |
