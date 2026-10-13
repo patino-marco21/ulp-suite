@@ -3,7 +3,7 @@ import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest'
 
 // content-dedup and the modules it imports only need getClient from @/lib/clickhouse.
 const h = vi.hoisted(() => {
-  const state = { rows: 1000, statsCalls: 0, rowCountCalls: 0, failRowCount: false }
+  const state = { rows: 1000, statsCalls: 0, rowCountCalls: 0, failRowCount: false, freeBytes: 200 * 1024 ** 3, failDisk: false }
   const client = {
     exec: vi.fn(),
     query: vi.fn(async ({ query }: { query: string }) => {
@@ -15,6 +15,10 @@ const h = vi.hoisted(() => {
       if (query.includes('GROUP BY content_key_hash')) {
         state.statsCalls++
         return { json: async () => [{ total: String(state.rows), distinctCreds: String(state.rows) }] }
+      }
+      if (query.includes('FROM system.disks')) {
+        if (state.failDisk) throw new Error('system.disks unreachable')
+        return { json: async () => [{ unreserved_space: String(state.freeBytes), total_space: String(937 * 1024 ** 3) }] }
       }
       throw new Error(`unexpected query in test: ${query.slice(0, 80)}`)
     }),
@@ -94,6 +98,9 @@ describe('runContentDedupTick — idle short-circuit', () => {
     h.state.statsCalls = 0
     h.state.rowCountCalls = 0
     h.state.failRowCount = false
+    h.state.freeBytes = 200 * 1024 ** 3 // plenty of room unless a test says otherwise
+    h.state.failDisk = false
+    delete process.env.DEDUP_STATS_MIN_FREE_BYTES
     delete process.env.CONTENT_DEDUP_APPLY // report-only: the tick returns right after the stats pass
   })
 
@@ -111,6 +118,26 @@ describe('runContentDedupTick — idle short-circuit', () => {
     expect(second).toEqual({ total: 1000, excess: 0, applied: false, skipped: true })
     expect(h.state.statsCalls).toBe(1) // not run again
     expect(spies.warn.mock.calls.some(c => String(c[0]).includes('skipping the stats scan'))).toBe(true)
+  })
+
+  test('a nearly full disk skips the stats pass, says so, and the next tick with room runs it', async () => {
+    h.state.freeBytes = 21 * 1024 ** 3
+    const skipped = await runContentDedupTick({ trigger: 'cron', skipIfUnchanged: true })
+    expect(skipped).toEqual({ total: 0, excess: 0, applied: false, skipped: true })
+    expect(h.state.statsCalls).toBe(0)
+    expect(spies.warn.mock.calls.some(c => String(c[0]).includes('skipped the stats pass'))).toBe(true)
+
+    h.state.freeBytes = 162 * 1024 ** 3
+    const next = await runContentDedupTick({ trigger: 'cron', skipIfUnchanged: true })
+    expect(next).toEqual({ total: 1000, excess: 0, applied: false })
+    expect(h.state.statsCalls).toBe(1)
+  })
+
+  test('a free-space check that fails also skips the stats pass', async () => {
+    h.state.failDisk = true
+    const skipped = await runContentDedupTick({ trigger: 'cron', skipIfUnchanged: true })
+    expect(skipped.skipped).toBe(true)
+    expect(h.state.statsCalls).toBe(0)
   })
 
   test('runs the full pass again once rows have changed', async () => {

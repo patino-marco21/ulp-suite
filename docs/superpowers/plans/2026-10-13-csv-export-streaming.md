@@ -1144,6 +1144,10 @@ print('edited', path)
 
 Run it from the worktree root. Expected: `edited lib/content-dedup.ts`.
 
+- [ ] **Step 3b: Give the existing tick test a roomy disk**
+
+`__tests__/content-dedup-stats-skip.test.ts` runs `runContentDedupTick` against a mocked ClickHouse client that throws on a query it does not know, so the new `system.disks` query made every full-pass test take the skip path. Add to its mock a `FROM system.disks` branch answering `{ unreserved_space, total_space }` from `state.freeBytes` (default 200 GiB, reset in `beforeEach`, with `state.failDisk` to make it throw), and two behaviour tests: a nearly full disk skips (result `{ total: 0, excess: 0, applied: false, skipped: true }`, the stats query not run, the warning logged, and the next tick with room runs the pass), and a failing check also skips.
+
 - [ ] **Step 4: Run the dedup tests, type-check, commit**
 
 Run: `npx vitest run __tests__/content-dedup-stats-guard.test.ts __tests__/content-dedup.test.ts __tests__/content-dedup-stats-skip.test.ts __tests__/content-dedup-projection-restore.test.ts __tests__/dedup-cron.test.ts` → PASS.

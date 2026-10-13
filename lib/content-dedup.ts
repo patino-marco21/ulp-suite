@@ -160,7 +160,7 @@ import type { ClickHouseClient } from '@clickhouse/client'
 import { getClient } from '@/lib/clickhouse'
 import { URL_CONTENT_KEY } from '@/lib/url-content-key'
 import { SEARCH_INDEX_DEFINITIONS } from '@/lib/search-index-definitions'
-import { createDiskGuard, DiskHeadroomError, type DiskGuard } from '@/lib/clickhouse-disk-guard'
+import { createDiskGuard, DiskHeadroomError, checkDiskHeadroom, formatBytes, type DiskGuard } from '@/lib/clickhouse-disk-guard'
 import {
   DOMAIN_REV_PROJECTION_NAME,
   EMAIL_DOMAIN_REV_PROJECTION_NAME,
@@ -699,6 +699,34 @@ async function queryContentKeyStats(
 }
 
 /**
+ * Free space below which the daily stats pass does not start. It is a full GROUP BY over every content key that spilled 13.82 GiB to disk at 1.84B
+ * rows (2026-10-13) and had no guard of its own (the disk guard covers only populate and the projection restores), so 40 GiB is about three times
+ * that spill. DEDUP_STATS_MIN_FREE_BYTES overrides it.
+ */
+export const DEFAULT_STATS_MIN_FREE_BYTES = 40 * 1024 ** 3
+
+export function dedupStatsMinFreeBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.DEDUP_STATS_MIN_FREE_BYTES
+  if (raw === undefined || raw.trim() === '') return DEFAULT_STATS_MIN_FREE_BYTES
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_STATS_MIN_FREE_BYTES
+}
+
+/** Why the stats pass should not start, or null when the disk has room. A free-space check that fails counts as no room. */
+export async function dedupStatsHeadroomRefusal(
+  env: NodeJS.ProcessEnv = process.env,
+  check: () => Promise<{ freeBytes: number }> = () => checkDiskHeadroom(),
+): Promise<string | null> {
+  const need = dedupStatsMinFreeBytes(env)
+  try {
+    const { freeBytes } = await check()
+    return freeBytes < need ? `${formatBytes(freeBytes)} free < ${formatBytes(need)} needed` : null
+  } catch (err) {
+    return `the free-space check failed (${err instanceof Error ? err.message : String(err)})`
+  }
+}
+
+/**
  * Read duplicate stats, log them, and — only when CONTENT_DEDUP_APPLY is on and
  * excess clears the threshold — run the rewrite+swap cycle. Never throws.
  */
@@ -726,6 +754,13 @@ export async function runContentDedupTick(
           `${Math.round((Date.now() - prior.at) / 3_600_000)}h ago) -- skipping the stats scan`,
       )
       return { total: prior.total, excess: prior.excess, applied: false, skipped: true }
+    }
+
+    // The stats pass is a full GROUP BY that spills to disk: do not start it on a nearly full disk.
+    const noRoom = await dedupStatsHeadroomRefusal()
+    if (noRoom) {
+      console.warn(`[content-dedup] ${trigger}: skipped the stats pass, ${noRoom}`)
+      return { total: 0, excess: 0, applied: false, skipped: true }
     }
 
     const { total, distinctCreds } = await queryContentKeyStats(client, buildContentKeyStatsSql())
