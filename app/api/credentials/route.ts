@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server"
 import { executeQuery } from "@/lib/clickhouse"
 import { validateRequest } from "@/lib/auth"
 import { parseULPQuery, buildULPWhere, buildULPWhereRegex, isIndexNeutralSearch } from "@/lib/ulp-search"
+import { parseSearchScope } from "@/lib/search-scope"
 import { importedRangeFromSearchParams, hasImportedRange, importedRangePlain, planImportedRange } from "@/lib/imported-range"
 import { tierWhereMulti, parseTierParams } from "@/lib/country-tiers"
 import { loginTypeWhere, parseLoginTypeParam } from "@/lib/login-type"
@@ -88,6 +89,7 @@ const DEDUPE_WINDOW_FACTOR = 3
  *   limit         number    (default 200, max 200)
  *   q             string    text search (indexed — hasToken / bloom-filter, NOT LIKE)
  *   regex         '1'       treat q as RE2 regex
+ *   scope         string    all (default) | login (a whole word in the login) | login_contains (anywhere in the login); else 400
  *   sort          string    see SORT_MAP keys (default domain_asc)
  *   domain        string    exact domain match
  *   breach        string    exact breach_name match
@@ -142,6 +144,8 @@ export async function GET(request: NextRequest) {
   const parsedRange = importedRangeFromSearchParams(sp)
   if (!parsedRange.ok) return NextResponse.json({ success: false, error: parsedRange.error }, { status: 400 })
   const importedRange = parsedRange.range
+  const scope = parseSearchScope(sp.get('scope'))
+  if (scope === null) return NextResponse.json({ success: false, error: 'scope must be all, login or login_contains' }, { status: 400 })
   const tierInclude = sp.get('tier_include')  || ''
   const tierExclude = sp.get('tier_exclude')  || ''
   // Declutter: hide low-signal rows (IP-host / :port / .php / localhost URLs).
@@ -174,7 +178,7 @@ export async function GET(request: NextRequest) {
   // proj_imported_desc: a projection has no text index, so hasToken(url, ...) there is a case-SENSITIVE function, while on the
   // table the text index (preprocessor lower(col)) answers it case-insensitively. See lib/ulp-search.ts (isIndexNeutralSearch).
   let projectionQClause = ''
-  const searchTokens = q.trim() ? parseULPQuery(q.trim()) : []
+  const searchTokens = q.trim() ? parseULPQuery(q.trim(), scope) : []
   if (q.trim()) {
     const built = regex ? buildULPWhereRegex(searchTokens) : buildULPWhere(searchTokens)
     qClause = built.clause
@@ -265,7 +269,7 @@ export async function GET(request: NextRequest) {
   // Domain search dictionary (lib/search-dictionary-plan.ts): a search for exactly one domain-shaped term is answered from two small derived
   // tables (the same rows, order, cursors and totals, 2-4 s instead of 15-19 s). null = this request keeps today's query. The rows request and the
   // totals request the page sends together share one lookup.
-  const dictionaryTerm = sp.get('dictionary') === '0' ? null : dictionaryTermFromQuery(q.trim(), regex)
+  const dictionaryTerm = sp.get('dictionary') === '0' ? null : dictionaryTermFromQuery(q.trim(), regex, scope)
   let candidatesMemo: Promise<DictionaryCandidates | null> | null = null
   const getCandidates = (): Promise<DictionaryCandidates | null> => {
     if (!dictionaryTerm) return Promise.resolve(null)

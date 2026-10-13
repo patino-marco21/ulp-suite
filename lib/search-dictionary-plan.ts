@@ -25,6 +25,7 @@
  */
 import { executeQuery } from '@/lib/clickhouse'
 import { parseULPQuery, buildULPWhere } from '@/lib/ulp-search'
+import type { SearchScope } from '@/lib/search-scope'
 import { dedupeLimitBy, dedupeCountPartial } from '@/lib/ulp-dedupe'
 import { chStringArrayLiteral, chReversedArrayLiteral } from '@/lib/clickhouse-literals'
 import { isEmailDomainRevProjectionReady, EMAIL_DOMAIN_REV_PROJECTION_NAME } from '@/lib/credentials-projections'
@@ -57,14 +58,15 @@ export interface DictionaryTerm {
 
 /**
  * The term, when the whole search is exactly one positive, non-regex, domain-shaped term; null for everything else (single word, @email, several
- * terms, negation, regex), which keeps today's query. The patterns come out of buildULPWhere's own parameters so they cannot drift from it.
+ * terms, negation, regex, a login scope), which keeps today's query. The patterns come out of buildULPWhere's own parameters so they cannot drift from it.
  */
-export function dictionaryTermFromQuery(q: string, regex: boolean): DictionaryTerm | null {
+export function dictionaryTermFromQuery(q: string, regex: boolean, scope: SearchScope = 'all'): DictionaryTerm | null {
   if (regex) return null
-  const tokens = parseULPQuery(q)
+  const tokens = parseULPQuery(q, scope)
   if (tokens.length !== 1) return null
   const [token] = tokens
-  if (token.type !== 'domain' || token.negate) return null
+  // A login scope (the dropdown or a login: prefix) is not a site search: the dictionary is about hosts.
+  if (token.type !== 'domain' || token.negate || token.scope !== 'all') return null
   const { params } = buildULPWhere(tokens)
   const { dom0, domsuf0, domlk0 } = params
   if (typeof dom0 !== 'string' || typeof domsuf0 !== 'string' || typeof domlk0 !== 'string') return null

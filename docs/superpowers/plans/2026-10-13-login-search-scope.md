@@ -1028,7 +1028,8 @@ describe('GET /api/credentials — scope', () => {
   test('regex mode in a login scope matches the login column only', async () => {
     await get(`q=${encodeURIComponent('^adm')}&regex=1&scope=login&skip_totals=1&dedupe=0`)
     expect(allSql()).toContain('match(email, {rp0:String})')
-    expect(allSql()).not.toContain('match(url')
+    // the SELECT list's own display normalisation contains a literal match(url, ...), so test for the bound search predicate
+    expect(allSql()).not.toContain('match(url, {rp0:String})')
   })
 
   test('a full address probes the common casings', async () => {
