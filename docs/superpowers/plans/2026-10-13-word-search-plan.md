@@ -35,6 +35,17 @@ Spec: `docs/superpowers/specs/2026-10-13-word-and-substring-search-plans-design.
 - Common passwords and keyboard patterns (`qwerty`, `123456`, `password`, ...) all exceed the caps (candidate e-mail domains in the hundreds to thousands): they keep today's query.
 - The capped probe (`count()` over `LIMIT 50001`) of plan 1 takes 0.13 to 0.6 s and is cached ten minutes per word; it is the rows gate's third number.
 
+## Calibration result (2026-10-13, Task 5) — the gate in this plan's text was replaced
+
+The starting gate below (candidate domains, candidate e-mail domains, text-index hits; rows budget 4 s) did not survive the measurement. 39 words inside the dictionary caps were run through the real route (domain A-Z, page 1, Unique on, cold caches, rows and totals, identical results in every run) with the gates relaxed and both budgets raised to 60 s, then branch by branch: the owner's 7 rare or mid-size words, 16 public brand words, and 16 institution-like words found through the e-mail dictionary to fill the gaps.
+
+- **What does not predict the cost:** the number of candidate e-mail domains (words with 30, 32, 40, 51 and 59 of them won 4-7 times; words with 32, 36 and 37 lost 1.4-2 times) and the text-index hit count (97,000 hits won 2.3 times, 1,800 hits lost). The text probe is gone from the word path.
+- **What does:** branch E reads each row of the matching e-mail domains from the base table by position (`proj_email_domain_rev` holds `_part_offset` only), so its cost follows the number of ROWS behind those domains: 0.3-1.0 s for up to about 200 rows (nine words), 2-8 s for 400 to 900, 6-26 s from 1,400 to 7,900. Branches T (0.5-2.6 s) and H (0.1-3.1 s) stayed cheap for every word with at most 300 candidate domains. One probe through the projection counts those rows in 0.1-0.4 s (`probeEmailDomainRows`).
+- **Rows gate:** at most 300 candidate domains and at most 300 such rows. 14 of 14 words won, 2.9 to 14 times (plan 1.2-4.6 s, today's rows query 9-19 s). The first loss in the sample is at 1,428 such rows (0.7 times); the worst, at 7,876 rows, took 44.9 s against 11.1 s.
+- **Totals gate:** at most 5,000 such rows. Every word tried won, 1.7 to 14.5 times, the slowest plan took 10.1 s; at 6,700-7,900 rows the plan took 8.4-12.6 s against 14-15 s, which is too close to the 12 s budget to be worth it.
+- **Budgets:** rows 8 s (the slowest admitted word needs 4.6 s; the 4 s of the spec would have cut off real wins in the first, deliberately relaxed run, which then fell back to today's query with identical rows, as designed), totals 12 s. An overrun is remembered for ten minutes per plan and word (`runWithBudget` with a key), so a page turn or a filter change does not pay the budget again.
+- The three limits are tunable by the environment: `SEARCH_WORD_ROWS_MAX_DOMAINS` (300), `SEARCH_WORD_ROWS_MAX_EMAIL_ROWS` (300) and `SEARCH_WORD_TOTALS_MAX_EMAIL_ROWS` (5,000).
+
 ## File Structure
 
 - Modify `lib/search-dictionary-plan.ts`: `WordTerm`, `wordTermFromQuery`, `TextBranch`, `wordTextBranch`, `resolveWordCandidates` (the shared end of both lookups becomes `finishCandidates`; the cache becomes `resolveCached`), and `buildDictionaryRowsSql` / `buildDictionaryTotalsSql` take optional `text`, `maxSeconds`, `overflow`.
