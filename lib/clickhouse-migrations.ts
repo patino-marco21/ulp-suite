@@ -14,6 +14,7 @@ import {
   INDEX_BF_BREACH_NAME,
   INDEX_BF_SOURCE_FILE,
   INDEX_NGRAM_DOMAIN,
+  isConnectionError,
   trackConnectionLoss,
   verifySchema,
   waitForClickHouse,
@@ -329,8 +330,17 @@ export async function runClickHouseMigrations(opts: { wait?: WaitOptions } = {})
   // A first start on an empty data directory finds the health check green against the entrypoint's temporary server while the real one is not listening yet.
   // Ask a real query until it answers instead of sending hundreds of statements into ECONNREFUSED and recording them as done.
   const rawClient = getClient()
+  let announced = false
   const reachable = await waitForClickHouse(async () => {
-    await (await rawClient.query({ query: 'SELECT 1', format: 'JSONEachRow' })).json()
+    try {
+      await (await rawClient.query({ query: 'SELECT 1', format: 'JSONEachRow' })).json()
+    } catch (err) {
+      if (!announced && isConnectionError(err)) {
+        announced = true
+        console.warn('[ClickHouse migration] ClickHouse is not accepting connections yet; waiting for it before running any DDL')
+      }
+      throw err
+    }
   }, opts.wait)
   if (!reachable) {
     tryAgainLater('ClickHouse did not answer a query in time: no DDL was run and no version was recorded')

@@ -2,7 +2,8 @@
  * End-to-end rehearsal of the whole pipeline in an ISOLATED stack (docker-compose.rehearsal.yml): a fresh ClickHouse built from
  * the production init SQL, the app, and a webhook receiver. It shares nothing with the real stack. What it proves, in order:
  *
- *   1. a fresh install comes up: the init SQL is accepted, every DDL migration runs, country_tier reads email_domain (v26) and
+ *   1. a fresh install comes up WITHOUT the app being restarted: the init SQL is accepted, the app waits for the real server, every DDL
+ *      migration runs (all skip indexes the migrations own exist), country_tier reads email_domain (v26) and
  *      proj_imported_desc carries is_noise and content_key_hash (v27);
  *   2. the admin can log in; a webhook can be saved and its Test button reaches a receiver on the Docker network, signed;
  *   3. a monitor + a file dropped in the inbox -> parsed -> inserted -> in-process match -> webhook delivered, signed, with
@@ -24,6 +25,7 @@ import { randomBytes } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { MIGRATION_INDEXES } from '@/lib/clickhouse-migration-safety'
 
 const PROJECT = 'ulp-rehearsal'
 const COMPOSE_FILE = 'docker-compose.rehearsal.yml'
@@ -139,8 +141,9 @@ async function main(): Promise<number> {
     const chUp = await waitFor('ClickHouse healthy', () => sh('docker', ['inspect', '-f', '{{.State.Health.Status}}', CH]) === 'healthy', 240_000)
     check('ClickHouse started from the production init SQL', !!chUp)
     // The image runs the init SQL on a temporary server, then starts the real one; /ping (the health check) answers on the
-    // temporary one too. Wait for the REAL server on its native port, stably, then restart the app so that its DDL migrations
-    // run against it and not against a server that is about to be replaced.
+    // temporary one too, so compose starts the app while the real server may not listen yet. The app is NOT restarted here: it has to
+    // wait for the server itself (lib/clickhouse-migration-safety.ts), exactly as on a first start after a disaster recovery. This script
+    // used to restart it, which hid the gap: the migrations then failed with ECONNREFUSED, were recorded as done, and left nine skip indexes out.
     const chStable = await waitFor(
       'ClickHouse answering on its native port',
       async () => {
@@ -155,10 +158,13 @@ async function main(): Promise<number> {
     )
     check('the real ClickHouse server is up on its native port after the init SQL ran', !!chStable)
     if (!chUp || !chStable) return 1
-    sh('docker', ['restart', APP], env)
     const appUp = await waitFor('app healthy', () => sh('docker', ['inspect', '-f', '{{.State.Health.Status}}', APP]) === 'healthy', 300_000)
-    check('the app started and ran its DDL migrations on the empty database', !!appUp)
+    check('the app came up on its own, without a restart', !!appUp)
     if (!appUp) return 1
+    const ddlRecorded = () => appNode(`const D=require('better-sqlite3');const db=new D('/app/data/ulp.db',{readonly:true});const r=db.prepare("SELECT value FROM app_settings WHERE key_name='ch_ddl_version'").get();console.log(r?r.value:'')`)
+    const migrated = await waitFor('the DDL version recorded', () => ddlRecorded() === '29', 180_000, 3000)
+    check('the app ran its DDL migrations on the empty database', !!migrated)
+    if (!migrated) return 1
 
     check('ulp.credentials exists', chQuery("SELECT count() FROM system.tables WHERE database='ulp' AND name='credentials'") === '1')
     const expr = chQuery("SELECT default_expression FROM system.columns WHERE database='ulp' AND table='credentials' AND name='country_tier'")
@@ -167,6 +173,15 @@ async function main(): Promise<number> {
     check('the DDL version recorded in SQLite is 29 (v29: the lower(email) index)', ddl === '29', `got ${ddl}`)
     const addressIndex = chQuery("SELECT expr FROM system.data_skipping_indices WHERE database='ulp' AND table='credentials' AND name='idx_bf_email_lc'")
     check('idx_bf_email_lc exists on a fresh install and indexes lower(email)', addressIndex === 'lower(email)', `got ${addressIndex}`)
+    const owned = MIGRATION_INDEXES.map((i) => i.name).sort()
+    const owns = chQuery(`SELECT arrayStringConcat(arraySort(groupArray(name)), ',') FROM system.data_skipping_indices WHERE database='ulp' AND table='credentials' AND name IN (${owned.map((n) => `'${n}'`).join(',')})`)
+    check(`all ${owned.length} skip indexes only the migrations create exist on a fresh install`, owns === owned.join(','), `got ${owns}`)
+    const indexCount = chQuery("SELECT count() FROM system.data_skipping_indices WHERE database='ulp' AND table='credentials'")
+    check('ulp.credentials has 20 skip indexes in all (11 from the init SQL, 9 from the migrations)', indexCount === '20', `got ${indexCount}`)
+    const migrationLog = sh('sh', ['-c', `docker logs ${APP} 2>&1 | grep -F '[ClickHouse migration]' || true`], env)
+    const bad = migrationLog.split('\n').filter((l) => /FAILED|was missing/.test(l))
+    check('the migration log reports no failure and no missing index', bad.length === 0, bad.slice(0, 2).join(' | ').slice(0, 300))
+    console.log(`  info: ${migrationLog.includes('not accepting connections yet') ? 'the app found the server not listening yet and waited for it' : 'the server was already listening when the app started (the first-start race did not happen this time)'}`)
     const sourcesCols = chQuery("SELECT arrayStringConcat(arraySort(groupArray(name)), ',') FROM system.columns WHERE database='ulp' AND table='sources' AND name IN ('size','sha256','archive_id')")
     check('ulp.sources has the identity columns (DDL v28 / the init SQL)', sourcesCols === 'archive_id,sha256,size', `got ${sourcesCols}`)
     const projCurrent = chQuery("SELECT count() FROM system.projections WHERE database = 'ulp' AND table = 'credentials' AND name = 'proj_imported_desc' AND position(query, 'is_noise') > 0 AND position(query, 'content_key_hash') > 0")

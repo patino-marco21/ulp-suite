@@ -62,13 +62,14 @@ function fakeWait(timeoutMs = 45_000) {
 describe('runClickHouseMigrations — start-up safeguards', () => {
   let run: typeof import('@/lib/clickhouse-migrations').runClickHouseMigrations
   let error: ReturnType<typeof vi.spyOn>
+  let warn: ReturnType<typeof vi.spyOn>
 
   beforeEach(async () => {
     vi.resetModules() // a fresh migrationsDone for every test
     ;({ runClickHouseMigrations: run } = await import('@/lib/clickhouse-migrations'))
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2026-10-17T12:00:00Z'))
-    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     error = vi.spyOn(console, 'error').mockImplementation(() => {})
     Object.assign(h.state, { probes: 0, probeFailures: 0, firstProbeAnswerAtExecs: -1, dropExecs: false, failExecWith: '', indexes: [...LIVE_INDEXES] })
     h.state.execs.length = 0
@@ -94,6 +95,14 @@ describe('runClickHouseMigrations — start-up safeguards', () => {
     expect(h.state.firstProbeAnswerAtExecs).toBe(0) // not one statement was sent before the first answer
     expect(h.state.execs.some(sql => sql.includes('idx_bf_email_lc'))).toBe(true)
     expect(getSetting('ch_ddl_version')).toBe('29')
+    // once, however many times it had to ask: the log is what tells a person why the start took a few seconds longer
+    const waiting = warn.mock.calls.filter(c => String(c[0]).includes('not accepting connections yet'))
+    expect(waiting).toHaveLength(1)
+  })
+
+  test('a server that answers at once logs nothing about waiting', async () => {
+    await run({ wait: fakeWait() })
+    expect(warn.mock.calls.some(c => String(c[0]).includes('not accepting connections yet'))).toBe(false)
   })
 
   test('a server that never answers: nothing is run, nothing is recorded, and the log says so', async () => {
