@@ -16,6 +16,7 @@ import { IngestHealthPanel } from "@/components/ingest-health-panel"
 import { postFileWithProgress, transferPercent, uploadErrorMessage } from "@/lib/upload-client"
 import { formatBytes } from "@/lib/utils"
 import Link from "next/link"
+import { JobViewLink } from "@/components/job-view-link"
 
 interface ZipFileEntry {
   filename: string
@@ -956,6 +957,7 @@ function QueueStatusPanel() {
                           <span className="text-muted-foreground shrink-0 flex items-center gap-0.5">
                             <Clock className="h-2.5 w-2.5" />{fmtDuration(job.duration_ms)}
                           </span>
+                          <JobViewLink job={job} />
                         </>
                       ) : (
                         <span className="text-red-500 truncate max-w-[200px]" title={job.error_message ?? ''}>

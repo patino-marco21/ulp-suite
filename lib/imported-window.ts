@@ -253,6 +253,7 @@ export function writeWindowToSearch(
 
 const JOB_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/
 const PLAIN_TEXT_FILE = /\.(txt|csv)$/i
+const ARCHIVE_REF_SUFFIX = '.archiveref'
 
 export interface JobForLink {
   filename: string
@@ -263,13 +264,21 @@ export interface JobForLink {
   created_at: string
 }
 
+/** What the rows of a job carry as `source_file`, when that is knowable from the job's name: a plain .txt / .csv, or the original name inside an `<name>.archiveref`. */
+function jobSourceFile(filename: string): string | null {
+  const name = filename.toLowerCase().endsWith(ARCHIVE_REF_SUFFIX) ? filename.slice(0, -ARCHIVE_REF_SUFFIX.length) : filename
+  return PLAIN_TEXT_FILE.test(name) ? name : null
+}
+
 /**
- * The Credentials page filtered to the rows one import job added, or null when the job added none. Jobs run one at a time and stamp their
- * rows between their start and their end, so the window is (floor(end - duration) - 1 s, end + 1 s]: the log row is stamped to the second,
- * and the lower bound is exclusive. A plain .txt / .csv file also pins `source_file`, which removes any bleed from the neighbouring job; a
- * ZIP or an archive reference does not (its rows carry the inner file names).
+ * The Credentials page filtered to the rows one import job added, or null when the job added none. The window is (floor(end - duration) - 1 s,
+ * end + 1 s]: a job stamps its rows between its start and its end, the log row is stamped to the second, and the lower bound is exclusive. The
+ * window alone is not exact, because the queue can run jobs side by side (UPLOAD_CONCURRENCY; 2 on the machine this was built on) and then
+ * the neighbour's rows fall inside it. The FILE is what makes the link exact (measured: 20 of 20 jobs select exactly the rows they wrote), so a
+ * plain .txt / .csv (or the original name inside an `.archiveref`) also pins `source_file`. A ZIP's rows carry its inner file names, so it gets the
+ * window only and `exact` is false.
  */
-export function jobViewHref(job: JobForLink): string | null {
+export function jobViewLink(job: JobForLink): { href: string; exact: boolean } | null {
   if (job.status !== 'done' || !(job.imported > 0) || !Number.isFinite(job.duration_ms) || job.duration_ms < 0) return null
   const m = JOB_TIME_RE.exec(job.created_at)
   if (!m) return null
@@ -279,6 +288,12 @@ export function jobViewHref(job: JobForLink): string | null {
     imported_after: epochSecondsToIso(Math.floor(end - job.duration_ms / 1000) - 1),
     imported_before: epochSecondsToIso(end + 1),
   })
-  if (PLAIN_TEXT_FILE.test(job.filename)) sp.set('source_file', job.filename)
-  return `/credentials?${sp.toString()}`
+  const file = jobSourceFile(job.filename)
+  if (file !== null) sp.set('source_file', file)
+  return { href: `/credentials?${sp.toString()}`, exact: file !== null }
+}
+
+/** The link's address alone. */
+export function jobViewHref(job: JobForLink): string | null {
+  return jobViewLink(job)?.href ?? null
 }

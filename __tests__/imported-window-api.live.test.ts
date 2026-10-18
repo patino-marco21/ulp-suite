@@ -1,4 +1,7 @@
 import { execSync } from 'node:child_process'
+import { copyFileSync, existsSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 
 /**
@@ -13,6 +16,8 @@ import { describe, expect, test, vi } from 'vitest'
  *   - password lookup: the logins found in a window are exactly the logins an independent query finds in it, and a subset of the unwindowed answer;
  *   - association: a window that covers everything reproduces the unwindowed answer exactly (candidates, confidence, evidence), a window in the future
  *     finds nothing, and a window in the middle never finds a candidate the unwindowed answer does not have.
+ *   - "View what this added": for every finished import job since 2026-10-17 the link's window and file select exactly the rows the job wrote (its
+ *     `imported` count), read from a COPY of the job log.
  */
 vi.mock('@/lib/api-key-auth', () => ({
   withApiKeyAuth: async () => ({ success: true, apiKey: { keyId: 'live-test', role: 'admin' }, rateLimit: { limit: 100, remaining: 99, resetAt: Date.now() + 60_000 } }),
@@ -175,4 +180,44 @@ describe.skipIf(!LIVE)('the imported window on the live table', () => {
     expect(stats.found).toBeGreaterThan(0)
     expect(stats.maxMs).toBeLessThan(30_000)
   }, 300_000)
+  test('"View what this added": the link of every import job since 2026-10-17 selects exactly the rows that job wrote', async () => {
+    const { executeQuery } = await import('@/lib/clickhouse')
+    const { jobViewHref } = await import('@/lib/imported-window')
+    const { parseImportedRange, importedRangeProjection } = await import('@/lib/imported-range')
+    const Database = (await import('better-sqlite3')).default
+
+    const dir = mkdtempSync(join(tmpdir(), 'iwa-jobs-'))
+    for (const f of ['ulp.db', 'ulp.db-wal', 'ulp.db-shm']) if (existsSync(`${process.cwd()}/data/${f}`)) copyFileSync(`${process.cwd()}/data/${f}`, `${dir}/${f}`)
+    const db = new Database(`${dir}/ulp.db`, { readonly: true })
+    const jobs = db.prepare(
+      `SELECT filename, status, imported, duration_ms, created_at FROM processing_jobs WHERE status = 'done' AND imported > 0 AND created_at >= '2026-10-17 00:00:00' ORDER BY id`,
+    ).all() as Array<{ filename: string; status: string; imported: number; duration_ms: number; created_at: string }>
+    expect(jobs.length, 'the job log should hold finished imports since the 17th').toBeGreaterThan(0)
+
+    const stats = { jobs: jobs.length, withFile: 0, exactWithFile: 0, windowOnly: 0, exactWindowOnly: 0, bleedRows: 0, mismatches: [] as string[] }
+    for (const job of jobs) {
+      const href = jobViewHref(job)!
+      const sp = new URL(href, 'http://x').searchParams
+      const parsed = parseImportedRange({ imported_after: sp.get('imported_after'), imported_before: sp.get('imported_before') })
+      if (!parsed.ok) throw new Error(parsed.error)
+      const proj = importedRangeProjection(parsed.range)
+      const where = proj.conditions.join(' AND ')
+      const file = sp.get('source_file')
+
+      const [inWindow] = (await executeQuery(`SELECT count() AS n FROM ulp.credentials WHERE ${where} ${NO_CACHE}`, proj.params)) as Array<{ n: string }>
+      stats.windowOnly++
+      if (Number(inWindow.n) === job.imported) stats.exactWindowOnly++
+      else stats.bleedRows += Math.max(0, Number(inWindow.n) - job.imported)
+
+      if (file !== null) {
+        const [mine] = (await executeQuery(`SELECT count() AS n FROM ulp.credentials WHERE ${where} AND source_file = {f:String} ${NO_CACHE}`, { ...proj.params, f: file })) as Array<{ n: string }>
+        stats.withFile++
+        if (Number(mine.n) === job.imported) stats.exactWithFile++
+        else stats.mismatches.push(`job ${job.created_at}: link selects ${mine.n}, the job wrote ${job.imported}`)
+      }
+    }
+    console.log(`job links live: ${JSON.stringify({ ...stats, mismatches: stats.mismatches.length })}`)
+    expect(stats.mismatches).toEqual([])
+    expect(stats.withFile).toBeGreaterThan(0)
+  }, 600_000)
 })

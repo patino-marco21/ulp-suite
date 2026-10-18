@@ -13,6 +13,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { useAuth, isAdmin } from "@/hooks/useAuth"
 import { useToast } from "@/hooks/use-toast"
 import { IngestHealthPanel } from "@/components/ingest-health-panel"
+import { JobViewLink } from "@/components/job-view-link"
 import { newKnownLabel, phaseLine } from "@/lib/import-summary"
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -584,6 +585,7 @@ export default function InboxPage() {
                       <span className="text-muted-foreground shrink-0 flex items-center gap-0.5">
                         <Timer className="h-2.5 w-2.5" />{fmtDuration(job.duration_ms)}
                       </span>
+                      <JobViewLink job={job} />
                     </>
                   ) : (
                     <span className={`${job.status === 'held' ? 'text-amber-600' : 'text-red-500'} truncate max-w-xs`} title={job.error_message ?? ''}>

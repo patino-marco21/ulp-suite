@@ -482,6 +482,28 @@ marked `too_common`). `password` matches exactly and case-sensitively; a rare pa
 `partial` (narrow it with `domain`). Passwords travel in the POST body, are never logged and are never returned. Design and measurements:
 `docs/superpowers/specs/2026-10-18-login-association-design.md`.
 
+### Imported window (`imported_after` / `imported_before`)
+
+"Only the rows added to the database in a time window", on every search and export surface. `imported_after` is **exclusive** and `imported_before` **inclusive**, both
+UTC instants to the second, so windows chained as (previous `imported_before`, next `imported_before`] never overlap and never leave a gap. Accepted forms: a date
+(`2026-10-05`, the whole UTC day on its own side), a UTC date-time (`2026-10-05 14:37:00`) or ISO-8601 with an offset (`2026-10-05T14:37:00-05:00`); anything else is a `400`
+naming the parameter. It means *rows added after the cutoff*: a credential imported again later counts as added. The answer repeats the effective window.
+
+| Where | How |
+|---|---|
+| `GET /api/v1/search/credentials`, `/search/domain`, `/lookup`, `/summary` | query string |
+| `POST /api/v1/lookup/batch`, `/lookup/password`, `/lookup/associate` | JSON body (`associate`: once at the top; it limits where a *candidate* can come from, the login's own rows are always read from the whole table) |
+| `POST /api/export` (every format), `GET /api/credentials` | the Credentials page's own routes |
+
+`GET /api/v1/summary?imported_after=..[&imported_before=..]` returns the table-wide summary for a window (rows added, estimated distinct domains and addresses, files imported,
+top 20 domains); it needs `imported_after` (an upper bound alone is the whole table), is computed on request and kept for 2 minutes (10 once the window is closed).
+
+In the app the window is the **Imported** pill in the Credentials filter row (presets Today, Yesterday, Last 24 h, 7 days, 30 days and Since last export; your local time, with
+the UTC instant shown under each field). It is kept in the page address (`/credentials?imported_after=..&imported_before=..`, plus `source_file=..`), so a window can be
+bookmarked, and every finished import job on the Inbox and Upload pages has a **View what this added** link that opens it on exactly that job's rows. The Lookup and
+Breaches pages use the same control. Design and measurements: `docs/superpowers/specs/2026-10-05-imported-after-filter-design.md` and
+`docs/superpowers/specs/2026-10-18-imported-window-ux-design.md`.
+
 ---
 
 ## Performance

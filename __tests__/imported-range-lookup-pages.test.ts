@@ -33,10 +33,16 @@ describe('Lookup page and breach export — one optional imported window each (t
   })
 })
 
-describe('API docs — the new parameters are documented on all four v1 lookups', () => {
+describe('API docs — the window is documented on every v1 endpoint that takes it', () => {
   const src = read('app/docs/page.tsx')
-  test('imported_after and imported_before appear in the search, domain, lookup and batch tables', () => {
-    expect(src.match(/name: "imported_after"/g)).toHaveLength(4)
-    expect(src.match(/name: "imported_before"/g)).toHaveLength(4)
+  test('imported_after and imported_before appear in the search, domain, lookup, batch, associate and password tables and the summary parameters', () => {
+    expect(src.match(/name: "imported_after"/g)).toHaveLength(7)
+    expect(src.match(/name: "imported_before"/g)).toHaveLength(7)
+  })
+
+  test('the summary says a lower bound is required and what a window costs; associate says its own rows stay unfiltered', () => {
+    expect(src).toContain('Needs imported_after: an upper bound alone is the whole table up to a date and is a 400.')
+    expect(src).toContain('kept for 2 minutes (10 once the window is closed)')
+    expect(src).toContain("The login's own rows are always read from the whole table, because they identify the account.")
   })
 })

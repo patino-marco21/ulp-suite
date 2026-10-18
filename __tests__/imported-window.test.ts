@@ -1,7 +1,7 @@
 import { describe, test, expect } from 'vitest'
 import {
   WINDOW_PRESETS, startOfLocalDay, presetEpochs, epochsToLocalInputs, localInputToEpoch, checkLocalWindow,
-  pillLabel, windowSentence, readWindowFromSearch, writeWindowToSearch, jobViewHref, type OffsetAt,
+  pillLabel, windowSentence, readWindowFromSearch, writeWindowToSearch, jobViewHref, jobViewLink, type OffsetAt,
 } from '@/lib/imported-window'
 import { parseImportedRange } from '@/lib/imported-range'
 
@@ -212,11 +212,20 @@ describe('jobViewHref: "View what this added"', () => {
     expect(params(href)).toEqual({ imported_after: '2026-10-18T16:54:42Z', imported_before: '2026-10-18T16:55:18Z', source_file: 'batch one.txt' })
   })
 
-  test('a name that is not a plain text file (ZIP, archive reference, anything else) gets the window only: its rows carry other file names', () => {
-    for (const filename of ['pack.zip', 'x.txt.archiveref', 'dump', 'a.TXT.gz']) {
+  test('an archive reference pins the ORIGINAL file name (its rows carry that name); a ZIP or any other name gets the window only', () => {
+    expect(params(jobViewHref({ ...job, filename: 'x y.txt.archiveref' }))).toHaveProperty('source_file', 'x y.txt')
+    expect(params(jobViewHref({ ...job, filename: 'UPPER.CSV.ARCHIVEREF' }))).toHaveProperty('source_file', 'UPPER.CSV')
+    expect(params(jobViewHref({ ...job, filename: 'UPPER.CSV' }))).toHaveProperty('source_file', 'UPPER.CSV')
+    for (const filename of ['pack.zip', 'x.zip.archiveref', 'dump', 'a.TXT.gz', '.archiveref']) {
       expect(params(jobViewHref({ ...job, filename })), filename).not.toHaveProperty('source_file')
     }
-    expect(params(jobViewHref({ ...job, filename: 'UPPER.CSV' }))).toHaveProperty('source_file', 'UPPER.CSV')
+  })
+
+  test('the link is exact when the file pins it, and says so when only the window does (the queue can run jobs side by side)', () => {
+    expect(jobViewLink(job)!.exact).toBe(true)
+    expect(jobViewLink({ ...job, filename: 'x.txt.archiveref' })!.exact).toBe(true)
+    expect(jobViewLink({ ...job, filename: 'pack.zip' })!.exact).toBe(false)
+    expect(jobViewLink({ ...job, filename: 'pack.zip' })!.href).toBe(jobViewHref({ ...job, filename: 'pack.zip' }))
   })
 
   test('only a finished job that added rows has something to view', () => {

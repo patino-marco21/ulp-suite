@@ -620,6 +620,8 @@ export default function DocsPage() {
                     { name: "site", type: "string", required: false, description: "The site the login is known from, e.g. example.com. The password the login has THERE identifies the person, so it makes the answer much stronger." },
                     { name: "password", type: "string", required: false, description: "A password the account is known to use. Probed for reuse; with site it pins the account. Never logged or returned." },
                     { name: "want", type: "string", required: false, description: "email (default), username or phone: the kind of login to look for. username with an e-mail login answers 'which handle goes with this address'." },
+                    { name: "imported_after", type: "string", required: false, description: "Given once at the top of the body (a single login or items): only rows imported after this UTC instant (exclusive) can produce a candidate, so the answer is 'what is new since'. A date (2026-10-05, the whole day), a date-time (2026-10-05 14:37:00, read as UTC) or ISO-8601 with an offset (2026-10-05T14:37:00-05:00). The login's own rows are always read from the whole table, because they identify the account. Anything else is a 400. The response echoes the effective window." },
+                    { name: "imported_before", type: "string", required: false, description: "Only rows imported up to and including this UTC instant (inclusive); same forms." },
                   ]} />
                 </div>
                 <div>
@@ -701,6 +703,8 @@ export default function DocsPage() {
                     { name: "type", type: "string", required: false, description: "email (default), username, phone or any: which kind of login to return." },
                     { name: "limit", type: "integer", required: false, description: "Logins to return, 1 to 1000 (default 100). has_more says whether there are more." },
                     { name: "domain", type: "string", required: false, description: "Only logins seen on this site. Narrows a very common password." },
+                    { name: "imported_after", type: "string", required: false, description: "Only rows imported after this UTC instant (exclusive). A date (2026-10-05, the whole day), a date-time (2026-10-05 14:37:00, read as UTC) or ISO-8601 with an offset (2026-10-05T14:37:00-05:00). Anything else is a 400. The response echoes the effective window." },
+                    { name: "imported_before", type: "string", required: false, description: "Only rows imported up to and including this UTC instant (inclusive); same forms." },
                   ]} />
                 </div>
                 <div>
@@ -758,10 +762,23 @@ export default function DocsPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
+                {/* Query parameters */}
+                <div>
+                  <h4 className="font-semibold mb-3 text-foreground">Query Parameters (optional)</h4>
+                  <ParameterTable params={[
+                    { name: "imported_after", type: "string", required: false, description: "Summarise only the rows imported after this UTC instant (exclusive): credentials (exact), unique_domains and unique_emails (estimates), the files imported in the window (sources) and its top 20 domains. A date (2026-10-05, the whole day), a date-time (2026-10-05 14:37:00, read as UTC) or ISO-8601 with an offset. Computed on request and kept for 2 minutes (10 once the window is closed). A window the size of the table can time out (408): narrow it." },
+                    { name: "imported_before", type: "string", required: false, description: "Close the window: rows imported up to and including this UTC instant (inclusive). Needs imported_after: an upper bound alone is the whole table up to a date and is a 400. The response echoes the effective window." },
+                  ]} />
+                </div>
+
                 {/* Example Request */}
                 <div>
                   <h4 className="font-semibold mb-3 text-foreground">Example Request</h4>
                   <CodeBlock code={`curl "${baseUrl}/api/v1/summary" \\
+  -H "X-API-Key: bv_your_api_key"
+
+# what the last day added
+curl "${baseUrl}/api/v1/summary?imported_after=2026-10-17T16:00:00Z" \\
   -H "X-API-Key: bv_your_api_key"`} />
                 </div>
 
