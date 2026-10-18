@@ -1,17 +1,21 @@
 /**
  * Password lookup API v1
- * POST /api/v1/lookup/password   { "password": "...", "type": "email", "limit": 100, "domain": "example.com" }
+ * POST /api/v1/lookup/password   { "password": "...", "type": "email", "limit": 100, "domain": "example.com",
+ *                                   "imported_after": "2026-10-05T14:37:00Z", "imported_before": "2026-10-06T00:00:00Z" }
  *
  * The logins that use exactly this password (case-sensitive), one row per login with how many sites and which (up to 5) it was seen on. "type" is
  * email (default), username, phone or any; "domain" narrows to one site. A POST body, not a query string, so the password stays out of URLs and access logs;
  * it is never logged or returned. The scan reads at most 100,000 matching rows: a more common password answers from the first rows in domain order and says
  * "partial": true (narrow it with "domain"). An exact match is pruned by the bloom filter on password, so a rare password answers in well under a second.
+ * imported_after (exclusive) / imported_before (inclusive), both optional, UTC (lib/imported-range.ts): only the rows added in that window count; the answer
+ * repeats the effective window.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from '@/lib/api-key-auth'
 import { executeQuery } from '@/lib/clickhouse'
 import { lookupPassword, parsePasswordLookup } from '@/lib/login-association'
+import { importedRangeEchoIfSet } from '@/lib/imported-range'
 
 export const dynamic = 'force-dynamic'
 
@@ -41,6 +45,7 @@ export async function POST(request: NextRequest) {
         has_more: out.hasMore,
         partial: out.partial,
         results: out.results.map(r => ({ login: r.login, login_type: r.loginType, sites: r.sites, domains: r.domains, rows: r.rows })),
+        ...(parsed.lookup.range ? importedRangeEchoIfSet(parsed.lookup.range) : {}),
       }),
       authResult.rateLimit,
     )

@@ -100,4 +100,33 @@ describe('POST /api/v1/lookup/password', () => {
     expect(res.status).toBe(500)
     expect(JSON.stringify(await res.json())).not.toContain(PW)
   })
+  describe('imported_after / imported_before', () => {
+    test.each([
+      ['imported_after', 'yesterday'],
+      ['imported_before', '2026-02-30'],
+      ['imported_after', 12345],
+    ])('%s=%j is a 400 that names the parameter, and nothing is queried', async (field, value) => {
+      const res = await call({ password: PW, [field]: value })
+      expect(res.status).toBe(400)
+      expect((await res.json()).error).toContain(`${field} must be`)
+      expect(ch.calls).toHaveLength(0)
+    })
+
+    test('the window reaches the query as parameters (the text carries no value) and is echoed as the effective instants', async () => {
+      ch.rows = [{ login: 'alice@mail.test', login_type: 'email', sites: '1', domains: ['a.test'], rows: '1', scanned: '1' }]
+      const res = await call({ password: PW, imported_after: '2026-10-05T09:37:00-05:00', imported_before: '2026-10-06' })
+      const json = await res.json()
+      expect(res.status).toBe(200)
+      expect(ch.calls[0].sql).toContain('imported_at > toDateTime({impAfter:Int64}) AND imported_at <= toDateTime({impBefore:Int64})')
+      expect(ch.calls[0].params).toMatchObject({ impAfter: Date.UTC(2026, 9, 5, 14, 37) / 1000, impBefore: Date.UTC(2026, 9, 6) / 1000 + 86_399 })
+      expect(json.imported_after).toBe('2026-10-05T14:37:00Z')
+      expect(json.imported_before).toBe('2026-10-06T23:59:59Z')
+    })
+
+    test('without a window the answer has exactly the keys it always had', async () => {
+      const json = await (await call({ password: PW })).json()
+      expect(Object.keys(json).sort()).toEqual(['count', 'has_more', 'partial', 'results', 'success'])
+      expect(ch.calls[0].sql).not.toContain('imported_at')
+    })
+  })
 })

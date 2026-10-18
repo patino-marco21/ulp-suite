@@ -17,9 +17,17 @@
  * (no login, site or password is spliced into the SQL text) and capped. Nothing here logs or returns a password.
  *
  * The runner is injected: the routes pass lib/clickhouse's executeQuery, the tests pass a fake.
+ *
+ * Imported window (imported_after / imported_before, lib/imported-range.ts; design 2026-10-18-imported-window-ux-design.md). For the password lookup it is
+ * a WHERE predicate: the logins that use the password among the rows added in the window. For an association it limits where a CANDIDATE can come
+ * from: the login's own rows and its anchor on a site are always read from the whole table (they are what identifies the account), every query that
+ * produces candidates also returns `max(<window>) AS in_win`, and a candidate qualifies only when a row that produced it is in the window. The
+ * popularity gates (a password shared by 300+ logins, a handle on many addresses) keep counting the whole table, so a narrow window cannot make a
+ * common password or handle look rare.
  */
 import { addressEquals } from '@/lib/address-lookup'
 import { isConnectionError } from '@/lib/clickhouse-migration-safety'
+import { hasImportedRange, importedRangePlain, parseImportedRange, type ImportedRange } from '@/lib/imported-range'
 
 export type WantedLogin = 'email' | 'username' | 'phone'
 export type Confidence = 'high' | 'medium' | 'low'
@@ -152,6 +160,8 @@ export interface CandidateState {
   pwGlobalSites: number
   /** Sign-in hosts that imply this address. */
   provider: Set<string>
+  /** With an imported window: a row that produced this candidate was added in the window. Unset without one. */
+  inWindow?: boolean
 }
 
 export function newCandidateState(): CandidateState {
@@ -227,7 +237,7 @@ const str = (v: unknown) => (typeof v === 'string' ? v : String(v ?? ''))
 export async function associateLogin(
   item: AssociateItem,
   run: QueryRunner,
-  opts: { now?: () => number; budgetMs?: number } = {},
+  opts: { now?: () => number; budgetMs?: number; range?: ImportedRange } = {},
 ): Promise<AssociateResult> {
   const L = ASSOCIATE_LIMITS
   const now = opts.now ?? Date.now
@@ -239,6 +249,12 @@ export async function associateLogin(
   const tc = tokenClause(n)
   const errors: string[] = []
   const base: Record<string, unknown> = { n, ...tc.params }
+  // The imported window, for the queries that produce candidates (not the ones that identify the account).
+  const win = opts.range && hasImportedRange(opts.range) ? importedRangePlain(opts.range) : null
+  const inWin = win ? `, max(${win.conditions.join(' AND ')}) AS in_win` : ''
+  const winParams: Record<string, unknown> = win ? win.params : {}
+  /** Without a window every row qualifies; with one, only the groups that have a row in it. */
+  const qualifies = (r: Row) => !win || Number(r.in_win) === 1
 
   const attempt = async (stage: string, tag: string, sql: string, params: Record<string, unknown>): Promise<Row[] | null> => {
     if (now() > deadline) {
@@ -304,12 +320,13 @@ export async function associateLogin(
     for (const [d, p] of pairs.filter(([d2, p2]) => !seen.has(`${d2}\u0000${p2}`)).slice(0, L.maxPairs)) s1.push([d, p, false])
   }
   for (const [d, p, tied] of s1) {
-    const others = await attempt('site', 's1', `SELECT lower(email) AS e, login_type FROM ulp.credentials
+    const others = await attempt('site', 's1', `SELECT lower(email) AS e, login_type${inWin} FROM ulp.credentials
       WHERE domain = {d:String} AND password = {p:String} AND lower(email) != lower({n:String})
-      GROUP BY e, login_type LIMIT 200 ${SET}`, { n, d, p })
+      GROUP BY e, login_type LIMIT 200 ${SET}`, { n, d, p, ...winParams })
     if (others === null) continue
     for (const o of others) {
-      if (str(o.login_type) !== want) continue
+      if (str(o.login_type) !== want || !qualifies(o)) continue
+      cand(str(o.e)).inWindow = true
       const bucket = tied ? cand(str(o.e)).pwSite : cand(str(o.e)).pwSiteOther
       bucket.set(d, Math.min(bucket.get(d) ?? Number.MAX_SAFE_INTEGER, others.length))
     }
@@ -317,48 +334,62 @@ export async function associateLogin(
 
   // 3. S2: logins on any site that use one of the account's passwords (popularity-gated)
   for (const p of basisPws) {
-    const rows = await attempt('reuse', 's2', `SELECT lower(email) AS e, login_type, uniqExact(domain) AS sites FROM ulp.credentials
+    const rows = await attempt('reuse', 's2', `SELECT lower(email) AS e, login_type, uniqExact(domain) AS sites${inWin} FROM ulp.credentials
       WHERE password = {p:String} AND lower(email) != lower({n:String})
-      GROUP BY e, login_type ${SET_POP}`, { n, p })
-    if (rows === null || rows.length >= L.popularityCap) continue // a common password tells nothing
+      GROUP BY e, login_type ${SET_POP}`, { n, p, ...winParams })
+    if (rows === null || rows.length >= L.popularityCap) continue // a common password tells nothing (counted over the whole table, window or not)
     for (const r of rows) {
-      if (str(r.login_type) !== want) continue
+      if (str(r.login_type) !== want || !qualifies(r)) continue
       const c = cand(str(r.e))
+      c.inWindow = true
       c.pwGlobal = c.pwGlobal === null ? rows.length : Math.min(c.pwGlobal, rows.length)
       c.pwGlobalSites = Math.max(c.pwGlobalSites, Number(r.sites) || 0)
     }
   }
 
   // 4. S3 and S4 only make sense for an e-mail answer to a handle. S3 prunes with the login's words: with none to prune by it would read the whole table.
+  let handleAddresses: number | null = null // with a window: the addresses with this handle in the whole table
   if (want === 'email' && !n.includes('@')) {
-    const h = tc.sql === '1' ? null : await attempt('handle', 'handle', `SELECT lower(email) AS e, domain, count() AS rows FROM ulp.credentials
+    const h = tc.sql === '1' ? null : await attempt('handle', 'handle', `SELECT lower(email) AS e, domain, count() AS rows${inWin} FROM ulp.credentials
       WHERE ${tc.sql} AND login_type = 'email'
         AND lower(substringUTF8(email, 1, position(email, '@') - 1)) = lower({n:String})
-      GROUP BY e, domain ORDER BY rows DESC LIMIT ${L.maxGroups} ${SET_OWN}`, base)
+      GROUP BY e, domain ORDER BY rows DESC LIMIT ${L.maxGroups} ${SET_OWN}`, { ...base, ...winParams })
     if (h !== null) {
       if (h.length >= L.maxGroups) result.tooCommon = true
+      // An address is a candidate when one of its rows is in the window; once it is, all of its rows describe it.
+      const admitted = new Set(h.filter(qualifies).map(r => str(r.e)))
+      if (win) handleAddresses = new Set(h.map(r => str(r.e))).size
       for (const r of h) {
+        if (!admitted.has(str(r.e))) continue
         const c = cand(str(r.e))
         c.observed = true
+        c.inWindow = true
         c.handleRows += Number(r.rows) || 0
         c.handleSites.add(str(r.domain))
       }
       if (basisPws.length > 0 && h.length > 0) {
-        const tied = await attempt('handle', 'tied', `SELECT lower(email) AS e, domain FROM ulp.credentials
+        const tied = await attempt('handle', 'tied', `SELECT lower(email) AS e, domain${inWin} FROM ulp.credentials
           WHERE ${tc.sql} AND login_type = 'email'
             AND lower(substringUTF8(email, 1, position(email, '@') - 1)) = lower({n:String})
             AND password IN {pws:Array(String)}
-          GROUP BY e, domain LIMIT ${L.maxGroups} ${SET_OWN}`, { ...base, pws: basisPws })
-        for (const r of tied ?? []) cand(str(r.e)).tiedSites.add(str(r.domain))
+          GROUP BY e, domain LIMIT ${L.maxGroups} ${SET_OWN}`, { ...base, ...winParams, pws: basisPws })
+        for (const r of tied ?? []) {
+          const e = str(r.e)
+          if (win && !admitted.has(e) && !qualifies(r)) continue // with a window: an address qualifies through its own in-window row, or one of its handle rows
+          const c = cand(e)
+          c.tiedSites.add(str(r.domain))
+          if (win && qualifies(r)) c.inWindow = true
+        }
       }
     }
     for (const d of result.loginSites) for (const m of PROVIDERS[d] ?? []) cand(`${handle}@${m}`).provider.add(d)
   }
 
-  const nHandle = [...cands.values()].filter(c => c.observed).length
+  const nHandle = handleAddresses ?? [...cands.values()].filter(c => c.observed).length
   const order = { high: 0, medium: 1, low: 2 }
   const ctx = { distinctive, nHandle, anchored }
   const ranked = [...cands.entries()]
+    .filter(([, c]) => !win || c.inWindow)
     .map(([login, c]) => ({ login, c, confidence: confidenceOf(c, ctx) }))
     .sort((a, b) =>
       order[a.confidence] - order[b.confidence] ||
@@ -391,6 +422,8 @@ export interface PasswordLookup {
   type: PasswordLoginType
   limit: number
   domain?: string
+  /** imported_after (exclusive) / imported_before (inclusive); absent = every row. */
+  range?: ImportedRange
 }
 
 export function parsePasswordLookup(raw: unknown): { ok: true; lookup: PasswordLookup } | { ok: false; error: string } {
@@ -414,6 +447,9 @@ export function parsePasswordLookup(raw: unknown): { ok: true; lookup: PasswordL
     if (!domain) return { ok: false, error: 'domain must be a bare host name such as example.com' }
     lookup.domain = domain
   }
+  const window = parseImportedRange({ imported_after: o.imported_after, imported_before: o.imported_before })
+  if (!window.ok) return { ok: false, error: window.error }
+  if (hasImportedRange(window.range)) lookup.range = window.range
   return { ok: true, lookup }
 }
 
@@ -428,6 +464,11 @@ export function buildPasswordLookupSql(l: PasswordLookup): { sql: string; params
   if (l.domain) {
     where.push('domain = {d:String}')
     params.d = l.domain
+  }
+  if (l.range) {
+    const w = importedRangePlain(l.range)
+    where.push(...w.conditions)
+    Object.assign(params, w.params)
   }
   params.scan = scanCap
   params.lim = l.limit + 1 // one more than asked, to know whether there is more

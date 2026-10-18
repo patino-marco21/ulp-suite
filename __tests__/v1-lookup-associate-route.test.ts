@@ -135,4 +135,50 @@ describe('POST /api/v1/lookup/associate', () => {
     await call({ login: 'alice_w' })
     expect(auth.addRateLimitHeaders).toHaveBeenCalled()
   })
+  describe('imported_after / imported_before', () => {
+    test.each([
+      ['imported_after', 'yesterday'],
+      ['imported_before', '2026-02-30'],
+    ])('%s=%j is a 400 that names the parameter, and nothing is queried', async (field, value) => {
+      const res = await call({ login: 'alice_w', [field]: value })
+      expect(res.status).toBe(400)
+      expect((await res.json()).error).toContain(`${field} must be`)
+      expect(ch.calls).toHaveLength(0)
+    })
+
+    test('one window at the top of the body applies to a single login and to every login of an items list, and is echoed', async () => {
+      ch.rowsFor = (tag) => (tag === 'own' ? [{ domain: 'example-site.test', password: PW }] : [])
+      for (const body of [
+        { login: 'alice_w', site: 'example-site.test', imported_after: '2026-10-05T14:37:00Z' },
+        { items: [{ login: 'alice_w', site: 'example-site.test' }, { login: 'bob_x', site: 'example-site.test' }], imported_after: '2026-10-05T14:37:00Z' },
+      ]) {
+        ch.calls.length = 0
+        const res = await call(body)
+        const json = await res.json()
+        expect(res.status).toBe(200)
+        expect(json.imported_after).toBe('2026-10-05T14:37:00Z')
+        expect(json.imported_before).toBeNull() // the open side is null, as on every other route that echoes the window
+        const producing = ch.calls.filter(c => /assoc:(s1|s2|handle|tied)/.test(c.sql))
+        expect(producing.length).toBeGreaterThan(0)
+        for (const c of producing) expect(c.params).toMatchObject({ impAfter: Date.UTC(2026, 9, 5, 14, 37) / 1000 })
+        for (const c of ch.calls.filter(c => /assoc:(own|anchor)/.test(c.sql))) expect(c.params).not.toHaveProperty('impAfter')
+      }
+    })
+
+    test('only candidates with a row in the window come back', async () => {
+      ch.rowsFor = (tag, p) => {
+        if (tag === 'own') return [{ domain: 'example-site.test', password: PW }]
+        if (tag === 's1' && p.d === 'example-site.test') return [{ e: 'old@mail.test', login_type: 'email', in_win: 0 }, { e: 'new@mail.test', login_type: 'email', in_win: 1 }]
+        return []
+      }
+      const json = await (await call({ login: 'alice_w', site: 'example-site.test', imported_after: '2026-10-05' })).json()
+      expect(json.results[0].candidates.map((c: { login: string }) => c.login)).toEqual(['new@mail.test'])
+    })
+
+    test('without a window the answer has exactly the keys it always had', async () => {
+      const json = await (await call({ login: 'alice_w' })).json()
+      expect(Object.keys(json).sort()).toEqual(['count', 'results', 'success'])
+      expect(ch.calls.every(c => !c.sql.includes('in_win'))).toBe(true)
+    })
+  })
 })

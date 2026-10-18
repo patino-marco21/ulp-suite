@@ -345,3 +345,157 @@ describe('parsePasswordLookup / buildPasswordLookupSql / lookupPassword', () => 
     expect(out).toEqual({ results: [], partial: false, hasMore: false })
   })
 })
+
+// ── the imported window (docs/superpowers/specs/2026-10-18-imported-window-ux-design.md) ─────────────────────────────────────────────
+
+const AFTER = Date.UTC(2026, 9, 5, 14, 37, 0) / 1000 // 2026-10-05T14:37:00Z
+const WINDOW = { lower: AFTER, upper: null }
+const WINDOW_BOTH = { lower: AFTER, upper: AFTER + 3600 }
+
+describe('password lookup: imported_after / imported_before', () => {
+  test('the bounds are read like every other v1 route reads them (same parser, same messages); an empty value is no bound', () => {
+    const r = parsePasswordLookup({ password: PW, imported_after: '2026-10-05T14:37:00Z', imported_before: '2026-10-06' })
+    expect(r).toEqual({ ok: true, lookup: { password: PW, type: 'email', limit: 100, range: { lower: AFTER, upper: Date.UTC(2026, 9, 6) / 1000 + 86_399 } } })
+    expect(parsePasswordLookup({ password: PW, imported_after: '', imported_before: null })).toEqual({ ok: true, lookup: { password: PW, type: 'email', limit: 100 } })
+    for (const [field, value] of [['imported_after', 'yesterday'], ['imported_before', '2026-02-30'], ['imported_after', 5]] as const) {
+      const bad = parsePasswordLookup({ password: PW, [field]: value })
+      expect(bad.ok).toBe(false)
+      expect(bad.ok === false && bad.error).toContain(`${field} must be`)
+    }
+  })
+
+  test('the window is a plain predicate on imported_at in the same WHERE as the password, with its own parameters; the text still carries no value', () => {
+    const { sql, params } = buildPasswordLookupSql({ password: PW, type: 'email', limit: 10, domain: 'example-site.test', range: WINDOW_BOTH })
+    expect(sql).toContain('password = {p:String} AND login_type = {t:String} AND domain = {d:String} AND imported_at > toDateTime({impAfter:Int64}) AND imported_at <= toDateTime({impBefore:Int64})')
+    expect(params).toMatchObject({ p: PW, t: 'email', d: 'example-site.test', impAfter: AFTER, impBefore: AFTER + 3600 })
+    expect(sql).not.toContain(String(AFTER))
+    const lowerOnly = buildPasswordLookupSql({ password: PW, type: 'any', limit: 10, range: WINDOW })
+    expect(lowerOnly.sql).toContain('imported_at > toDateTime({impAfter:Int64})')
+    expect(lowerOnly.sql).not.toContain('impBefore')
+  })
+
+  test('without a window the SQL is exactly what it was', () => {
+    const { sql, params } = buildPasswordLookupSql({ password: PW, type: 'email', limit: 100 })
+    expect(sql).not.toContain('imported_at')
+    expect(Object.keys(params).sort()).toEqual(['lim', 'p', 'scan', 't'])
+  })
+})
+
+describe('associateLogin with a window: it limits where a candidate can come from, nothing else', () => {
+  const win = (rows: Row[]) => rows
+  const OWN = [{ domain: 'example-site.test', password: PW }]
+
+  test('without a window no query mentions the window, and a candidate needs no flag', async () => {
+    const { run, calls } = runnerOf((tag) => (tag === 'own' ? OWN : tag === 's1' ? [{ e: 'alice@mail.test', login_type: 'email' }] : []))
+    const r = await associateLogin(item({ site: 'example-site.test' }), run)
+    expect(r.candidates.map(c => c.login)).toEqual(['alice@mail.test'])
+    for (const c of calls) {
+      expect(c.sql).not.toContain('in_win')
+      expect(Object.keys(c.params)).not.toContain('impAfter')
+    }
+  })
+
+  test('the login\'s own rows and its anchor are read from the whole table: they are what identifies the account', async () => {
+    const { run, calls } = runnerOf((tag) => (tag === 'own' ? OWN : tag === 'anchor' ? [{ password: PW }] : []))
+    await associateLogin(item({ site: 'example-site.test' }), run, { range: WINDOW })
+    for (const tag of ['own', 'anchor']) {
+      const c = calls.find(x => x.tag === tag)!
+      expect(c.sql, tag).not.toContain('imported_at')
+      expect(Object.keys(c.params), tag).not.toContain('impAfter')
+    }
+  })
+
+  test('every candidate-producing query returns whether the group has a row in the window, with the bounds as parameters', async () => {
+    const { run, calls } = runnerOf((tag, _sql, p) => {
+      if (tag === 'own') return [{ domain: 'example-site.test', password: PW }]
+      if (tag === 's1') return [{ e: 'alice@mail.test', login_type: 'email', in_win: 1 }]
+      if (tag === 'handle') return [{ e: 'alice@mail.test', domain: 'example-site.test', rows: '2', in_win: 1 }]
+      void p
+      return []
+    })
+    await associateLogin(item({ login: 'alice', site: 'example-site.test' }), run, { range: WINDOW_BOTH })
+    const tags = new Set(calls.map(c => c.tag))
+    for (const tag of ['s1', 's2', 'handle', 'tied']) expect(tags.has(tag), tag).toBe(true)
+    for (const c of calls.filter(x => ['s1', 's2', 'handle', 'tied'].includes(x.tag))) {
+      expect(c.sql, c.tag).toContain('max(imported_at > toDateTime({impAfter:Int64}) AND imported_at <= toDateTime({impBefore:Int64})) AS in_win')
+      expect(c.params, c.tag).toMatchObject({ impAfter: AFTER, impBefore: AFTER + 3600 })
+    }
+  })
+
+  test('a candidate whose rows are all outside the window is not returned; one with a row inside is', async () => {
+    const { run } = runnerOf((tag) => {
+      if (tag === 'own') return OWN
+      if (tag === 's1') return win([{ e: 'old@mail.test', login_type: 'email', in_win: 0 }, { e: 'new@mail.test', login_type: 'email', in_win: 1 }])
+      return []
+    })
+    const r = await associateLogin(item({ site: 'example-site.test' }), run, { range: WINDOW })
+    expect(r.candidates.map(c => c.login)).toEqual(['new@mail.test'])
+    expect(r.candidatesTotal).toBe(1)
+  })
+
+  test('how many logins share a password is counted over the WHOLE table, so a narrow window cannot make a common password look rare', async () => {
+    // 300 logins use the password (the popularity cap); only two of them have a row in the window.
+    const crowd = Array.from({ length: ASSOCIATE_LIMITS.popularityCap }, (_, i) => ({ e: `u${i}@m.test`, login_type: 'email', sites: '1', in_win: i < 2 ? 1 : 0 }))
+    const { run } = runnerOf((tag) => (tag === 'own' ? OWN : tag === 's2' ? crowd : []))
+    const r = await associateLogin(item({ site: 'example-site.test' }), run, { range: WINDOW })
+    expect(r.candidates).toEqual([])
+  })
+
+  test('the evidence still says how many logins share the password, windowed or not', async () => {
+    const others = [
+      { e: 'new@mail.test', login_type: 'email', in_win: 1 },
+      ...Array.from({ length: 4 }, (_, i) => ({ e: `old${i}@mail.test`, login_type: 'email', in_win: 0 })),
+    ]
+    const { run } = runnerOf((tag) => (tag === 'own' ? OWN : tag === 's1' ? others : []))
+    const r = await associateLogin(item({ site: 'example-site.test' }), run, { range: WINDOW })
+    expect(r.candidates).toHaveLength(1)
+    expect(r.candidates[0].evidence).toContain('(5 logins share it)')
+  })
+
+  test('an address implied only by a mail provider sign-in is not "in the window": no row of it was added', async () => {
+    const own = [{ domain: 'accounts.google.com', password: PW }]
+    const unwindowed = runnerOf((tag) => (tag === 'own' ? own : []))
+    const without = await associateLogin(item({ login: 'alice' }), unwindowed.run)
+    expect(without.candidates.map(c => c.login)).toEqual(['alice@gmail.com'])
+
+    const windowed = runnerOf((tag) => (tag === 'own' ? own : []))
+    const withWin = await associateLogin(item({ login: 'alice' }), windowed.run, { range: WINDOW })
+    expect(withWin.candidates).toEqual([])
+  })
+
+  test('how many addresses share the handle is also counted over the whole table, so confidence does not rise because the window is narrow', async () => {
+    const own = [{ domain: 'accounts.google.com', password: PW }]
+    const five = (inWin: (i: number) => number): Row[] =>
+      Array.from({ length: 5 }, (_, i) => ({ e: `alice@m${i}.test`, domain: 'site.test', rows: '1', in_win: inWin(i) }))
+    // one address of five has a row in the window: with the unwindowed count (5 > 3) it stays low; counted inside the window it would be "one of at most 3", medium
+    const { run } = runnerOf((tag) => (tag === 'own' ? own : tag === 'handle' ? five(i => (i === 0 ? 1 : 0)) : []))
+    const r = await associateLogin(item({ login: 'alice' }), run, { range: WINDOW })
+    expect(r.candidates.map(c => [c.login, c.confidence])).toEqual([['alice@m0.test', 'low']])
+  })
+})
+
+describe('associateLogin: the tied-address rows', () => {
+  const own = [{ domain: 'accounts.google.com', password: PW }]
+
+  test('without a window an address that only the tied query returned (the handle list was cut short) is still a candidate, as it always was', async () => {
+    const { run } = runnerOf((tag) => {
+      if (tag === 'own') return own
+      if (tag === 'handle') return [{ e: 'alice@m0.test', domain: 'site.test', rows: '1' }]
+      if (tag === 'tied') return [{ e: 'alice@m9.test', domain: 'site.test' }]
+      return []
+    })
+    const r = await associateLogin(item({ login: 'alice' }), run)
+    expect(r.candidates.map(c => c.login)).toContain('alice@m9.test')
+  })
+
+  test('with a window an address qualifies through its own in-window tied row, even when the handle list did not list it', async () => {
+    const { run } = runnerOf((tag) => {
+      if (tag === 'own') return own
+      if (tag === 'handle') return [{ e: 'alice@m0.test', domain: 'site.test', rows: '1', in_win: 0 }]
+      if (tag === 'tied') return [{ e: 'alice@m9.test', domain: 'site.test', in_win: 1 }, { e: 'alice@m8.test', domain: 'site.test', in_win: 0 }]
+      return []
+    })
+    const r = await associateLogin(item({ login: 'alice' }), run, { range: WINDOW })
+    expect(r.candidates.map(c => c.login)).toEqual(['alice@m9.test'])
+  })
+})
