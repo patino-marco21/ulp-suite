@@ -13,6 +13,7 @@
  */
 
 import { executeQuery } from '@/lib/clickhouse'
+import { importedRangePlain, planImportedRange, type ImportedRange } from '@/lib/imported-range'
 
 /** How long a computed summary counts as fresh. */
 export const SUMMARY_TTL_MS = 10 * 60_000
@@ -112,10 +113,90 @@ export async function getSummary(): Promise<{ summary: SummaryPayload; stale: bo
   return { summary: cached.value, stale }
 }
 
+// ── The same summary for a window (imported_after / imported_before) ───────────────────────────────────────────────────────────────
+
+/**
+ * What a window summary costs. The aggregate shape lets the planner use the projection form (the bound on proj_imported_desc's key), which reads only the
+ * window: a day is tenths of a second where the table-wide scan is 28 s (docs/superpowers/specs/2026-10-05-imported-after-filter-design.md measured the same
+ * trade for the browse totals). A window the size of the table is as slow as the table-wide scan, which is why the route requires a lower bound and the query
+ * stops at 60 s.
+ */
+const WINDOW_SETTINGS = `SETTINGS max_execution_time = 60, timeout_overflow_mode = 'throw', http_wait_end_of_query = 1, use_query_cache = 0`
+
+/** A window that is open at the top keeps gaining rows; a closed one (its upper bound is more than 10 minutes old) will not change. */
+export const WINDOW_TTL_OPEN_MS = 2 * 60_000
+export const WINDOW_TTL_CLOSED_MS = 10 * 60_000
+export const WINDOW_CACHE_MAX = 32
+const CLOSED_AFTER_SECONDS = 600
+
+const windowCache = new Map<string, { value: SummaryPayload; expiresAt: number }>()
+const windowInflight = new Map<string, Promise<SummaryPayload>>()
+
+const windowKey = (r: ImportedRange) => `${r.lower ?? ''}:${r.upper ?? ''}`
+
+async function computeWindow(range: ImportedRange): Promise<SummaryPayload> {
+  const rows = await planImportedRange(range, { shape: 'aggregate', indexNeutral: true, run: sql => executeQuery(sql) })
+  const where = `WHERE ${rows.conditions.join(' AND ')}`
+  const sources = importedRangePlain(range) // ulp.sources has no projection: the plain bound only
+  const [credStats, sourceStats, topDomains] = await Promise.all([
+    executeQuery(
+      `SELECT count() AS total_credentials, uniq(domain) AS total_domains, uniq(email) AS unique_emails
+       FROM ulp.credentials ${where} ${WINDOW_SETTINGS}`,
+      rows.params,
+    ),
+    executeQuery(`SELECT count() AS total_sources FROM ulp.sources WHERE ${sources.conditions.join(' AND ')}`, sources.params),
+    executeQuery(
+      `SELECT domain, count() AS count FROM ulp.credentials ${where}
+       GROUP BY domain ORDER BY count DESC, domain ASC LIMIT 20 ${WINDOW_SETTINGS}`,
+      rows.params,
+    ),
+  ])
+  return {
+    stats: {
+      credentials: Number(credStats[0]?.total_credentials || 0),
+      unique_domains: Number(credStats[0]?.total_domains || 0),
+      unique_emails: Number(credStats[0]?.unique_emails || 0),
+      sources: Number(sourceStats[0]?.total_sources || 0),
+    },
+    top_domains: topDomains as SummaryPayload['top_domains'],
+    as_of: new Date().toISOString(),
+  }
+}
+
+/**
+ * The summary of the rows added in a window: credentials (exact), unique domains and e-mails (estimates, like the table-wide ones), the source files imported
+ * in it and its top 20 domains. Needs a lower bound (the route checks). Answers are kept per window for WINDOW_TTL_OPEN_MS / WINDOW_TTL_CLOSED_MS, at most
+ * WINDOW_CACHE_MAX of them, and concurrent identical requests share one computation. A failure is not kept; the caller sees the error.
+ */
+export async function getWindowSummary(range: ImportedRange): Promise<SummaryPayload> {
+  if (range.lower === null) throw new Error('a window summary needs a lower bound')
+  const key = windowKey(range)
+  const hit = windowCache.get(key)
+  if (hit && hit.expiresAt > Date.now()) return hit.value
+  const running = windowInflight.get(key)
+  if (running) return running
+
+  const promise = computeWindow(range)
+    .then(value => {
+      const closed = range.upper !== null && range.upper < Math.floor(Date.now() / 1000) - CLOSED_AFTER_SECONDS
+      windowCache.delete(key)
+      windowCache.set(key, { value, expiresAt: Date.now() + (closed ? WINDOW_TTL_CLOSED_MS : WINDOW_TTL_OPEN_MS) })
+      while (windowCache.size > WINDOW_CACHE_MAX) windowCache.delete(windowCache.keys().next().value as string)
+      return value
+    })
+    .finally(() => {
+      windowInflight.delete(key)
+    })
+  windowInflight.set(key, promise)
+  return promise
+}
+
 /** Test seam: forget the cached value and any in-flight computation. */
 export function resetSummaryCache(): void {
   cached = null
   inflight = null
   retryNotBefore = 0
   lastError = null
+  windowCache.clear()
+  windowInflight.clear()
 }

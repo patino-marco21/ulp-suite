@@ -161,7 +161,10 @@ describe('POST /api/v1/lookup/associate', () => {
         const producing = ch.calls.filter(c => /assoc:(s1|s2|handle|tied)/.test(c.sql))
         expect(producing.length).toBeGreaterThan(0)
         for (const c of producing) expect(c.params).toMatchObject({ impAfter: Date.UTC(2026, 9, 5, 14, 37) / 1000 })
-        for (const c of ch.calls.filter(c => /assoc:(own|anchor)/.test(c.sql))) expect(c.params).not.toHaveProperty('impAfter')
+        for (const c of ch.calls.filter(c => /assoc:anchor/.test(c.sql))) expect(c.params).not.toHaveProperty('impAfter') // the anchor reads the whole table
+        for (const c of ch.calls.filter(c => /assoc:own/.test(c.sql))) {
+          expect(c.sql.slice(c.sql.indexOf('WHERE'), c.sql.indexOf('GROUP BY'))).not.toContain('imported_at') // so does the login's own query: it only flags
+        }
       }
     })
 

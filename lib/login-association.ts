@@ -21,9 +21,10 @@
  * Imported window (imported_after / imported_before, lib/imported-range.ts; design 2026-10-18-imported-window-ux-design.md). For the password lookup it is
  * a WHERE predicate: the logins that use the password among the rows added in the window. For an association it limits where a CANDIDATE can come
  * from: the login's own rows and its anchor on a site are always read from the whole table (they are what identifies the account), every query that
- * produces candidates also returns `max(<window>) AS in_win`, and a candidate qualifies only when a row that produced it is in the window. The
- * popularity gates (a password shared by 300+ logins, a handle on many addresses) keep counting the whole table, so a narrow window cannot make a
- * common password or handle look rare.
+ * produces candidates also returns `max(<window>) AS in_win`, and a candidate qualifies only when a row that produced it is in the window (for an
+ * address implied by a mail-provider sign-in, that row is the login's own row at the provider). The popularity gates (a password shared by 300+
+ * logins, a handle on many addresses) keep counting the whole table, so a narrow window cannot make a common password or handle look rare. A window
+ * that covers everything therefore gives exactly the unwindowed answer (the live test pins it).
  */
 import { addressEquals } from '@/lib/address-lookup'
 import { isConnectionError } from '@/lib/clickhouse-migration-safety'
@@ -273,10 +274,12 @@ export async function associateLogin(
   const result: AssociateResult = { login: n, want, anchored: false, tooCommon: false, loginSites: [], candidatesTotal: 0, candidates: [], errors }
 
   // 1. the login's own rows: its sites and passwords
-  const own = await attempt('login', 'own', `SELECT domain, password FROM ulp.credentials
+  // (With a window the query also says which groups have a row in it; nothing is filtered: the whole table identifies the account.)
+  const own = await attempt('login', 'own', `SELECT domain, password${inWin} FROM ulp.credentials
     WHERE ${tc.sql} AND ${addressEquals('n')}
-    GROUP BY domain, password LIMIT ${L.maxGroups} ${SET_OWN}`, base)
+    GROUP BY domain, password LIMIT ${L.maxGroups} ${SET_OWN}`, { ...base, ...winParams })
   if (own === null) return result
+  const ownInWindow = new Set(own.filter(qualifies).map(r => str(r.domain))) // sites where the login has a row added in the window
   if (own.length >= L.maxGroups) result.tooCommon = true
   const pairs: Array<[string, string]> = own.map(r => [str(r.domain), str(r.password)] as [string, string]).filter(([d, p]) => !NOISE_DOMAINS.has(d) && p !== '')
   result.loginSites = [...new Set(pairs.map(([d]) => d))].sort()
@@ -382,7 +385,13 @@ export async function associateLogin(
         }
       }
     }
-    for (const d of result.loginSites) for (const m of PROVIDERS[d] ?? []) cand(`${handle}@${m}`).provider.add(d)
+    for (const d of result.loginSites) {
+      for (const m of PROVIDERS[d] ?? []) {
+        const c = cand(`${handle}@${m}`)
+        c.provider.add(d)
+        if (ownInWindow.has(d)) c.inWindow = true // no row of the address exists: the sign-in row is the evidence, and it is in the window
+      }
+    }
   }
 
   const nHandle = handleAddresses ?? [...cands.values()].filter(c => c.observed).length

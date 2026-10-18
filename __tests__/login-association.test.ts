@@ -395,14 +395,16 @@ describe('associateLogin with a window: it limits where a candidate can come fro
     }
   })
 
-  test('the login\'s own rows and its anchor are read from the whole table: they are what identifies the account', async () => {
+  test('the login\'s own rows and its anchor are read from the whole table: nothing is filtered by the window, they are what identifies the account', async () => {
     const { run, calls } = runnerOf((tag) => (tag === 'own' ? OWN : tag === 'anchor' ? [{ password: PW }] : []))
     await associateLogin(item({ site: 'example-site.test' }), run, { range: WINDOW })
-    for (const tag of ['own', 'anchor']) {
-      const c = calls.find(x => x.tag === tag)!
-      expect(c.sql, tag).not.toContain('imported_at')
-      expect(Object.keys(c.params), tag).not.toContain('impAfter')
-    }
+    const where = (sql: string) => sql.slice(sql.indexOf('WHERE'), sql.indexOf('GROUP BY'))
+    const own = calls.find(x => x.tag === 'own')!
+    expect(where(own.sql)).not.toContain('imported_at') // no predicate: every row of the login is read ...
+    expect(own.sql).toContain('AS in_win') // ... and each group only says whether it has a row in the window
+    const anchor = calls.find(x => x.tag === 'anchor')!
+    expect(anchor.sql).not.toContain('imported_at')
+    expect(Object.keys(anchor.params)).not.toContain('impAfter')
   })
 
   test('every candidate-producing query returns whether the group has a row in the window, with the bounds as parameters', async () => {
@@ -452,15 +454,18 @@ describe('associateLogin with a window: it limits where a candidate can come fro
     expect(r.candidates[0].evidence).toContain('(5 logins share it)')
   })
 
-  test('an address implied only by a mail provider sign-in is not "in the window": no row of it was added', async () => {
-    const own = [{ domain: 'accounts.google.com', password: PW }]
-    const unwindowed = runnerOf((tag) => (tag === 'own' ? own : []))
+  test('an address implied only by a mail provider sign-in qualifies through the login\'s own row at the provider: in the window or not', async () => {
+    const row = (in_win: number) => [{ domain: 'accounts.google.com', password: PW, in_win }]
+    const unwindowed = runnerOf((tag) => (tag === 'own' ? [{ domain: 'accounts.google.com', password: PW }] : []))
     const without = await associateLogin(item({ login: 'alice' }), unwindowed.run)
     expect(without.candidates.map(c => c.login)).toEqual(['alice@gmail.com'])
 
-    const windowed = runnerOf((tag) => (tag === 'own' ? own : []))
-    const withWin = await associateLogin(item({ login: 'alice' }), windowed.run, { range: WINDOW })
-    expect(withWin.candidates).toEqual([])
+    const old = runnerOf((tag) => (tag === 'own' ? row(0) : []))
+    expect((await associateLogin(item({ login: 'alice' }), old.run, { range: WINDOW })).candidates).toEqual([]) // the sign-in row is older than the window
+
+    const fresh = runnerOf((tag) => (tag === 'own' ? row(1) : []))
+    const withWin = await associateLogin(item({ login: 'alice' }), fresh.run, { range: WINDOW })
+    expect(withWin.candidates).toEqual(without.candidates) // the sign-in row is in it: the same answer as without a window
   })
 
   test('how many addresses share the handle is also counted over the whole table, so confidence does not rise because the window is narrow', async () => {
