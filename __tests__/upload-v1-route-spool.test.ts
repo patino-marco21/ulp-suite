@@ -164,6 +164,28 @@ describe('POST /api/v1/upload: spool first, answer when the import has finished'
     expect(await zip.json()).toMatchObject({ imported: 0, known: 4, files: [{ filename: 'seen.txt', imported: 0, known: 4 }] })
   })
 
+  it('hands the phase timings of a text upload to the job log', async () => {
+    mockProcessTextFile.mockImplementationOnce(async (_path: string, filename: string) => ({
+      imported: 3, known: 0, inFileDuplicates: 0, skipped: 0, errors: 0, filename, breach_name: 'test',
+      rejection_breakdown: {}, alreadyImported: false, tierDropped: 0, timings: { parse_ms: 11, check_ms: 22, insert_ms: 33 },
+    }))
+    await post('timed.txt', 'https://a.com:user@a.com:pass\n')
+    expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ source: 'http', status: 'done', parse_ms: 11, check_ms: 22, insert_ms: 33 }))
+  })
+
+  it('adds up the phase timings of the entries of a zip for the job log', async () => {
+    const zipEntry = (filename: string, imported: number, timings: Record<string, number>) => ({
+      imported, known: 0, inFileDuplicates: 0, skipped: 0, errors: 0, filename, breach_name: 'test',
+      rejection_breakdown: {}, alreadyImported: false, tierDropped: 0, timings,
+    })
+    mockProcessZipFile.mockImplementationOnce(async (_path: string, onEntry: (r: unknown) => void) => {
+      onEntry(zipEntry('a.txt', 2, { parse_ms: 10, check_ms: 20, insert_ms: 30 }))
+      onEntry(zipEntry('b.txt', 1, { parse_ms: 1, check_ms: 2, insert_ms: 3 }))
+    })
+    await post('timed.zip', 'pretend zip bytes')
+    expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ source: 'http', status: 'done', imported: 3, parse_ms: 11, check_ms: 22, insert_ms: 33 }))
+  })
+
   it('respects a smaller admin-configured max file size, not just the 10 GB default', async () => {
     mockGetMax.mockResolvedValueOnce(10) // 10 bytes, for this call only
 

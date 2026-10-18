@@ -262,6 +262,8 @@ export interface CommitOptions {
   insertThreads?: number
   /** Test seams. */
   db?: NoveltyDb
+  /** Milliseconds clock for the phase timings; default Date.now. */
+  now?: () => number
   gates?: CommitGates
   newQueryId?: () => string
 }
@@ -279,6 +281,10 @@ export interface CommitResult {
   inFileDuplicates: number
   slabs: number
   matches: MatchedCredential[]
+  /** Milliseconds spent on the existence check (clear, fill and count the known table), added up over the slabs. */
+  checkMs: number
+  /** Milliseconds spent on the commit INSERT ... SELECT, added up over the slabs. */
+  commitMs: number
 }
 
 interface MonitorRow {
@@ -309,6 +315,9 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
   const monitors = (opts.monitors ?? []).filter(m => m.domains.some(d => d.trim() !== ''))
   const matchCap = Math.max(0, Math.floor(opts.matchCap ?? 0))
   const insertThreads = opts.insertThreads ?? commitInsertThreads()
+  const now = opts.now ?? Date.now
+  let checkMs = 0
+  let commitMs = 0
   const matches: MatchedCredential[] = []
 
   const stageRows = await countRows(db, stageCountSql(t), { queryId: queryId(), signal })
@@ -341,9 +350,11 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
       const slabDistinct = await step(id => countRows(db, slabDistinctSql(t, slabs, k), { queryId: id, signal }))
       if (slabDistinct > 0) {
         opts.onPhase?.({ phase: 'checking', slab: k + 1, slabs })
+        const checkStart = now()
         await step(id => db.exec(knownResetSql(t), { queryId: id, signal }))
         await step(id => db.exec(knownFillSql(t, opts.noveltyAgainst, slabs, k), { queryId: id, signal }))
         const slabKnown = await step(id => countRows(db, knownCountSql(t), { queryId: id, signal }))
+        checkMs += now() - checkStart
         if (slabKnown > slabDistinct) {
           throw new NoveltyAccountingError(
             `slab ${k + 1}/${slabs}: ${slabKnown} known hashes for ${slabDistinct} distinct ones; the stage and the table disagree`,
@@ -353,8 +364,10 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
 
         if (expected > 0) {
           opts.onPhase?.({ phase: 'inserting', slab: k + 1, slabs })
+          const insertStart = now()
           const { writtenRows } = await step(id =>
             db.exec(commitInsertSql(t, opts.target, slabs, k), { queryId: id, signal, settings: { max_insert_threads: insertThreads } }))
+          commitMs += now() - insertStart
           if (writtenRows === null) {
             console.warn(`[ingest-novelty] slab ${k + 1}/${slabs}: the server sent no written-rows count; the accounting check was skipped`)
           } else if (writtenRows !== expected) {
@@ -403,5 +416,7 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
     inFileDuplicates: Math.max(0, opts.parsedRows - distinct),
     slabs,
     matches,
+    checkMs,
+    commitMs,
   }
 }

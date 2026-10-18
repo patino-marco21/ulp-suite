@@ -40,7 +40,7 @@ const LINES =
 const stream = (text = LINES) => Readable.toWeb(Readable.from([Buffer.from(text)])) as ReadableStream<Uint8Array>
 
 const commitResult = (extra: Record<string, unknown> = {}) => ({
-  rows: 3, distinct: 3, known: 1, inserted: 2, inFileDuplicates: 0, slabs: 1, matches: [], ...extra,
+  rows: 3, distinct: 3, known: 1, inserted: 2, inFileDuplicates: 0, slabs: 1, matches: [], checkMs: 0, commitMs: 0, ...extra,
 })
 const insertedTables = () => h.insert.mock.calls.map(c => c[0].table as string)
 const sourceRows = () => h.insert.mock.calls.filter(c => c[0].table === 'ulp.sources').map(c => c[0].values)
@@ -79,6 +79,19 @@ describe('processTextStream with novelty-aware ingest', () => {
     const commit = h.commitStage.mock.calls[0][0]
     expect(commit).toMatchObject({ target: 'ulp.credentials', noveltyAgainst: 'ulp.credentials', parsedRows: 3, slabRows: 20_000_000, matchCap: MAX_INPROCESS_MATCHES })
     expect(commit.tables.stage).toBe(stageTable)
+  })
+
+  it('returns the phase timings: the parser wait, the commit\'s check, and the stage insert plus the commit insert', async () => {
+    // Staging a batch takes a real 200 ms; the commit reports 700 ms of existence check and 300 ms of insert. Three lines parse in no time.
+    h.insert.mockImplementation(async (arg: { table: string }) => {
+      if (/^ulp\.zz_import_stage_/.test(arg.table)) await new Promise(resolve => setTimeout(resolve, 200))
+    })
+    h.commitStage.mockResolvedValue(commitResult({ checkMs: 700, commitMs: 300 }))
+    const out = await processTextStream(stream(), 'novelty-timings.txt')
+    expect(out.timings).toBeDefined()
+    expect(out.timings!.check_ms).toBe(700)
+    expect(out.timings!.insert_ms).toBeGreaterThanOrEqual(300 + 190)
+    expect(out.timings!.parse_ms).toBeLessThan(150)
   })
 
   it('leaves in-file dedup to the stage: a repeated line is staged, then counted, not skipped', async () => {

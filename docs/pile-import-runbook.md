@@ -12,7 +12,7 @@ values into a log, a commit or a doc.
 | `reset.sh` | `check` (read-only) or `apply`: drop the partition the run filled, delete the pile's `ulp.sources` rows, unlink `inbox/done` names that are hardlinks of originals. Aborts while a file is in flight. |
 | `watch.sh` | One monitor for a run (feeder events, anomalies, a heartbeat). Run it under the Monitor tool. |
 | `global-checks.sh` | Read-only checks of the run's partition (duplicates, junk signature, `t.me/`, double-encoded text, empty fields, hash collisions with the older partitions). |
-| `jobs-summary.cjs` | One line (or one per job) from a COPY of `data/ulp.db`: files done / failed, rows new / known / skipped. |
+| `jobs-summary.cjs` | One line (or one per job) from a COPY of `data/ulp.db`: files done / failed, rows new / known / skipped, and where the time went (`parse` = waiting for the parser, `check` = the existence check, `insert` = stage inserts plus the commit insert) once the database has `processing_jobs.parse_ms` / `check_ms` / `insert_ms`. |
 | `verify-file.ts` | Per-file exact recount: re-parses the original with the app's own parser and policy and compares with the job record and ClickHouse. |
 | `scripts/archive-queue.cjs` | The feeder's helper for `SOURCE=archive`: `list <archive dir>` and `write <archive dir> <name> <dest>`. |
 

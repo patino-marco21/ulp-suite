@@ -40,6 +40,7 @@ import {
   IngestHeldError, describeVerdict, evaluateGate, newGateCounters, parseGateConfig, recordGateBatch,
   type GateCounters, type GateReport, type GateVerdict,
 } from '@/lib/ingest-quality-gate'
+import type { PhaseTimings } from '@/lib/phase-timings'
 import { openSource } from '@/lib/source-archive'
 import { ArchiveRefError, appArchiveDir, hashingStream, readArchiveRefFile } from '@/lib/archive-ref'
 
@@ -65,6 +66,8 @@ export interface ProcessResult {
   error_reason?:       string
   /** The quality gate's report, set when its final verdict was not `pass` (a warn, or a hold that an admin released). */
   gate?:               GateReport
+  /** Where the time went (lib/phase-timings.ts). Set by the staged path only; the direct path and a skipped file have none. */
+  timings?:            PhaseTimings
 }
 
 export const UPLOAD_BATCH_SIZE = 100_000
@@ -260,7 +263,7 @@ export interface StreamToTableOptions {
   dedupInFile?: boolean
   /** Called after each batch inserts, with cumulative counts. */
   onProgress?: (imported: number, skipped: number) => void
-  /** Optional accumulator (benchmark): time awaiting parse vs awaiting insert. */
+  /** Optional accumulator (the benchmark and the staged import): time awaiting parse vs awaiting insert. */
   timings?: { parseMs: number; insertMs: number }
   /** Per-batch live metrics (ingest-health panel). Not passed by the benchmark. */
   onBatchMetrics?: (m: { rows: number; parseMs: number; insertMs: number; tierDropped: number }) => void
@@ -429,6 +432,7 @@ async function importThroughStage(a: StagedImport): Promise<ProcessResult> {
   let inserted = 0
   let staged = 0
   let skipped = 0
+  const streamTimings = { parseMs: 0, insertMs: 0 }
   const report = (event: ImportProgressEvent) => {
     if (jobId) {
       updateJob(jobId, {
@@ -471,6 +475,7 @@ async function importThroughStage(a: StagedImport): Promise<ProcessResult> {
           report({ phase: 'parsing', staged, skipped, known: 0, inserted: 0 })
         },
         onBatchMetrics: recordBatch,
+        timings:        streamTimings,
         gate,
         gateCheckpoint: gate ? { atLines: gateConfig.earlyLines, check: () => { gateCheck('early') } } : undefined,
       })
@@ -526,6 +531,11 @@ async function importThroughStage(a: StagedImport): Promise<ProcessResult> {
       alreadyImported:     false,
       tierDropped:         streamed.tierDropped,
       gate:                gateVerdict && gateVerdict.level !== 'pass' ? gateVerdict.report : undefined,
+      timings: {
+        parse_ms:  streamTimings.parseMs,
+        check_ms:  commit.checkMs,
+        insert_ms: streamTimings.insertMs + commit.commitMs,
+      },
     }
   } finally {
     try {

@@ -119,6 +119,30 @@ describe('inbox watcher: held files', () => {
   })
 })
 
+describe('inbox watcher: phase timings', () => {
+  it('logs the phase timings of a text file', async () => {
+    h.processTextFile.mockResolvedValue({ ...OK, timings: { parse_ms: 11, check_ms: 22, insert_ms: 33 } })
+    await run('timed-a.txt')
+    expect(logged('timed-a.txt')[0]).toMatchObject({ status: 'done', parse_ms: 11, check_ms: 22, insert_ms: 33 })
+  })
+
+  it('adds up the phase timings of the entries of a ZIP', async () => {
+    h.processZipFile.mockImplementation(async (_path: string, onEntry: (r: unknown) => void) => {
+      onEntry({ ...OK, filename: 'a.txt', timings: { parse_ms: 10, check_ms: 20, insert_ms: 30 } })
+      onEntry({ ...OK, filename: 'b.txt', timings: { parse_ms: 1, check_ms: 2, insert_ms: 3 } })
+    })
+    await run('timed-b.zip')
+    expect(logged('timed-b.zip')[0]).toMatchObject({ status: 'done', imported: 10, parse_ms: 11, check_ms: 22, insert_ms: 33 })
+  })
+
+  it('logs a file without timings (the direct path) as before, with none of the three', async () => {
+    h.processTextFile.mockResolvedValue(OK)
+    await run('timed-c.txt')
+    expect(logged('timed-c.txt')[0]).toMatchObject({ status: 'done', imported: 5 })
+    expect(logged('timed-c.txt')[0].parse_ms ?? 0).toBe(0)
+  })
+})
+
 describe('inbox watcher: .archiveref files', () => {
   it('imports the reference through processArchiveRef and keeps only the reference in done/', async () => {
     h.processArchiveRef.mockResolvedValue(OK)

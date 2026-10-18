@@ -8,6 +8,7 @@ import { uploadQueue, setCurrentJob } from '@/lib/upload-queue'
 import { processTextFile, processZipFile, type ProcessResult } from '@/lib/upload-processor'
 import { checkLimit, getClientIP } from '@/lib/rate-limiter'
 import { logJob } from '@/lib/processing-log'
+import { sumTimings } from '@/lib/phase-timings'
 import { settingsManager } from '@/lib/settings'
 import { formatBytes } from '@/lib/utils'
 import { runImportJob } from '@/lib/import-runner'
@@ -76,6 +77,7 @@ async function runWithProgress(
       skipped:     result.skipped,
       duration_ms: Date.now() - startAt,
       breach_name: result.breach_name,
+      ...result.timings,
     })
     void logUploadAction('upload.complete', actor, jobId, {
       filename, imported: result.imported, known: result.known, skipped: result.skipped, duration_ms: Date.now() - startAt,
@@ -308,6 +310,7 @@ export async function POST(request: NextRequest) {
       known:       totalKnown,
       skipped:     totalSkipped,
       duration_ms: Date.now() - startAt,
+      ...sumTimings(results),
       ...(failedEntries.length > 0
         ? { error_message: `${failedEntries.length} entr${failedEntries.length === 1 ? 'y' : 'ies'} skipped: ${failedEntries.join(', ')}` }
         : {}),

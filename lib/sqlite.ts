@@ -302,6 +302,11 @@ function initSchema(db: Database.Database): void {
   // Ingest quality gate (lib/ingest-quality-gate.ts): the JSON report of a held or warned import. Additive, like `known` above.
   try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN gate_report TEXT`) } catch {}
 
+  // Where an import's time went (lib/phase-timings.ts): the parse wait, the existence check, the writes. Additive, so older rows read 0.
+  try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN parse_ms INTEGER NOT NULL DEFAULT 0`) } catch {}
+  try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN check_ms INTEGER NOT NULL DEFAULT 0`) } catch {}
+  try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN insert_ms INTEGER NOT NULL DEFAULT 0`) } catch {}
+
   // One-shot releases of held files (lib/ingest-gate-store.ts): an admin pressed Release; the next claim of that file name consumes the row.
   db.exec(`
     CREATE TABLE IF NOT EXISTS gate_overrides (

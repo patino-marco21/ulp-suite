@@ -361,3 +361,40 @@ describe('commitStage: the commit insert runs on several insert threads', () => 
     }
   })
 })
+
+describe('commitStage: how long the check and the insert took', () => {
+  // The fake database advances a fake clock by what each statement "costs", so the numbers are exact. The slab-distinct and stage counts
+  // cost 1000 each: they are not a phase, and must not show up in either number.
+  const cost = (sql: string): number =>
+    sql.startsWith('TRUNCATE') ? 2
+    : sql.startsWith('INSERT INTO ulp.zz_import_known_') ? 40
+    : sql.startsWith('SELECT count() AS c FROM ulp.zz_import_known_') ? 3
+    : sql.startsWith('INSERT INTO ulp.') ? 300
+    : 1000
+  const timed = (cfg: FakeConfig) => {
+    let clock = 5_000
+    const base = makeDb(cfg)
+    const db: NoveltyDb & { calls: Call[] } = {
+      calls: base.calls,
+      async select<T>(sql: string, o: Parameters<NoveltyDb['select']>[1]) { clock += cost(sql); return base.select<T>(sql, o) },
+      async exec(sql, o) { clock += cost(sql); return base.exec(sql, o) },
+      kill: base.kill,
+    }
+    return { db, now: () => clock }
+  }
+
+  it('reports the existence check (reset, fill, count) and the commit insert of a one-slab file', async () => {
+    const { db, now } = timed({ stageRows: 1000, distinct: [900], known: [100] })
+    expect(await commitStage(options(db, { parsedRows: 1000, now }))).toMatchObject({ checkMs: 45, commitMs: 300 })
+  })
+
+  it('adds up the slabs, and an entirely known slab costs a check but no insert', async () => {
+    const { db, now } = timed({ stageRows: 1700, distinct: [800, 850], known: [0, 850] })
+    expect(await commitStage(options(db, { parsedRows: 1700, slabRows: 1000, now }))).toMatchObject({ slabs: 2, checkMs: 90, commitMs: 300 })
+  })
+
+  it('is zero for an empty stage', async () => {
+    const { db, now } = timed({ stageRows: 0, distinct: [], known: [] })
+    expect(await commitStage(options(db, { parsedRows: 0, now }))).toMatchObject({ checkMs: 0, commitMs: 0 })
+  })
+})

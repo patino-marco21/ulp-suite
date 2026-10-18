@@ -158,6 +158,17 @@ describe('POST /api/upload: receive first, then reply', () => {
     ))
   })
 
+  it('hands the phase timings of a text upload to the job log', async () => {
+    mockProcessTextFile.mockImplementationOnce(async (_path: string, filename: string) => ({
+      imported: 3, known: 0, inFileDuplicates: 0, skipped: 0, errors: 0, filename, breach_name: 'test',
+      rejection_breakdown: {}, alreadyImported: false, tierDropped: 0, timings: { parse_ms: 11, check_ms: 22, insert_ms: 33 },
+    }))
+    const res = await post('timed.txt', 'https://a.com:user@a.com:pass\n')
+    const { jobId } = await res.json()
+    await vi.waitFor(() => expect(getJob(jobId)?.status).toBe('done'))
+    expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ source: 'http', status: 'done', parse_ms: 11, check_ms: 22, insert_ms: 33 }))
+  })
+
   it('answers 413 and creates no job when the body exceeds the admin-configured cap', async () => {
     mockGetMax.mockResolvedValueOnce(10) // 10 bytes, for this call only
 
@@ -270,6 +281,14 @@ describe('POST /api/upload: zip archives', () => {
     ])
     expect(json.import_pct).toBe(75) // kept 9 of 12 lines: 2 + 6 + 1 kept, 3 skipped
     expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ source: 'http', status: 'done', imported: 2, known: 6 }))
+  })
+  it('adds up the phase timings of the entries of a zip for the job log', async () => {
+    mockProcessZipFile.mockImplementationOnce(async (_path: string, onEntry: (r: unknown) => void) => {
+      onEntry(entry('a.txt', 2, { timings: { parse_ms: 10, check_ms: 20, insert_ms: 30 } }))
+      onEntry(entry('b.txt', 1, { timings: { parse_ms: 1, check_ms: 2, insert_ms: 3 } }))
+    })
+    await post('timed.zip', 'pretend zip bytes')
+    expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ source: 'http', status: 'done', imported: 3, parse_ms: 11, check_ms: 22, insert_ms: 33 }))
   })
 })
 

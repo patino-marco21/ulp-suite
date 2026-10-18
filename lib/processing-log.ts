@@ -5,9 +5,10 @@
  * inbox watcher.  Silent on error so logging never crashes a pipeline.
  */
 
+import type { PhaseTimings } from '@/lib/phase-timings'
 import { dbRun } from '@/lib/sqlite'
 
-export interface JobLogEntry {
+export interface JobLogEntry extends Partial<PhaseTimings> {
   source:         'http' | 'inbox'
   filename:       string
   status:         'done' | 'failed' | 'held'
@@ -23,12 +24,18 @@ export interface JobLogEntry {
   gate_report?:   string
 }
 
+/**
+ * A timing as the column holds it: whole milliseconds (the column is INTEGER, and SQLite would keep a fractional value as a REAL), never negative.
+ * Anything that is not a number is 0 rather than a failed INSERT: this function swallows errors, so a NaN would lose the whole job row.
+ */
+const ms = (v: number | undefined): number => (v !== undefined && Number.isFinite(v) ? Math.max(0, Math.round(v)) : 0)
+
 export function logJob(entry: JobLogEntry): void {
   try {
     dbRun(
       `INSERT INTO processing_jobs
-         (source, filename, status, imported, skipped, duration_ms, error_message, breach_name, known, gate_report)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (source, filename, status, imported, skipped, duration_ms, error_message, breach_name, known, gate_report, parse_ms, check_ms, insert_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         entry.source,
         entry.filename,
@@ -40,6 +47,9 @@ export function logJob(entry: JobLogEntry): void {
         entry.breach_name   ?? null,
         entry.known         ?? 0,
         entry.gate_report   ?? null,
+        ms(entry.parse_ms),
+        ms(entry.check_ms),
+        ms(entry.insert_ms),
       ],
     )
   } catch {

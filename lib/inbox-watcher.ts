@@ -48,6 +48,7 @@ import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 import { waitForDiskSpace } from '@/lib/ingest-disk-gate'
 import { noveltyConfig } from '@/lib/ingest-novelty-config'
 import { applyImportProgress } from '@/lib/inbox-progress'
+import { sumTimings, type PhaseTimings } from '@/lib/phase-timings'
 import type { ImportPhase, ImportProgressEvent } from '@/lib/import-runner'
 
 const INBOX = path.resolve('./inbox')
@@ -301,6 +302,7 @@ async function enqueueFile(filePath: string): Promise<void> {
     let skipped  = 0
     let procPath: string | null = null
     let gateReport: string | undefined
+    let timings: PhaseTimings | undefined
     try {
       const guardController = new AbortController()
       // Disk first (lib/ingest-disk-gate.ts): while the data disk is under its floor the file stays in inbox/, unclaimed.
@@ -344,6 +346,7 @@ async function enqueueFile(filePath: string): Promise<void> {
             imported += result.imported
             known    += result.known
             skipped  += result.skipped
+            timings = sumTimings([{ timings }, result])
             const cp = getCurrentProgress()
             if (cp) { cp.rows_imported = imported; cp.rows_known = known }
             if (result.imported > 0 || result.known > 0) {
@@ -368,6 +371,7 @@ async function enqueueFile(filePath: string): Promise<void> {
         imported = result.imported
         known    = result.known
         skipped  = result.skipped
+        timings  = result.timings
         gateReport = result.gate ? JSON.stringify(result.gate) : undefined
         console.log(
           `[inbox-watcher] done: ${filename} (from the archive) ` +
@@ -385,6 +389,7 @@ async function enqueueFile(filePath: string): Promise<void> {
         imported = result.imported
         known    = result.known
         skipped  = result.skipped
+        timings  = result.timings
         gateReport = result.gate ? JSON.stringify(result.gate) : undefined
         console.log(
           `[inbox-watcher] done: ${filename} ` +
@@ -404,6 +409,7 @@ async function enqueueFile(filePath: string): Promise<void> {
         skipped,
         duration_ms: Date.now() - startAt,
         gate_report: gateReport,
+        ...timings,
       })
     } catch (err) {
       if (isIngestHeldError(err)) {

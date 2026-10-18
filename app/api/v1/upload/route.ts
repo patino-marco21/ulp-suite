@@ -24,6 +24,7 @@ import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-ke
 import { uploadQueue } from "@/lib/upload-queue"
 import { processTextFile, processZipFile, type ProcessResult } from "@/lib/upload-processor"
 import { logJob } from "@/lib/processing-log"
+import { sumTimings } from "@/lib/phase-timings"
 import { settingsManager } from "@/lib/settings"
 import { formatBytes } from "@/lib/utils"
 import { runImportJob } from '@/lib/import-runner'
@@ -113,6 +114,7 @@ export async function POST(request: NextRequest) {
         skipped:     r.skipped,
         duration_ms: Date.now() - startAt,
         breach_name: r.breach_name,
+        ...r.timings,
       })
       void logUploadAction('upload.api.complete', actor, null, {
         ...keyDetails, filename: originalFilename, imported: r.imported, known: r.known, skipped: r.skipped, duration_ms: Date.now() - startAt,
@@ -164,6 +166,7 @@ export async function POST(request: NextRequest) {
       known:       totalKnown,
       skipped:     totalSkipped,
       duration_ms: Date.now() - startAt,
+      ...sumTimings(results),
       ...(failedEntries.length > 0
         ? { error_message: `${failedEntries.length} entr${failedEntries.length === 1 ? 'y' : 'ies'} skipped: ${failedEntries.join(', ')}` }
         : {}),
