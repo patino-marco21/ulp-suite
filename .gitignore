@@ -46,6 +46,8 @@ docs/api
 .worktrees/
 .claude/worktrees/
 .claude/settings.local.json
+# local issue tracker (docs/agents/issue-tracker.md): agent-written tickets can quote logs, so they stay off the public repo
+.scratch/
 # curl cookie jars — contain live session tokens, never commit
 cookies.txt
 *.cookie
