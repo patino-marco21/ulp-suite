@@ -1,7 +1,7 @@
 # CI Pipeline (GitHub Actions) Design
 
 **Date:** 2026-08-26
-**Status:** Approved
+**Status:** Implemented 2026-08-26 (`c501a41`, `.github/workflows/ci.yml`)
 
 ## Goal
 

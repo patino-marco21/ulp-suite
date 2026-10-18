@@ -1,7 +1,7 @@
 # Credential Dedup Backfill Design
 
 **Date:** 2026-09-24
-**Status:** Approved
+**Status:** Retired 2026-09-30 (`9fb9297`): built 2026-09-24/26, then superseded by content-dedup (see `2026-09-28-dedup-reconciliation-design.md`). `credential_dedup_meta` and the backfill script are gone; DDL v22 drops the table.
 
 ## Goal
 

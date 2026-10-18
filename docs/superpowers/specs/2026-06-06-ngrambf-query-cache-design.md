@@ -1,7 +1,7 @@
 # ngrambf_v1 Indexes + Extended query_cache Design
 
 **Date:** 2026-06-06
-**Status:** Approved
+**Status:** Implemented 2026-06-06 (DDL v4 `8e95f57`, query cache `7eef01b`; the ngram indexes were resized by DDL v9 and v17)
 
 ## Goal
 

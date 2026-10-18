@@ -8,7 +8,7 @@
 
 ## What it is
 
-ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores them in ClickHouse, and exposes a fast search and monitoring interface. It runs entirely on your own infrastructure, on one machine: the reference deployment holds **1.39 billion rows (~132 GiB on disk)** on a 32 GB laptop.
+ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores them in ClickHouse, and exposes a fast search and monitoring interface. It runs entirely on your own infrastructure, on one machine: the reference deployment holds **1.87 billion rows (~156 GiB on disk)** on a 32 GB laptop.
 
 **Tech stack:** Next.js 15 · React 19 · ClickHouse · SQLite · TypeScript · Docker
 
@@ -63,7 +63,7 @@ Browser / API client
   │                 │
 ClickHouse       SQLite
 (credentials,    (users, sessions,
- 1.39B rows)      monitors, webhooks,
+ 1.87B rows)      monitors, webhooks,
                   API keys, audit log)
 ```
 
@@ -90,7 +90,7 @@ ClickHouse       SQLite
 | App (Node.js 24) | 8 GB | 6 GB heap (`NODE_OPTIONS`) + 2 GB headroom |
 | ClickHouse | 20 GB | `max_server_memory_usage` is 18 GB, 2 GB under the limit on purpose |
 | OS | ~4 GB | |
-| **Total** | **32 GB** | the sizing the 1.39B-row reference deployment runs on |
+| **Total** | **32 GB** | the sizing the 1.87B-row reference deployment runs on |
 
 **Smaller machines:** lower the two `mem_limit`s in `docker-compose.yml` together with the
 settings they back: `--max-old-space-size` in the app's `NODE_OPTIONS`, and
@@ -383,9 +383,11 @@ The app supports scheduled or manual dedup — **report-only until you opt in**:
 ```bash
 CONTENT_DEDUP_APPLY=true   # allow the background ALTER … DELETE
 DEDUP_CRON_HOURS=24        # 0 disables the scheduled job
-DEDUP_MIN_EXCESS=1000      # skip the (heavy) rewrite below this many excess rows (the 1.39B-row deployment uses 14000000, ~1% of the table)
+DEDUP_MIN_EXCESS=1000      # skip the (heavy) rewrite below this many excess rows (the 1.87B-row deployment uses 14000000, ~0.75% of the table)
 DEDUP_STATS_MIN_FREE_BYTES=42949672960   # the daily duplicate count spills to disk (13.8 GiB at 1.84B rows); it skips itself with less free space than this (default 40 GiB)
 ```
+
+The daily duplicate count (about 80 s, 11.5 GiB of memory at 1.84B rows) is skipped while the table's row count is unchanged, because duplicates can only appear through inserts. It is forced again after 7 days, and what the last count saw is kept in the app database, so a restart or a deploy does not cost another one.
 
 ### Ingest tier filter — permanently reject T3
 
@@ -455,7 +457,7 @@ Full interactive docs at `/docs` when the app is running.
 
 ## Performance
 
-Reference deployment: 1.39 billion rows, one 32 GB laptop (cold timings, measured 2026-09/10):
+Reference deployment: 1.87 billion rows (156 GiB), one 32 GB laptop (cold timings, measured 2026-09/10 while the table grew from 1.39 to 1.87 billion rows):
 
 | Metric | Value |
 |---|---|
@@ -495,6 +497,11 @@ Reference deployment: 1.39 billion rows, one 32 GB laptop (cold timings, measure
   `bash scripts/rebuild-imported-desc-projection.sh` (dry run by default; `APPLY=1` builds, asynchronously and polled, with a
   free-disk floor), then `NFW_PARITY=1 npx vitest run __tests__/newest-first-parity.live.test.ts` to confirm the windowed pages
   equal the plain query's. The projection scope cron never clears the newest partition.
+- **First start, or a restored data directory.** Before it runs any DDL the app asks ClickHouse a real query for up to 45 s (a first start on an empty
+  data directory sees the container "healthy" a moment before the real server listens). The DDL version is recorded only when no statement lost its
+  connection, and every start then compares `ulp.credentials` with what the migrations own: a missing skip index is added (metadata only, and the log
+  names the `MATERIALIZE INDEX` that existing parts still need), a missing column is reported and left alone. Look for `[ClickHouse migration]` lines
+  in `docker logs ulpsuite_app` (`lib/clickhouse-migration-safety.ts`).
 - **Durability.** Inserts and merges are fsynced (`fsync_after_insert`, and `min_rows_to_fsync_after_merge`
   from DDL v25).
 - **Known data-quality gap.** About 6.3M rows (0.45%) imported by an earlier parser sit in the wrong

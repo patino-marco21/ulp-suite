@@ -1,7 +1,7 @@
 # Cursor Pagination Design
 
 **Date:** 2026-06-06
-**Status:** Approved
+**Status:** Implemented 2026-06-06 (`c52261e` credentials route, `0844543` search route; the cursor is built from stored values since `e290042`)
 
 ## Goal
 
