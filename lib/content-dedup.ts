@@ -161,6 +161,7 @@ import { getClient } from '@/lib/clickhouse'
 import { URL_CONTENT_KEY } from '@/lib/url-content-key'
 import { SEARCH_INDEX_DEFINITIONS } from '@/lib/search-index-definitions'
 import { createDiskGuard, DiskHeadroomError, checkDiskHeadroom, formatBytes, type DiskGuard } from '@/lib/clickhouse-disk-guard'
+import { clearStatsMarker, loadStatsMarker, saveStatsMarker } from '@/lib/dedup-stats-marker'
 import {
   DOMAIN_REV_PROJECTION_NAME,
   EMAIL_DOMAIN_REV_PROJECTION_NAME,
@@ -593,9 +594,10 @@ export function dedupCronHourUtc(env: NodeJS.ProcessEnv = process.env): number {
 let tickInFlight = false
 
 /**
- * What the most recent completed, non-applying stats pass saw. In-process, like the
- * project's other single-node caches: a restart costs one full pass, exactly today's
- * cost. Reset to null whenever a tick goes on to rebuild the table.
+ * What the most recent completed, non-applying stats pass saw. Held in memory and
+ * mirrored to SQLite (lib/dedup-stats-marker.ts), so a restart no longer costs a full
+ * pass: the first tick after it reads the mirror. Reset (memory and mirror) whenever a
+ * tick goes on to rebuild the table.
  */
 interface LastStatsPass { rows: number; total: number; excess: number; at: number }
 let lastStatsPass: LastStatsPass | null = null
@@ -747,7 +749,7 @@ export async function runContentDedupTick(
     // it runs make the next tick measure again. See
     // docs/superpowers/specs/2026-09-30-query-perf-wins-design.md.
     const rowsBefore = opts.skipIfUnchanged ? await queryTableRowCount(client) : null
-    const prior = lastStatsPass
+    const prior = lastStatsPass ?? loadStatsMarker()
     if (prior !== null && shouldSkipStatsPass({ rows: rowsBefore, last: prior, now: Date.now() })) {
       console.warn(
         `[content-dedup] ${trigger}: rows unchanged since the last stats pass (rows=${prior.rows}, ` +
@@ -773,13 +775,18 @@ export async function runContentDedupTick(
         (applyOn ? '' : ' (report-only — set CONTENT_DEDUP_APPLY=true to enable cleanup)'),
     )
     if (!willApply) {
-      if (rowsBefore !== null) lastStatsPass = { rows: rowsBefore, total, excess, at: Date.now() }
+      if (rowsBefore !== null) {
+        lastStatsPass = { rows: rowsBefore, total, excess, at: Date.now() }
+        saveStatsMarker(lastStatsPass)
+      }
       return { total, excess, applied: false }
     }
 
     // Applying: forget what the last pass saw. The table is about to be rebuilt, so the
-    // next tick must measure again (re-verifying excess = 0) rather than skip.
+    // next tick must measure again (re-verifying excess = 0) rather than skip. The stored
+    // copy goes too: after the swap its row count could match a table it no longer describes.
     lastStatsPass = null
+    clearStatsMarker()
 
     // 1. Capture cutoff BEFORE the populate step's bucket scan starts (step
     // 5 below), for CATCH-UP's own correctness (unchanged -- see the file's

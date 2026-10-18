@@ -28,6 +28,7 @@ const h = vi.hoisted(() => {
 
 vi.mock('@/lib/clickhouse', () => ({ getClient: () => h.client }))
 
+import { clearStatsMarker, loadStatsMarker } from '@/lib/dedup-stats-marker'
 import {
   STATS_FORCE_INTERVAL_MS,
   shouldSkipStatsPass,
@@ -94,6 +95,7 @@ describe('runContentDedupTick — idle short-circuit', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-10-01T04:00:00Z'))
     spies = silenceConsole()
+    clearStatsMarker() // the marker lives in SQLite, so it outlives vi.resetModules() and the previous test
     h.state.rows = 1000
     h.state.statsCalls = 0
     h.state.rowCountCalls = 0
@@ -182,11 +184,54 @@ describe('runContentDedupTick — idle short-circuit', () => {
     expect(h.state.statsCalls).toBe(2)
   })
 
+  test('a restart does not cost another stats pass: the marker survives in SQLite', async () => {
+    await runContentDedupTick({ trigger: 'cron', skipIfUnchanged: true })
+    expect(h.state.statsCalls).toBe(1)
+
+    vi.resetModules() // the process restarts: the module-level remembered pass is gone
+    ;({ runContentDedupTick } = await import('@/lib/content-dedup'))
+
+    const afterRestart = await runContentDedupTick({ trigger: 'cron', skipIfUnchanged: true })
+    expect(afterRestart).toEqual({ total: 1000, excess: 0, applied: false, skipped: true })
+    expect(h.state.statsCalls).toBe(1) // not run again
+    expect(spies.warn.mock.calls.some(c => String(c[0]).includes('skipping the stats scan'))).toBe(true)
+  })
+
+  test('after a restart a changed row count still measures again', async () => {
+    await runContentDedupTick({ trigger: 'cron', skipIfUnchanged: true })
+    vi.resetModules()
+    ;({ runContentDedupTick } = await import('@/lib/content-dedup'))
+    h.state.rows = 1500
+    const second = await runContentDedupTick({ trigger: 'cron', skipIfUnchanged: true })
+    expect(second).toEqual({ total: 1500, excess: 0, applied: false })
+    expect(h.state.statsCalls).toBe(2)
+  })
+
+  test('after a restart a marker older than 7 days still measures again', async () => {
+    await runContentDedupTick({ trigger: 'cron', skipIfUnchanged: true })
+    vi.resetModules()
+    ;({ runContentDedupTick } = await import('@/lib/content-dedup'))
+    vi.setSystemTime(new Date('2026-10-09T04:00:00Z')) // 8 days later
+    const second = await runContentDedupTick({ trigger: 'cron', skipIfUnchanged: true })
+    expect(second.skipped).toBeUndefined()
+    expect(h.state.statsCalls).toBe(2)
+  })
+
+  test('a pass whose row count could not be read leaves no marker behind', async () => {
+    h.state.failRowCount = true
+    await runContentDedupTick({ trigger: 'cron', skipIfUnchanged: true })
+    expect(loadStatsMarker()).toBeNull()
+  })
+
   test('an applying tick forgets the remembered pass before it touches anything (source contract)', () => {
     const src = readFileSync(new URL('../lib/content-dedup.ts', import.meta.url), 'utf8')
     const tick = src.slice(src.indexOf('export async function runContentDedupTick'))
     const reset = tick.indexOf('lastStatsPass = null')
     expect(reset).toBeGreaterThan(-1)
     expect(reset).toBeGreaterThan(tick.indexOf('if (!willApply)'))
+    // the persisted copy goes with it, otherwise the first tick after the swap would skip against a table that no longer matches
+    const cleared = tick.indexOf('clearStatsMarker()')
+    expect(cleared).toBeGreaterThan(tick.indexOf('if (!willApply)'))
+    expect(tick.includes('saveStatsMarker(')).toBe(true)
   })
 })
