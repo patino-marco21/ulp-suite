@@ -1,6 +1,6 @@
 # Imported window: an always-visible control, links from import jobs, and API parity (2026-10-18)
 
-Status: IN PROGRESS. The decisions below are the owner's answers of 2026-10-18; "Release and result" is filled in when it ships.
+Status: **implemented and deployed on 2026-10-18.** The decisions below are the owner's answers of 2026-10-18; "Release and result" says what shipped, what was measured and what was left.
 Builds on `2026-10-05-imported-after-filter-design.md`: the semantics (`imported_after` EXCLUSIVE, `imported_before` INCLUSIVE, UTC), the SQL forms and the plan rule are unchanged.
 
 ## The problem
@@ -30,6 +30,29 @@ Builds on `2026-10-05-imported-after-filter-design.md`: the semantics (`imported
 
 Pure helpers with injected time zones (a DST day included); the client URL reader against the server parser on a table of inputs; route tests for the three endpoints; live parity (read-only, on the real table) for each of them against the same question asked without the window; the popover and the links driven in a browser on the isolated rehearsal stack with test data; the whole suite, both typechecks, lint, build; the usual rollback tag and a local deploy.
 
-## Release and result
+## Release and result (2026-10-18)
 
-(filled in when it ships)
+**Release 1.** Merged to `main` by fast-forward (`99b19e5` .. `7139f8d`, 29 files, +2,151 / -188) and deployed locally the same evening while no import was queued or running: `ulp-suite-app:latest` became image `82057bfed7f9`; the image it replaced (`5aa70e386777`, the fast-ingest Step A release) is tagged `ulp-suite-app:rollback-20261018-2045z`. No schema, projection, index or data change, so the rollback is the previous image. Only the app container was recreated (`--no-deps`); ClickHouse stayed up. CI (`verify`: typecheck of the app, `scripts/` and `__tests__/`, test, lint, build) passed on `7139f8d`. Locally: 3,887 tests pass (89 skipped, the live files among them), both typechecks and lint clean.
+
+**Live proof, read-only, on the 1.87B-row table** (`__tests__/imported-window-api.live.test.ts`, `IWA_LIVE=1`; it prints counts and timings only):
+- `v1/summary` for a window equals an independent plain query over the same bounds (credentials, top 20 domains, source count); the estimates are within 3% of the exact distinct counts. A 34M-row window answers in 1.1 s against 4.5 s for the plain form, a 4M-row window in 0.2 s against 0.4 s.
+- `lookup/password` in a window finds exactly the logins an independent query finds there, a subset of the unwindowed answer.
+- `lookup/associate`: a window that covers everything reproduces the unwindowed answer exactly; a window in the future finds nothing; a window in the middle only narrows. The first run of this test failed (addresses implied by a mail-provider sign-in dropped out under a covering window); flagging the login's own row at the provider fixed it.
+- "View what this added": for the 20 import jobs since 2026-10-17 the window plus the file selects exactly the rows each job wrote (20 of 20). The window alone matched 7 of 20: the queue runs two jobs side by side (`UPLOAD_CONCURRENCY=2`) and 24.7M rows of neighbours fell inside the windows.
+
+**Browser, on the isolated rehearsal stack** (the deployed image, synthetic files, no live data). First pass, Credentials: the pill in the chips row, a preset that searches at once, typed dates on Enter and on closing, Escape and an invalid range dropped, a reload that restores the window from the address, the Inbox links. Second pass: Lookup (the batch body carries `imported_after`, and `imported_before` once typed), the Breaches export (both bounds), the Upload page links (right window and file, and a link opens exactly that job's rows), the light theme, a 375 px phone width.
+
+**Release 2: four layout defects the second pass found (`f840fc7`).** Measured before the change, fixed and measured again after it:
+
+| defect | before | after |
+|---|---|---|
+| popover taller than a short window | 451 px tall at a 768 px high window; Apply and Clear at y 792 to 820, below the visible area, on a fixed layer the page cannot scroll to | capped at the 378 px Radix measures, scrolls inside, Clear and Apply pinned to its bottom edge and in view |
+| popover against the screen edge at 375 px | flush with the right edge | 8 px margin (`collisionPadding`) |
+| Breaches export row at 375 px | pill on two lines, "user:pass" and "ULP" past the card edge | pill on one line, buttons wrap inside the card, no horizontal overflow |
+| job-link icon | 12 px hit area | 20 x 20 px, the row does not move |
+
+Built from `f840fc7` (CI `verify` green; 3,891 tests pass locally) and deployed the same evening with the queue idle, app container only: `ulp-suite-app:latest` is image `143ade4b35c7`; the image it replaced (release 1, `82057bfed7f9`) is tagged `ulp-suite-app:rollback-20261018-2108z`. On the container: healthy, no errors in the startup log, the new popover rule in the client bundle. The live job-links test also stopped leaving a copy of the app's database in `/tmp` (`0bb8246`).
+
+**Found and left alone.** The "Breach..." filter on the Credentials page sits in a row that does not wrap and overflows a 375 px screen (it made the emulated phone zoom out to 526 px); it is not part of this change. `/credentials?breach=<name>` links from the Breaches pages still open the unfiltered browser, because the page reads no `breach` parameter; the three window parameters and `source_file` are the only ones it reads.
+
+**Not verified.** The deployed app itself was not driven in a browser (the pane is not signed in to it, and only the owner can sign in). On the deployed container: healthy, no errors in the startup log, the schema migration skipped as already applied, both new UI strings in the bundle, and `v1/summary` answers 401 without a key.
