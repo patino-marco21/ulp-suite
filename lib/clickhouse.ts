@@ -44,6 +44,16 @@ function validateEnvVars() {
 }
 
 /**
+ * Whether INSERT request bodies are gzip-compressed on their way to ClickHouse. Off by default: the app reaches ClickHouse over
+ * loopback or the Docker network, where gzip only costs CPU on the single thread that parses the file (measured: 5.3 us of the
+ * 15.1 us it takes per line, docs/superpowers/specs/2026-10-12-fast-ingest-design.md, step A1). CLICKHOUSE_COMPRESS_REQUESTS=1
+ * (or true / on / yes) turns it back on, for a ClickHouse across a slow link. Responses are always compressed.
+ */
+export function compressRequests(env: NodeJS.Dict<string> = process.env): boolean {
+  return ['1', 'true', 'on', 'yes'].includes((env.CLICKHOUSE_COMPRESS_REQUESTS ?? '').trim().toLowerCase())
+}
+
+/**
  * Singleton Pattern to prevent multiple instances during hot-reload in development
  * 
  * In Next.js development environment, Hot Reload often creates new instances
@@ -133,8 +143,8 @@ function getClickHouseClient(): ClickHouseClient {
 
     // ── Transport-level compression ────────────────────────────────────────
     compression: {
-      // Compress INSERT request bodies → 3–5× less network traffic for bulk uploads
-      request: true,
+      // INSERT request bodies: off unless CLICKHOUSE_COMPRESS_REQUESTS says otherwise (see compressRequests).
+      request: compressRequests(),
       // Decompress compressed responses from ClickHouse
       response: true,
     },
