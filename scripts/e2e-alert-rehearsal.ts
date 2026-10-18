@@ -179,13 +179,35 @@ async function main(): Promise<number> {
     const indexCount = chQuery("SELECT count() FROM system.data_skipping_indices WHERE database='ulp' AND table='credentials'")
     check('ulp.credentials has 20 skip indexes in all (11 from the init SQL, 9 from the migrations)', indexCount === '20', `got ${indexCount}`)
     const migrationLog = sh('sh', ['-c', `docker logs ${APP} 2>&1 | grep -F '[ClickHouse migration]' || true`], env)
-    const bad = migrationLog.split('\n').filter((l) => /FAILED|was missing/.test(l))
-    check('the migration log reports no failure and no missing index', bad.length === 0, bad.slice(0, 2).join(' | ').slice(0, 300))
+    const migrationProblems = migrationLog.split('\n').filter((l) => /FAILED|was missing/.test(l))
+    check('the migration log reports no failure and no missing index', migrationProblems.length === 0, migrationProblems.slice(0, 2).join(' | ').slice(0, 300))
     console.log(`  info: ${migrationLog.includes('not accepting connections yet') ? 'the app found the server not listening yet and waited for it' : 'the server was already listening when the app started (the first-start race did not happen this time)'}`)
     const sourcesCols = chQuery("SELECT arrayStringConcat(arraySort(groupArray(name)), ',') FROM system.columns WHERE database='ulp' AND table='sources' AND name IN ('size','sha256','archive_id')")
     check('ulp.sources has the identity columns (DDL v28 / the init SQL)', sourcesCols === 'archive_id,sha256,size', `got ${sourcesCols}`)
     const projCurrent = chQuery("SELECT count() FROM system.projections WHERE database = 'ulp' AND table = 'credentials' AND name = 'proj_imported_desc' AND position(query, 'is_noise') > 0 AND position(query, 'content_key_hash') > 0")
     check('proj_imported_desc carries is_noise and content_key_hash (DDL v27 / the init SQL)', projCurrent === '1', `count ${projCurrent}`)
+
+    // 1b. The start-up safeguards against a REAL server: ClickHouse is down when the app starts (the app has to wait for it, not record anything), and an
+    // index the migrations own has been lost (the schema check has to add it back). Both happen on the next start of the same app, with its DDL version already at 29.
+    console.log('1b. Start-up with ClickHouse down and an index lost')
+    chQuery('ALTER TABLE ulp.credentials DROP INDEX idx_inv_url')
+    check('the index is gone before the restart (the drift is real)', chQuery("SELECT count() FROM system.data_skipping_indices WHERE database='ulp' AND table='credentials' AND name='idx_inv_url'") === '0')
+    sh('docker', ['stop', CH], env)
+    const restartedAt = new Date().toISOString() // only what this start logs counts, not the first start's lines
+    sh('docker', ['restart', APP], env)
+    const waitSeen = await waitFor('the app waiting for ClickHouse', () => sh('sh', ['-c', `docker logs --since ${restartedAt} ${APP} 2>&1 | grep -c 'not accepting connections yet' || true`], env) !== '0', 90_000, 2000)
+    check('the app started with ClickHouse down and says it is waiting for it, instead of running its DDL', !!waitSeen)
+    const ddlWhileDown = sh('sh', ['-c', `docker logs --since ${restartedAt} ${APP} 2>&1 | grep -c 'DDL v29 already applied' || true`], env)
+    check('no DDL step ran while ClickHouse was down', ddlWhileDown === '0')
+    sh('docker', ['start', CH], env)
+    const schemaChecked = await waitFor('the schema check after the start', () => sh('sh', ['-c', `docker logs --since ${restartedAt} ${APP} 2>&1 | grep -c 'was missing 1 skip index' || true`], env) !== '0', 240_000, 3000)
+    check('once ClickHouse answered, the app ran on and the schema check named the missing index', !!schemaChecked)
+    const indexBack = chQueryOrEmpty("SELECT count() FROM system.data_skipping_indices WHERE database='ulp' AND table='credentials' AND name='idx_inv_url'")
+    check('idx_inv_url was added back by the schema check', indexBack === '1', `got ${indexBack}`)
+    check('the recorded DDL version is still 29', ddlRecorded() === '29')
+    const appHealthy1b = await waitFor('app healthy again', () => sh('docker', ['inspect', '-f', '{{.State.Health.Status}}', APP]) === 'healthy', 300_000)
+    check('the app is healthy again after the restart', !!appHealthy1b)
+    if (!appHealthy1b) return 1
 
     console.log('2. Login and webhook')
     const login = await api('POST', '/api/auth/login', { email: secrets.REHEARSAL_ADMIN_EMAIL, password: secrets.REHEARSAL_ADMIN_PASSWORD })
