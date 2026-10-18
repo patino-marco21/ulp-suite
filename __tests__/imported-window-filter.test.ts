@@ -93,3 +93,25 @@ describe('ImportedWindowFilter — when a change takes effect (read from the com
     expect((src.match(/font-mono text-muted-foreground">= \{utcOf\(/g) ?? []).length).toBe(2)
   })
 })
+
+describe('ImportedWindowFilter — the popover fits the screen it opens on (read from the component)', () => {
+  const src = read('components/imported-window-filter.tsx')
+  const content = src.slice(src.indexOf('<PopoverContent'), src.indexOf('onEscapeKeyDown'))
+
+  // Measured in the browser: 451 px tall at a 768 px high window, opened from a chip row 380 px down, Radix keeps the side with the least overflow and
+  // Apply / Clear ended 52 px below the visible area, on a fixed layer the page cannot scroll to.
+  test('on a short window the popover scrolls inside the room it has, so Apply and Clear are never below the fold', () => {
+    expect(content).toContain('max-h-[var(--radix-popover-content-available-height)]')
+    expect(content).toContain('overflow-y-auto')
+  })
+
+  // At 375 px the 320 px popover was flush with the right edge of the screen.
+  test('on a phone it keeps a margin to the screen edge', () => {
+    expect(content).toContain('collisionPadding={8}')
+  })
+
+  // With the height capped, Apply sat at the bottom of the scrolled content: pinned, it is in view whatever the window height.
+  test('Clear and Apply stay pinned to the bottom of the popover while its content scrolls', () => {
+    expect(src).toContain('sticky bottom-0 -mx-3 -mb-3 flex items-center justify-between gap-2 border-t border-border/50 bg-popover px-3 py-2')
+  })
+})

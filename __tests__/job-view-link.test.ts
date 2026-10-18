@@ -23,6 +23,13 @@ describe('JobViewLink — "View what this added"', () => {
     expect(out).toContain('aria-label="View what pack.zip added"')
   })
 
+  // The icon is 12 px; on a phone that is hard to hit. The padding is cancelled by the negative margin, so the row does not move.
+  test('the icon has a larger hit area than its 12 px, without changing the row layout', () => {
+    const out = html(job)
+    expect(out).toContain('p-1 -m-1')
+    expect(out).toContain('h-3 w-3')
+  })
+
   test('a job that added nothing, failed or was held shows no link', () => {
     expect(html({ ...job, imported: 0 })).toBe('')
     expect(html({ ...job, status: 'failed' })).toBe('')

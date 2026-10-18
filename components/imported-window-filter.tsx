@@ -114,8 +114,9 @@ export function ImportedWindowFilter({ value, onChange, extraPresets = [], note,
         </button>
       </PopoverTrigger>
       <PopoverContent
-        className="w-80 p-3 space-y-3"
+        className="w-80 max-h-[var(--radix-popover-content-available-height)] overflow-y-auto p-3 space-y-3"
         align="start"
+        collisionPadding={8}
         onEscapeKeyDown={() => { escaped.current = true }}
       >
         <div>
@@ -188,7 +189,7 @@ export function ImportedWindowFilter({ value, onChange, extraPresets = [], note,
         </p>
         {note}
 
-        <div className="flex items-center justify-between gap-2 pt-1 border-t border-border/50">
+        <div className="sticky bottom-0 -mx-3 -mb-3 flex items-center justify-between gap-2 border-t border-border/50 bg-popover px-3 py-2">
           <Button
             type="button"
             size="sm"

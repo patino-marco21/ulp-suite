@@ -24,6 +24,14 @@ describe('Lookup page and breach export — one optional imported window each (t
     expect(src).not.toContain('type="datetime-local"')
   })
 
+  // Measured at 375 px: the nowrap row put the pill on two lines and pushed "user:pass" and "ULP" past the card edge.
+  test('the breach export row wraps, so the window pill and the export buttons stay inside the card on a phone', () => {
+    const src = read('app/breaches/[name]/page.tsx')
+    const row = src.slice(src.indexOf('{/* Export */}'), src.indexOf('<ImportedWindowFilter'))
+    expect(row).toContain('<CardContent className="p-4 flex flex-wrap items-center justify-between gap-3">')
+    expect(row).toContain('<div className="flex flex-wrap items-end gap-2">')
+  })
+
   test('both pages convert local time to a UTC instant with the shared helper', () => {
     for (const path of ['app/lookup/page.tsx', 'app/breaches/[name]/page.tsx']) {
       const src = read(path)

@@ -341,11 +341,11 @@ export default function BreachDetailPage() {
       {/* Export */}
       {stats && stats.credential_count > 0 && (
         <Card className="glass-card">
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-4 flex flex-wrap items-center justify-between gap-3">
             <p className="text-sm text-muted-foreground">
               Export <strong className="text-foreground">{stats.credential_count.toLocaleString()}</strong> credentials from this breach
             </p>
-            <div className="flex items-end gap-2">
+            <div className="flex flex-wrap items-end gap-2">
               <div className="space-y-1">
                 <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Only imported in a window (optional)</label>
                 <div><ImportedWindowFilter value={importedWindow} onChange={setImportedWindow} /></div>

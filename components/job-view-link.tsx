@@ -17,7 +17,7 @@ export function JobViewLink({ job }: { job: JobForLink }) {
       href={link.href}
       title={link.exact ? "View what this added" : "View the rows added while this job ran (rows of files imported at the same time can be included)"}
       aria-label={`View what ${job.filename} added`}
-      className="shrink-0 text-muted-foreground hover:text-foreground"
+      className="shrink-0 rounded p-1 -m-1 text-muted-foreground hover:bg-muted hover:text-foreground"
     >
       <Eye className="h-3 w-3" />
     </Link>
