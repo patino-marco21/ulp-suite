@@ -28,9 +28,15 @@ import {
 import type { SortKey } from "@/lib/cursor-pagination"
 import { parseTotals, recordsLabel, resultsLabel, totalsParams, withPendingTotals, withTotals } from "@/lib/credential-totals"
 import {
-  IMPORTED_PRESETS, epochSecondsToIso, localInputToUtcIso, utcEpochToLocalInput, utcIsoToDisplay,
+  epochSecondsToIso, utcIsoToDisplay,
   searchFingerprint, readMark, writeMark, markStorageKey, sinceLastExportWindow, markAfterExport, type ExportMark,
 } from "@/lib/imported-range-client"
+import {
+  browserOffsetAt, epochsToLocalInputs, localToUtcIso, readWindowFromSearch, windowSentence, writeWindowToSearch,
+} from "@/lib/imported-window"
+import {
+  ImportedWindowFilter, EMPTY_IMPORTED_WINDOW, type ImportedWindowValue, type ExtraWindowPreset,
+} from "@/components/imported-window-filter"
 import { SEARCH_SCOPE_OPTIONS, SEARCH_SCOPE_PLACEHOLDERS, SEARCH_SCOPE_TITLE, type SearchScope } from '@/lib/search-scope'
 import { readCountedStream } from '@/lib/export-stream-client'
 
@@ -133,8 +139,23 @@ const EXPORT_FORMATS = [
 
 const PAGE_SIZES = [25, 50, 100, 200]
 
-/** A datetime-local value (the browser's local time) as the UTC instant the API takes; null when empty or not a real time. */
-const localToUtcIso = (value: string): string | null => (value ? localInputToUtcIso(value, new Date(value).getTimezoneOffset()) : null)
+/** Keeps the page address in step with the applied window and file (lib/imported-window.ts) without adding history entries. */
+function syncWindowToUrl(ps: URLSearchParams): void {
+  try {
+    const next = writeWindowToSearch(window.location.search, {
+      afterIso: ps.get('imported_after'), beforeIso: ps.get('imported_before'), sourceFile: ps.get('source_file'),
+    })
+    if (next !== window.location.search) window.history.replaceState(window.history.state, '', `${window.location.pathname}${next}${window.location.hash}`)
+  } catch {
+    // The address is a convenience (bookmarks, links from the import jobs): the search does not depend on it.
+  }
+}
+
+/** Values a caller hands to load() because the state it just set has not been rendered yet. */
+interface LoadOverrides {
+  sort?: string; limit?: number; q?: string; domain?: string; excludeNoise?: boolean; dedupe?: boolean
+  importedAfter?: string; importedBefore?: string; sourceFile?: string
+}
 
 /** localStorage can be blocked (private windows, site data cleared): the "since last export" memory is a convenience, so null is fine. */
 const browserStorage = (): Storage | null => {
@@ -677,13 +698,15 @@ export default function CredentialsPage() {
   // On by default — non-destructive view filter, toggle off to show every copy.
   const [dedupe, setDedupe] = useState(true)
 
-  // Advanced filters (hidden behind toggle)
-  const [advOpen, setAdvOpen]               = useState(false)
-  // Imported window: <input type="datetime-local"> values in the browser's LOCAL time; the API takes UTC instants (localToUtcIso).
-  const [importedAfter, setImportedAfter]   = useState('')
-  const [importedBefore, setImportedBefore] = useState('')
+  // Imported window (the pill in the chips row): <input type="datetime-local"> values in the browser's LOCAL time and the preset that filled
+  // them; the API takes UTC instants (localToUtcIso).
+  const [importedWindow, setImportedWindow] = useState<ImportedWindowValue>(EMPTY_IMPORTED_WINDOW)
+  const { after: importedAfter, before: importedBefore } = importedWindow
   // The cut of the last complete export of THIS search, kept in the browser (lib/imported-range-client.ts).
   const [exportMark, setExportMark]         = useState<ExportMark | null>(null)
+
+  // Advanced filters (hidden behind toggle)
+  const [advOpen, setAdvOpen]               = useState(false)
   const [pwLenMin, setPwLenMin]             = useState('')
   const [pwLenMax, setPwLenMax]             = useState('')
   const [emailDomainFilter, setEmailDomainFilter] = useState('')
@@ -698,7 +721,7 @@ export default function CredentialsPage() {
 
   const { toast } = useToast()
 
-  const buildParams = useCallback((cursor: string | null, overrides?: { sort?: string; limit?: number; q?: string; domain?: string; excludeNoise?: boolean; dedupe?: boolean }) => {
+  const buildParams = useCallback((cursor: string | null, overrides?: LoadOverrides) => {
     const effectiveSort  = overrides?.sort   ?? sortKey
     const effectiveLimit = overrides?.limit  ?? limit
     const effectiveQ     = overrides?.q      ?? q
@@ -719,15 +742,17 @@ export default function CredentialsPage() {
     if (tierExclude.length)   ps.set('tier_exclude', tierExclude.join(','))
     if (effectiveExcludeNoise) ps.set('exclude_noise', '1')
     if (effectiveDedupe)       ps.set('dedupe', '1')
-    // Advanced
-    const afterIso  = localToUtcIso(importedAfter)
-    const beforeIso = localToUtcIso(importedBefore)
+    // Imported window (the pill)
+    const afterIso  = localToUtcIso(overrides?.importedAfter ?? importedAfter)
+    const beforeIso = localToUtcIso(overrides?.importedBefore ?? importedBefore)
     if (afterIso)           ps.set('imported_after', afterIso)
     if (beforeIso)          ps.set('imported_before', beforeIso)
+    // Advanced
+    const effectiveSourceFile = overrides?.sourceFile ?? sourceFileFilter
     if (pwLenMin)           ps.set('pw_len_min', pwLenMin)
     if (pwLenMax)           ps.set('pw_len_max', pwLenMax)
     if (emailDomainFilter)  ps.set('email_domain', emailDomainFilter)
-    if (sourceFileFilter)   ps.set('source_file', sourceFileFilter)
+    if (effectiveSourceFile) ps.set('source_file', effectiveSourceFile)
     if (urlHostFilter)      ps.set('url_host', urlHostFilter)
     if (regexMode)          ps.set('regex', '1')
     return ps
@@ -744,7 +769,7 @@ export default function CredentialsPage() {
   // response lands last wins, even if it was the stale request.
   const loadAbortRef = useRef<AbortController | null>(null)
 
-  const load = useCallback(async (cursor: string | null, overrides?: { sort?: string; limit?: number; q?: string; domain?: string; excludeNoise?: boolean; dedupe?: boolean }) => {
+  const load = useCallback(async (cursor: string | null, overrides?: LoadOverrides) => {
     loadAbortRef.current?.abort()
     const controller = new AbortController()
     loadAbortRef.current = controller
@@ -753,6 +778,7 @@ export default function CredentialsPage() {
     const t0 = performance.now()
     try {
       const params = buildParams(cursor, overrides)
+      syncWindowToUrl(params)
       // First page: the rows and the whole-table totals are two requests, so the table renders as soon
       // as its rows are ready instead of waiting for a count that scans the table (11 s for a
       // domain-token search on 1.39B rows against ~3 s for the first page). Both share this request's
@@ -800,14 +826,30 @@ export default function CredentialsPage() {
     }
   }, [buildParams, toast])
 
-  useEffect(() => { load(null) }, [])  // eslint-disable-line react-hooks/exhaustive-deps
+  // First load. An address that names a window or a file (a bookmark, or "View what this added" on an import job) is applied before the
+  // search runs; the sort switches to Newest first for a window, as it does when the pill sets one.
+  useEffect(() => {
+    const fromUrl = readWindowFromSearch(window.location.search, browserOffsetAt)
+    if (fromUrl.invalid.length) {
+      toast({ title: `${fromUrl.invalid.join(' and ')} in the address ${fromUrl.invalid.length > 1 ? 'are' : 'is'} not a date and was ignored`, variant: 'destructive' })
+    }
+    if (!fromUrl.after && !fromUrl.before && !fromUrl.sourceFile) {
+      load(null)
+      return
+    }
+    const sort = fromUrl.after ? 'imported_desc' as const : undefined
+    setImportedWindow({ after: fromUrl.after, before: fromUrl.before, source: null })
+    setSourceFileFilter(fromUrl.sourceFile)
+    if (sort) setSortKey(sort)
+    load(null, { importedAfter: fromUrl.after, importedBefore: fromUrl.before, sourceFile: fromUrl.sourceFile, ...(sort ? { sort } : {}) })
+  }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const applyFilters = () => { resetCursor(); load(null) }
 
   const clearAll = () => {
     setQ(''); setScope('all'); setDomain(''); setBreach(''); setLoginType(''); setPwMask([])
     setIsCorporate(false); setUrlScheme(''); setTierInclude([]); setTierExclude([])
-    setImportedAfter(''); setImportedBefore(''); setPwLenMin(''); setPwLenMax('')
+    setImportedWindow(EMPTY_IMPORTED_WINDOW); setPwLenMin(''); setPwLenMax('')
     setEmailDomainFilter(''); setSourceFileFilter(''); setUrlHostFilter('')
     setRegexMode(false)
     setExcludeNoise(true)
@@ -818,6 +860,7 @@ export default function CredentialsPage() {
     // exclude_noise=1 + dedupe=1 keep the default-on declutter + dedupe after a clear.
     setLoading(true)
     setCursorStack([]); setCurrentCursor(null)
+    syncWindowToUrl(new URLSearchParams())
     loadAbortRef.current?.abort()
     const controller = new AbortController()
     loadAbortRef.current = controller
@@ -875,34 +918,41 @@ export default function CredentialsPage() {
   }))
   useEffect(() => { setExportMark(readMark(browserStorage(), markKey)) }, [markKey])
 
-  const importedAfterIso  = localToUtcIso(importedAfter)
-  const importedBeforeIso = localToUtcIso(importedBefore)
-
-  /** A lower bound makes the time-ordered plan the right one (the fast path), so switch to Newest first unless a time sort is already on. */
-  const ensureTimeSort = () => { if (sortKey !== 'imported_desc' && sortKey !== 'imported_asc') setSortKey('imported_desc') }
-
-  /** "Last 24 h" / "Last 7 days": fills the lower bound with now minus that many seconds. Press Search to apply. */
-  const applyPreset = (seconds: number) => {
-    const epoch = Math.floor(Date.now() / 1000) - seconds
-    setImportedAfter(utcEpochToLocalInput(epoch, new Date(epoch * 1000).getTimezoneOffset()))
-    setImportedBefore('')
-    ensureTimeSort()
+  /**
+   * The pill set a window (a preset, Enter, Apply, Clear, or the popover closing on a changed value): search with it now. A lower bound makes
+   * the time-ordered plan the right one (the fast path), so a non-time sort switches to Newest first.
+   */
+  const onWindowChange = (next: ImportedWindowValue) => {
+    const sort = next.after && sortKey !== 'imported_desc' && sortKey !== 'imported_asc' ? 'imported_desc' as const : undefined
+    setImportedWindow(next)
+    if (sort) setSortKey(sort)
+    resetCursor()
+    load(null, { importedAfter: next.after, importedBefore: next.before, ...(sort ? { sort } : {}) })
   }
 
-  /** Fills the window with (the last complete export's cut, now minus the lag]. Press Export (or Search) to use it. */
-  const fillSinceLastExport = () => {
-    const w = sinceLastExportWindow(exportMark, Date.now())
-    if (!w.ok) {
-      toast(w.reason === 'no-mark'
-        ? { title: 'No earlier export of this search is remembered yet', description: 'Run an export first; the next one can then start where it ended.' }
-        : { title: 'Exported moments ago', description: 'Give it a couple of minutes: rows are stamped a little before they become visible.' })
-      return
-    }
-    const after = Date.parse(w.after) / 1000
-    const before = Date.parse(w.before) / 1000
-    setImportedAfter(utcEpochToLocalInput(after, new Date(after * 1000).getTimezoneOffset()))
-    setImportedBefore(utcEpochToLocalInput(before, new Date(before * 1000).getTimezoneOffset()))
-    ensureTimeSort()
+  /** The popover's "Since last export": (the last complete export's cut, now minus the lag]. */
+  const sinceLastExport: ExtraWindowPreset = {
+    key: 'since-last-export',
+    label: 'Since last export',
+    title: 'Start where the last complete export of this search ended',
+    resolve: () => {
+      const w = sinceLastExportWindow(exportMark, Date.now())
+      if (!w.ok) {
+        toast(w.reason === 'no-mark'
+          ? { title: 'No earlier export of this search is remembered yet', description: 'Run an export first; the next one can then start where it ended.' }
+          : { title: 'Exported moments ago', description: 'Give it a couple of minutes: rows are stamped a little before they become visible.' })
+        return null
+      }
+      return epochsToLocalInputs({ lower: Date.parse(w.after) / 1000, upper: Date.parse(w.before) / 1000 }, browserOffsetAt)
+    },
+  }
+  const windowText = windowSentence(importedWindow, browserOffsetAt)
+
+  /** The file named by a "View what this added" link (or typed under Advanced) is dropped; the search runs again. */
+  const clearSourceFile = () => {
+    setSourceFileFilter('')
+    resetCursor()
+    load(null, { sourceFile: '' })
   }
 
   const doExport = useCallback(async () => {
@@ -998,13 +1048,12 @@ export default function CredentialsPage() {
     t === 'T2' ? 'bg-blue-500/10 text-blue-600 border-blue-500/20' :
     t === 'T3' ? 'bg-amber-500/10 text-amber-600 border-amber-500/20' : ''
 
-  const hasBasicFilters = !!(q || scope !== 'all' || domain || breach || loginType || pwMask.length || isCorporate || urlScheme || tierInclude.length || tierExclude.length)
-  const hasAdvFilters   = !!(importedAfter || importedBefore || pwLenMin || pwLenMax || emailDomainFilter || sourceFileFilter || urlHostFilter || regexMode)
+  const hasBasicFilters = !!(q || scope !== 'all' || domain || breach || loginType || pwMask.length || isCorporate || urlScheme || tierInclude.length || tierExclude.length || importedAfter || importedBefore)
+  const hasAdvFilters   = !!(pwLenMin || pwLenMax || emailDomainFilter || sourceFileFilter || urlHostFilter || regexMode)
   const hasFilters      = hasBasicFilters || hasAdvFilters
 
   const selectCls = "h-8 text-xs border border-border rounded-md bg-background px-2 text-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 cursor-pointer"
   const advInputCls = "h-7 text-xs font-mono"
-  const presetCls   = "rounded-full border border-border bg-muted/40 px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted"
 
   return (
     <div className="flex h-full flex-col">
@@ -1048,6 +1097,32 @@ export default function CredentialsPage() {
                   </p>
                 )}
               </>
+            )}
+            {/* The window and file in force, spelled out (the pill is short): your time, and the UTC instants the server uses */}
+            {(windowText || sourceFileFilter) && (
+              <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+                {windowText && (
+                  <span>
+                    Showing rows {windowText.text} <span className="font-mono opacity-70">· {windowText.utc}</span>
+                    <button
+                      type="button"
+                      onClick={() => onWindowChange({ ...EMPTY_IMPORTED_WINDOW })}
+                      className="ml-1.5 underline hover:text-foreground"
+                      aria-label="Clear the imported window"
+                    >
+                      clear
+                    </button>
+                  </span>
+                )}
+                {sourceFileFilter && (
+                  <span>
+                    {windowText ? '· ' : ''}from file <span className="font-mono">{sourceFileFilter}</span>
+                    <button type="button" onClick={clearSourceFile} className="ml-1.5 underline hover:text-foreground" aria-label="Clear the source file">
+                      clear
+                    </button>
+                  </span>
+                )}
+              </p>
             )}
           </div>
 
@@ -1314,6 +1389,19 @@ export default function CredentialsPage() {
 
           <div className="h-4 w-px bg-border" />
 
+          {/* Imported window: always in view; a preset searches at once, typed dates on Enter / Apply / closing */}
+          <ImportedWindowFilter
+            value={importedWindow}
+            onChange={onWindowChange}
+            extraPresets={[sinceLastExport]}
+            note={exportMark && (
+              <p className="text-[10px] text-muted-foreground">
+                Last export of this search ended {utcIsoToDisplay(epochSecondsToIso(exportMark.through))}
+                {exportMark.rows ? ` · ${exportMark.rows.toLocaleString()} rows` : ''}
+              </p>
+            )}
+          />
+
           {/* Advanced filters toggle */}
           <button
             onClick={() => setAdvOpen(!advOpen)}
@@ -1333,32 +1421,6 @@ export default function CredentialsPage() {
             </p>
 
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              {/* Imported window: your local time here, UTC on the server (shown under each field) */}
-              <div className="space-y-1">
-                <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Imported after</label>
-                <Input
-                  type="datetime-local"
-                  step={1}
-                  value={importedAfter}
-                  onChange={e => { setImportedAfter(e.target.value); if (e.target.value) ensureTimeSort() }}
-                  onKeyDown={e => e.key === 'Enter' && applyFilters()}
-                  className={advInputCls}
-                />
-                {importedAfterIso && <p className="text-[10px] font-mono text-muted-foreground">= {utcIsoToDisplay(importedAfterIso)}</p>}
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Imported before</label>
-                <Input
-                  type="datetime-local"
-                  step={1}
-                  value={importedBefore}
-                  onChange={e => setImportedBefore(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && applyFilters()}
-                  className={advInputCls}
-                />
-                {importedBeforeIso && <p className="text-[10px] font-mono text-muted-foreground">= {utcIsoToDisplay(importedBeforeIso)}</p>}
-              </div>
-
               {/* Password length range */}
               <div className="space-y-1">
                 <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Min pw length</label>
@@ -1384,37 +1446,6 @@ export default function CredentialsPage() {
                   className={advInputCls}
                 />
               </div>
-            </div>
-
-            {/* Imported presets and the since-last-export memory */}
-            <div className="space-y-1.5">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Imported</span>
-                {IMPORTED_PRESETS.map(p => (
-                  <button key={p.key} onClick={() => applyPreset(p.seconds)} className={presetCls}>{p.label}</button>
-                ))}
-                <button onClick={fillSinceLastExport} className={presetCls} title="Start where the last complete export of this search ended">
-                  Since last export
-                </button>
-                {(importedAfter || importedBefore) && (
-                  <button
-                    onClick={() => { setImportedAfter(''); setImportedBefore('') }}
-                    className="text-[10px] text-muted-foreground underline hover:text-foreground"
-                  >
-                    clear
-                  </button>
-                )}
-                {exportMark && (
-                  <span className="text-[10px] text-muted-foreground">
-                    last export of this search ended {utcIsoToDisplay(epochSecondsToIso(exportMark.through))}
-                    {exportMark.rows ? ` · ${exportMark.rows.toLocaleString()} rows` : ''}
-                  </span>
-                )}
-              </div>
-              <p className="text-[10px] text-muted-foreground">
-                Matches rows added to the database after this time; a credential imported again later counts as added. These fields are your
-                local time; the server works in UTC (shown under each field).
-              </p>
             </div>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">

@@ -1,7 +1,7 @@
 import { describe, test, expect } from 'vitest'
 import {
   EXPORT_CUT_LAG_SECONDS, epochSecondsToIso, localInputToUtcIso, utcEpochToLocalInput, utcIsoToDisplay,
-  searchFingerprint, readMark, writeMark, markStorageKey, sinceLastExportWindow, markAfterExport, IMPORTED_PRESETS,
+  searchFingerprint, readMark, writeMark, markStorageKey, sinceLastExportWindow, markAfterExport,
   type ExportMark,
 } from '@/lib/imported-range-client'
 
@@ -156,11 +156,5 @@ describe('markAfterExport — the chain has no gaps', () => {
   test('the mark never moves backwards', () => {
     expect(markAfterExport(prev, { lower: null, upper: T - 1000 }, complete, NOW_MS)).toBeNull()
     expect(markAfterExport(prev, { lower: T, upper: T }, complete, NOW_MS)?.through).toBe(T) // an empty window leaves it where it was
-  })
-})
-
-describe('presets', () => {
-  test('the lower-bound presets, in seconds before now', () => {
-    expect(IMPORTED_PRESETS.map(p => [p.key, p.seconds])).toEqual([['last-24h', 86_400], ['last-7d', 604_800]])
   })
 })

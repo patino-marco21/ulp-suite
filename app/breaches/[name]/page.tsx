@@ -9,12 +9,12 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { useToast } from "@/hooks/use-toast"
 import { useAuth, isAdmin } from "@/hooks/useAuth"
 import Link from "next/link"
-import { localInputToUtcIso, utcIsoToDisplay } from "@/lib/imported-range-client"
+import { localToUtcIso } from "@/lib/imported-window"
+import { ImportedWindowFilter, EMPTY_IMPORTED_WINDOW, type ImportedWindowValue } from "@/components/imported-window-filter"
 import { SafeDescription } from "@/components/safe-description"
 
 interface BreachRecord {
@@ -61,9 +61,10 @@ export default function BreachDetailPage() {
   const [retagFile, setRetagFile] = useState('')
   const [retagging, setRetagging] = useState(false)
   const [exporting, setExporting] = useState(false)
-  // Optional: export only what was imported after this time (local time here; the API takes the UTC instant shown beneath the field).
-  const [importedAfter, setImportedAfter] = useState('')
-  const importedAfterIso = importedAfter ? localInputToUtcIso(importedAfter, new Date(importedAfter).getTimezoneOffset()) : null
+  // Optional: export only what was imported in this window (local time here; the API takes the UTC instants shown beneath the fields).
+  const [importedWindow, setImportedWindow] = useState<ImportedWindowValue>(EMPTY_IMPORTED_WINDOW)
+  const importedAfterIso = localToUtcIso(importedWindow.after)
+  const importedBeforeIso = localToUtcIso(importedWindow.before)
 
   const userIsAdmin = user ? isAdmin(user) : false
 
@@ -94,7 +95,7 @@ export default function BreachDetailPage() {
       const res = await fetch('/api/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ format, query: '', domain: '', breach_name: breachName, imported_after: importedAfterIso ?? '' }),
+        body: JSON.stringify({ format, query: '', domain: '', breach_name: breachName, imported_after: importedAfterIso ?? '', imported_before: importedBeforeIso ?? '' }),
       })
       if (!res.ok) throw new Error('Export failed')
       const blob = await res.blob()
@@ -107,7 +108,7 @@ export default function BreachDetailPage() {
       a.click()
       URL.revokeObjectURL(url)
       if (res.headers.get('X-Export-Truncated') === '1') {
-        toast({ title: 'Export stopped at 10,000 rows', description: 'Set "Only imported after" to a later time to get the rest.', variant: 'destructive' })
+        toast({ title: 'Export stopped at 10,000 rows', description: 'Narrow the imported window to get the rest.', variant: 'destructive' })
       }
     } catch {
       toast({ title: "Export failed", variant: "destructive" })
@@ -346,15 +347,8 @@ export default function BreachDetailPage() {
             </p>
             <div className="flex items-end gap-2">
               <div className="space-y-1">
-                <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Only imported after (optional)</label>
-                <Input
-                  type="datetime-local"
-                  step={1}
-                  value={importedAfter}
-                  onChange={e => setImportedAfter(e.target.value)}
-                  className="h-8 text-xs font-mono"
-                />
-                {importedAfterIso && <p className="text-[10px] font-mono text-muted-foreground">= {utcIsoToDisplay(importedAfterIso)}</p>}
+                <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Only imported in a window (optional)</label>
+                <div><ImportedWindowFilter value={importedWindow} onChange={setImportedWindow} /></div>
               </div>
               <Button size="sm" variant="outline" onClick={() => exportBreachCredentials('csv')} disabled={exporting}>
                 <Download className="mr-1 h-3 w-3" />CSV

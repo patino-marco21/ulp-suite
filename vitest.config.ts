@@ -6,6 +6,8 @@ export default defineConfig({
       '@': new URL('.', import.meta.url).pathname.replace(/\/$/, ''),
     },
   },
+  // tsconfig keeps JSX as-is (jsx: preserve) for Next's own compiler; Vitest has to compile it to import a component.
+  oxc: { jsx: { runtime: 'automatic' } },
   test: {
     environment: 'node',
     globals: true,

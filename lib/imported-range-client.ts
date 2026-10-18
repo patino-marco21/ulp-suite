@@ -130,8 +130,4 @@ export function markAfterExport(
   return { through, rows: outcome.rows, at: nowMs }
 }
 
-/** Presets for the lower bound, as seconds before now. */
-export const IMPORTED_PRESETS = [
-  { key: 'last-24h', label: 'Last 24 h', seconds: 24 * 3600 },
-  { key: 'last-7d', label: 'Last 7 days', seconds: 7 * 24 * 3600 },
-] as const
+// The quick choices of the popover (Today ... Last 30 days) live in lib/imported-window.ts.
