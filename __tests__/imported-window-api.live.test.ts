@@ -1,8 +1,8 @@
 import { execSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdtempSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, test, vi } from 'vitest'
+import { afterAll, describe, expect, test, vi } from 'vitest'
 
 /**
  * LIVE check of the imported window on the three endpoints that gained it (docs/superpowers/specs/2026-10-18-imported-window-ux-design.md) against the
@@ -34,6 +34,10 @@ if (LIVE) {
   process.env.CLICKHOUSE_PASSWORD = ''
   process.env.CLICKHOUSE_DATABASE = 'ulp'
 }
+
+// The job log is read from a COPY of the app's SQLite (a database in WAL mode is not opened in place). The copy holds the accounts too, so it is removed.
+const jobLogCopies: string[] = []
+afterAll(() => { for (const dir of jobLogCopies) rmSync(dir, { recursive: true, force: true }) })
 
 const NO_CACHE = 'SETTINGS use_query_cache = 0, max_execution_time = 120'
 const iso = (epoch: number) => new Date(epoch * 1000).toISOString().replace('.000Z', 'Z')
@@ -187,11 +191,13 @@ describe.skipIf(!LIVE)('the imported window on the live table', () => {
     const Database = (await import('better-sqlite3')).default
 
     const dir = mkdtempSync(join(tmpdir(), 'iwa-jobs-'))
+    jobLogCopies.push(dir)
     for (const f of ['ulp.db', 'ulp.db-wal', 'ulp.db-shm']) if (existsSync(`${process.cwd()}/data/${f}`)) copyFileSync(`${process.cwd()}/data/${f}`, `${dir}/${f}`)
     const db = new Database(`${dir}/ulp.db`, { readonly: true })
     const jobs = db.prepare(
       `SELECT filename, status, imported, duration_ms, created_at FROM processing_jobs WHERE status = 'done' AND imported > 0 AND created_at >= '2026-10-17 00:00:00' ORDER BY id`,
     ).all() as Array<{ filename: string; status: string; imported: number; duration_ms: number; created_at: string }>
+    db.close()
     expect(jobs.length, 'the job log should hold finished imports since the 17th').toBeGreaterThan(0)
 
     const stats = { jobs: jobs.length, withFile: 0, exactWithFile: 0, windowOnly: 0, exactWindowOnly: 0, bleedRows: 0, mismatches: [] as string[] }
