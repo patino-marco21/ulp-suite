@@ -19,7 +19,7 @@ const MAX_HOPS = 10
 // 10 hops of IPv6 with ports is under 600 characters; anything longer is not a proxy chain.
 const MAX_HEADER_LENGTH = 2048
 
-export function trustedProxyHops(env: NodeJS.ProcessEnv = process.env): number {
+export function trustedProxyHops(env: NodeJS.Dict<string> = process.env): number {
   const raw = (env.TRUST_PROXY_HOPS ?? '').trim()
   if (!/^\d+$/.test(raw)) return 0
   const n = Number(raw)
@@ -50,7 +50,7 @@ function parseEntry(entry: string): string | null {
  * The caller's address when a trusted proxy vouches for it, else null. X-Real-IP is deliberately ignored: a
  * proxy only overwrites it if it was configured to, and otherwise it passes the client's value through.
  */
-export function trustedClientIp(headers: HeaderReader, env: NodeJS.ProcessEnv = process.env): string | null {
+export function trustedClientIp(headers: HeaderReader, env: NodeJS.Dict<string> = process.env): string | null {
   const hops = trustedProxyHops(env)
   if (hops === 0) return null
   const entries = forwardedEntries(headers)
@@ -64,7 +64,7 @@ export function trustedClientIp(headers: HeaderReader, env: NodeJS.ProcessEnv = 
  * itself, so treat it as a lead and not as proof. Only an IP literal is ever returned, so nothing a client
  * writes into the header can reach the database as text.
  */
-export function clientIpForLog(headers: HeaderReader, env: NodeJS.ProcessEnv = process.env): string | null {
+export function clientIpForLog(headers: HeaderReader, env: NodeJS.Dict<string> = process.env): string | null {
   if (trustedProxyHops(env) > 0) return trustedClientIp(headers, env)
   const entries = forwardedEntries(headers)
   return entries.length > 0 ? parseEntry(entries[0]) : null
@@ -74,6 +74,6 @@ export function clientIpForLog(headers: HeaderReader, env: NodeJS.ProcessEnv = p
  * What a rate limiter should key on: the trusted address, or one shared key when the app cannot tell
  * callers apart. Rotating X-Forwarded-For then buys nothing, because every caller lands in the same bucket.
  */
-export function rateLimitKey(headers: HeaderReader, env: NodeJS.ProcessEnv = process.env): string {
+export function rateLimitKey(headers: HeaderReader, env: NodeJS.Dict<string> = process.env): string {
   return trustedClientIp(headers, env) ?? 'direct'
 }

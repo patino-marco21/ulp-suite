@@ -21,7 +21,7 @@ describe('allowPrivateHosts', () => {
   test.each([['1', true], ['true', true], [' YES ', true], ['on', true], ['', false], ['0', false], ['no', false], [undefined, false]])(
     'WEBHOOK_ALLOW_PRIVATE_HOSTS=%j -> %j',
     (raw, want) => {
-      expect(allowPrivateHosts(raw === undefined ? ({} as NodeJS.ProcessEnv) : ({ WEBHOOK_ALLOW_PRIVATE_HOSTS: raw } as NodeJS.ProcessEnv))).toBe(want)
+      expect(allowPrivateHosts(raw === undefined ? {} : { WEBHOOK_ALLOW_PRIVATE_HOSTS: raw })).toBe(want)
     },
   )
 })

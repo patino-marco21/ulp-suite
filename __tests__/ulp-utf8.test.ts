@@ -50,7 +50,7 @@ describe('repairUtf8Line', () => {
 async function parseBytes(bytes: Buffer) {
   const credentials: Array<{ url: string; email: string; password: string }> = []
   let rejected = 0
-  const body = new Response(bytes).body as ReadableStream<Uint8Array>
+  const body = new Response(bytes as unknown as BodyInit).body as ReadableStream<Uint8Array>
   for await (const batch of parseULPStream(body, 'utf8.txt', 1000, undefined, { dedupInFile: false })) {
     credentials.push(...batch.credentials)
     rejected += batch.rejected

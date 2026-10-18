@@ -8,7 +8,7 @@
  */
 
 /** Live-table budget in bytes. Default 550GB (~70% of this laptop's 784GB disk). */
-export function diskBudgetBytes(env: NodeJS.ProcessEnv = process.env): number {
+export function diskBudgetBytes(env: NodeJS.Dict<string> = process.env): number {
   const b = parseInt(env.DISK_BUDGET_BYTES ?? '', 10)
   return Number.isFinite(b) && b > 0 ? b : 550 * 1024 ** 3
 }

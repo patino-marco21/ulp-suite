@@ -76,7 +76,7 @@ describe('runDiskWatchTick — reports changes, not every reading', () => {
   const notify = vi.fn()
   let free = 219
   let clock = 1_000_000
-  const tick = (env: NodeJS.ProcessEnv = {}) =>
+  const tick = (env: NodeJS.Dict<string> = {}) =>
     runDiskWatchTick({ check: async () => headroom(free), notify, env, now: () => clock })
 
   beforeEach(() => {

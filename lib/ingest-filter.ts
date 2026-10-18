@@ -79,7 +79,7 @@ function parseSuffixSet(raw: string | undefined): SuffixSet {
   return { suffixes, tlds: new Set(suffixes.map(s => s.slice(1))) }
 }
 
-export function parseIngestPolicy(env: NodeJS.ProcessEnv = process.env): IngestDropPolicy {
+export function parseIngestPolicy(env: NodeJS.Dict<string> = process.env): IngestDropPolicy {
   const dropNoise = ['1', 'true', 'yes', 'on'].includes(
     (env.INGEST_FILTER_DROP_NOISE ?? '').trim().toLowerCase(),
   )

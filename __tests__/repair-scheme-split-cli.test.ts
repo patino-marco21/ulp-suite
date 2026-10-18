@@ -20,7 +20,7 @@ function run(args: string[], input: string, env: Record<string, string> = {}) {
   const base: Record<string, string> = {}
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !/^INGEST_FILTER_/.test(k)) base[k] = v
   return spawnSync(TSX, [join(REPO, 'scripts', 'repair-scheme-split-rows.ts'), ...args], {
-    cwd: REPO, input, encoding: 'utf8', env: { ...base, ...env }, timeout: 60_000,
+    cwd: REPO, input, encoding: 'utf8', env: { ...base, ...env } as NodeJS.ProcessEnv, timeout: 60_000,
   })
 }
 

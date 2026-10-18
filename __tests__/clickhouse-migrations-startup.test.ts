@@ -96,13 +96,13 @@ describe('runClickHouseMigrations — start-up safeguards', () => {
     expect(h.state.execs.some(sql => sql.includes('idx_bf_email_lc'))).toBe(true)
     expect(getSetting('ch_ddl_version')).toBe('29')
     // once, however many times it had to ask: the log is what tells a person why the start took a few seconds longer
-    const waiting = warn.mock.calls.filter(c => String(c[0]).includes('not accepting connections yet'))
+    const waiting = warn.mock.calls.filter((c: unknown[]) => String(c[0]).includes('not accepting connections yet'))
     expect(waiting).toHaveLength(1)
   })
 
   test('a server that answers at once logs nothing about waiting', async () => {
     await run({ wait: fakeWait() })
-    expect(warn.mock.calls.some(c => String(c[0]).includes('not accepting connections yet'))).toBe(false)
+    expect(warn.mock.calls.some((c: unknown[]) => String(c[0]).includes('not accepting connections yet'))).toBe(false)
   })
 
   test('a server that never answers: nothing is run, nothing is recorded, and the log says so', async () => {
@@ -110,7 +110,7 @@ describe('runClickHouseMigrations — start-up safeguards', () => {
     await run({ wait: fakeWait(5_000) })
     expect(h.state.execs).toEqual([])
     expect(getSetting('ch_ddl_version')).toBe('28')
-    const lines = error.mock.calls.map(c => String(c[0])).join('\n')
+    const lines = error.mock.calls.map((c: unknown[]) => String(c[0])).join('\n')
     expect(lines).toContain('no DDL was run')
   })
 
@@ -135,7 +135,7 @@ describe('runClickHouseMigrations — start-up safeguards', () => {
     expect(getSetting('ch_ddl_version')).toBe('28')
     expect(getSetting('ch_repair_mutations_fired')).toBeNull()
     expect(h.state.queries.some(q => q.includes('system.data_skipping_indices'))).toBe(false) // no schema check against a server that just dropped us
-    expect(error.mock.calls.map(c => String(c[0])).join('\n')).toContain('connection')
+    expect(error.mock.calls.map((c: unknown[]) => String(c[0])).join('\n')).toContain('connection')
 
     h.state.dropExecs = false
     h.state.execs.length = 0

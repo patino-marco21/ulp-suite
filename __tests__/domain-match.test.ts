@@ -436,8 +436,8 @@ describe('phase-2 branches + mergeMatchPages — legacy bucket ownership', () =>
     const legacyRows = page(table.filter(r => LEGACY.includes(r.rawDomain) && matches(r)))
 
     const columns: Array<{ column: CandidateColumn; values: string[] }> = [
-      { column: 'domain', values: [...new Set(table.filter(r => domainMatches(r.rawDomain, monitored)).map(r => r.rawDomain))] },
-      { column: 'email_domain', values: [...new Set(table.filter(r => domainMatches(r.email_domain, monitored)).map(r => r.email_domain))] },
+      { column: 'domain' as const, values: [...new Set(table.filter(r => domainMatches(r.rawDomain, monitored)).map(r => r.rawDomain))] },
+      { column: 'email_domain' as const, values: [...new Set(table.filter(r => domainMatches(r.email_domain, monitored)).map(r => r.email_domain))] },
     ].map(c => ({ ...c, values: c.values.filter(v => !LEGACY.includes(v)) }))
 
     const pages = buildCandidateValueBranches(columns, excluded)

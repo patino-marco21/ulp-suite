@@ -17,7 +17,7 @@ export interface NoveltyConfig {
   slabRows: number
 }
 
-export function noveltyConfig(env: NodeJS.ProcessEnv = process.env): NoveltyConfig {
+export function noveltyConfig(env: NodeJS.Dict<string> = process.env): NoveltyConfig {
   const flag = (env.INGEST_NOVELTY_CHECK ?? '').trim().toLowerCase()
   const enabled = !(flag === 'off' || flag === '0' || flag === 'false')
   const raw = env.INGEST_NOVELTY_SLAB_ROWS

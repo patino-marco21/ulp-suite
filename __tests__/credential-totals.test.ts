@@ -5,10 +5,11 @@ import {
   resultsLabel,
   totalsParams,
   withPendingTotals,
+  type TotalsFields,
   withTotals,
 } from '@/lib/credential-totals'
 
-const page = { results: ['a'], total: 5, raw_total: 8 as number | null }
+const page: TotalsFields & { results: string[] } = { results: ['a'], total: 5, raw_total: 8 }
 
 describe('withPendingTotals', () => {
   test('marks the rows as showing with their count still pending, and drops any stale count', () => {

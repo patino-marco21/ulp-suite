@@ -32,7 +32,7 @@ export class ArchiveRefError extends Error {
 }
 
 /** The archive directory as the app sees it: docker-compose.yml mounts the host's ~/ulp-archive read-only at /archive. */
-export function appArchiveDir(env: NodeJS.ProcessEnv = process.env): string {
+export function appArchiveDir(env: NodeJS.Dict<string> = process.env): string {
   return env.ULP_ARCHIVE_DIR?.trim() || '/archive'
 }
 

@@ -236,7 +236,7 @@ describe('planImportedRange — the projection form only where it is safe and us
   const READY = [{ defined: 1, parts: 1, with_projection: 1, covered_from: 1_786_000_000 }]
   const NOT_READY = [{ defined: 0, parts: 1, with_projection: 0, covered_from: 0 }]
   let run: ReturnType<typeof vi.fn>
-  const ctx = (over: Partial<Parameters<typeof planImportedRange>[1]> = {}) => ({ shape: 'time' as const, indexNeutral: true, run, ...over })
+  const ctx = (over: Partial<Parameters<typeof planImportedRange>[1]> = {}) => ({ shape: 'time' as const, indexNeutral: true, run: run as unknown as Parameters<typeof planImportedRange>[1]['run'], ...over })
   const hasKey = (sql: { conditions: string[] }) => sql.conditions.some(c => c.includes(IMPORTED_KEY_EXPR))
 
   beforeEach(() => {

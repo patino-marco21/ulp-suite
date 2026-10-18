@@ -110,7 +110,7 @@ describe.skipIf(!LIVE)('login search scope parity on the live table', () => {
       const complete = await reference('lower(email) = lower({a:String})', { a }, ', use_skip_indexes = 0')
       const explain = await (await getClient().query({
         query: 'EXPLAIN indexes = 1 SELECT count() FROM ulp.credentials WHERE lower(email) = lower({a:String}) SETTINGS optimize_use_projections = 0',
-        query_params: { a }, format: 'TSVRaw',
+        query_params: { a }, format: 'TSVRaw' as never, // ClickHouse reads TSVRaw; the client's DataFormat type does not list it
       })).text()
       const lines = explain.split('\n')
       const g = /Granules:\s*(\d+)\/(\d+)/.exec(lines.slice(lines.findIndex(l => l.includes('Name: idx_bf_email_lc'))).find(l => /Granules:/.test(l)) ?? '')

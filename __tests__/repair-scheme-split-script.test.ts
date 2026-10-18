@@ -74,11 +74,11 @@ function run(env: Record<string, string>) {
   base.STUB_ROWS = rowsPath
   base.STUB_STDIN = stdinPath
 
-  const probe = spawnSync('bash', ['-c', 'command -v docker'], { env: base, encoding: 'utf8' })
+  const probe = spawnSync('bash', ['-c', 'command -v docker'], { env: base as NodeJS.ProcessEnv, encoding: 'utf8' })
   if (probe.stdout.trim() !== stubPath) throw new Error(`refusing to run: docker resolves to "${probe.stdout.trim()}", not the stub`)
 
   const r = spawnSync('bash', [join(REPO, 'scripts', 'repair-scheme-split-rows.sh')], {
-    cwd: REPO, env: { ...base, ...env }, encoding: 'utf8', timeout: 120_000,
+    cwd: REPO, env: { ...base, ...env } as NodeJS.ProcessEnv, encoding: 'utf8', timeout: 120_000,
   })
   return {
     status: r.status,

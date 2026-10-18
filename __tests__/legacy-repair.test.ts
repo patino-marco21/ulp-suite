@@ -21,7 +21,7 @@ describe('isSchemeSplitRow — the rows the old parser produced by splitting `ht
     ['a colon in the email (not this shape)', { url: 'https', email: '//h:8080/p', password: 'a|b' }],
     ['an ordinary row', { url: 'https://a.example/x', email: 'a@b.com', password: 'pw' }],
   ])('not: %s', (_why, row) => {
-    expect(isSchemeSplitRow({ ...row, source_file: 'f' })).toBe(false)
+    expect(isSchemeSplitRow({ ...row, source_file: 'f' } as typeof row)).toBe(false)
   })
 })
 
@@ -53,13 +53,13 @@ describe('repairSchemeSplit — re-parse the original line with the CURRENT pars
   })
 
   test('applies the importer\'s hard-drop policy: a T3 row is not re-introduced', () => {
-    const policy = makeHardDropPredicate(parseIngestPolicy({ INGEST_FILTER_HARD_DROP_TIERS: 'T3' } as NodeJS.ProcessEnv))
+    const policy = makeHardDropPredicate(parseIngestPolicy({ INGEST_FILTER_HARD_DROP_TIERS: 'T3' }))
     expect(repairSchemeSplit(stored('//site.example.ru/login', 'x@mail.ru|secret1'), { shouldHardDrop: policy })).toEqual({ kind: 'rejected', reason: 'tier_dropped' })
     expect(repairSchemeSplit(stored('//site.example.ru/login', 'x@mail.ru|secret1')).kind).toBe('repaired')
   })
 
   test('the importer\'s other ingest drops apply too (here DROP_NOISE: a .php endpoint), not only the hard tiers', () => {
-    const policy = parseIngestPolicy({ INGEST_FILTER_DROP_NOISE: 'true' } as NodeJS.ProcessEnv)
+    const policy = parseIngestPolicy({ INGEST_FILTER_DROP_NOISE: 'true' })
     const shouldDrop = (c: { email: string; url: string; domain: string }) => shouldDropAtIngest(c.email, c.url, c.domain, policy)
     const row = stored('//shop.example.com/wp-login.php', 'alice@mail.com|hunter22')
     expect(repairSchemeSplit(row, { shouldDrop })).toEqual({ kind: 'rejected', reason: 'policy_dropped' })

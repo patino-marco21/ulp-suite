@@ -98,7 +98,7 @@ describe('runSearchDictionaryTick', () => {
 
   test('failures are recorded; three in a row wait an hour; after the hour it tries again; a success clears the count', async () => {
     let t = 1_000_000
-    const build = vi.fn(async () => { throw new Error('MEMORY_LIMIT_EXCEEDED') })
+    const build = vi.fn(async (): Promise<typeof BUILT> => { throw new Error('MEMORY_LIMIT_EXCEEDED') })
     const d = deps({ build, now: vi.fn(() => t) })
     for (let i = 0; i < 3; i++) expect(await runSearchDictionaryTick(d)).toBe('failed')
     expect(readBuildRecord().lastError).toContain('MEMORY_LIMIT_EXCEEDED')

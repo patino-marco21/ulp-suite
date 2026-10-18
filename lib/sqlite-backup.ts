@@ -19,7 +19,7 @@ import { backupDb } from '@/lib/sqlite'
 
 const FILE_RE = /^ulp-\d{8}-\d{6}\.db$/
 
-export function sqliteBackupDir(env: NodeJS.ProcessEnv = process.env): string {
+export function sqliteBackupDir(env: NodeJS.Dict<string> = process.env): string {
   if (env.SQLITE_BACKUP_DIR?.trim()) return env.SQLITE_BACKUP_DIR.trim()
   const dbPath = env.SQLITE_PATH || path.join(process.cwd(), 'data', 'ulp.db')
   return path.join(path.dirname(dbPath), 'backups')
@@ -31,12 +31,12 @@ function envInt(value: string | undefined, fallback: number): number {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback
 }
 
-export function sqliteBackupKeep(env: NodeJS.ProcessEnv = process.env): number {
+export function sqliteBackupKeep(env: NodeJS.Dict<string> = process.env): number {
   const keep = envInt(env.SQLITE_BACKUP_KEEP, 7)
   return keep < 1 ? 7 : keep
 }
 
-export function sqliteBackupHours(env: NodeJS.ProcessEnv = process.env): number {
+export function sqliteBackupHours(env: NodeJS.Dict<string> = process.env): number {
   return envInt(env.SQLITE_BACKUP_HOURS, 24)
 }
 
@@ -75,7 +75,7 @@ export interface SqliteBackupResult {
 
 export async function runSqliteBackup(
   deps: {
-    env?: NodeJS.ProcessEnv
+    env?: NodeJS.Dict<string>
     now?: () => Date
     backup?: (dest: string) => Promise<unknown>
     verify?: (file: string) => void

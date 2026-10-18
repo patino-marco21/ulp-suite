@@ -35,13 +35,13 @@ export function clearProjectionNeedBytes(largestPartBytes: number): number {
 }
 
 /** Cron interval in hours; 0 (or invalid) disables the scheduled job. Default 24. */
-export function projectionScopeCronHours(env: NodeJS.ProcessEnv = process.env): number {
+export function projectionScopeCronHours(env: NodeJS.Dict<string> = process.env): number {
   const h = parseInt(env.PROJECTION_SCOPE_CRON_HOURS ?? '24', 10)
   return Number.isFinite(h) && h > 0 ? h : 0
 }
 
 /** How many months of the most recent data keep the projection. Default 2. */
-export function projectionScopeWindowMonths(env: NodeJS.ProcessEnv = process.env): number {
+export function projectionScopeWindowMonths(env: NodeJS.Dict<string> = process.env): number {
   const m = parseInt(env.PROJECTION_SCOPE_WINDOW_MONTHS ?? '2', 10)
   return Number.isFinite(m) && m > 0 ? m : 2
 }

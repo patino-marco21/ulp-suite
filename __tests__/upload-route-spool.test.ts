@@ -188,7 +188,7 @@ describe('POST /api/upload: receive first, then reply', () => {
       body,
       duplex: 'half',
       signal: controller.signal,
-    } as RequestInit & { duplex: 'half' })
+    } as unknown as ConstructorParameters<typeof NextRequest>[1])
 
     const pending = POST(request)
     await new Promise(resolve => setTimeout(resolve, 30)) // the first chunk reaches the spool file

@@ -63,11 +63,11 @@ function run(env: Record<string, string>) {
   base.STUB_CALLS = callsPath
   base.POLL_SECONDS = '0'
 
-  const probe = spawnSync('bash', ['-c', 'command -v docker'], { env: base, encoding: 'utf8' })
+  const probe = spawnSync('bash', ['-c', 'command -v docker'], { env: base as NodeJS.ProcessEnv, encoding: 'utf8' })
   if (probe.stdout.trim() !== stubPath) throw new Error(`refusing to run: docker resolves to "${probe.stdout.trim()}", not the stub`)
 
   const r = spawnSync('bash', [join(REPO, 'scripts', 'rebuild-imported-desc-projection.sh')], {
-    cwd: REPO, env: { ...base, ...env }, encoding: 'utf8', timeout: 120_000,
+    cwd: REPO, env: { ...base, ...env } as NodeJS.ProcessEnv, encoding: 'utf8', timeout: 120_000,
   })
   return { status: r.status, out: (r.stdout ?? '') + (r.stderr ?? ''), calls: readFileSync(callsPath, 'utf8') }
 }

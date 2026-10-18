@@ -40,12 +40,12 @@ function item(at: unknown, nowMs: number, maxAgeHours: number): BackupItem {
   return { lastAt: new Date(ms).toISOString(), ageHours, stale: ageHours > maxAgeHours }
 }
 
-export function backupMaxAgeHours(env: NodeJS.ProcessEnv = process.env): number {
+export function backupMaxAgeHours(env: NodeJS.Dict<string> = process.env): number {
   const parsed = Number(env.BACKUP_MAX_AGE_HOURS)
   return env.BACKUP_MAX_AGE_HOURS && Number.isFinite(parsed) && parsed > 0 ? parsed : 72
 }
 
-export function readBackupStatus(env: NodeJS.ProcessEnv = process.env, nowMs = Date.now()): BackupStatus {
+export function readBackupStatus(env: NodeJS.Dict<string> = process.env, nowMs = Date.now()): BackupStatus {
   const dir = sqliteBackupDir(env)
   const maxAgeHours = backupMaxAgeHours(env)
 

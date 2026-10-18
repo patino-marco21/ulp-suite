@@ -178,7 +178,7 @@ describe('scripts/pile/feed.sh in a sandbox', () => {
 
 describe('scripts/pile/reset.sh in a sandbox', () => {
   const CUT = '2026-10-11 21:57:59'
-  const run = (b: Box, mode: string, extra: NodeJS.ProcessEnv = {}) => spawnSync('bash', [script('reset.sh'), mode], { env: { ...b.env, CUT, ...extra }, encoding: 'utf8' })
+  const run = (b: Box, mode: string, extra: NodeJS.Dict<string> = {}) => spawnSync('bash', [script('reset.sh'), mode], { env: { ...b.env, CUT, ...extra }, encoding: 'utf8' })
   /** a.txt: a hardlink of the original; b.txt: an independent copy with the same bytes (one link); c.txt: not a pile file;
    *  d.txt: has two links, but to some OTHER file, while the pile holds a different d.txt (the inode guard is what protects it) */
   const withDoneNames = (b: Box) => {

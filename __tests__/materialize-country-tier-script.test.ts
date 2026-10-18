@@ -74,12 +74,12 @@ function run(env: Record<string, string>, parity = PARITY_OK) {
   base.STUB_EXPR = NEW_EXPR
   base.POLL_SECONDS = '0'
 
-  const probe = spawnSync('bash', ['-c', 'command -v docker'], { env: base, encoding: 'utf8' })
+  const probe = spawnSync('bash', ['-c', 'command -v docker'], { env: base as NodeJS.ProcessEnv, encoding: 'utf8' })
   if (probe.stdout.trim() !== stubPath) throw new Error(`refusing to run: docker resolves to "${probe.stdout.trim()}", not the stub`)
 
   const r = spawnSync('bash', [join(REPO, 'scripts', 'materialize-country-tier.sh')], {
     cwd: REPO,
-    env: { ...base, ...env },
+    env: { ...base, ...env } as NodeJS.ProcessEnv,
     encoding: 'utf8',
     timeout: 120_000,
   })

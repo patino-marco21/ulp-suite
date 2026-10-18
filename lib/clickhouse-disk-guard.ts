@@ -65,7 +65,7 @@ export function formatBytes(bytes: number): string {
 
 export function resolveDiskGuardOptions(
   opts: DiskGuardOptions = {},
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.Dict<string> = process.env,
 ): Required<DiskGuardOptions> {
   return {
     minFreeBytes: opts.minFreeBytes ?? parseEnvNumber(env.DISK_GUARD_MIN_FREE_BYTES, DEFAULT_MIN_FREE_BYTES),

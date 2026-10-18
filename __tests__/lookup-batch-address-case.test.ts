@@ -24,7 +24,7 @@ import { NextRequest } from 'next/server'
 import { POST as uiBatch } from '@/app/api/lookup/batch/route'
 import { POST as v1Batch } from '@/app/api/v1/lookup/batch/route'
 
-const post = (handler: typeof uiBatch, url: string, body: unknown) =>
+const post = (handler: (request: NextRequest) => Promise<Response>, url: string, body: unknown) =>
   handler(new NextRequest(`http://localhost${url}`, { method: 'POST', body: JSON.stringify(body) }))
 
 const stored = (email: string, imported_at: string) => ({

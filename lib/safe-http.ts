@@ -49,7 +49,7 @@ export function isPublicAddress(ip: string): boolean {
   return !blocked.check(ip, family === 4 ? 'ipv4' : 'ipv6')
 }
 
-export function allowPrivateHosts(env: NodeJS.ProcessEnv = process.env): boolean {
+export function allowPrivateHosts(env: NodeJS.Dict<string> = process.env): boolean {
   return ['1', 'true', 'yes', 'on'].includes((env.WEBHOOK_ALLOW_PRIVATE_HOSTS ?? '').trim().toLowerCase())
 }
 

@@ -209,8 +209,8 @@ describe('manifest and openSource', () => {
   })
 
   test('defaultArchiveDir reads ULP_ARCHIVE_DIR and falls back to ~/ulp-archive', () => {
-    expect(defaultArchiveDir({ ULP_ARCHIVE_DIR: '/somewhere' } as NodeJS.ProcessEnv)).toBe('/somewhere')
-    expect(defaultArchiveDir({ ULP_ARCHIVE_DIR: '  ' } as NodeJS.ProcessEnv)).toMatch(/ulp-archive$/)
+    expect(defaultArchiveDir({ ULP_ARCHIVE_DIR: '/somewhere' })).toBe('/somewhere')
+    expect(defaultArchiveDir({ ULP_ARCHIVE_DIR: '  ' })).toMatch(/ulp-archive$/)
     expect(defaultArchiveDir({} as NodeJS.ProcessEnv)).toMatch(/ulp-archive$/)
   })
 })

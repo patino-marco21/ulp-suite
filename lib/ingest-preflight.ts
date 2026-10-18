@@ -23,7 +23,7 @@ export interface PreflightOptions {
   sliceBytes?: number
   wholeFileMax?: number
   config: GateConfig
-  env?: NodeJS.ProcessEnv
+  env?: NodeJS.Dict<string>
 }
 
 export interface PreflightResult {
@@ -39,11 +39,11 @@ export interface PreflightResult {
 }
 
 /** The ingest policy as the production app runs it: T3 dropped, with the keep-list of countries. `undefined` when INGEST_FILTER_HARD_DROP_TIERS is set empty (nothing is hard-dropped). */
-export function preflightHardDrop(env: NodeJS.ProcessEnv = process.env): ((email: string, url: string) => boolean) | undefined {
+export function preflightHardDrop(env: NodeJS.Dict<string> = process.env): ((email: string, url: string) => boolean) | undefined {
   const policy = parseIngestPolicy({
     INGEST_FILTER_HARD_DROP_TIERS: env.INGEST_FILTER_HARD_DROP_TIERS ?? 'T3',
     INGEST_FILTER_HARD_KEEP_COUNTRIES: env.INGEST_FILTER_HARD_KEEP_COUNTRIES ?? DEFAULT_HARD_KEEP_COUNTRIES,
-  } as unknown as NodeJS.ProcessEnv)
+  })
   return makeHardDropPredicate(policy)
 }
 

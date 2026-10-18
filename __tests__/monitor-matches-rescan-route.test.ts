@@ -66,7 +66,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   mockValidateRequest.mockResolvedValue(ADMIN_USER as never)
   mockRequireAdminRole.mockReturnValue(null as never)
-  mockCheckLimit.mockReturnValue({ allowed: true, resetAt: 0 })
+  mockCheckLimit.mockReturnValue({ allowed: true, remaining: 1, resetAt: 0 })
   mockGetMonitor.mockResolvedValue(MONITOR as never)
   mockGetMonitorMatchesCache.mockResolvedValue({ rows: [], status: 'ok', checkedAt: '2026-08-25 00:00:00', lastError: null })
 })
@@ -128,7 +128,7 @@ describe('POST .../matches/rescan', () => {
   })
 
   test('rate limited returns 429', async () => {
-    mockCheckLimit.mockReturnValue({ allowed: false, resetAt: Date.now() + 5000 })
+    mockCheckLimit.mockReturnValue({ allowed: false, remaining: 0, resetAt: Date.now() + 5000 })
 
     const res = await POST(req(), { params: Promise.resolve({ id: '1' }) })
     expect(res.status).toBe(429)

@@ -58,7 +58,7 @@ function envNumber(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
 }
 
-export function diskThresholds(totalBytes: number, env: NodeJS.ProcessEnv = process.env): DiskThresholds {
+export function diskThresholds(totalBytes: number, env: NodeJS.Dict<string> = process.env): DiskThresholds {
   const criticalBytes = computeEffectiveFloorBytes(resolveDiskGuardOptions({}, env), totalBytes)
   const warnBytes = Math.max(
     envNumber(env.DISK_WARN_FREE_BYTES, DEFAULT_WARN_FREE_BYTES),
@@ -69,7 +69,7 @@ export function diskThresholds(totalBytes: number, env: NodeJS.ProcessEnv = proc
 }
 
 /** Pure: classify one `system.disks` reading. */
-export function evaluateDisk(headroom: DiskHeadroom, env: NodeJS.ProcessEnv = process.env, now = Date.now()): DiskReading {
+export function evaluateDisk(headroom: DiskHeadroom, env: NodeJS.Dict<string> = process.env, now = Date.now()): DiskReading {
   const thresholds = diskThresholds(headroom.totalBytes, env)
   const status: DiskStatus =
     headroom.freeBytes < thresholds.criticalBytes ? 'critical'
@@ -99,7 +99,7 @@ function unknownReading(err: unknown, now: number): DiskReading {
 
 /** One live reading; never throws. */
 export async function readDisk(
-  deps: { check?: () => Promise<DiskHeadroom>; env?: NodeJS.ProcessEnv; now?: () => number } = {},
+  deps: { check?: () => Promise<DiskHeadroom>; env?: NodeJS.Dict<string>; now?: () => number } = {},
 ): Promise<DiskReading> {
   const now = deps.now ?? Date.now
   try {
@@ -144,7 +144,7 @@ export function resetDiskWatch(): void {
 export type Notify = (message: string, reading: DiskReading) => Promise<void> | void
 
 /** Log line, plus the webhook when DISK_ALERT_WEBHOOK_URL is set. A failing webhook never throws. */
-export function defaultNotify(env: NodeJS.ProcessEnv = process.env, fetchImpl: typeof fetch = fetch): Notify {
+export function defaultNotify(env: NodeJS.Dict<string> = process.env, fetchImpl: typeof fetch = fetch): Notify {
   return async (message, reading) => {
     const line = `[disk-watch] ${message}`
     if (reading.status === 'critical' || reading.status === 'unknown') console.error(line)
@@ -180,7 +180,7 @@ export async function runDiskWatchTick(
   deps: {
     check?: () => Promise<DiskHeadroom>
     notify?: Notify
-    env?: NodeJS.ProcessEnv
+    env?: NodeJS.Dict<string>
     now?: () => number
   } = {},
 ): Promise<DiskReading> {

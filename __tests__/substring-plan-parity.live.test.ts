@@ -154,7 +154,7 @@ describe.skipIf(!LIVE)('the whole-token rule agrees with ClickHouse', () => {
     await client.insert({ table: INDEX_TABLE, format: 'JSONEachRow', values: sample.map((c, id) => ({ id, url: `q${c}Abc${c}q` })) })
     await client.command({ query: `OPTIMIZE TABLE ${INDEX_TABLE} FINAL` })
 
-    const explain = await (await client.query({ query: `EXPLAIN indexes = 1 SELECT id FROM ${INDEX_TABLE} WHERE hasToken(url, 'abc')`, format: 'TSVRaw' })).text()
+    const explain = await (await client.query({ query: `EXPLAIN indexes = 1 SELECT id FROM ${INDEX_TABLE} WHERE hasToken(url, 'abc')`, format: 'TSVRaw' as never })).text()
     expect(explain).toContain('idx_inv_url')
     const found = ((await (await client.query({ query: `SELECT id FROM ${INDEX_TABLE} WHERE hasToken(url, 'abc') ORDER BY id`, format: 'JSONEachRow' })).json()) as Array<{ id: number }>)
       .map(r => Number(r.id))

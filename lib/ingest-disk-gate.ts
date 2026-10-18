@@ -51,7 +51,7 @@ export interface IngestDiskGateState {
   error?: string
 }
 
-export function ingestDiskGateConfig(env: NodeJS.ProcessEnv = process.env): IngestDiskGateConfig {
+export function ingestDiskGateConfig(env: NodeJS.Dict<string> = process.env): IngestDiskGateConfig {
   const flag = (env.INGEST_DISK_GATE ?? '').trim().toLowerCase()
   const enabled = !(flag === 'off' || flag === '0' || flag === 'false')
   const raw = env.INGEST_MIN_FREE_BYTES
@@ -80,7 +80,7 @@ function store(): GateStore {
 }
 
 /** Snapshot for the banner endpoint and the Ingest Health panel. The floor and resume level always come from the environment. */
-export function getIngestDiskGate(env: NodeJS.ProcessEnv = process.env): IngestDiskGateState {
+export function getIngestDiskGate(env: NodeJS.Dict<string> = process.env): IngestDiskGateState {
   const s = store()
   const cfg = ingestDiskGateConfig(env)
   return {
@@ -108,7 +108,7 @@ export interface WaitForDiskSpaceOptions {
   check?: (signal: AbortSignal) => Promise<DiskHeadroom>
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>
   now?: () => number
-  env?: NodeJS.ProcessEnv
+  env?: NodeJS.Dict<string>
 }
 
 function defaultSleep(ms: number, signal: AbortSignal): Promise<void> {

@@ -43,7 +43,7 @@ esac
   return { root, src, arc, inbox, sources, dockerLog, env }
 }
 
-const run = (b: Box, args: string[], extra: NodeJS.ProcessEnv = {}) =>
+const run = (b: Box, args: string[], extra: NodeJS.Dict<string> = {}) =>
   spawnSync(TSX, [SCRIPT, ...args], { cwd: REPO, encoding: 'utf8', env: { ...b.env, ...extra }, timeout: 120_000 })
 const manifest = (b: Box) => readFileSync(join(b.arc, 'manifest.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l) as Record<string, unknown>)
 

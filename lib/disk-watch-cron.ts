@@ -9,7 +9,7 @@ import { runDiskWatchTick } from '@/lib/disk-watch'
 
 let started = false
 
-export function diskWatchMinutes(env: NodeJS.ProcessEnv = process.env): number {
+export function diskWatchMinutes(env: NodeJS.Dict<string> = process.env): number {
   const raw = env.DISK_WATCH_MINUTES
   if (raw === undefined || raw.trim() === '') return 10
   const parsed = Number(raw)

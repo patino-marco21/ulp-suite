@@ -43,7 +43,7 @@ async function main(): Promise<void> {
     parseULPStream: typeof parseULPStream
   }
   // A baseline from v6 on reads a line like the new parser does (UTF-8 repair, Android app ids), so only the rules that differ show up; an older one is read as before.
-  const baselineParse = (line: string, hard: (e: string, u: string) => boolean): Outcome => (baseline.parseInlineLine ?? baseline.parseLine)(line, 'f.txt', hard)
+  const baselineParse = (line: string, hard: ((e: string, u: string) => boolean) | undefined): Outcome => (baseline.parseInlineLine ?? baseline.parseLine)(line, 'f.txt', hard)
 
   const newHard = makeHardDropPredicate(parseIngestPolicy({ INGEST_FILTER_HARD_DROP_TIERS: 'T3', INGEST_FILTER_HARD_KEEP_COUNTRIES: DEFAULT_HARD_KEEP_COUNTRIES }))
   // --same-policy compares two parsers under the SAME T3 policy (the keep-list), so that only parser rules differ; without it the baseline keeps the old policy (no keep-list)

@@ -52,7 +52,7 @@ if (LIVE) {
   process.env.CLICKHOUSE_DATABASE = 'ulp'
 }
 
-const scenarios: Array<{ name: string; qs: string; plan?: 'windows' | 'plain' }> = [
+const scenarios: Array<{ name: string; qs: string; plan?: 'windows' | 'plain' | 'dictionary' }> = [
   { name: 'default view: Declutter + Unique, no search', qs: 'exclude_noise=1&dedupe=1', plan: 'windows' },
   { name: 'binance.com, Declutter + Unique', qs: 'q=binance.com&exclude_noise=1&dedupe=1', plan: 'windows' },
   { name: 'binance.com, no Declutter, no Unique', qs: 'q=binance.com', plan: 'windows' },

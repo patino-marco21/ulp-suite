@@ -76,14 +76,14 @@ function run(script: string, extraEnv: Record<string, string>, auditRows: string
   env.STUB_CALLS = callsPath
   env.STUB_AUDIT = auditPath
 
-  const probe = spawnSync('bash', ['-c', 'command -v docker'], { env, encoding: 'utf8' })
+  const probe = spawnSync('bash', ['-c', 'command -v docker'], { env: env as NodeJS.ProcessEnv, encoding: 'utf8' })
   if (probe.stdout.trim() !== stubPath) {
     throw new Error(`refusing to run: docker resolves to "${probe.stdout.trim()}", not the stub`)
   }
 
   const r = spawnSync('bash', [join(REPO, 'scripts', script)], {
     cwd: REPO,
-    env: { ...env, ...extraEnv },
+    env: { ...env, ...extraEnv } as NodeJS.ProcessEnv,
     encoding: 'utf8',
     timeout: 90_000,
   })

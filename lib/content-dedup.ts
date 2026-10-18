@@ -346,7 +346,7 @@ export const CONTENT_DEDUP_MAX_THREADS = 6
  * function's fallback default (32, untouched -- not re-validated at
  * smaller table sizes, kept as a conservative default for fresh installs).
  */
-export function contentDedupBucketCount(env: NodeJS.ProcessEnv = process.env): number {
+export function contentDedupBucketCount(env: NodeJS.Dict<string> = process.env): number {
   const n = parseInt(env.CONTENT_DEDUP_BUCKET_COUNT ?? '32', 10)
   return Number.isFinite(n) && n >= 1 ? n : 32
 }
@@ -560,18 +560,18 @@ export async function populateDedupedTableWithGuard(
 // ── env knobs (pure, testable) ──────────────────────────────────────────────────
 
 /** Cron interval in hours; 0 (or invalid) disables the scheduled job. Default 24. */
-export function dedupCronHours(env: NodeJS.ProcessEnv = process.env): number {
+export function dedupCronHours(env: NodeJS.Dict<string> = process.env): number {
   const h = parseInt(env.DEDUP_CRON_HOURS ?? '24', 10)
   return Number.isFinite(h) && h > 0 ? h : 0
 }
 
 /** Whether the destructive rebuild is allowed to run. Default false (report-only). */
-export function contentDedupApplyEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+export function contentDedupApplyEnabled(env: NodeJS.Dict<string> = process.env): boolean {
   return env.CONTENT_DEDUP_APPLY === 'true' || env.CONTENT_DEDUP_APPLY === '1'
 }
 
 /** Don't rebuild the table unless at least this many excess rows exist. Default 1000. */
-export function minExcessToApply(env: NodeJS.ProcessEnv = process.env): number {
+export function minExcessToApply(env: NodeJS.Dict<string> = process.env): number {
   const n = parseInt(env.DEDUP_MIN_EXCESS ?? '1000', 10)
   return Number.isFinite(n) && n >= 0 ? n : 1000
 }
@@ -584,7 +584,7 @@ export function minExcessToApply(env: NodeJS.ProcessEnv = process.env): number {
  * it to an explicit hour instead; tune DEDUP_CRON_HOUR_UTC to your actual
  * low-traffic window.
  */
-export function dedupCronHourUtc(env: NodeJS.ProcessEnv = process.env): number {
+export function dedupCronHourUtc(env: NodeJS.Dict<string> = process.env): number {
   const h = parseInt(env.DEDUP_CRON_HOUR_UTC ?? '4', 10)
   return Number.isFinite(h) && h >= 0 && h <= 23 ? h : 4
 }
@@ -707,7 +707,7 @@ async function queryContentKeyStats(
  */
 export const DEFAULT_STATS_MIN_FREE_BYTES = 40 * 1024 ** 3
 
-export function dedupStatsMinFreeBytes(env: NodeJS.ProcessEnv = process.env): number {
+export function dedupStatsMinFreeBytes(env: NodeJS.Dict<string> = process.env): number {
   const raw = env.DEDUP_STATS_MIN_FREE_BYTES
   if (raw === undefined || raw.trim() === '') return DEFAULT_STATS_MIN_FREE_BYTES
   const n = Number(raw)
@@ -716,7 +716,7 @@ export function dedupStatsMinFreeBytes(env: NodeJS.ProcessEnv = process.env): nu
 
 /** Why the stats pass should not start, or null when the disk has room. A free-space check that fails counts as no room. */
 export async function dedupStatsHeadroomRefusal(
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.Dict<string> = process.env,
   check: () => Promise<{ freeBytes: number }> = () => checkDiskHeadroom(),
 ): Promise<string | null> {
   const need = dedupStatsMinFreeBytes(env)

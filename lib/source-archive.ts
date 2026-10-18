@@ -43,7 +43,7 @@ export interface ManifestEntry {
   replaced_at?: string
 }
 
-export function defaultArchiveDir(env: NodeJS.ProcessEnv = process.env): string {
+export function defaultArchiveDir(env: NodeJS.Dict<string> = process.env): string {
   const set = env.ULP_ARCHIVE_DIR?.trim()
   return set ? set : join(homedir(), 'ulp-archive')
 }

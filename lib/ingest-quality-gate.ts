@@ -177,7 +177,7 @@ function whole(raw: string | undefined, fallback: number): number {
 }
 
 /** Reads INGEST_QUALITY_GATE*. Anything that is not a positive number falls back to the default; an unknown mode is `hold`. */
-export function parseGateConfig(env: NodeJS.ProcessEnv = process.env): GateConfig {
+export function parseGateConfig(env: NodeJS.Dict<string> = process.env): GateConfig {
   const mode = (env.INGEST_QUALITY_GATE ?? '').trim().toLowerCase()
   return {
     mode: mode === 'warn' || mode === 'off' ? mode : 'hold',

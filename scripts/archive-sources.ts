@@ -26,7 +26,7 @@ import { FREE_MARGIN_BYTES, MIN_AGE_MS, inboxIsBusy, replaceOriginal, replaceRef
 const argv = process.argv.slice(2)
 const flag = (name: string): string | undefined => { const i = argv.indexOf(`--${name}`); return i === -1 ? undefined : argv[i + 1] }
 const has = (name: string): boolean => argv.includes(`--${name}`)
-const die = (message: string, code = 2): never => { console.error(message); process.exit(code) }
+function die(message: string, code = 2): never { console.error(message); process.exit(code) }
 
 const ARCHIVE = defaultArchiveDir(flag('out') ? { ...process.env, ULP_ARCHIVE_DIR: flag('out') } : process.env)
 const REPO = process.env.ULP_REPO ?? process.cwd()

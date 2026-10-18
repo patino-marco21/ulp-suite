@@ -1,0 +1,12 @@
+{
+  // Type-checks what tsconfig.json leaves out: the rehearsal scripts and the test suite (`npm run typecheck` runs both).
+  // The tests use vitest's globals, so its types are loaded here and not in the app's config.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "incremental": false,
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["next-env.d.ts", "types/**/*.ts", "__tests__/**/*.ts", "__tests__/**/*.tsx", "scripts/**/*.ts"],
+  "exclude": ["node_modules"]
+}

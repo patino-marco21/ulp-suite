@@ -21,7 +21,7 @@ import { readBackupStatus, backupMaxAgeHours } from '@/lib/backup-status'
 
 let tmp: string
 let src: Database.Database
-let env: NodeJS.ProcessEnv
+let env: NodeJS.Dict<string>
 const backupFromSrc = (dest: string) => src.backup(dest)
 const at = (iso: string) => () => new Date(iso)
 
