@@ -1,5 +1,5 @@
 import { execSync } from 'node:child_process'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 /**
  * LIVE check of lib/login-association.ts against the real ulp.credentials (the running ulpsuite_clickhouse container). READ-ONLY. Skipped unless LA_LIVE=1:
@@ -12,6 +12,13 @@ import { describe, expect, test } from 'vitest'
  *   - the username's association, pinned to the site, lists the address (and the reverse); and no step fails or hits the 30 s cap.
  * Only counts and timings are printed. The probes come from one slice of the primary key (domains q*), which is 4.6M rows and answers in under a second.
  */
+// The routes are the real ones against the real ClickHouse; only the API-key check is replaced (there is no key to give a test).
+vi.mock('@/lib/api-key-auth', () => ({
+  withApiKeyAuth: async () => ({ success: true, apiKey: { keyId: 'live-test', role: 'admin' }, rateLimit: { limit: 100, remaining: 99, resetAt: Date.now() + 60_000 } }),
+  addRateLimitHeaders: (response: unknown) => response,
+  logApiRequest: async () => undefined,
+}))
+
 const LIVE = process.env.LA_LIVE === '1'
 
 if (LIVE) {
@@ -76,4 +83,39 @@ describe.skipIf(!LIVE)('login association on the live table', () => {
     expect(stats.reverseFound).toBeGreaterThanOrEqual(Math.floor(stats.groups * 0.9))
     expect(stats.assocHigh).toBeGreaterThanOrEqual(Math.floor(stats.groups * 0.7))
   }, 300_000)
+
+  test('the two routes answer the same probes end to end (the real handlers, the real ClickHouse)', async () => {
+    const { executeQuery } = await import('@/lib/clickhouse')
+    const { NextRequest } = await import('next/server')
+    const { POST: associate } = await import('@/app/api/v1/lookup/associate/route')
+    const { POST: password } = await import('@/app/api/v1/lookup/password/route')
+    const post = (handler: (r: InstanceType<typeof NextRequest>) => Promise<Response>, path: string, body: unknown) =>
+      handler(new NextRequest(`http://localhost${path}`, { method: 'POST', body: JSON.stringify(body) }))
+
+    const g = ((await executeQuery(
+      `SELECT domain, password, groupArrayIf(email, login_type = 'username') AS users, groupArrayIf(email, login_type = 'email') AS mails
+       FROM ulp.credentials WHERE domain >= 'q' AND domain < 'r' AND length(password) >= 10
+       GROUP BY domain, password HAVING length(users) = 1 AND length(mails) = 1 ORDER BY cityHash64(domain, password) LIMIT 1
+       SETTINGS max_execution_time = 60`,
+      {},
+    )) as Array<{ domain: string; password: string; users: string[]; mails: string[] }>)[0]
+    expect(g).toBeDefined()
+
+    const t = Date.now()
+    const pw = await post(password, '/api/v1/lookup/password', { password: g.password, type: 'any', limit: 200 })
+    expect(pw.status).toBe(200)
+    const pwJson = await pw.json()
+    expect(pwJson.success).toBe(true)
+    expect(pwJson.results.map((r: { login: string }) => r.login)).toEqual(expect.arrayContaining([g.users[0].toLowerCase(), g.mails[0].toLowerCase()]))
+    expect(JSON.stringify(pwJson)).not.toContain(g.password)
+
+    const as = await post(associate, '/api/v1/lookup/associate', { items: [{ login: g.users[0], site: g.domain }, { login: g.mails[0], site: g.domain, want: 'username' }] })
+    expect(as.status).toBe(200)
+    const asJson = await as.json()
+    expect(asJson.count).toBe(2)
+    expect(asJson.results[0].candidates.map((c: { login: string }) => c.login)).toContain(g.mails[0].toLowerCase())
+    expect(asJson.results[1].candidates.map((c: { login: string }) => c.login)).toContain(g.users[0].toLowerCase())
+    expect(JSON.stringify(asJson)).not.toContain(g.password)
+    console.log(`login association routes live: both answered in ${Date.now() - t} ms`)
+  }, 120_000)
 })
