@@ -167,7 +167,7 @@ export default function DocsPage() {
               API Documentation
             </h1>
             <p className="text-muted-foreground mt-2">
-              Complete reference for the BronVault REST API v1
+              Complete reference for the ULP Suite REST API v1
             </p>
           </div>
           <Link href="/api-keys">
