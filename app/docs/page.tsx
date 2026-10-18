@@ -118,6 +118,8 @@ export default function DocsPage() {
     { id: "search-domain", label: "Search Domain", icon: Search, method: "GET" },
     { id: "lookup", label: "Lookup", icon: Database, method: "GET" },
     { id: "batch-lookup", label: "Batch Lookup", icon: Database, method: "POST" },
+    { id: "associate", label: "Associate", icon: Search, method: "POST" },
+    { id: "password-lookup", label: "Password Lookup", icon: Key, method: "POST" },
     { id: "summary", label: "Summary", icon: BarChart3, method: "GET" },
     { id: "upload", label: "Upload", icon: Upload, method: "POST" },
     { id: "api-keys", label: "API Keys", icon: Key, method: "CRUD" },
@@ -595,6 +597,154 @@ export default function DocsPage() {
         )}
 
         {/* Summary Section */}
+        {activeSection === "associate" && (
+          <div className="space-y-6">
+            <Card className="glass-card border-border/50">
+              <CardHeader>
+                <div className="flex items-center gap-3">
+                  <Badge className="bg-blue-500/10 text-blue-400 border-blue-500/30 font-mono">POST</Badge>
+                  <code className="text-lg font-mono text-foreground">/api/v1/lookup/associate</code>
+                </div>
+                <CardDescription className="text-muted-foreground mt-2">
+                  Which other logins belong to the same account as a login: an e-mail address for a username, or the reverse. A ULP line never pairs the two, so the link is inferred
+                  from the account&apos;s own password (on the site the login is known from, and anywhere else); the handle alone is weak evidence. Every candidate has a confidence
+                  (high, medium or low) and the evidence behind it. These are heuristics, not proof.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div>
+                  <h4 className="font-semibold mb-3 text-foreground">JSON Body</h4>
+                  <ParameterTable params={[
+                    { name: "login", type: "string", required: true, description: "The username, e-mail address or phone number to look up. Send one login, or use items for several." },
+                    { name: "items", type: "object[]", required: false, description: "Up to 10 objects with the fields below, instead of a single login. Each login takes a few seconds; three are probed at a time." },
+                    { name: "site", type: "string", required: false, description: "The site the login is known from, e.g. example.com. The password the login has THERE identifies the person, so it makes the answer much stronger." },
+                    { name: "password", type: "string", required: false, description: "A password the account is known to use. Probed for reuse; with site it pins the account. Never logged or returned." },
+                    { name: "want", type: "string", required: false, description: "email (default), username or phone: the kind of login to look for. username with an e-mail login answers 'which handle goes with this address'." },
+                  ]} />
+                </div>
+                <div>
+                  <h4 className="font-semibold mb-3 text-foreground">Example Request</h4>
+                  <CodeBlock code={`curl -X POST "${baseUrl}/api/v1/lookup/associate" \\
+  -H "X-API-Key: bv_your_api_key" \\
+  -H "Content-Type: application/json" \\
+  -d '{"items":[{"login":"somehandle","site":"example.com"}]}'`} />
+                </div>
+                <div>
+                  <h4 className="font-semibold mb-3 text-foreground flex items-center gap-2">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    Success Response
+                    <Badge variant="outline" className="text-xs">200 OK</Badge>
+                  </h4>
+                  <CodeBlock
+                    language="json"
+                    code={`{
+  "success": true,
+  "count": 1,
+  "results": [
+    {
+      "login": "somehandle",
+      "want": "email",
+      "anchored": true,        // pinned to the given site, so reuse on other sites counts
+      "too_common": false,     // true: the handle matches too many rows to attribute to one person
+      "login_sites": ["example.com", "other.org"],
+      "candidates_total": 1,
+      "candidates": [
+        {
+          "login": "someone@mail.example",
+          "confidence": "high",
+          "evidence": "same password as the username on example.com (2 logins share it)"
+        }
+      ],
+      "errors": []             // steps that failed or were skipped, by kind, e.g. "reuse: timed out"
+    }
+  ]
+}`}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    A rare handle answers in 0.5 to 2.5 s; a very common one (john) can take 15 s and a single letter 30 s, and is marked too_common
+                  </div>
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    Each login has a 40 s budget; a step that did not run says so in errors
+                  </div>
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <AlertCircle className="h-4 w-4 text-amber-500" />
+                    Low confidence means the same handle only: it may be another person
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
+        {activeSection === "password-lookup" && (
+          <div className="space-y-6">
+            <Card className="glass-card border-border/50">
+              <CardHeader>
+                <div className="flex items-center gap-3">
+                  <Badge className="bg-blue-500/10 text-blue-400 border-blue-500/30 font-mono">POST</Badge>
+                  <code className="text-lg font-mono text-foreground">/api/v1/lookup/password</code>
+                </div>
+                <CardDescription className="text-muted-foreground mt-2">
+                  The logins that use exactly this password (case-sensitive), one row per login with how many sites it was seen on and which. The password goes in the POST body,
+                  so it stays out of URLs and access logs; it is never logged and never returned.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div>
+                  <h4 className="font-semibold mb-3 text-foreground">JSON Body</h4>
+                  <ParameterTable params={[
+                    { name: "password", type: "string", required: true, description: "The exact password to look for (up to 256 characters)." },
+                    { name: "type", type: "string", required: false, description: "email (default), username, phone or any: which kind of login to return." },
+                    { name: "limit", type: "integer", required: false, description: "Logins to return, 1 to 1000 (default 100). has_more says whether there are more." },
+                    { name: "domain", type: "string", required: false, description: "Only logins seen on this site. Narrows a very common password." },
+                  ]} />
+                </div>
+                <div>
+                  <h4 className="font-semibold mb-3 text-foreground">Example Request</h4>
+                  <CodeBlock code={`curl -X POST "${baseUrl}/api/v1/lookup/password" \\
+  -H "X-API-Key: bv_your_api_key" \\
+  -H "Content-Type: application/json" \\
+  -d '{"password":"the password","type":"email","limit":50}'`} />
+                </div>
+                <div>
+                  <h4 className="font-semibold mb-3 text-foreground flex items-center gap-2">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    Success Response
+                    <Badge variant="outline" className="text-xs">200 OK</Badge>
+                  </h4>
+                  <CodeBlock
+                    language="json"
+                    code={`{
+  "success": true,
+  "count": 2,
+  "has_more": false,
+  "partial": false,        // true: a very common password; only the first 100,000 matching rows were read
+  "results": [
+    { "login": "someone@mail.example", "login_type": "email", "sites": 3, "domains": ["a.example", "b.example", "c.example"], "rows": 4 },
+    { "login": "other@mail.example", "login_type": "email", "sites": 1, "domains": ["a.example"], "rows": 1 }
+  ]
+}`}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    A rare password answers in about a second (a few seconds on a cold cache)
+                  </div>
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <AlertCircle className="h-4 w-4 text-amber-500" />
+                    A very common password reads at most 100,000 rows and says partial; 408 means it timed out: add domain
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
         {activeSection === "summary" && (
           <div className="space-y-6">
             <Card className="glass-card border-border/50">

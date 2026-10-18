@@ -448,10 +448,34 @@ Authentication: `Authorization: Bearer <api-key>` header.
 | `GET` | `/api/v1/search/credentials` | Search credentials by email, domain, URL, password, breach |
 | `GET` | `/api/v1/search/domain` | Domain/keyword search with subdomain and path aggregation |
 | `POST` | `/api/v1/lookup` | Batch lookup up to 100 emails |
+| `POST` | `/api/v1/lookup/associate` | Which e-mail (or username, or phone) belongs to the same account as a login, with a confidence and the evidence |
+| `POST` | `/api/v1/lookup/password` | The logins that use exactly this password |
 | `POST` | `/api/v1/upload` | Upload ULP file (admin keys only) |
 | `GET` | `/api/check` | Public self-service breach check (no key required) |
 
 Full interactive docs at `/docs` when the app is running.
+
+### Login association and password lookup
+
+A ULP line never pairs a username with an e-mail address, so `lookup/associate` **infers** the link from other rows. The strongest evidence is the account's own
+password: the password a login has on a site identifies the person far better than the handle does. Signals: an e-mail with the same password on the same site (`site`, optional),
+on any site (the fewer logins share the password, the stronger), an e-mail whose local part is the handle (strong only with the account's password), and a sign-in at a mail provider
+(`accounts.google.com` implies `<handle>@gmail.com`). Each candidate is `high`, `medium` or `low` with the evidence in words; these are heuristics, not proof (a generic handle belongs
+to many people, and the answer says `too_common`). On 122 handles the method gave 32 high, 28 medium, 53 low and 9 none, and random pairings share four or more letters 0.3% of the time
+against 41-54% for the high and medium candidates.
+
+```bash
+curl -X POST "$BASE/api/v1/lookup/associate" -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"items":[{"login":"somehandle","site":"example.com","password":"optional: a password the account is known to use"}]}'
+# "want": "username" or "phone" looks for those instead of e-mail addresses, so the same call also answers "which handle goes with this address"
+curl -X POST "$BASE/api/v1/lookup/password" -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"password":"the password","type":"email","limit":100,"domain":"optional-site.com"}'
+```
+
+`associate` takes up to 10 logins per request (a few seconds each, three at a time; a very common handle such as `john` can take 15 s or more and a single letter 30 s, and is
+marked `too_common`). `password` matches exactly and case-sensitively; a rare password answers in about a second, a very common one reads at most 100,000 matching rows and says
+`partial` (narrow it with `domain`). Passwords travel in the POST body, are never logged and are never returned. Design and measurements:
+`docs/superpowers/specs/2026-10-18-login-association-design.md`.
 
 ---
 
