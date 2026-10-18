@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest'
 import {
   COMMIT_MAX_EXECUTION_S,
+  DEFAULT_COMMIT_INSERT_THREADS,
   DEFAULT_NOVELTY_SLAB_ROWS,
   MIN_NOVELTY_SLAB_ROWS,
+  commitInsertThreads,
   noveltyConfig,
   slabCount,
 } from '@/lib/ingest-novelty-config'
@@ -48,5 +50,20 @@ describe('slabCount', () => {
     expect(slabCount(20_000_001, 20_000_000)).toBe(2)
     expect(slabCount(2_500, 1_000)).toBe(3)
     expect(slabCount(300_000_000, 20_000_000)).toBe(15)
+  })
+})
+
+describe('commitInsertThreads', () => {
+  it('is 4 by default', () => {
+    expect(DEFAULT_COMMIT_INSERT_THREADS).toBe(4)
+    expect(commitInsertThreads(env())).toBe(4)
+  })
+
+  it.each([['1', 1], ['8', 8], ['16', 16], [' 3 ', 3], ['2.9', 2]])('INGEST_COMMIT_INSERT_THREADS=%j gives %i', (raw, want) => {
+    expect(commitInsertThreads(env({ INGEST_COMMIT_INSERT_THREADS: raw }))).toBe(want)
+  })
+
+  it.each(['', '  ', 'abc', '0', '-1', '0.5', '17', '100', 'NaN'])('falls back to 4 for INGEST_COMMIT_INSERT_THREADS=%j (the range is 1 to 16)', raw => {
+    expect(commitInsertThreads(env({ INGEST_COMMIT_INSERT_THREADS: raw }))).toBe(4)
   })
 })

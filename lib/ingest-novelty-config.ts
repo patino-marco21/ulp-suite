@@ -4,10 +4,16 @@
  *
  *   INGEST_NOVELTY_CHECK      default on. off | 0 | false imports straight into ulp.credentials, exactly as before this feature.
  *   INGEST_NOVELTY_SLAB_ROWS  default 20,000,000, at least 1,000. A file is committed in slabs of about this many staged rows.
+ *   INGEST_COMMIT_INSERT_THREADS  default 4, 1 to 16. The commit INSERT ... SELECT runs with this many insert threads
+ *                                 (docs/superpowers/specs/2026-10-12-fast-ingest-design.md, step A2).
  */
 
 export const DEFAULT_NOVELTY_SLAB_ROWS = 20_000_000
 export const MIN_NOVELTY_SLAB_ROWS = 1_000
+
+export const DEFAULT_COMMIT_INSERT_THREADS = 4
+const MIN_COMMIT_INSERT_THREADS = 1
+const MAX_COMMIT_INSERT_THREADS = 16
 
 /** Every commit statement may run this long, in seconds. The client's own default is 60, far too short for a slab. */
 export const COMMIT_MAX_EXECUTION_S = 3300
@@ -24,6 +30,16 @@ export function noveltyConfig(env: NodeJS.Dict<string> = process.env): NoveltyCo
   const parsed = raw === undefined || raw.trim() === '' ? Number.NaN : Math.floor(Number(raw))
   const slabRows = Number.isFinite(parsed) && parsed >= MIN_NOVELTY_SLAB_ROWS ? parsed : DEFAULT_NOVELTY_SLAB_ROWS
   return { enabled, slabRows }
+}
+
+/**
+ * `max_insert_threads` for the commit insert. The server's default (0) wrote the exact statement at 142k rows/s; 4 threads reached 452k and 8 gained
+ * nothing more (measured on ClickHouse 26.3 against the live DDL, `LIMIT 1 BY` included). A value that is not a whole number from 1 to 16 means the default.
+ */
+export function commitInsertThreads(env: NodeJS.Dict<string> = process.env): number {
+  const raw = env.INGEST_COMMIT_INSERT_THREADS
+  const parsed = raw === undefined || raw.trim() === '' ? Number.NaN : Math.floor(Number(raw))
+  return Number.isFinite(parsed) && parsed >= MIN_COMMIT_INSERT_THREADS && parsed <= MAX_COMMIT_INSERT_THREADS ? parsed : DEFAULT_COMMIT_INSERT_THREADS
 }
 
 /** How many slabs a stage of `stageRows` rows is committed in (always at least one). */

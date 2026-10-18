@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/lib/clickhouse', () => ({ getClient: vi.fn() }))
 
@@ -16,7 +16,7 @@ import { stageTables } from '@/lib/ingest-stage'
 const tables = stageTables('0123456789ab')
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
-interface Call { kind: 'select' | 'exec' | 'kill'; sql: string; queryId: string }
+interface Call { kind: 'select' | 'exec' | 'kill'; sql: string; queryId: string; settings?: Record<string, number> }
 
 interface FakeConfig {
   stageRows: number
@@ -50,8 +50,8 @@ function makeDb(cfg: FakeConfig) {
       }
       throw new Error(`unexpected select: ${sql}`)
     },
-    async exec(sql, { queryId, signal }) {
-      calls.push({ kind: 'exec', sql, queryId })
+    async exec(sql, { queryId, signal, settings }) {
+      calls.push({ kind: 'exec', sql, queryId, settings })
       if (cfg.execDelayMs) await sleep(cfg.execDelayMs)
       if (cfg.hang?.test(sql)) {
         await new Promise<never>((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
@@ -323,5 +323,41 @@ describe('commitStage', () => {
       expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('monitor 1'))
       expect(db.calls.some(c => c.kind === 'kill')).toBe(false)
     })
+  })
+})
+
+describe('commitStage: the commit insert runs on several insert threads', () => {
+  afterEach(() => { vi.unstubAllEnvs() })
+
+  const run = async (extra: Partial<CommitOptions> = {}) => {
+    const db = makeDb({ stageRows: 1000, distinct: [900], known: [100] })
+    await commitStage(options(db, { parsedRows: 1000, ...extra }))
+    return db
+  }
+  const commitInsert = (db: { calls: Call[] }) => db.calls.find(c => c.sql.startsWith('INSERT INTO ulp.credentials'))!
+
+  it('asks for 4 insert threads by default, and only the commit insert asks', async () => {
+    const db = await run()
+    expect(commitInsert(db).settings).toEqual({ max_insert_threads: 4 })
+    const others = db.calls.filter(c => c.kind === 'exec' && c !== commitInsert(db))
+    expect(others.map(label)).toEqual(['truncate known', 'fill known']) // the existence scan keeps the server's own plan
+    expect(others.every(c => c.settings === undefined)).toBe(true)
+  })
+
+  it('takes the count from INGEST_COMMIT_INSERT_THREADS', async () => {
+    vi.stubEnv('INGEST_COMMIT_INSERT_THREADS', '8')
+    expect(commitInsert(await run()).settings).toEqual({ max_insert_threads: 8 })
+  })
+
+  it('an explicit count wins over the environment', async () => {
+    vi.stubEnv('INGEST_COMMIT_INSERT_THREADS', '8')
+    expect(commitInsert(await run({ insertThreads: 2 })).settings).toEqual({ max_insert_threads: 2 })
+  })
+
+  it('rows written and the accounting check do not depend on the thread count', async () => {
+    for (const insertThreads of [1, 4, 16]) {
+      expect(await commitStage(options(makeDb({ stageRows: 1000, distinct: [900], known: [100] }), { parsedRows: 1000, insertThreads })))
+        .toMatchObject({ inserted: 800, known: 100, distinct: 900 })
+    }
   })
 })

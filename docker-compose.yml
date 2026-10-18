@@ -158,6 +158,11 @@ services:
       # commit step.
       INGEST_NOVELTY_CHECK: ${INGEST_NOVELTY_CHECK:-}
       INGEST_NOVELTY_SLAB_ROWS: ${INGEST_NOVELTY_SLAB_ROWS:-}
+      # Fast ingest, step A (docs/superpowers/specs/2026-10-12-fast-ingest-design.md) -- optional; forwarded explicitly (see above).
+      # INGEST_COMMIT_INSERT_THREADS (empty = 4, 1 to 16) is max_insert_threads for the commit insert. CLICKHOUSE_COMPRESS_REQUESTS=1 gzips
+      # INSERT bodies again (off by default: the app reaches ClickHouse over the Docker network, where gzip only costs CPU).
+      INGEST_COMMIT_INSERT_THREADS: ${INGEST_COMMIT_INSERT_THREADS:-}
+      CLICKHOUSE_COMPRESS_REQUESTS: ${CLICKHOUSE_COMPRESS_REQUESTS:-}
       # Ingest quality gate (lib/ingest-quality-gate.ts) -- optional; forwarded explicitly (see above). A file whose rows break too many rules is held in
       # inbox/held/ before one row is stored. INGEST_QUALITY_GATE=warn only reports, =off switches it off. The thresholds are percentages; empty = the
       # defaults in code (hold above 2% rows that break a rule, 5% unsplit lines, 25% garbage; at least 20000 lines; the first check after 1000000 lines).

@@ -213,6 +213,11 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   holds costs the parse and one scan of one column. `off` imports straight into `ulp.credentials` as before.
 - `INGEST_NOVELTY_SLAB_ROWS` — rows per commit step (default `20000000`, at least `1000`). Files below
   this are committed in one step; larger ones in hash slabs, one slab at a time across all imports.
+- `INGEST_COMMIT_INSERT_THREADS` — `max_insert_threads` for the commit insert (default `4`, `1` to `16`). Measured on the exact
+  statement against the live table definition: 142k rows/s with the server's default, 452k with 4, nothing more with 8
+  (`docs/superpowers/specs/2026-10-12-fast-ingest-design.md`, step A2).
+- `CLICKHOUSE_COMPRESS_REQUESTS` — set `1` to gzip INSERT bodies again. Off by default: ClickHouse is on the same machine or
+  network, where gzip only cost CPU on the thread that parses the file (step A1).
 - `INGEST_QUALITY_GATE` — the ingest quality gate, on by default (`hold`; `lib/ingest-quality-gate.ts`,
   `docs/superpowers/specs/2026-10-12-source-archive-and-ingest-gate-design.md`). While a file is staged the importer counts
   the rows that break a rule a correctly parsed row never breaks (a login that is a URL, a url that holds a credential, a

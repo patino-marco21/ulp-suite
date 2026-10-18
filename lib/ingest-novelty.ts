@@ -22,7 +22,7 @@ import { getClient } from '@/lib/clickhouse'
 import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 import { buildNormalizedDomainSetMatch, type MatchedCredential, type MatchMode } from '@/lib/domain-match'
 import { waitForDiskSpace } from '@/lib/ingest-disk-gate'
-import { COMMIT_MAX_EXECUTION_S, slabCount } from '@/lib/ingest-novelty-config'
+import { COMMIT_MAX_EXECUTION_S, commitInsertThreads, slabCount } from '@/lib/ingest-novelty-config'
 import type { StageTables } from '@/lib/ingest-stage'
 
 // ── SQL builders (pure) ─────────────────────────────────────────────────────────────────────────────
@@ -91,8 +91,11 @@ export function monitorStageSql(
 // ── the ClickHouse executor ─────────────────────────────────────────────────────────────────────────
 
 export interface NoveltyDb {
-  /** Runs a statement that returns no rows. `writtenRows` is the server's own count, or null when it sent none. */
-  exec(sql: string, o: { queryId: string; signal: AbortSignal }): Promise<{ writtenRows: number | null }>
+  /**
+   * Runs a statement that returns no rows. `writtenRows` is the server's own count, or null when it sent none.
+   * `settings` are ClickHouse settings for this one statement, on top of the commit settings every statement carries.
+   */
+  exec(sql: string, o: { queryId: string; signal: AbortSignal; settings?: Record<string, number> }): Promise<{ writtenRows: number | null }>
   select<T>(sql: string, o: { queryId: string; signal: AbortSignal; params?: Record<string, unknown> }): Promise<T[]>
   /** Best-effort KILL QUERY of a statement this module started. */
   kill(queryId: string): Promise<void>
@@ -112,12 +115,12 @@ export const newQueryId = () => `novelty-${randomUUID()}`
 
 export function clickhouseNoveltyDb(): NoveltyDb {
   return {
-    async exec(sql, { queryId, signal }) {
+    async exec(sql, { queryId, signal, settings }) {
       const res = await getClient().command({
         query: sql,
         query_id: queryId,
         abort_signal: signal,
-        clickhouse_settings: COMMIT_SETTINGS,
+        clickhouse_settings: (settings ? { ...COMMIT_SETTINGS, ...settings } : COMMIT_SETTINGS) as ClickHouseSettings,
       })
       const written = res.summary ? Number(res.summary.written_rows) : Number.NaN
       return { writtenRows: Number.isFinite(written) ? written : null }
@@ -255,6 +258,8 @@ export interface CommitOptions {
   monitors?: CommitMonitor[]
   /** Most monitor matches to collect in total; 0 or absent = none. */
   matchCap?: number
+  /** `max_insert_threads` for the commit insert; absent = INGEST_COMMIT_INSERT_THREADS (lib/ingest-novelty-config.ts). */
+  insertThreads?: number
   /** Test seams. */
   db?: NoveltyDb
   gates?: CommitGates
@@ -303,6 +308,7 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
   const { signal, tables: t } = opts
   const monitors = (opts.monitors ?? []).filter(m => m.domains.some(d => d.trim() !== ''))
   const matchCap = Math.max(0, Math.floor(opts.matchCap ?? 0))
+  const insertThreads = opts.insertThreads ?? commitInsertThreads()
   const matches: MatchedCredential[] = []
 
   const stageRows = await countRows(db, stageCountSql(t), { queryId: queryId(), signal })
@@ -347,7 +353,8 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
 
         if (expected > 0) {
           opts.onPhase?.({ phase: 'inserting', slab: k + 1, slabs })
-          const { writtenRows } = await step(id => db.exec(commitInsertSql(t, opts.target, slabs, k), { queryId: id, signal }))
+          const { writtenRows } = await step(id =>
+            db.exec(commitInsertSql(t, opts.target, slabs, k), { queryId: id, signal, settings: { max_insert_threads: insertThreads } }))
           if (writtenRows === null) {
             console.warn(`[ingest-novelty] slab ${k + 1}/${slabs}: the server sent no written-rows count; the accounting check was skipped`)
           } else if (writtenRows !== expected) {
