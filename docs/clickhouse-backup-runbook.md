@@ -30,9 +30,9 @@ starting `credentials_` or `zz_` (today: `ulp.credentials`, `ulp.sources`, `ulp.
 Override with `BACKUP_TABLES=db.table,db.table`.
 
 It deliberately does **not** use `ulp.*`. The database also holds the pre-dedup archive
-`ulp.credentials_predup_auto` (~381 GiB) and any dedup scratch tables. A wildcard would
+`ulp.credentials_predup_auto` (~138 GiB since 2026-10-18, see the last section) and any dedup scratch tables. A wildcard would
 snapshot them too — pinning their parts, so dropping the archive afterwards would free
-nothing until the snapshot is deleted — and would try to upload hundreds of GiB.
+nothing until the snapshot is deleted — and would try to upload over a hundred GiB it does not need.
 
 ## Why local snapshots are guarded
 
@@ -197,12 +197,43 @@ If the whole box is gone: stand up the stack on new hardware (`docker compose up
 fill `.env` with the same `S3_*`, then `restore <name>` pulls from S3 and rebuilds. Restore
 the SQLite snapshot too (§6) or you will have the data but no accounts.
 
-## Before dropping the pre-dedup archive
+## The pre-dedup archive
 
-`ulp.credentials_predup_auto` (~381 GiB) is the only second copy of the credential data while
-no backup exists. Do not drop it until: S3 is configured → `space` → `full` → `status` →
-`verify` all succeed. Then see the drop procedure in
-`docs/superpowers/specs/2026-09-30-related-panel-and-domain-rev-design.md` (Results).
+`ulp.credentials_predup_auto` is what the 2026-09-30 content-dedup cutover left behind: the July and August 2026
+partitions as they were before the duplicates were removed (2,778,102,283 rows). It is a rollback net for logical
+mistakes (a wrong DELETE or mutation on the live table), not a disk-failure backup: it sits on the same disk as
+everything else. Nothing reads it at run time, and no view or dictionary depends on it.
+
+**2026-10-18: its two projections were dropped** (`proj_imported_desc` and `proj_domain_reversed`, 242.8 GiB of
+re-sorted copies; `ALTER TABLE ... DROP PROJECTION`, a hardlink mutation that finished in seconds). It now holds the
+base data only: 138.43 GiB, the same 8 parts and the same 2,778,102,283 rows, nothing lost.
+
+What the rest of the table still holds and the live table does not:
+
+- **The duplicate rows** (1,384,652,732 at the cutover). In sampled slices about 90% are the same credential seen in
+  other files and 10% are repeated lines inside one file. The live table keeps one row per credential, with a
+  `was_duplicated` flag and the earliest source file and import time, but not the number of copies or the other files.
+- **A second, ClickHouse-side copy of the old rows.** The plaintext of most of them is gone: 96.5% of the old rows
+  come from source files that are not in the source archive. By content, a sample taken on 2026-10-18 (8,032 old rows
+  with e-mail logins) found 73% of the logins and passwords, and 59% with the same site, in the archived files under
+  other names, so roughly a quarter to a third of the old rows exist only in ClickHouse.
+
+Before dropping the rest (`DROP TABLE ulp.credentials_predup_auto SYNC SETTINGS max_table_size_to_drop = 0`; the
+default 50 GB limit still refuses a 138 GiB table, and `SYNC` frees the space at once, with no `UNDROP` window):
+
+1. Have a replacement net for the two closed months: an S3 backup (`space` → `full` → `status` → `verify`, above) or,
+   weaker, a local hardlink snapshot, `BACKUP_TABLES=ulp.credentials BACKUP_PARTITIONS=202607,202608
+   BACKUP_FORCE=1 ./scripts/clickhouse-backup.sh local` (about 0 GiB; it protects against mistakes, not against
+   disk failure; not yet run on the real table).
+2. Accept that the duplicate rows and their file lineage go with it.
+3. Do any cleanup of the old partitions first, while the net exists (the leftovers of earlier parser versions are
+   listed in `docs/superpowers/specs/2026-10-12-parser-v6-and-redo-design.md`). With the table's projections the
+   lightweight DELETE is refused (`lightweight_mutation_projection_mode = throw`), so the cleanup is an
+   `ALTER ... DELETE` that rewrites the two old partitions (about 97 GiB plus 12 GiB of projections, estimated 1-2 h)
+   and needs about 110 GiB of free space on top.
+
+The content-dedup tick drops the previous archive itself, without asking, in step 2 of an *applying* cycle
+(`CONTENT_DEDUP_APPLY=true` and at least `DEDUP_MIN_EXCESS` excess rows); the default is `false`.
 
 ---
 

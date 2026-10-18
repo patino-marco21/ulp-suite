@@ -237,6 +237,8 @@ or `https`:
    backup's restored count. Then:
    `docker exec ulpsuite_clickhouse clickhouse-client -q "DROP TABLE ulp.credentials_predup_auto SYNC SETTINGS max_table_size_to_drop = 0"`
    (the default 50 GB limit refuses it otherwise; `SYNC` releases the space at once). It frees ~381 GiB.
+   *Update 2026-10-18:* the archive's two projections were dropped (381.20 -> 138.43 GiB, nothing lost); the
+   runbook section "The pre-dedup archive" has the current state and the steps before dropping the rest.
    **Note:** the content-dedup tick drops the previous archive itself in step 2 of its next *applying* cycle
    (`CONTENT_DEDUP_APPLY=true`, needs >= `DEDUP_MIN_EXCESS` = 14,000,000 excess rows, so not soon) - without asking.
 2. **Enrolling 2FA** (needs the owner's authenticator). The loopback binding is the interim mitigation.
