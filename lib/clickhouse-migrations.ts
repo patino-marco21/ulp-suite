@@ -10,6 +10,15 @@ import { buildFreeWebmailInClause } from './webmail-providers'
 import { NOISE_EXPR } from './ulp-noise'
 import { dbGet, dbRun } from './sqlite'
 import { SEARCH_INDEX_DEFINITIONS } from './search-index-definitions'
+import {
+  INDEX_BF_BREACH_NAME,
+  INDEX_BF_SOURCE_FILE,
+  INDEX_NGRAM_DOMAIN,
+  trackConnectionLoss,
+  verifySchema,
+  waitForClickHouse,
+  type WaitOptions,
+} from './clickhouse-migration-safety'
 import { addressIndexAddSql } from './address-lookup'
 import {
   IMPORTED_DESC_PROJECTION_BODY,
@@ -24,6 +33,10 @@ import { SOURCES_IDENTITY_ALTER } from './source-archive'
 
 // Per-process guard (still useful to avoid redundant calls within one process)
 let migrationsDone = false
+
+// A run that could not reach ClickHouse (or lost it) is not recorded and may be tried again, but the upload route calls the runner on every request: wait this long between tries.
+const RETRY_COOLDOWN_MS = 60_000
+let retryNotBefore = 0
 
 // Schema-migration version — bump this to run the new DDL block on next startup.
 // The data-repair mutations have their own separate persistence gate below.
@@ -302,13 +315,32 @@ function setSetting(key: string, value: string): void {
   try { dbRun(`INSERT OR REPLACE INTO app_settings (key_name, value) VALUES (?, ?)`, [key, value]) } catch {}
 }
 
-export async function runClickHouseMigrations(): Promise<void> {
-  if (migrationsDone) return
+export async function runClickHouseMigrations(opts: { wait?: WaitOptions } = {}): Promise<void> {
+  if (migrationsDone || Date.now() < retryNotBefore) return
   migrationsDone = true
 
-  const lastDdl = getSettingInt('ch_ddl_version', 0)
+  // Not recorded and tried again later: the run reached ClickHouse only partly or not at all (lib/clickhouse-migration-safety.ts has the incident).
+  const tryAgainLater = (why: string) => {
+    migrationsDone = false
+    retryNotBefore = Date.now() + RETRY_COOLDOWN_MS
+    console.error(`[ClickHouse migration] ${why}; the next start (or a call after a minute) runs it again`)
+  }
 
-  const client = getClient()
+  // A first start on an empty data directory finds the health check green against the entrypoint's temporary server while the real one is not listening yet.
+  // Ask a real query until it answers instead of sending hundreds of statements into ECONNREFUSED and recording them as done.
+  const rawClient = getClient()
+  const reachable = await waitForClickHouse(async () => {
+    await (await rawClient.query({ query: 'SELECT 1', format: 'JSONEachRow' })).json()
+  }, opts.wait)
+  if (!reachable) {
+    tryAgainLater('ClickHouse did not answer a query in time: no DDL was run and no version was recorded')
+    return
+  }
+
+  let connectionLost = false
+  const client = trackConnectionLoss(rawClient, () => { connectionLost = true })
+
+  const lastDdl = getSettingInt('ch_ddl_version', 0)
 
   const countryTierExpr  = buildCountryTierExpression()
   const loginTypeExpr    = buildLoginTypeExpression()
@@ -436,11 +468,11 @@ export async function runClickHouseMigrations(): Promise<void> {
   // MATERIALIZE INDEX rebuilds the index for existing data (fire-and-forget mutation).
   if (lastDdl < 2) {
     await runMigration(
-      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_bf_breach_name breach_name TYPE bloom_filter(0.01) GRANULARITY 1`,
+      INDEX_BF_BREACH_NAME.addSql,
       `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_bf_breach_name`
     )
     await runMigration(
-      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_bf_source_file source_file TYPE bloom_filter(0.01) GRANULARITY 1`,
+      INDEX_BF_SOURCE_FILE.addSql,
       `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_bf_source_file`
     )
     console.warn('[ClickHouse migration] DDL v2 applied')
@@ -939,7 +971,7 @@ export async function runClickHouseMigrations(): Promise<void> {
   // columns once each has one.
   if (lastDdl < 19) {
     await runMigration(
-      `ALTER TABLE ulp.credentials ADD INDEX IF NOT EXISTS idx_ngram_domain domain TYPE ngrambf_v1(4, 8192, 4, 0) GRANULARITY 1`,
+      INDEX_NGRAM_DOMAIN.addSql,
       `ALTER TABLE ulp.credentials MATERIALIZE INDEX idx_ngram_domain`
     )
     console.warn('[ClickHouse migration] DDL v19 applied (added idx_ngram_domain — MATERIALIZE running in background)')
@@ -1093,6 +1125,12 @@ export async function runClickHouseMigrations(): Promise<void> {
     }
   }
 
+  // A connection that was lost at any point means statements may not have reached the server: record nothing (every block is idempotent) and fire no repair mutation.
+  if (connectionLost) {
+    tryAgainLater('the connection to ClickHouse was lost during the run: the DDL version was not recorded and the data-repair mutations were not fired')
+    return
+  }
+
   // A failed v28 or v29 keeps the recorded version below it, so the next start runs the ALTER again: an import from the archive needs the v28 columns, the lookups the v29 index.
   const ddlReached = ddlVersionToRecord(sourcesIdentityFailed, addressIndexFailed)
   if (lastDdl < DDL_VERSION) {
@@ -1101,6 +1139,9 @@ export async function runClickHouseMigrations(): Promise<void> {
   } else {
     console.warn(`[ClickHouse migration] DDL v${DDL_VERSION} already applied — skipping`)
   }
+
+  // Whatever the recorded version says, compare the live table with what the migrations own (indexes added, columns reported); see lib/clickhouse-migration-safety.ts.
+  await verifySchema(client)
 
   // ── Data-repair mutations (fire-and-forget, run exactly once) ────────────
   // These fix rows that were mis-parsed before the ULP parser was patched.
