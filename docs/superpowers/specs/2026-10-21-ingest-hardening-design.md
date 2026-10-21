@@ -38,12 +38,9 @@ at start like the phase timings of fast-ingest step A3.
 
 ## Not changed, on purpose
 
-- **The 7-day purge of `inbox/done/` by file mtime** (at every start) is the reason a file that exists only there is at risk: a file keeps the mtime of its download, so
-  one that was imported yesterday can be older than 7 days. The run book's order (archive first, `--replace` only by the owner) is the protection; the 20 files that had
-  no archive were archived by hand the same day (no `--replace`, every archive decoded again and matched). Deleting by the age of the move (ctime) or only files with an
-  archive would close it in code; it is a separate, small change.
-- **`UPLOAD_CONCURRENCY` stays at 2.** Two lanes used 1.1 of 16 cores while staging; four lanes should take about 23-28 minutes for a batch like this one instead of 47
-  (an estimate, not a measurement). It is a setting, applied when `inbox/processing` is empty.
+- **The 7-day purge of `inbox/done/` by file mtime** was left for a separate change; it was made the same evening (see "Follow-up", first part).
+- **`UPLOAD_CONCURRENCY` stays at 2**, and the estimate written here first (four lanes in about 23-28 minutes instead of 47) was wrong: the lanes share one JavaScript
+  thread (see "Follow-up", second part, with the measurement).
 - Group commit, parse workers and a native parser are the fast-ingest spec's steps B and C.
 
 ## Evidence
@@ -80,3 +77,63 @@ A fake-docker test runs the real `verify-file.ts` and pins its bucket SQL, the s
 **Not proven by the rehearsal:** the cron's skip on the live queue (it is unit-tested against the real `uploadQueue`, and the rehearsal showed the cron still builds when
 idle). The estimate of the total rows on a small file lags by the batches in flight (up to about 50% on a 5-batch file, 0.7% on a 74-million-row one); the share read and
 the time left come from the bytes alone and do not.
+
+## Follow-up (2026-10-21, evening): `done/` retention, and why the lane count stays at 2
+
+Two items of "Not changed, on purpose" were looked at again after the release. The first became a code change; the second was measured and the answer is no.
+
+### 1. `inbox/done/` is pruned by the age of the import, and only for files the archive holds
+
+**The defect.** At every start the watcher deleted each file of `done/` whose own modification date was older than 7 days. A rename keeps that date, so a file downloaded ten
+days before it was imported was "old" the moment it landed in `done/`. On the afternoon of 2026-10-21 that rule would have deleted the first of the 20 files that nobody had
+archived (21.6 GB) at the next start from 2026-10-24, and the rest on the days after; the start of the release deploy deleted two files for the same reason (both archived).
+The archive (`scripts/archive-sources.ts`) is the only other copy of a source file, and the owner's rule is never to delete an original that is not archived.
+
+**Why not the change time.** The first idea was to age a file from when it moved (ctime). It cannot work: `docker-entrypoint.sh` runs `chown -R` and `chmod -R 777` on
+`/app/inbox` at every container start, which sets the ctime of every file in the folder to the time of the start. Measured on the live folder: all 21 files of `done/` and the
+one in `failed/` showed the time of that day's deploy as their change time, although the imports had ended three hours earlier.
+
+**The rule now** (`lib/inbox-retention.ts`, called from `startInboxWatcher`). A file leaves `done/` only when both hold:
+- the job log (`processing_jobs`, source `inbox`, status `done`, the newest row of that name, read as UTC) is more than 7 days old. A file with no such row stays;
+- the source archive holds that exact file: the manifest has the same name and size, and `<id>.zst` is on disk at the `archive_bytes` the manifest records; for an
+  `.archiveref` the archive file it points to exists. A manifest that cannot be read means nothing counts as archived, one warning says so, and nothing is deleted.
+
+Everything else stays. The start-up log, now `console.warn` because the production build strips `console.log` (the old deletion lines never reached `docker logs`), says what was
+deleted and how many files and GiB wait for the archive. The app reads the manifest through the read-only `/archive` mount it already has; no setting is new. A deployment
+with no archive keeps `done/` for ever, which is the safe side of the old behaviour (a full disk is loud: the ingest disk gate pauses imports; a deleted original is silent).
+
+**Evidence.** Test-first: the first 19 unit tests, written against the old rule, failed 14 of 19 for the right reasons (a file nobody archived deleted, one imported yesterday
+deleted because the file was a month old, a file the log never imported deleted, no lookup failure contained). Final: 20 unit tests on real directories, a real archive made with
+the archive tool's own functions and the real job log, plus 3 checks that the watcher calls the rule and logs with `console.warn`. Rehearsal scenario `retention` in
+`scripts/e2e-novelty-ingest.ts` (a real archive copied into the container, five files in `done/` with their own date 40 days back and job rows of 8 days, 8 days, 1 day, 8 days
+(an `.archiveref`) and none, then a restart of the production image): on the PREVIOUS image 5 of its 18 checks fail (the file nobody archived, the file imported yesterday and
+the file the log never imported are all deleted, and there is no log line); on the candidate it passes, and so do `basic`, `concurrent`, `link`, `same-name` and `progress`
+(77 of 77 together).
+
+### 2. `UPLOAD_CONCURRENCY` stays at 2: the lanes share one JavaScript thread
+
+The release notes above said four lanes should take about 23-28 minutes for the 47-minute batch. That was an estimate that treated each lane as a parallel parser, and it was
+wrong. Parsing runs on the app's main thread (no `worker_threads` anywhere in the code; the parse pool of the fast-ingest spec, step C, is specified and not built), so lanes
+only overlap one file's waits (inserts, the commit lock) with another file's parsing. The batch itself already said so: the two lanes used 1.09 cores of 16 in total, and its
+aggregate of 115k lines/s sits next to a one-thread parse ceiling of 129k lines/s (330M lines at that ceiling are 43 of the 47.4 minutes).
+
+Measured with `scripts/measure-upload-lanes.mjs` on the isolated rehearsal stack, production image, one run per setting, 4 synthetic files of 2,000,000 lines (8,000,000 rows,
+every one imported exactly), the rehearsal's 30 s stall watchdog raised to the production 20 minutes:
+
+| `UPLOAD_CONCURRENCY` | wall | end to end | app CPU | ClickHouse CPU | app memory peak (anon) |
+|---|---|---|---|---|---|
+| 1 | 124 s | 65k lines/s | 0.66 cores | 1.57 cores | 492 MiB |
+| 2 | 85 s | 94k lines/s | 0.90 cores | 2.16 cores | 546 MiB |
+| 4 | 131 s | 61k lines/s | 0.60 cores | 2.31 cores | 842 MiB |
+
+Two lanes get the app to 0.9 of the one core it can use (an earlier 2-lane run took 94 s, so the spread is about 10%). Four lanes add no capacity and only contention: each file
+took 76-128 s instead of about 30 s alone, the app used less CPU, ClickHouse more. A first 4-lane run with the rehearsal's own 30 s watchdog failed one file after 36 s
+without progress (a lane that was waiting, most likely for the commit lock; the cause was not isolated); the production limit is 20 minutes, and in the live batch a slab
+commit holds the lock about a minute. Memory is not what limits it: the app's heap peaked at 492, 546 and 842 MiB at 1, 2 and 4 lanes (the live app has an 8 GiB limit and a
+6 GiB heap). Limits of the measurement: one run per setting; the rehearsal ClickHouse is capped at 4 GB and holds almost no data, so its commit is cheaper than the live one and
+the four-lane slowdown may be smaller or larger live. The one-thread argument does not depend on it.
+
+**What this changes.** The setting stays at 2, and the lever for a big-file batch is the parse pool, not the lane count. Parsing is 51.5% of lane time in the 47.4-minute batch;
+spread over several cores the floor becomes the serialized commit (16.3 minutes of lock in that batch), so roughly 20-25 minutes with four or more workers is the order of
+magnitude to expect (an estimate from those numbers, not a measurement). For a batch of many small files the lever is group commit (step B: 11 existence scans become 1).
+Both are in the fast-ingest spec and await its review.
