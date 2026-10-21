@@ -1,6 +1,6 @@
 # Ingest hardening: design and result (2026-10-21)
 
-Status: built and rehearsed (see "Evidence"); the deploy and its result are at the end. The repository is public: this file holds numbers and reasons only, never file
+Status: built, rehearsed on the isolated stack and checked on the live table (see "Evidence"); the deploy and its result are at the end. The repository is public: this file holds numbers and reasons only, never file
 names, search terms or credential values.
 
 ## Why
@@ -48,4 +48,35 @@ at start like the phase timings of fast-ingest step A3.
 
 ## Evidence
 
-(Filled in below as the checks ran.)
+**Unit and integration tests.** Every change was written test-first and the new tests were watched failing for the right reason before the code. Final tree: 259 files
+passed (10 live files skipped), 3,962 tests passed, typecheck of the app, `scripts/` and `__tests__/` clean, ESLint clean, `next build` ok (inside the image build).
+A fake-docker test runs the real `verify-file.ts` and pins its bucket SQL, the sums, the new checks and the parallel mode.
+
+**On the live table, read-only** (`verify-file.ts` against the real ClickHouse and a copy of the job log; its only write is a scratch Memory table it drops):
+
+| File | Importable rows | Distinct hashes | Buckets | Result |
+|---|---|---|---|---|
+| a small one, single probe, then 4 buckets | 913,502 | 882,263 | 1, then 4 | identical numbers; each of the 4 passes took 15-22 s and peaked at 207-287 MB |
+| a 4.2 GB file | 61,014,785 | 56,630,708 | 4 | all 8 checks pass at the default 6 GB cap |
+| the file that stopped the old tool with a memory error | 74,081,817 | 74,071,354 | 5 | all 8 checks pass |
+| a second big file, in the same `--jobs 2` run | 47,633,232 | 43,123,013 | 3 | all 8 checks pass; the run prints each file as one block and ends `ALL CHECKS PASSED (2 files)` |
+
+**On the isolated rehearsal stack** (a real ClickHouse and the real inbox volume; candidate image built from the commit under test, `REHEARSAL_APP_IMAGE`):
+
+- The three new scenarios first ran against the PREVIOUS (live) image and failed where the defects are, 20 of 36: a finished file put back as a second name left `processing/`
+  with a link count of 2 and the file was imported twice over, a used name with another size was skipped silently with no size in `ulp.sources`, and the status endpoint had
+  no per-file progress (0 samples).
+- Against the candidate: fresh install 49 of 49, novelty-aware ingest **182 of 182** (the 8 older scenarios and all the earlier checks included, with the 3 new ones),
+  upload resilience 33 of 33, search dictionary 81 of 81 (the rebuild cron still builds when no import runs). The first full run had 8 failures in the new scenarios' own
+  fixtures (reused line tags, a percentage that two batches in flight make meaningless on a 5-batch file, two files that could miss each other); they were fixed in the
+  fixtures and the same fixtures fail on the previous image.
+- Progress, two lanes (500,000 rows each, one file of short lines and one of long ones): both files listed in the same answer, the share read within a point of the bytes
+  read and never going back, the time left never negative and never growing past 40%, the other file's card kept when the first finished.
+- Looked at in the Browser pane against that stack: two cards at once (21.9 MB of 492.2 MB read, 4%, est. 2.2M rows, ETA about 1 min; 21.9 MB of 175.3 MB read, 12%),
+  the card of the short file gone when it finished while the long one went on (440.4 MB of 492.2 MB, 89%), "already imported · skipped" with its tooltip for a re-dropped
+  finished file, and the line-by-line tooltip of a finished job. A 3,000,000-row file of long lines failed in that stack only because its ClickHouse is capped at 4 GB
+  (the live one has 20 GiB); nothing was left stranded.
+
+**Not proven by the rehearsal:** the cron's skip on the live queue (it is unit-tested against the real `uploadQueue`, and the rehearsal showed the cron still builds when
+idle). The estimate of the total rows on a small file lags by the batches in flight (up to about 50% on a 5-batch file, 0.7% on a 74-million-row one); the share read and
+the time left come from the bytes alone and do not.
