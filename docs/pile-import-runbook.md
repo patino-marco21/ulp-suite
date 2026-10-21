@@ -73,7 +73,7 @@ repository writes its scratch files under `PILE_WORK_DIR`: point that at a scrat
 
 1. `CUT=... scripts/pile/global-checks.sh` (all lines): 0 duplicate hashes, junk signature about 500 per million, `t.me/` about 3 per million, double-encoded text about 0,
    0 empty fields, 0 hash collisions in the 4 buckets.
-2. `npx tsx scripts/pile/verify-file.ts <db copy dir> '<CUT>' <file> ...` on a spread of 5-10 files (small, 100 MB, 1 GB, one of the largest 4 GB ones, which takes ~8 minutes and 2 GB of memory): every check `ok`. It parses the file with the
+2. `npx tsx scripts/pile/verify-file.ts [--jobs 4] <db copy dir> '<CUT>' <file> ...` on a spread of 5-10 files (small, 100 MB, 1 GB, one of the largest 4 GB ones, which takes ~8 minutes and 2 GB of memory): every check `ok`. The table is probed in buckets of the content hash (`VERIFY_BUCKET_HASHES`, 16M rows each), so a file of 74 million distinct hashes stays far under the 6 GB cap that stopped the single probe; `--jobs N` recounts N files at once (one parser core each) and prints every file as one block. It parses the file with the
    working tree's parser, so run it from a checkout of the commit that is deployed; against rows imported by an older parser it reports FAILs by design.
 3. Build the search dictionary by hand: `npx tsx scripts/build-search-dictionary.ts --skip-headroom-check` (about 4 minutes, +2.5 GiB; run 4's took 237 s), then `--status` says fresh.
 4. Cron lines after 05:00Z: `docker logs ulpsuite_app | grep -E "content-dedup\] cron|projection-scope\] cron"`; the dedup report must say `applied` false.

@@ -194,12 +194,14 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   (see `docs/superpowers/specs/2026-07-20-ingest-memory-backpressure-design.md`)
   paces every batch and file claim against ClickHouse's own live memory
   pressure, raising this to 2–3 is reasonable on hosts with memory headroom —
-  this deployment runs at 2. Known limitation: the Inbox Monitor's live
-  progress display is a single slot, not per-job — at concurrency > 1 a
-  still-running file's progress can go invisible if another concurrent file
-  finishes first. Every file still gets its own row in the job log / Inbox
-  Monitor history regardless; this only affects the live in-progress
-  indicator.
+  this deployment runs at 2. The Inbox page shows one progress card per file
+  in flight (`jobs_progress` in `GET /api/inbox/status`); a plain file and a
+  file read from the archive report the share of the file read from the bytes
+  read, so the bar and the ETA do not depend on the length of a line. The
+  job log records, for every finished file, the rows that repeat inside it
+  (`repeats`) and a note when the same-name check skipped it
+  (`already-imported`), so imported + already-known + repeated + rejected add
+  up to the lines of the file.
 - `IMPORT_STALL_TIMEOUT_MS` — an import that makes no progress for this long (no
   batch inserted, no retry, no memory-guard poll) is failed and its queue slot
   freed. Time is measured while the machine is awake, so a laptop suspend does

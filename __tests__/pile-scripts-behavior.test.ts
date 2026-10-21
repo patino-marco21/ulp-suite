@@ -316,4 +316,22 @@ describe('scripts/pile/jobs-summary.cjs', () => {
     const list = spawnSync('node', [script('jobs-summary.cjs'), dir, '2026-10-11 00:00:00', 'list'], { encoding: 'utf8' })
     expect(list.stdout).toContain('done   new=100 known=40 skipped=10 240.0s parse=60.0s check=120.0s insert=30.0s a.txt')
   })
+  test('adds up the lines of the files when the database records the rows repeated inside a file, and labels the skipped ones', () => {
+    box = makeBox({})
+    const dir = join(box.root, 'copy-lines'); mkdirSync(dir)
+    const db = new Database(join(dir, 'ulp.db')); db.exec(JOBS_SCHEMA)
+    for (const col of ['repeats INTEGER', 'note TEXT']) db.exec(`ALTER TABLE processing_jobs ADD COLUMN ${col}`)
+    const ins = db.prepare('INSERT INTO processing_jobs (source, filename, status, imported, known, skipped, duration_ms, error_message, created_at, repeats, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    ins.run('inbox', 'a.txt', 'done', 100, 40, 10, 120000, null, '2026-10-12 01:00:00', 50, null)
+    ins.run('inbox', 'b.txt', 'done', 0, 0, 0, 1000, null, '2026-10-12 02:00:00', 0, 'already-imported')
+    ins.run('inbox', 'c.txt', 'done', 5, 0, 1, 1000, null, '2026-10-12 03:00:00', null, null)     // from before the repeats were recorded
+    db.close()
+    const summary = spawnSync('node', [script('jobs-summary.cjs'), dir, '2026-10-11 00:00:00'], { encoding: 'utf8' })
+    expect(summary.stdout.trim()).toBe('JOBS since 2026-10-11 00:00:00: done=3 failed=0 imported(new)=105 known=40 skipped=11 busy_min=2.0 repeats=50 lines=206 unrecorded=1 skipped_files=1')
+    const list = spawnSync('node', [script('jobs-summary.cjs'), dir, '2026-10-11 00:00:00', 'list'], { encoding: 'utf8' })
+    expect(list.stdout).toContain('done   new=100 known=40 skipped=10 repeats=50 120.0s a.txt')
+    expect(list.stdout).toContain('done   new=0 known=0 skipped=0 repeats=0 1.0s b.txt  [already imported, skipped]')
+    expect(list.stdout).toContain('done   new=5 known=0 skipped=1 1.0s c.txt')
+  })
+
 })
