@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { importRatePct, keptRows, newKnownLabel, phaseLine } from '@/lib/import-summary'
+import { ALREADY_IMPORTED_NOTE, addToTally, importRatePct, jobAccounting, jobAccountingTitle, jobLabel, keptRows, newJobTally, newKnownLabel, phaseLine, tallyOf } from '@/lib/import-summary'
 
 describe('keptRows / importRatePct', () => {
   it('counts the new, the already-known and the repeated rows as accepted', () => {
@@ -46,5 +46,79 @@ describe('newKnownLabel', () => {
   it('shows new and known side by side otherwise', () => {
     expect(newKnownLabel(1000, 250, fmt)).toBe('<1000> new · <250> known')
     expect(newKnownLabel(0, 250, fmt)).toBe('<0> new · <250> known')
+  })
+})
+
+const entry = (over: Partial<{ inFileDuplicates: number; alreadyImported: boolean; errors: number }> = {}) => ({ inFileDuplicates: 0, alreadyImported: false, errors: 0, ...over })
+
+describe('the job tally (what processing_jobs records besides the counts)', () => {
+  it('adds up the rows repeated inside the file over every entry', () => {
+    const t = newJobTally()
+    addToTally(t, entry({ inFileDuplicates: 22 }))
+    addToTally(t, entry({ inFileDuplicates: 20 }))
+    expect(jobAccounting(t)).toEqual({ repeats: 42 })
+  })
+
+  it('notes "already imported" when every entry was skipped by the same-name check', () => {
+    const one = newJobTally()
+    addToTally(one, entry({ alreadyImported: true }))
+    expect(jobAccounting(one)).toEqual({ repeats: 0, note: ALREADY_IMPORTED_NOTE })
+    const many = newJobTally()
+    addToTally(many, entry({ alreadyImported: true }))
+    addToTally(many, entry({ alreadyImported: true }))
+    expect(jobAccounting(many).note).toBe(ALREADY_IMPORTED_NOTE)
+  })
+
+  it('has no note when one entry was imported, when there were no entries, or when only entries that failed were seen', () => {
+    const mixed = newJobTally()
+    addToTally(mixed, entry({ alreadyImported: true }))
+    addToTally(mixed, entry())
+    expect(jobAccounting(mixed).note).toBeUndefined()
+    expect(jobAccounting(newJobTally())).toEqual({ repeats: 0 })
+    const failed = newJobTally()
+    addToTally(failed, entry({ errors: 1 }))
+    expect(jobAccounting(failed).note).toBeUndefined()
+  })
+
+  it('does not count an entry that failed as a skipped file', () => {
+    const t = newJobTally()
+    addToTally(t, entry({ alreadyImported: true }))
+    addToTally(t, entry({ errors: 1 }))
+    expect(jobAccounting(t).note).toBe(ALREADY_IMPORTED_NOTE)
+  })
+})
+
+describe('jobAccountingTitle', () => {
+  it('says where every line went', () => {
+    expect(jobAccountingTitle({ imported: 100, known: 40, repeats: 50, skipped: 10 }))
+      .toBe('200 lines: 100 new · 40 already in the database · 50 repeated inside the file · 10 rejected')
+  })
+
+  it('leaves out the repeated rows and the total for a job from before they were recorded', () => {
+    expect(jobAccountingTitle({ imported: 100, known: 40, repeats: null, skipped: 10 })).toBe('100 new · 40 already in the database · 10 rejected')
+    expect(jobAccountingTitle({ imported: 100, skipped: 10 })).toBe('100 new · 0 already in the database · 10 rejected')
+  })
+
+  it('names the skip of a file that was already imported', () => {
+    expect(jobAccountingTitle({ imported: 0, known: 0, repeats: 0, skipped: 0, note: ALREADY_IMPORTED_NOTE }))
+      .toBe('A file with this name (and size) was imported before, so it was not read again')
+  })
+})
+
+describe('jobLabel', () => {
+  const fmt = (n: number) => `<${n}>`
+  it('says a file was skipped instead of showing an empty "0 rows"', () => {
+    expect(jobLabel({ imported: 0, known: 0, note: ALREADY_IMPORTED_NOTE }, fmt)).toBe('already imported · skipped')
+  })
+  it('is the new / known wording for every other job, with or without a note field', () => {
+    expect(jobLabel({ imported: 1000, known: 250, note: null }, fmt)).toBe('<1000> new · <250> known')
+    expect(jobLabel({ imported: 1000 }, fmt)).toBe('<1000> rows')
+  })
+})
+
+describe('tallyOf', () => {
+  it('is the tally of one file imported on its own', () => {
+    expect(jobAccounting(tallyOf({ inFileDuplicates: 3, alreadyImported: false, errors: 0 }))).toEqual({ repeats: 3 })
+    expect(jobAccounting(tallyOf({ inFileDuplicates: 0, alreadyImported: true, errors: 0 })).note).toBe(ALREADY_IMPORTED_NOTE)
   })
 })

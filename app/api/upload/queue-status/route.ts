@@ -17,6 +17,9 @@ interface ProcessingJobRow {
   error_message: string | null
   breach_name:   string | null
   created_at:    string
+  /** Rows that repeat inside the file, and why a file added nothing (lib/import-summary.ts); null on a job that did not record them. */
+  repeats:       number | null
+  note:          string | null
 }
 
 interface TotalsRow {
@@ -34,7 +37,7 @@ export async function GET(request: NextRequest) {
 
   const recent = dbQuery(
     `SELECT id, source, filename, status, imported, known, skipped,
-            duration_ms, error_message, breach_name, created_at
+            duration_ms, error_message, breach_name, created_at, repeats, note
      FROM processing_jobs
      ORDER BY id DESC
      LIMIT 20`,

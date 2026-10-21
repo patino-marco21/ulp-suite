@@ -8,6 +8,7 @@ import { uploadQueue, setCurrentJob } from '@/lib/upload-queue'
 import { processTextFile, processZipFile, type ProcessResult } from '@/lib/upload-processor'
 import { checkLimit, getClientIP } from '@/lib/rate-limiter'
 import { logJob } from '@/lib/processing-log'
+import { addToTally, jobAccounting, newJobTally, tallyOf } from '@/lib/import-summary'
 import { sumTimings } from '@/lib/phase-timings'
 import { settingsManager } from '@/lib/settings'
 import { formatBytes } from '@/lib/utils'
@@ -78,6 +79,7 @@ async function runWithProgress(
       duration_ms: Date.now() - startAt,
       breach_name: result.breach_name,
       ...result.timings,
+      ...jobAccounting(tallyOf(result)),
     })
     void logUploadAction('upload.complete', actor, jobId, {
       filename, imported: result.imported, known: result.known, skipped: result.skipped, duration_ms: Date.now() - startAt,
@@ -249,6 +251,7 @@ export async function POST(request: NextRequest) {
     const results: ProcessResult[] = []
     let totalErrors = 0
     const failedEntries: string[] = []
+    const tally = newJobTally()
     void logUploadAction(
       'upload.start', actor, null,
       { filename: originalFilename, bytes: spool.bytes, via: 'ui', kind: 'zip' },
@@ -262,6 +265,7 @@ export async function POST(request: NextRequest) {
           await runImportJob({
             label: originalFilename,
             work:  ctx => processZipFile(spool.path, result => {
+              addToTally(tally, result)
               if (result.imported > 0 || result.known > 0) results.push(result)
               if (result.errors > 0) {
                 totalErrors += result.errors
@@ -311,6 +315,7 @@ export async function POST(request: NextRequest) {
       skipped:     totalSkipped,
       duration_ms: Date.now() - startAt,
       ...sumTimings(results),
+      ...jobAccounting(tally),
       ...(failedEntries.length > 0
         ? { error_message: `${failedEntries.length} entr${failedEntries.length === 1 ? 'y' : 'ies'} skipped: ${failedEntries.join(', ')}` }
         : {}),

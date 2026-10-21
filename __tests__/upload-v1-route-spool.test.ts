@@ -186,6 +186,33 @@ describe('POST /api/v1/upload: spool first, answer when the import has finished'
     expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ source: 'http', status: 'done', imported: 3, parse_ms: 11, check_ms: 22, insert_ms: 33 }))
   })
 
+  it('hands the repeated rows and the "already imported" note to the job log, for a text upload and for a zip', async () => {
+    mockProcessTextFile.mockImplementationOnce(async (_path: string, filename: string) => ({
+      imported: 3, known: 0, inFileDuplicates: 5, skipped: 0, errors: 0, filename, breach_name: 'test',
+      rejection_breakdown: {}, alreadyImported: false, tierDropped: 0,
+    }))
+    await post('lines-a.txt', 'https://a.com:user@a.com:pass\n')
+    expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ filename: 'lines-a.txt', status: 'done', repeats: 5 }))
+
+    mockProcessTextFile.mockImplementationOnce(async (_path: string, filename: string) => ({
+      imported: 0, known: 0, inFileDuplicates: 0, skipped: 0, errors: 0, filename, breach_name: 'test',
+      rejection_breakdown: {}, alreadyImported: true, tierDropped: 0,
+    }))
+    await post('lines-b.txt', 'https://a.com:user@a.com:pass\n')
+    expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ filename: 'lines-b.txt', status: 'done', repeats: 0, note: 'already-imported' }))
+
+    const entry = (filename: string, over: Record<string, unknown>) => ({
+      imported: 0, known: 0, inFileDuplicates: 0, skipped: 0, errors: 0, filename, breach_name: 'test',
+      rejection_breakdown: {}, alreadyImported: false, tierDropped: 0, ...over,
+    })
+    mockProcessZipFile.mockImplementationOnce(async (_path: string, onEntry: (r: unknown) => void) => {
+      onEntry(entry('a.txt', { alreadyImported: true }))
+      onEntry(entry('b.txt', { alreadyImported: true }))
+    })
+    await post('lines-c.zip', 'pretend zip bytes')
+    expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ filename: 'lines-c.zip', status: 'done', repeats: 0, note: 'already-imported' }))
+  })
+
   it('respects a smaller admin-configured max file size, not just the 10 GB default', async () => {
     mockGetMax.mockResolvedValueOnce(10) // 10 bytes, for this call only
 

@@ -14,7 +14,7 @@ import { useAuth, isAdmin } from "@/hooks/useAuth"
 import { useToast } from "@/hooks/use-toast"
 import { IngestHealthPanel } from "@/components/ingest-health-panel"
 import { JobViewLink } from "@/components/job-view-link"
-import { newKnownLabel, phaseLine } from "@/lib/import-summary"
+import { jobAccountingTitle, jobLabel, phaseLine } from "@/lib/import-summary"
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -34,6 +34,9 @@ interface DoneEntry {
   duration_ms:   number
   error_message: string | null
   created_at:    string
+  /** Rows that repeat inside the file, and why a file added nothing; null on a job from before they were recorded. */
+  repeats?:      number | null
+  note?:         string | null
   /** The ingest quality gate's verdict for this job and its first reason, when it recorded one. */
   gate_level?:   string | null
   gate_note?:    string | null
@@ -578,7 +581,7 @@ export default function InboxPage() {
                   </span>
                   {job.status === 'done' ? (
                     <>
-                      <span className="tabular-nums shrink-0">{newKnownLabel(job.imported, job.known, fmtRows)}</span>
+                      <span className="tabular-nums shrink-0" title={jobAccountingTitle(job)}>{jobLabel(job, fmtRows)}</span>
                       {job.gate_level === 'warn' && (
                         <span className="text-amber-600 shrink-0" title={job.gate_note ?? 'The quality gate warned about this file'}>gate: warn</span>
                       )}

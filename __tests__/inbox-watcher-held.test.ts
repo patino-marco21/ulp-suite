@@ -202,3 +202,52 @@ describe('inbox watcher: a file that is already kept under the same name', () =>
     expect(statSync(dir('failed', 'again-c.txt')).nlink).toBe(1)
   })
 })
+
+describe('inbox watcher: what the job row says about the lines', () => {
+  const SKIPPED = { ...OK, imported: 0, known: 0, skipped: 0, alreadyImported: true }
+
+  it('records the rows that repeat inside a text file, and no note', async () => {
+    h.processTextFile.mockResolvedValue({ ...OK, inFileDuplicates: 7 })
+    await run('lines-a.txt')
+    expect(logged('lines-a.txt')[0]).toMatchObject({ status: 'done', repeats: 7 })
+    expect(logged('lines-a.txt')[0].note).toBeUndefined()
+  })
+
+  it('labels a file the same-name check skipped, instead of leaving a bare empty row', async () => {
+    h.processTextFile.mockResolvedValue(SKIPPED)
+    await run('lines-b.txt')
+    expect(logged('lines-b.txt')[0]).toMatchObject({ status: 'done', imported: 0, repeats: 0, note: 'already-imported' })
+  })
+
+  it('adds up the repeats of the entries of a ZIP', async () => {
+    h.processZipFile.mockImplementation(async (_path: string, onEntry: (r: unknown) => void) => {
+      onEntry({ ...OK, filename: 'a.txt', inFileDuplicates: 3 })
+      onEntry({ ...OK, filename: 'b.txt', inFileDuplicates: 4 })
+    })
+    await run('lines-c.zip')
+    expect(logged('lines-c.zip')[0]).toMatchObject({ status: 'done', repeats: 7 })
+    expect(logged('lines-c.zip')[0].note).toBeUndefined()
+  })
+
+  it('labels a ZIP whose entries were all skipped, but not one where only some were', async () => {
+    h.processZipFile.mockImplementation(async (_path: string, onEntry: (r: unknown) => void) => {
+      onEntry({ ...SKIPPED, filename: 'a.txt' })
+      onEntry({ ...SKIPPED, filename: 'b.txt' })
+    })
+    await run('lines-d.zip')
+    expect(logged('lines-d.zip')[0]).toMatchObject({ status: 'done', note: 'already-imported' })
+    h.processZipFile.mockImplementation(async (_path: string, onEntry: (r: unknown) => void) => {
+      onEntry({ ...SKIPPED, filename: 'a.txt' })
+      onEntry({ ...OK, filename: 'b.txt' })
+    })
+    await run('lines-e.zip')
+    expect(logged('lines-e.zip')[0].note).toBeUndefined()
+  })
+
+  it('records the same for an import from the archive', async () => {
+    h.processArchiveRef.mockResolvedValue({ ...OK, inFileDuplicates: 9 })
+    const ref = JSON.stringify({ v: 1, id: 'b'.repeat(24), name: 'lines-f.txt', size: 3, sha256: 'b'.repeat(64) })
+    await run('lines-f.txt.archiveref', ref + '\n')
+    expect(logged('lines-f.txt.archiveref')[0]).toMatchObject({ status: 'done', repeats: 9 })
+  })
+})

@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge"
 import { useAuth, isAdmin } from "@/hooks/useAuth"
 import { useToast } from "@/hooks/use-toast"
 import { buildTopRejections } from "@/lib/rejection-report"
-import { importRatePct, keptRows, newKnownLabel, phaseLine } from "@/lib/import-summary"
+import { importRatePct, jobAccountingTitle, jobLabel, keptRows, newKnownLabel, phaseLine } from "@/lib/import-summary"
 import { IngestHealthPanel } from "@/components/ingest-health-panel"
 import { postFileWithProgress, transferPercent, uploadErrorMessage } from "@/lib/upload-client"
 import { formatBytes } from "@/lib/utils"
@@ -816,6 +816,9 @@ interface QueueJob {
   error_message: string | null
   breach_name:   string | null
   created_at:    string
+  /** Rows that repeat inside the file, and why a file added nothing; null on a job from before they were recorded. */
+  repeats?:      number | null
+  note?:         string | null
 }
 
 interface QueueStatus {
@@ -953,7 +956,7 @@ function QueueStatusPanel() {
                       </span>
                       {job.status === 'done' ? (
                         <>
-                          <span className="tabular-nums shrink-0">{newKnownLabel(job.imported, job.known, fmtRows)}</span>
+                          <span className="tabular-nums shrink-0" title={jobAccountingTitle(job)}>{jobLabel(job, fmtRows)}</span>
                           <span className="text-muted-foreground shrink-0 flex items-center gap-0.5">
                             <Clock className="h-2.5 w-2.5" />{fmtDuration(job.duration_ms)}
                           </span>

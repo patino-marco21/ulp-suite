@@ -307,6 +307,11 @@ function initSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN check_ms INTEGER NOT NULL DEFAULT 0`) } catch {}
   try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN insert_ms INTEGER NOT NULL DEFAULT 0`) } catch {}
 
+  // What an import did with the lines of its file (lib/import-summary.ts): the rows that repeat inside the file, and a note when the same-name check skipped the whole
+  // file. Additive and nullable: an older row reads NULL, "not recorded", where 0 would claim a measurement.
+  try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN repeats INTEGER`) } catch {}
+  try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN note TEXT`) } catch {}
+
   // One-shot releases of held files (lib/ingest-gate-store.ts): an admin pressed Release; the next claim of that file name consumes the row.
   db.exec(`
     CREATE TABLE IF NOT EXISTS gate_overrides (

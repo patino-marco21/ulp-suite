@@ -169,6 +169,23 @@ describe('POST /api/upload: receive first, then reply', () => {
     expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ source: 'http', status: 'done', parse_ms: 11, check_ms: 22, insert_ms: 33 }))
   })
 
+  it('hands the repeated rows and the "already imported" note of a text upload to the job log', async () => {
+    mockProcessTextFile.mockImplementationOnce(async (_path: string, filename: string) => ({
+      imported: 3, known: 0, inFileDuplicates: 5, skipped: 0, errors: 0, filename, breach_name: 'test',
+      rejection_breakdown: {}, alreadyImported: false, tierDropped: 0,
+    }))
+    mockProcessTextFile.mockImplementationOnce(async (_path: string, filename: string) => ({
+      imported: 0, known: 0, inFileDuplicates: 0, skipped: 0, errors: 0, filename, breach_name: 'test',
+      rejection_breakdown: {}, alreadyImported: true, tierDropped: 0,
+    }))
+    const { jobId: first } = await (await post('lines-a.txt', 'https://a.com:user@a.com:pass\n')).json()
+    await vi.waitFor(() => expect(getJob(first)?.status).toBe('done'))
+    const { jobId: second } = await (await post('lines-b.txt', 'https://a.com:user@a.com:pass\n')).json()
+    await vi.waitFor(() => expect(getJob(second)?.status).toBe('done'))
+    expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ filename: 'lines-a.txt', status: 'done', repeats: 5 }))
+    expect(mockLogJob).toHaveBeenCalledWith(expect.objectContaining({ filename: 'lines-b.txt', status: 'done', repeats: 0, note: 'already-imported' }))
+  })
+
   it('answers 413 and creates no job when the body exceeds the admin-configured cap', async () => {
     mockGetMax.mockResolvedValueOnce(10) // 10 bytes, for this call only
 

@@ -19,6 +19,9 @@ interface DoneRow {
   duration_ms:   number
   error_message: string | null
   created_at:    string
+  /** Rows that repeat inside the file, and why a file added nothing (lib/import-summary.ts); null on a job that did not record them. */
+  repeats:       number | null
+  note:          string | null
   gate_level:    string | null
   gate_note:     string | null
 }
@@ -43,7 +46,7 @@ export async function GET(request: NextRequest) {
   const done_count = getDoneCount()
 
   const done_recent = dbQuery(
-    `SELECT id, filename, status, imported, known, skipped, duration_ms, error_message, created_at,
+    `SELECT id, filename, status, imported, known, skipped, duration_ms, error_message, created_at, repeats, note,
             CASE WHEN json_valid(gate_report) THEN json_extract(gate_report, '$.level') END AS gate_level,
             CASE WHEN json_valid(gate_report) THEN json_extract(gate_report, '$.reasons[0]') END AS gate_note
      FROM processing_jobs

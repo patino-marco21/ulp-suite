@@ -28,6 +28,15 @@ describe('GET /api/upload/queue-status: known rows', () => {
     expect(json.totals).toMatchObject({ rows_imported: 5, rows_known: 9, files_done: 1 })
   })
 
+  it('selects the repeated rows and the note of every recent job', async () => {
+    h.dbQuery
+      .mockReturnValueOnce([{ id: 1, source: 'http', filename: 'a.txt', status: 'done', imported: 0, known: 0, skipped: 0, duration_ms: 1, error_message: null, breach_name: null, created_at: 'x', repeats: 0, note: 'already-imported' }])
+      .mockReturnValueOnce([])
+    const json = await (await GET(new NextRequest('http://localhost/api/upload/queue-status'))).json()
+    expect(h.dbQuery.mock.calls[0][0]).toMatch(/SELECT[^;]*\brepeats\b[^;]*\bnote\b/)
+    expect(json.recent[0]).toMatchObject({ repeats: 0, note: 'already-imported' })
+  })
+
   it('reports 0 known rows when there are no finished jobs yet', async () => {
     h.dbQuery.mockReturnValue([])
     const json = await (await GET(new NextRequest('http://localhost/api/upload/queue-status'))).json()

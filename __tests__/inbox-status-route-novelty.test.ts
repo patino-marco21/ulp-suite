@@ -24,6 +24,15 @@ beforeEach(() => {
   h.dbQuery.mockReturnValue([])
 })
 
+describe('GET /api/inbox/status: the finished jobs', () => {
+  it('selects the repeated rows and the note of every recent job', async () => {
+    h.dbQuery.mockReturnValue([{ id: 1, filename: 'a.txt', status: 'done', imported: 0, known: 0, skipped: 0, duration_ms: 1, error_message: null, created_at: 'x', repeats: 4, note: null }])
+    const json = await get()
+    expect(h.dbQuery.mock.calls[0][0]).toMatch(/SELECT[^;]*\brepeats\b[^;]*\bnote\b/)
+    expect(json.done_recent[0]).toMatchObject({ repeats: 4, note: null })
+  })
+})
+
 describe('GET /api/inbox/status with novelty-aware ingest', () => {
   it('measures progress by the rows staged while the file is being read, and passes the phase on', async () => {
     h.progress = {
