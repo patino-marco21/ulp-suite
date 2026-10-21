@@ -72,6 +72,11 @@ export type ImportHooks = Partial<ImportContext> & {
   beforeCommit?: () => void | Promise<void>
   /** The file's identity when it was read from the source archive. */
   source?: SourceIdentity
+  /**
+   * The size in bytes of the plain file being imported, when the caller knows it (processTextFile reads it from the disk). The same-name check then
+   * treats a file of another size as another file, and ulp.sources records the size. Without it, and for a record that has no size, the name alone decides.
+   */
+  fileSize?: number
 }
 
 export interface RunImportOptions<T> {

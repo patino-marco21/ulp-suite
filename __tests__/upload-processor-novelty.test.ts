@@ -31,7 +31,10 @@ vi.mock('@/lib/ingest-stage', async () => {
   }
 })
 
-import { MAX_INPROCESS_MATCHES, processTextStream } from '@/lib/upload-processor'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { MAX_INPROCESS_MATCHES, processTextFile, processTextStream } from '@/lib/upload-processor'
 
 const LINES =
   'https://shop.example.com:alice@example.com:pw-one\n' +
@@ -210,5 +213,32 @@ describe('processTextStream with novelty-aware ingest', () => {
     const out = await processTextStream(stream(), 'again.txt')
     expect(out).toMatchObject({ alreadyImported: true, imported: 0, known: 0, inFileDuplicates: 0 })
     expect(h.registerStage).not.toHaveBeenCalled()
+  })
+})
+
+describe('the same-name check of a file on disk knows its size', () => {
+  let dir = ''
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'same-name-')) })
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+  const file = (name: string, body = LINES) => { const p = join(dir, name); writeFileSync(p, body); return p }
+
+  it('asks with the size of the file it opens and records that size when it imports it', async () => {
+    await processTextFile(file('sized.txt'), 'sized.txt')
+    expect((h.query.mock.calls[0][0] as { query_params: Record<string, unknown> }).query_params).toEqual({ f: 'sized.txt', s: Buffer.byteLength(LINES) })
+    expect(sourceRows()).toEqual([[{ filename: 'sized.txt', line_count: 2, size: Buffer.byteLength(LINES) }]])
+  })
+
+  it('skips a file when the name AND the size were imported before, and imports one that only has the name', async () => {
+    const SEEN = Buffer.byteLength(LINES)
+    h.query.mockImplementation(async (q: { query_params: { s?: number } }) => ({ json: async () => [{ c: q.query_params.s === SEEN ? 1 : 0 }] }))
+
+    const same = await processTextFile(file('shared-name.txt'), 'shared-name.txt')
+    expect(same).toMatchObject({ alreadyImported: true, imported: 0 })
+    expect(h.registerStage).not.toHaveBeenCalled()
+
+    const other = await processTextFile(file('shared-name-2.txt', LINES + 'https://shop.example.net:dave@example.net:pw-four\n'), 'shared-name.txt')
+    expect(other.alreadyImported).toBe(false)
+    expect(h.registerStage).toHaveBeenCalledTimes(1)
+    expect(sourceRows()[0][0]).toMatchObject({ filename: 'shared-name.txt', size: SEEN + 'https://shop.example.net:dave@example.net:pw-four\n'.length })
   })
 })

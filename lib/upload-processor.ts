@@ -110,20 +110,31 @@ function makeRetryLogger(
   }
 }
 
+/** What the same-name check knows about the file besides its name: the hash of an archived file, or the size of a plain one. */
+interface SourceIdentityQuery {
+  sha256?: string
+  size?: number
+}
+
 /**
  * Authoritative "already imported" check. ulp.sources is written by recordSource
  * ONLY after a file fully imports, so its presence means the whole file is already
  * in ulp.credentials. Used both to skip re-imports (processTextStream) and to keep
  * recordSource idempotent.
+ *
+ * The name alone decides unless the caller knows more. With a content hash (an import from the source archive) the same name with other content is a different
+ * file; a row without a hash still blocks by name. With a size (a plain file on disk, whose content is not read at claim time) the same name with another size
+ * is a different file; a row without a size (size 0: an import from before sizes were recorded) still blocks by name.
  */
-async function querySourceAlreadyImported(filename: string, signal: AbortSignal, sha256?: string): Promise<boolean> {
+async function querySourceAlreadyImported(filename: string, signal: AbortSignal, identity: SourceIdentityQuery = {}): Promise<boolean> {
+  const { sha256, size } = identity
   const res = await getClient().query({
-    // With a content hash (an import from the source archive) the same name with other content is a different file; a row without a hash (an older
-    // import, or a plain file) still blocks by name. Without a hash -- a plain file, whose content is not known at claim time -- it is the name alone.
     query:        sha256
       ? `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} AND (sha256 = '' OR sha256 = {h:String}) LIMIT 1`
-      : `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1`,
-    query_params: sha256 ? { f: filename, h: sha256 } : { f: filename },
+      : size
+        ? `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} AND (size = 0 OR size = {s:UInt64}) LIMIT 1`
+        : `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1`,
+    query_params: sha256 ? { f: filename, h: sha256 } : size ? { f: filename, s: size } : { f: filename },
     format:       'JSONEachRow',
     abort_signal: signal,
     clickhouse_settings: {
@@ -144,9 +155,14 @@ async function querySourceAlreadyImported(filename: string, signal: AbortSignal,
   }
 }
 
+/** The identity a hook set carries: the archive's hash wins over a plain file's size. */
+function identityOf(hooks: ImportHooks): SourceIdentityQuery {
+  return { sha256: hooks.source?.sha256, size: hooks.fileSize !== undefined && hooks.fileSize > 0 ? hooks.fileSize : undefined }
+}
+
 export async function sourceAlreadyImported(filename: string, hooks: ImportHooks = {}): Promise<boolean> {
   const rows = await withClickHouseRetry(
-    async signal => querySourceAlreadyImported(filename, signal, hooks.source?.sha256),
+    async signal => querySourceAlreadyImported(filename, signal, identityOf(hooks)),
     { signal: hooks.signal, onRetry: makeRetryLogger('source check', filename, () => hooks.beat?.()) }
   )
   return rows
@@ -210,7 +226,7 @@ export async function recordSource(filename: string, lineCount: number, hooks: I
       // OOM crash between processTextStream and renameSync, or a Force Scan race).
       // Retried inserts re-check the guard so an ambiguous transient error does not
       // create duplicate source rows on a later attempt.
-      if (await querySourceAlreadyImported(filename, signal, hooks.source?.sha256)) {
+      if (await querySourceAlreadyImported(filename, signal, identityOf(hooks))) {
         console.log(`[upload-processor] recordSource: ${filename} already in ulp.sources — skipping`)
         return
       }
@@ -222,7 +238,9 @@ export async function recordSource(filename: string, lineCount: number, hooks: I
           line_count: lineCount,
           // The identity of the file, when the importer knows it (it read the file from the source archive). A plain file leaves the columns at their defaults;
           // scripts/archive-sources.ts fills them later.
-          ...(hooks.source ? { size: hooks.source.size, sha256: hooks.source.sha256, archive_id: hooks.source.archiveId } : {}),
+          ...(hooks.source
+            ? { size: hooks.source.size, sha256: hooks.source.sha256, archive_id: hooks.source.archiveId }
+            : hooks.fileSize !== undefined && hooks.fileSize > 0 ? { size: hooks.fileSize } : {}),
         }],
         format: 'JSONEachRow',
         abort_signal: signal,
@@ -706,8 +724,13 @@ export async function processTextFile(
 ): Promise<ProcessResult> {
   const nodeStream = fs.createReadStream(filePath)
   const webStream = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>
+  // The size tells the same-name check a file of the same name and another size from the file it already has (see querySourceAlreadyImported).
+  let fileSize = hooks.fileSize
+  if (fileSize === undefined) {
+    try { fileSize = fs.statSync(filePath).size } catch { /* the read below reports a file that is gone; the check then goes by name */ }
+  }
   try {
-    return await processTextStream(webStream, filename, jobId, onBatch, hooks)
+    return await processTextStream(webStream, filename, jobId, onBatch, { ...hooks, fileSize })
   } finally {
     nodeStream.destroy()
   }

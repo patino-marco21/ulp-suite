@@ -66,6 +66,22 @@ describe('the duplicate-file guard with a content hash', () => {
     expect(sqlOf(0).query_params).toEqual({ f: 'a.txt', h: SOURCE.sha256 })
   })
 
+  // A plain file's content is not known at claim time (hashing 4 GB would cost a read), but its size is. A row whose recorded size differs is another file
+  // that happens to share the name; a row without a size (an import from before sizes were recorded, or one from a source that has none) still blocks by name.
+  it('asks by name and size when the caller knows the size of a plain file', async () => {
+    await sourceAlreadyImported('a.txt', { fileSize: 4096 })
+    expect(sqlOf(0).query).toBe('SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} AND (size = 0 OR size = {s:UInt64}) LIMIT 1')
+    expect(sqlOf(0).query_params).toEqual({ f: 'a.txt', s: 4096 })
+  })
+
+  it('prefers the hash to the size when the import has both, and treats a size of 0 as no size', async () => {
+    await sourceAlreadyImported('a.txt', { source: SOURCE, fileSize: 4096 })
+    expect(sqlOf(0).query).toContain('sha256 = {h:String}')
+    expect(sqlOf(0).query).not.toContain('size')
+    await sourceAlreadyImported('b.txt', { fileSize: 0 })
+    expect(sqlOf(1).query).toBe('SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1')
+  })
+
   it('says "already imported" when such a row exists and "new file" when only rows with another hash exist', async () => {
     h.query.mockResolvedValue({ json: async () => [{ c: 1 }] })
     expect(await sourceAlreadyImported('a.txt', { source: SOURCE })).toBe(true)
@@ -85,6 +101,17 @@ describe('recordSource', () => {
   it('writes the size, the sha256 and the archive id when the import came from the archive', async () => {
     await recordSource('a.txt', 10, { source: SOURCE })
     expect(sourcesInsert().values).toEqual([{ filename: 'a.txt', line_count: 10, size: 1234, sha256: SOURCE.sha256, archive_id: SOURCE.archiveId }])
+  })
+
+  it('writes the size of a plain file whose size is known, and nothing else', async () => {
+    await recordSource('a.txt', 10, { fileSize: 4096 })
+    expect(sourcesInsert().values).toEqual([{ filename: 'a.txt', line_count: 10, size: 4096 }])
+  })
+
+  it('checks for an earlier record with the same name and size, so another file with the name still gets its own row', async () => {
+    await recordSource('a.txt', 10, { fileSize: 4096 })
+    expect((h.query.mock.calls[0][0] as { query_params: Record<string, unknown> }).query_params).toEqual({ f: 'a.txt', s: 4096 })
+    expect(sourcesInsert()).toBeDefined()
   })
 
   it('stays idempotent: a name already recorded with the same content is not recorded again', async () => {
