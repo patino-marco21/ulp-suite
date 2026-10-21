@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const h = vi.hoisted(() => ({ progress: null as null | Record<string, unknown>, dbQuery: vi.fn(), held: [] as Array<Record<string, unknown>>, latestHeldReport: vi.fn() }))
+const h = vi.hoisted(() => ({ progress: null as null | Record<string, unknown>, jobs: null as null | Array<Record<string, unknown>>, dbQuery: vi.fn(), held: [] as Array<Record<string, unknown>>, latestHeldReport: vi.fn() }))
 vi.mock('@/lib/auth', () => ({
   validateRequest: vi.fn().mockResolvedValue({ userId: '1', role: 'admin', email: 'admin@example.com' }),
   requireAdminRole: vi.fn().mockReturnValue(null),
@@ -10,7 +10,7 @@ vi.mock('@/lib/sqlite', () => ({ dbQuery: h.dbQuery }))
 vi.mock('@/lib/upload-queue', () => ({ uploadQueue: { activeCount: 1, pendingCount: 0 }, getCurrentJob: () => 'big.txt' }))
 vi.mock('@/lib/inbox-helpers', () => ({ getWaiting: () => [], getFailed: () => [], getHeld: () => h.held, getDoneCount: () => 0 }))
 vi.mock('@/lib/ingest-gate-store', () => ({ latestHeldReport: h.latestHeldReport }))
-vi.mock('@/lib/inbox-watcher', () => ({ getInboxJobProgress: () => h.progress, getInFlightCount: () => 1 }))
+vi.mock('@/lib/inbox-watcher', () => ({ getInboxJobsProgress: () => h.jobs ?? (h.progress ? [h.progress] : []), getInFlightCount: () => 1 }))
 
 import { GET } from '@/app/api/inbox/status/route'
 
@@ -18,10 +18,43 @@ const get = async () => (await GET(new NextRequest('http://localhost/api/inbox/s
 
 beforeEach(() => {
   h.progress = null
+  h.jobs = null
   h.held = []
   h.latestHeldReport.mockReset()
   h.dbQuery.mockReset()
   h.dbQuery.mockReturnValue([])
+})
+
+describe('GET /api/inbox/status: the files being imported', () => {
+  it('measures a plain file by the bytes read, not by an assumed line length', async () => {
+    h.progress = {
+      filename: 'big.txt', started_at: Date.now() - 100_000, rows_imported: 0, file_size_bytes: 1_000_000_000,
+      phase: 'parsing', rows_staged: 5_000_000, readBytes: () => 250_000_000,
+    }
+    const json = await get()
+    expect(json.current_progress).toMatchObject({ filename: 'big.txt', pct: 25, est_total_rows: 20_000_000 })
+    expect(json.current_progress.eta_ms).toBeGreaterThan(290_000)
+    expect(json.current_progress.eta_ms).toBeLessThan(310_000)
+    expect(json.current_progress).not.toHaveProperty('readBytes')
+  })
+
+  it('lists every file in flight, each with its own progress, and keeps current_progress as the first of them', async () => {
+    const base = { rows_imported: 0, phase: 'parsing', file_size_bytes: 1_000_000_000 }
+    h.jobs = [
+      { ...base, filename: 'a.txt', started_at: Date.now() - 100_000, rows_staged: 5_000_000, readBytes: () => 250_000_000 },
+      { ...base, filename: 'b.txt', started_at: Date.now() - 50_000, rows_staged: 1_000_000, readBytes: () => 500_000_000 },
+    ]
+    const json = await get()
+    expect(json.jobs_progress.map((j: { filename: string }) => j.filename)).toEqual(['a.txt', 'b.txt'])
+    expect(json.jobs_progress.map((j: { pct: number }) => j.pct)).toEqual([25, 50])
+    expect(json.current_progress).toEqual(json.jobs_progress[0])
+  })
+
+  it('has an empty list and no current progress when nothing is being imported', async () => {
+    const json = await get()
+    expect(json.jobs_progress).toEqual([])
+    expect(json.current_progress).toBeNull()
+  })
 })
 
 describe('GET /api/inbox/status: the finished jobs', () => {

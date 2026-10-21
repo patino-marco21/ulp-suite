@@ -66,15 +66,17 @@ export function serializeArchiveRef(entry: { id: string; name: string; size: num
 
 /**
  * Wraps the plaintext stream of an archive: every chunk is hashed on its way through. `digest()` is valid once the stream has been read to its end (it throws
- * before that), and gives the sha256 of exactly the bytes the parser saw.
+ * before that), and gives the sha256 of exactly the bytes the parser saw. `bytes()` is how many bytes have passed so far (the progress line of the Inbox).
  */
-export function hashingStream(src: Readable): { stream: ReadableStream<Uint8Array>; digest: () => string } {
+export function hashingStream(src: Readable): { stream: ReadableStream<Uint8Array>; digest: () => string; bytes: () => number } {
   const hash = createHash('sha256')
   let ended = false
+  let seen = 0
   const web = Readable.toWeb(src) as ReadableStream<Uint8Array>
   const stream = web.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       hash.update(chunk)
+      seen += chunk.byteLength
       controller.enqueue(chunk)
     },
     flush() {
@@ -83,6 +85,7 @@ export function hashingStream(src: Readable): { stream: ReadableStream<Uint8Arra
   }))
   return {
     stream,
+    bytes: () => seen,
     digest() {
       if (!ended) throw new ArchiveRefError('the archive was not read to its end')
       return hash.digest('hex')

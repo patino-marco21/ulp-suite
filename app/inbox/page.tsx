@@ -48,6 +48,8 @@ interface CurrentProgress {
   elapsed_ms:      number
   rows_imported:   number
   file_size_bytes: number
+  /** Bytes of the file read so far, when the importer can count them (plain and archived files). */
+  bytes_read?:     number | null
   rows_per_sec:    number
   est_total_rows:  number | null
   pct:             number | null
@@ -82,6 +84,8 @@ interface InboxStatus {
   current_file:     string | null
   queue_depth:      number
   current_progress: CurrentProgress | null
+  /** One entry per file being imported (several at once when UPLOAD_CONCURRENCY is above 1). */
+  jobs_progress?:   CurrentProgress[]
   waiting:          InboxFileEntry[]   // excludes file currently being processed
   waiting_total:    number             // true waiting + 1 if processing
   failed:           InboxFileEntry[]
@@ -127,6 +131,79 @@ function fmtEta(ms: number): string {
   if (ms < 60_000)   return `~${Math.round(ms / 1_000)}s`
   if (ms < 3_600_000) return `~${Math.round(ms / 60_000)}m`
   return `~${(ms / 3_600_000).toFixed(1)}h`
+}
+
+/** The progress card of one file being imported. */
+function ProgressCard({ p }: { p: CurrentProgress }) {
+  return (
+    <Card className="border-green-500/30 bg-green-500/5">
+      <CardHeader className="py-3">
+        <CardTitle className="text-base flex items-center gap-2">
+          <Loader2 className="h-4 w-4 animate-spin text-green-500" />
+          Processing
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="pt-0 pb-4 space-y-3">
+        <div className="flex items-center justify-between text-xs">
+          <span className="font-mono truncate max-w-xs text-muted-foreground" title={p.filename}>
+            {p.filename}
+          </span>
+          <span className="tabular-nums shrink-0 text-muted-foreground ml-2">
+            {p.bytes_read != null ? `${fmtBytes(p.bytes_read)} of ${fmtBytes(p.file_size_bytes)} read` : fmtBytes(p.file_size_bytes)}
+          </span>
+        </div>
+        {/* Progress bar */}
+        {p.pct !== null && (
+          <div>
+            <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
+              <span>
+                {p.phase
+                  ? `${fmtRows(p.rows_staged ?? 0)} rows read`
+                  : `${fmtRows(p.rows_imported)} rows imported`}
+              </span>
+              <span className="font-medium text-foreground">{p.pct}%</span>
+              {p.est_total_rows && (
+                <span>est. {fmtRows(p.est_total_rows)} total</span>
+              )}
+            </div>
+            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+              <div
+                className="h-full rounded-full bg-green-500 transition-all"
+                style={{ width: `${Math.min(100, p.pct)}%` }}
+              />
+            </div>
+          </div>
+        )}
+        {p.pct === null && (
+          <p className="text-xs text-muted-foreground">
+            {p.phase
+              ? `${fmtRows(p.rows_staged ?? 0)} rows read`
+              : `${fmtRows(p.rows_imported)} rows imported`}
+            {(p.phase ? (p.rows_staged ?? 0) : p.rows_imported) === 0 && ' — parsing first batch…'}
+          </p>
+        )}
+        {p.phase && (
+          <p className="text-xs text-muted-foreground">
+            {phaseLine({
+              phase:    p.phase,
+              staged:   p.rows_staged,
+              imported: p.rows_imported,
+              known:    p.rows_known,
+              slab:     p.slab,
+              slabs:    p.slabs,
+            })}
+          </p>
+        )}
+        <div className="flex gap-4 text-xs text-muted-foreground flex-wrap">
+          <span><span className="font-medium text-foreground">{fmtRows(p.rows_per_sec)}</span> rows/s</span>
+          <span>Elapsed: <span className="font-medium text-foreground">{fmtDuration(p.elapsed_ms)}</span></span>
+          {p.eta_ms !== null && p.eta_ms > 0 && (
+            <span>ETA: <span className="font-medium text-foreground">{fmtEta(p.eta_ms)}</span></span>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  )
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
@@ -335,76 +412,10 @@ export default function InboxPage() {
         </Card>
       )}
 
-      {/* Currently Processing — progress card */}
-      {data?.current_progress && (
-        <Card className="border-green-500/30 bg-green-500/5">
-          <CardHeader className="py-3">
-            <CardTitle className="text-base flex items-center gap-2">
-              <Loader2 className="h-4 w-4 animate-spin text-green-500" />
-              Processing
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0 pb-4 space-y-3">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-mono truncate max-w-xs text-muted-foreground" title={data.current_progress.filename}>
-                {data.current_progress.filename}
-              </span>
-              <span className="tabular-nums shrink-0 text-muted-foreground ml-2">
-                {fmtBytes(data.current_progress.file_size_bytes)}
-              </span>
-            </div>
-            {/* Progress bar */}
-            {data.current_progress.pct !== null && (
-              <div>
-                <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
-                  <span>
-                    {data.current_progress.phase
-                      ? `${fmtRows(data.current_progress.rows_staged ?? 0)} rows read`
-                      : `${fmtRows(data.current_progress.rows_imported)} rows imported`}
-                  </span>
-                  <span className="font-medium text-foreground">{data.current_progress.pct}%</span>
-                  {data.current_progress.est_total_rows && (
-                    <span>est. {fmtRows(data.current_progress.est_total_rows)} total</span>
-                  )}
-                </div>
-                <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-green-500 transition-all"
-                    style={{ width: `${Math.min(100, data.current_progress.pct)}%` }}
-                  />
-                </div>
-              </div>
-            )}
-            {data.current_progress.pct === null && (
-              <p className="text-xs text-muted-foreground">
-                {data.current_progress.phase
-                  ? `${fmtRows(data.current_progress.rows_staged ?? 0)} rows read`
-                  : `${fmtRows(data.current_progress.rows_imported)} rows imported`}
-                {(data.current_progress.phase ? (data.current_progress.rows_staged ?? 0) : data.current_progress.rows_imported) === 0 && ' — parsing first batch…'}
-              </p>
-            )}
-            {data.current_progress.phase && (
-              <p className="text-xs text-muted-foreground">
-                {phaseLine({
-                  phase:    data.current_progress.phase,
-                  staged:   data.current_progress.rows_staged,
-                  imported: data.current_progress.rows_imported,
-                  known:    data.current_progress.rows_known,
-                  slab:     data.current_progress.slab,
-                  slabs:    data.current_progress.slabs,
-                })}
-              </p>
-            )}
-            <div className="flex gap-4 text-xs text-muted-foreground flex-wrap">
-              <span><span className="font-medium text-foreground">{fmtRows(data.current_progress.rows_per_sec)}</span> rows/s</span>
-              <span>Elapsed: <span className="font-medium text-foreground">{fmtDuration(data.current_progress.elapsed_ms)}</span></span>
-              {data.current_progress.eta_ms !== null && data.current_progress.eta_ms > 0 && (
-                <span>ETA: <span className="font-medium text-foreground">{fmtEta(data.current_progress.eta_ms)}</span></span>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      {/* Currently Processing — one progress card per file in flight */}
+      {(data?.jobs_progress ?? (data?.current_progress ? [data.current_progress] : [])).map(p => (
+        <ProgressCard key={p.filename} p={p} />
+      ))}
 
       {/* Ingest health — same ClickHouse-pressure signal shown on /upload; the
           underlying metrics already cover both HTTP uploads and this watcher. */}

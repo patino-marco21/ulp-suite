@@ -724,6 +724,7 @@ export async function processTextFile(
 ): Promise<ProcessResult> {
   const nodeStream = fs.createReadStream(filePath)
   const webStream = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>
+  hooks.onSourceBytes?.(() => nodeStream.bytesRead)
   // The size tells the same-name check a file of the same name and another size from the file it already has (see querySourceAlreadyImported).
   let fileSize = hooks.fileSize
   if (fileSize === undefined) {
@@ -757,7 +758,8 @@ export async function processArchiveRef(
     throw new ArchiveRefError(`the reference for ${ref.id} does not match the archive manifest (size or sha256 differ)`)
   }
   const nodeStream = source.stream()
-  const { stream, digest } = hashingStream(nodeStream)
+  const { stream, digest, bytes } = hashingStream(nodeStream)
+  hooks.onSourceBytes?.(bytes)
   try {
     return await processTextStream(stream, ref.name, undefined, onBatch, {
       ...hooks,

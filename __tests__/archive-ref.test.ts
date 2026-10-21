@@ -90,6 +90,16 @@ describe('hashingStream', () => {
     expect(digest()).toBe(createHash('sha256').update('abcdef').digest('hex'))
   })
 
+  it('counts the bytes that have passed through, for the progress line of the Inbox', async () => {
+    const { stream, bytes } = hashingStream(Readable.from([Buffer.from('abc'), Buffer.from('defg')]))
+    expect(bytes()).toBe(0)
+    const reader = stream.getReader()
+    await reader.read()
+    expect(bytes()).toBe(3)
+    while (!(await reader.read()).done) { /* drain */ }
+    expect(bytes()).toBe(7)
+  })
+
   it('refuses to give a digest before the stream was read to its end', async () => {
     const { stream, digest } = hashingStream(Readable.from([Buffer.from('abc'), Buffer.from('def')]))
     const reader = stream.getReader()

@@ -228,6 +228,13 @@ describe('the same-name check of a file on disk knows its size', () => {
     expect(sourceRows()).toEqual([[{ filename: 'sized.txt', line_count: 2, size: Buffer.byteLength(LINES) }]])
   })
 
+  it('hands the caller a counter of the bytes read, which ends at the size of the file', async () => {
+    let bytes = () => -1
+    const path = file('counted.txt')
+    await processTextFile(path, 'counted.txt', undefined, undefined, { onSourceBytes: read => { bytes = read } })
+    expect(bytes()).toBe(Buffer.byteLength(LINES))
+  })
+
   it('skips a file when the name AND the size were imported before, and imports one that only has the name', async () => {
     const SEEN = Buffer.byteLength(LINES)
     h.query.mockImplementation(async (q: { query_params: { s?: number } }) => ({ json: async () => [{ c: q.query_params.s === SEEN ? 1 : 0 }] }))

@@ -43,7 +43,7 @@ import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable, move
 import { sniffFileKind } from '@/lib/inbox-helpers'
 import { isIngestHeldError } from '@/lib/ingest-quality-gate'
 import { consumeGateOverride } from '@/lib/ingest-gate-store'
-import { ARCHIVE_REF_EXT } from '@/lib/archive-ref'
+import { ARCHIVE_REF_EXT, readArchiveRefFile } from '@/lib/archive-ref'
 import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 import { waitForDiskSpace } from '@/lib/ingest-disk-gate'
 import { noveltyConfig } from '@/lib/ingest-novelty-config'
@@ -88,6 +88,8 @@ export interface InboxJobProgress {
   rows_known?:     number
   slab?:           number
   slabs?:          number
+  /** How many bytes of the file have been read so far, when the importer can count them (a plain file, a file from the archive). */
+  readBytes?:      () => number
 }
 
 // globalThis-backed singletons -----------------------------------------------
@@ -107,7 +109,7 @@ declare global {
   // eslint-disable-next-line no-var
   var __ulpPendingTasks: Set<string> | undefined
   // eslint-disable-next-line no-var
-  var __ulpCurrentProgress: InboxJobProgress | null | undefined
+  var __ulpJobProgress: Map<string, InboxJobProgress> | undefined
 }
 
 /**
@@ -128,17 +130,19 @@ declare global {
 const inFlight     = globalThis.__ulpInFlight     ?? (globalThis.__ulpInFlight     = new Set<string>())
 const pendingTasks = globalThis.__ulpPendingTasks ?? (globalThis.__ulpPendingTasks = new Set<string>())  // subset of inFlight — has live pLimit task
 
-function getCurrentProgress(): InboxJobProgress | null {
-  return globalThis.__ulpCurrentProgress ?? null
+/** One record per file being imported: with UPLOAD_CONCURRENCY above 1 several run at once, and each reports its own progress. */
+function progressMap(): Map<string, InboxJobProgress> {
+  return globalThis.__ulpJobProgress ?? (globalThis.__ulpJobProgress = new Map<string, InboxJobProgress>())
 }
 
-function setCurrentProgress(progress: InboxJobProgress | null): void {
-  globalThis.__ulpCurrentProgress = progress
+/** Live progress of every inbox file being imported, the one that started first at the front. */
+export function getInboxJobsProgress(): InboxJobProgress[] {
+  return [...progressMap().values()].sort((a, b) => a.started_at - b.started_at)
 }
 
-/** Returns live progress for the inbox file currently being processed, or null if idle. */
+/** Live progress of the inbox file that has been importing the longest, or null if idle. */
 export function getInboxJobProgress(): InboxJobProgress | null {
-  return getCurrentProgress()
+  return getInboxJobsProgress()[0] ?? null
 }
 
 /** Number of filenames currently marked as queued or in-progress. */
@@ -163,10 +167,9 @@ export function getInFlightCount(): number {
  *      Not in inbox/ (task already ran and cleaned up, but entry leaked)
  */
 export function clearStaleInFlight(): number {
-  const current = getCurrentProgress()?.filename ?? null
   let cleared = 0
   for (const name of Array.from(inFlight)) {
-    if (name === current)          continue  // actively processing — leave it
+    if (progressMap().has(name))   continue  // actively processing — leave it
     if (pendingTasks.has(name))    continue  // has a live pLimit task — DO NOT clear
     // True orphan: in inFlight but no live pLimit task — safe to remove
     inFlight.delete(name)
@@ -302,6 +305,7 @@ async function enqueueFile(filePath: string): Promise<void> {
     let known    = 0
     let skipped  = 0
     let procPath: string | null = null
+    let progress: InboxJobProgress | null = null
     let gateReport: string | undefined
     let timings: PhaseTimings | undefined
     const tally = newJobTally()
@@ -327,17 +331,22 @@ async function enqueueFile(filePath: string): Promise<void> {
       if (gateOverride) console.warn(`[inbox-watcher] ${filename} was released by an admin: the quality gate reports on it but does not hold it`)
 
       console.log(`[inbox-watcher] processing: ${filename}`)
-      // Capture file size (from the claimed path) for ETA in the status API.
+      // Capture file size (from the claimed path) for the progress card. A reference to an archived file is a few hundred bytes long; what it stands for is
+      // the plaintext size it records.
       const claimedPath: string = procPath
-      const fileSizeBytes = (() => { try { return fs.statSync(claimedPath).size } catch { return 0 } })()
-      setCurrentProgress({ filename, started_at: startAt, rows_imported: 0, file_size_bytes: fileSizeBytes })
+      let fileSizeBytes = (() => { try { return fs.statSync(claimedPath).size } catch { return 0 } })()
+      if (ext === ARCHIVE_REF_EXT) {
+        try { fileSizeBytes = readArchiveRefFile(claimedPath).size } catch { /* a bad reference fails the import below with its own message */ }
+      }
+      // This file's own record: other files imported at the same time (UPLOAD_CONCURRENCY above 1) have theirs.
+      const mine: InboxJobProgress = { filename, started_at: startAt, rows_imported: 0, file_size_bytes: fileSizeBytes }
+      progress = mine
+      progressMap().set(filename, mine)
 
       // The live line follows novelty-aware ingest: reading the file, checking it against the table, writing the new rows. For an
       // archive, `imported` / `known` hold the entries that already finished, so the entry in flight adds to them.
-      const onImportProgress = (e: ImportProgressEvent) => {
-        const cp = getCurrentProgress()
-        if (cp) applyImportProgress(cp, e, { imported, known })
-      }
+      const onImportProgress = (e: ImportProgressEvent) => applyImportProgress(mine, e, { imported, known })
+      const onSourceBytes = (read: () => number) => { mine.readBytes = read }
 
       // runImportJob fails the job, and frees this queue slot, if it stops making progress for IMPORT_STALL_TIMEOUT_MS:
       // one wedged import can no longer hold the shared queue until an app restart.
@@ -350,8 +359,8 @@ async function enqueueFile(filePath: string): Promise<void> {
             skipped  += result.skipped
             timings = sumTimings([{ timings }, result])
             addToTally(tally, result)
-            const cp = getCurrentProgress()
-            if (cp) { cp.rows_imported = imported; cp.rows_known = known }
+            mine.rows_imported = imported
+            mine.rows_known = known
             if (result.imported > 0 || result.known > 0) {
               console.log(
                 `[inbox-watcher]   ${result.filename}: ` +
@@ -366,10 +375,7 @@ async function enqueueFile(filePath: string): Promise<void> {
         // The reference names a file in the source archive (lib/archive-ref.ts): the plaintext is read from there, never from the inbox.
         const result = await runImportJob({
           label: filename,
-          work:  ctx => processArchiveRef(claimedPath, n => {
-            const cp = getCurrentProgress()
-            if (cp) cp.rows_imported = n
-          }, { ...ctx, onImportProgress, gateOverride }),
+          work:  ctx => processArchiveRef(claimedPath, n => { mine.rows_imported = n }, { ...ctx, onImportProgress, onSourceBytes, gateOverride }),
         })
         imported = result.imported
         known    = result.known
@@ -386,9 +392,8 @@ async function enqueueFile(filePath: string): Promise<void> {
           label: filename,
           work:  ctx => processTextFile(claimedPath, filename, undefined, n => {
             // onBatch: update live progress after each batch (each slab with novelty-aware ingest)
-            const cp = getCurrentProgress()
-            if (cp) cp.rows_imported = n
-          }, { ...ctx, onImportProgress, gateOverride }),
+            mine.rows_imported = n
+          }, { ...ctx, onImportProgress, onSourceBytes, gateOverride }),
         })
         imported = result.imported
         known    = result.known
@@ -465,7 +470,7 @@ async function enqueueFile(filePath: string): Promise<void> {
         }
       }
     } finally {
-      setCurrentProgress(null)
+      if (progress && progressMap().get(filename) === progress) progressMap().delete(filename)   // this file's record only
       pendingTasks.delete(filename)   // task is done (success or fail)
       inFlight.delete(filename)
       setCurrentJob(null)

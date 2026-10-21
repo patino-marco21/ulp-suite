@@ -1,10 +1,10 @@
 import { describe, test, expect, afterEach } from 'vitest'
-import { getInFlightCount, getInboxJobProgress } from '@/lib/inbox-watcher'
+import { getInFlightCount, getInboxJobProgress, getInboxJobsProgress } from '@/lib/inbox-watcher'
 
 describe('inbox-watcher globalThis-backed state (survives cross-chunk duplication)', () => {
   afterEach(() => {
     globalThis.__ulpInFlight?.delete('probe-globalthis-inflight.txt')
-    globalThis.__ulpCurrentProgress = null
+    globalThis.__ulpJobProgress?.clear()
   })
 
   test('getInFlightCount reads from the globalThis-backed Set', () => {
@@ -20,13 +20,13 @@ describe('inbox-watcher globalThis-backed state (survives cross-chunk duplicatio
     expect(globalThis.__ulpPendingTasks).toBeInstanceOf(Set)
   })
 
-  test('getInboxJobProgress reads from the globalThis-backed value', () => {
+  test('the progress of the files being imported is read from a globalThis-backed map, the oldest first', () => {
     expect(getInboxJobProgress()).toBeNull()
-    globalThis.__ulpCurrentProgress = {
-      filename: 'probe.txt', started_at: Date.now(), rows_imported: 5, file_size_bytes: 100,
-    }
-    expect(getInboxJobProgress()).toEqual({
-      filename: 'probe.txt', started_at: expect.any(Number), rows_imported: 5, file_size_bytes: 100,
-    })
+    expect(getInboxJobsProgress()).toEqual([])
+    expect(globalThis.__ulpJobProgress).toBeInstanceOf(Map)
+    globalThis.__ulpJobProgress!.set('newer.txt', { filename: 'newer.txt', started_at: 2_000, rows_imported: 1, file_size_bytes: 10 })
+    globalThis.__ulpJobProgress!.set('older.txt', { filename: 'older.txt', started_at: 1_000, rows_imported: 5, file_size_bytes: 100 })
+    expect(getInboxJobsProgress().map(p => p.filename)).toEqual(['older.txt', 'newer.txt'])
+    expect(getInboxJobProgress()).toEqual({ filename: 'older.txt', started_at: 1_000, rows_imported: 5, file_size_bytes: 100 })
   })
 })

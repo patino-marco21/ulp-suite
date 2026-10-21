@@ -72,6 +72,8 @@ export type ImportHooks = Partial<ImportContext> & {
   beforeCommit?: () => void | Promise<void>
   /** The file's identity when it was read from the source archive. */
   source?: SourceIdentity
+  /** Called once, with a function that tells how many bytes of the file have been read so far (the progress line of the Inbox). */
+  onSourceBytes?: (bytesRead: () => number) => void
   /**
    * The size in bytes of the plain file being imported, when the caller knows it (processTextFile reads it from the disk). The same-name check then
    * treats a file of another size as another file, and ulp.sources records the size. Without it, and for a record that has no size, the name alone decides.
