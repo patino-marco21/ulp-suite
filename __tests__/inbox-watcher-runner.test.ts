@@ -19,7 +19,12 @@ describe('inbox watcher: imports run under the stall watchdog', () => {
     expect(afterClaim).toContain('processArchiveRef(claimedPath')
   })
 
-  test('the task still clears its in-flight state in a finally, so the slot and the inFlight entry are always released', () => {
-    expect(source).toMatch(/finally \{\s*setCurrentProgress\(null\)/)
+  test('the task still clears its own in-flight state in a finally, so the slot and the inFlight entry are always released', () => {
+    const last = source.lastIndexOf('} finally {', source.indexOf('function reconcile('))
+    const block = source.slice(last, source.indexOf('\n  })', last))
+    expect(block).toMatch(/progressMap\(\)\.get\(filename\) === progress\) progressMap\(\)\.delete\(filename\)/)   // this file's record, never another file's
+    expect(block).toContain('pendingTasks.delete(filename)')
+    expect(block).toContain('inFlight.delete(filename)')
+    expect(block).toContain('setCurrentJob(null)')
   })
 })

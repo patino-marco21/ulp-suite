@@ -30,6 +30,12 @@
  *                 once, and the audit row exists. (The disk gate's scenario is called "gate".)
  *   archive-ref   a file imported from the source archive through an .archiveref: same counts as the plain import, identity in ulp.sources, a same-name file with other
  *                 content is a new file, a damaged archive fails before one row is committed, and no plaintext copy of the file appears in the inbox
+ *   same-name     the same-name check compares size: the same file again is skipped (and the job log says so), another file under that name is imported and gets its
+ *                 own ulp.sources row; the job log records the rows repeated inside a file
+ *   link          a finished file put back into the inbox as a second hard-linked name of itself: the second pass is skipped and labelled, and nothing is stranded in
+ *                 processing/ (rename(2) between two names of one file does nothing), on the real inbox volume
+ *   progress      two inbox files at once (UPLOAD_CONCURRENCY=2), one with short lines and one with long ones: the status endpoint lists both, each share read
+ *                 follows the bytes read and not an assumed line length, the estimated total converges on the real one, and one file finishing leaves the other's card
  *
  *   docker compose build app
  *   npx tsx scripts/e2e-alert-rehearsal.ts --keep    # brings the rehearsal stack up (about 4 minutes) and leaves it running
@@ -820,6 +826,126 @@ async function archiveRef(): Promise<void> {
 }
 
 // ── main ────────────────────────────────────────────────────────────────────────────────────────
+async function sameName(): Promise<void> {
+  console.log('\n8. A used name with another size (the same-name check compares size) and the job log')
+  const N = `e2e-nov-same-${RUN}.txt`
+  const first = lines('P', 0, 1_000)
+  const a = await importLines(N, first)
+  check('the first file of that name: 1000 new', a.status === 'done' && a.imported === 1_000 && a.known === 0, brief(a))
+  const sizeA = Buffer.byteLength(text(first))
+  check('...ulp.sources remembers its name and its size', chQuery(`SELECT size FROM ulp.sources WHERE filename = '${N}'`) === String(sizeA), `[${chQuery(`SELECT size FROM ulp.sources WHERE filename = '${N}'`)}] vs ${sizeA}`)
+
+  const again = await importLines(N, first)
+  check('the same file again (same name, same size) is skipped: nothing imported, nothing read', again.status === 'done' && again.imported === 0 && again.known === 0, brief(again))
+  check('...and it did not add a second ulp.sources row', Number(chQuery(`SELECT count() FROM ulp.sources WHERE filename = '${N}'`)) === 1)
+
+  const more = [...first, ...lines('P', 1_000, 1_500)]
+  const b = await importLines(N, more)
+  check('another file under that name (500 more lines, another size) is imported: 500 new, 1000 known', b.status === 'done' && b.imported === 500 && b.known === 1_000, brief(b))
+  check('...it has its own ulp.sources row, with its own size', chQuery(`SELECT arrayStringConcat(arraySort(groupArray(toString(size))), ',') FROM ulp.sources WHERE filename = '${N}'`)
+    === [sizeA, Buffer.byteLength(text(more))].sort().join(','), chQuery(`SELECT groupArray(size) FROM ulp.sources WHERE filename = '${N}'`))
+  check('...and 1500 rows are stored for the name, each once', rowsFor(N) === 1_500 && distinctFor(N) === 1_500, `rows ${rowsFor(N)}, distinct ${distinctFor(N)}`)
+  const b2 = await importLines(N, more)
+  check('that second file is skipped when it is uploaded again', b2.status === 'done' && b2.imported === 0 && b2.known === 0, brief(b2))
+
+  const R = `e2e-nov-repeats-${RUN}.txt`
+  const rep = lines('R', 0, 100)
+  await importLines(R, [...rep, ...rep])
+  const recent = ((await api('GET', '/api/upload/queue-status')).json?.recent ?? []) as Array<{ filename: string; imported: number; repeats: number | null; note: string | null }>
+  const jobsOf = (name: string) => recent.filter(r => r.filename === name)
+  check('the job log labels the two skips of that name "already-imported" and no import', jobsOf(N).filter(r => r.note === 'already-imported').length === 2 && jobsOf(N).filter(r => r.note === null && r.imported > 0).length === 2,
+    JSON.stringify(jobsOf(N).map(r => [r.imported, r.note])))
+  check('...and records the rows repeated inside a file (100 here), and 0 for a skip', jobsOf(R)[0]?.repeats === 100 && jobsOf(N).every(r => r.repeats === 0), JSON.stringify([jobsOf(R)[0]?.repeats, jobsOf(N).map(r => r.repeats)]))
+  check('no stage table is left', stageTableCount() === 0)
+}
+
+/** The rows of the Inbox job list for a file, newest first. */
+async function inboxJobs(name: string): Promise<Array<{ status: string; imported: number; known: number; repeats: number | null; note: string | null }>> {
+  return (((await api('GET', '/api/inbox/status')).json?.done_recent ?? []) as Array<{ filename: string; status: string; imported: number; known: number; repeats: number | null; note: string | null }>)
+    .filter(r => r.filename === name)
+}
+
+async function hardLinkedNames(): Promise<void> {
+  console.log('\n9. A finished file put back into the inbox as a second name of itself (rename(2) between two names of one file does nothing)')
+  const N = `e2e-nov-link-${RUN}.txt`
+  const inApp = (cmd: string) => sh('docker', ['exec', APP, 'sh', '-c', cmd])
+  sh('docker', ['exec', '-i', APP, 'sh', '-c', `cat > /app/inbox/${N}`], process.env, text(lines('K', 0, 2_000)))
+  const first = await waitFor(async () => (await inboxJobs(N))[0], 120_000, 1000)
+  check('the file dropped in the inbox is imported: 2000 new', !!first && first.status === 'done' && first.imported === 2_000, JSON.stringify(first))
+  check('...and it ends in done/ only', inApp(`ls /app/inbox/done/${N} 2>/dev/null; ls /app/inbox/processing /app/inbox | grep -c "${N}" || true`).split('\n').pop() === '0')
+
+  // like an owner who moves a finished file back with a hard link: done/ keeps the file, the inbox gets a second name of the same file
+  inApp(`ln /app/inbox/done/${N} /app/inbox/${N}`)
+  const second = await waitFor(async () => ((await inboxJobs(N)).length >= 2 ? (await inboxJobs(N))[0] : null), 120_000, 1000)
+  check('the second pass is skipped by the same-name check and labelled', !!second && second.status === 'done' && second.imported === 0 && second.note === 'already-imported', JSON.stringify(second))
+  const left = inApp(`ls /app/inbox/processing | grep -c "${N}" || true`)
+  const inbox = inApp(`ls /app/inbox | grep -c "${N}" || true`)
+  const links = inApp(`stat -c %h /app/inbox/done/${N}`)
+  check('nothing is left in processing/ or in the inbox, and done/ holds the file under one name', left === '0' && inbox === '0' && links === '1', `processing ${left}, inbox ${inbox}, links ${links}`)
+  check('...and the rows are still in ClickHouse once', rowsFor(N) === 2_000, `rows ${rowsFor(N)}`)
+}
+
+interface CardSample { poll: number; t: number; filename: string; phase: string | null; pct: number | null; bytes_read: number | null; file_size_bytes: number; est_total_rows: number | null; rows_staged: number }
+
+async function progressCards(): Promise<void> {
+  console.log('\n10. The progress cards of two inbox files imported at once (UPLOAD_CONCURRENCY=2), short lines and long ones')
+  scanLog('before the progress scenario')
+  if (!check('the rehearsal app restarted with concurrency 2', await recreateApp({ concurrency: '2' }))) return
+  const SHORT = `e2e-nov-prog-short-${RUN}.txt`
+  const LONG = `e2e-nov-prog-long-${RUN}.txt`
+  const ROWS = 500_000
+  const pad = 'x'.repeat(90)
+  const shortLines = Array.from({ length: ROWS }, (_, i) => `https://s.test/:Ps${RUN}x${i}@m.test:Pw-${RUN}x${i}`)
+  const longLines = Array.from({ length: ROWS }, (_, i) => `https://shop${i % 500}.example-store.test/account/login/${pad}:Pl${RUN}x${i}@probe-mail.test:Pw-${RUN}x${i}-Xy!`)
+  const put = (name: string, ls: string[]) => sh('docker', ['exec', '-i', APP, 'sh', '-c', `cat > /app/inbox/${name}`], process.env, text(ls)) // the watcher waits for the size to stop changing
+  put(SHORT, shortLines)
+  put(LONG, longLines)
+
+  const samples: CardSample[] = []
+  const end = Date.now() + 240_000
+  let finished = false
+  let poll = 0
+  while (Date.now() < end && !finished) {
+    const json = (await api('GET', '/api/inbox/status')).json
+    poll++
+    for (const c of (json?.jobs_progress ?? []) as Array<Record<string, any>>) {
+      samples.push({ poll, t: Date.now(), filename: c.filename, phase: c.phase, pct: c.pct, bytes_read: c.bytes_read, file_size_bytes: c.file_size_bytes, est_total_rows: c.est_total_rows, rows_staged: c.rows_staged })
+    }
+    const done = ((json?.done_recent ?? []) as Array<{ filename: string; status: string }>).filter(r => [SHORT, LONG].includes(r.filename) && r.status === 'done').length
+    finished = done >= 2
+    if (!finished) await sleep(200)
+  }
+  check('both files were imported', finished)
+  const by = (name: string) => samples.filter(x => x.filename === name)
+  const together = new Map<number, Set<string>>()
+  for (const x of samples) together.set(x.poll, (together.get(x.poll) ?? new Set()).add(x.filename))
+  check('the status endpoint listed both files in flight in the same answer', [...together.values()].some(set => set.size === 2), `samples ${samples.length}`)
+  check('...and every line of both files was imported (500000 rows each)', rowsFor(SHORT) === ROWS && rowsFor(LONG) === ROWS, `short ${rowsFor(SHORT)}, long ${rowsFor(LONG)}`)
+  for (const [label, name] of [['short', SHORT], ['long', LONG]] as const) {
+    const reading = by(name).filter(x => x.phase === 'parsing' && x.bytes_read !== null && x.bytes_read > 0)
+    check(`${label} lines: the card showed the bytes read while the file was read (${reading.length} samples)`, reading.length >= 3)
+    const inside = reading.filter(x => x.pct !== null && x.pct > 0 && x.pct < 99)
+    check(`${label} lines: the share read in the card follows the bytes read (within a point)`,
+      inside.length >= 2 && inside.every(x => Math.abs((x.pct as number) - Math.floor((x.bytes_read as number) / x.file_size_bytes * 100)) <= 1), JSON.stringify(inside.slice(0, 3)))
+    check(`${label} lines: the share read never goes back`, reading.every((x, i) => i === 0 || (x.pct ?? 0) >= (reading[i - 1].pct ?? 0)))
+    const real = rowsFor(name)
+    const late = reading.filter(x => (x.pct ?? 0) >= 40 && x.est_total_rows)
+    const worst = late.reduce((m, x) => Math.max(m, Math.abs((x.est_total_rows as number) - real) / real), 0)
+    const guess = Math.abs(Math.round(reading[0]?.file_size_bytes / 80) - real) / real   // what the old card assumed, for the report
+    check(`${label} lines: once 40% is read the estimated total is within 10% of the real ${real} rows`, late.length >= 1 && worst <= 0.1, `samples ${late.length}, worst ${(worst * 100).toFixed(1)}%`)
+    info(`${label} lines: the old 80-bytes-a-line estimate would have been off by`, `${(guess * 100).toFixed(0)}%`)
+  }
+  const lastShort = Math.max(...by(SHORT).map(x => x.t), 0)
+  const lastLong = Math.max(...by(LONG).map(x => x.t), 0)
+  const earlier = lastShort < lastLong ? SHORT : LONG
+  const later = earlier === SHORT ? LONG : SHORT
+  const afterEarlier = by(later).filter(x => x.t > Math.max(...by(earlier).map(y => y.t)))
+  check(`when ${earlier === SHORT ? 'the short' : 'the long'} file finished the other kept its card (${afterEarlier.length} samples after)`, afterEarlier.length >= 1)
+  const idle = (await api('GET', '/api/inbox/status')).json
+  check('...and when both are done the endpoint lists no file in flight', (idle?.jobs_progress ?? []).length === 0 && idle?.current_progress === null)
+  check('no stage table is left', stageTableCount() === 0)
+}
+
 async function run(): Promise<number> {
   // The receiver runs the app image's node with its own entrypoint, so the image's health check (port 3000) always calls it
   // unhealthy: for it, running is what matters.
@@ -864,6 +990,9 @@ async function run(): Promise<number> {
   if (want('off')) await directPath()
   if (want('quality-gate')) await qualityGate()
   if (want('archive-ref')) await archiveRef()
+  if (want('same-name')) await sameName()
+  if (want('link')) await hardLinkedNames()
+  if (want('progress')) await progressCards()
 
   scanLog('at the end')
   await recreateApp() // leave the stack on the production defaults
