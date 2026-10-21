@@ -7,7 +7,7 @@
  * Directory layout (auto-created on startup):
  *   ./inbox/            — place files here
  *   ./inbox/processing/ — a file lives here for the duration of its import
- *   ./inbox/done/       — successfully processed files are moved here
+ *   ./inbox/done/       — successfully processed files are moved here (removed at a start 7 days after the import, and only once the source archive holds them)
  *   ./inbox/failed/     — failed (or interrupted) files are moved here
  *   ./inbox/held/       — files the ingest quality gate stopped before one row was stored (an admin releases them)
  *
@@ -43,7 +43,8 @@ import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable, move
 import { sniffFileKind } from '@/lib/inbox-helpers'
 import { isIngestHeldError } from '@/lib/ingest-quality-gate'
 import { consumeGateOverride } from '@/lib/ingest-gate-store'
-import { ARCHIVE_REF_EXT, readArchiveRefFile } from '@/lib/archive-ref'
+import { ARCHIVE_REF_EXT, appArchiveDir, readArchiveRefFile } from '@/lib/archive-ref'
+import { DONE_MAX_AGE_MS, archiveLookup, importedAtFromJobLog, pruneDoneFiles } from '@/lib/inbox-retention'
 import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 import { waitForDiskSpace } from '@/lib/ingest-disk-gate'
 import { noveltyConfig } from '@/lib/ingest-novelty-config'
@@ -72,7 +73,6 @@ const HELD_PREFIX = HELD + path.sep
 
 let started = false
 
-const DONE_MAX_AGE_MS         = 7 * 24 * 60 * 60 * 1_000   // 7 days
 const RECONCILE_INTERVAL_MS   = 30_000                       // scan for missed files every 30 s
 const STABILITY_CHECK_WAIT_MS = 1_000                        // gap between size checks before claiming a file
 
@@ -202,23 +202,21 @@ export function forceReconcile(): number {
 
 const SUPPORTED_EXTS = new Set(['.txt', '.csv', '.zip', ARCHIVE_REF_EXT])
 
-/** Delete files in dir that are older than maxAgeMs. Silent on errors. */
-function cleanupOldFiles(dir: string, maxAgeMs: number): void {
+/**
+ * Remove from done/ the files imported more than 7 days ago that the source archive also holds (lib/inbox-retention.ts). A file nobody archived stays, and the
+ * log says how many files and bytes are waiting for the archive. console.warn: the production build strips console.log, and the owner reads docker logs.
+ */
+function pruneDone(): void {
   try {
-    const now    = Date.now()
-    const cutoff = now - maxAgeMs
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (!entry.isFile()) continue
-      const filePath = path.join(dir, entry.name)
-      try {
-        const { mtimeMs } = fs.statSync(filePath)
-        if (mtimeMs < cutoff) {
-          fs.unlinkSync(filePath)
-          console.log(`[inbox-watcher] cleanup: deleted old done file ${entry.name}`)
-        }
-      } catch { /* ignore individual file errors */ }
+    const report = pruneDoneFiles(DONE, DONE_MAX_AGE_MS, { importedAt: importedAtFromJobLog(), isArchived: archiveLookup(appArchiveDir()) })
+    for (const name of report.deleted) console.warn(`[inbox-watcher] cleanup: deleted ${name} from done/ (imported over 7 days ago, held by the source archive)`)
+    if (report.unarchived.length > 0) {
+      const gib = report.unarchived.reduce((sum, f) => sum + f.size, 0) / 1024 ** 3
+      console.warn(`[inbox-watcher] cleanup: kept ${report.unarchived.length} file(s), ${gib.toFixed(1)} GiB, in done/ that were imported over 7 days ago but are not in the source archive; archive them (scripts/archive-sources.ts) and the next start removes them`)
     }
-  } catch { /* ignore if dir doesn't exist yet */ }
+  } catch (err) {
+    console.warn('[inbox-watcher] cleanup of done/ failed, nothing was deleted:', err)
+  }
 }
 
 /**
@@ -532,8 +530,8 @@ export function startInboxWatcher(): void {
     })
   }
 
-  // Prune stale done/ files on startup (older than 7 days)
-  cleanupOldFiles(DONE, DONE_MAX_AGE_MS)
+  // Prune done/ on startup: files imported over 7 days ago AND held by the source archive (never an original nobody archived)
+  pruneDone()
 
   // Reconcile on startup: pick up any files that were in inbox/ before this
   // process started (e.g. dropped during a rebuild or before first run).

@@ -36,6 +36,8 @@
  *                 processing/ (rename(2) between two names of one file does nothing), on the real inbox volume
  *   progress      two inbox files at once (UPLOAD_CONCURRENCY=2), one with short lines and one with long ones: the status endpoint lists both, each share read
  *                 follows the bytes read and not an assumed line length, the estimated total converges on the real one, and one file finishing leaves the other's card
+ *   retention     inbox/done at start-up: a file imported over 7 days ago is removed only when the source archive holds it (a real archive, an .archiveref, a restart); a
+ *                 file the archive does not hold, one imported yesterday although its own date is 40 days old, and one the job log never imported all stay
  *
  *   docker compose build app
  *   npx tsx scripts/e2e-alert-rehearsal.ts --keep    # brings the rehearsal stack up (about 4 minutes) and leaves it running
@@ -959,6 +961,78 @@ async function progressCards(): Promise<void> {
   check('no stage table is left', stageTableCount() === 0)
 }
 
+async function doneRetention(): Promise<void> {
+  console.log('\n11. inbox/done is pruned at start-up by the age of the import, and only for files the source archive holds')
+  scanLog('before the retention scenario')
+  if (!check('the rehearsal app restarted with the production defaults', await recreateApp())) return
+  const OLD_ARCH = `e2e-ret-old-archived-${RUN}.txt`
+  const OLD_PLAIN = `e2e-ret-old-unarchived-${RUN}.txt`
+  const NEW_ARCH = `e2e-ret-new-archived-${RUN}.txt`
+  const VIA_REF = `e2e-ret-ref-${RUN}.txt`
+  const NO_JOB = `e2e-ret-nojob-${RUN}.txt`
+  const body = (tag: string) => text(lines(tag, 0, 200))
+
+  // The real archive tool, on the host, for every file but OLD_PLAIN. (It leaves a file modified in the last 10 minutes alone: the fixtures are an hour old.)
+  const srcDir = join(work, 'ret-src')
+  const archiveDir = join(work, 'ret-archive')
+  mkdirSync(srcDir)
+  mkdirSync(archiveDir)
+  const hourAgo = new Date(Date.now() - 3_600_000)
+  const bodies = new Map<string, string>()
+  for (const [name, tag] of [[OLD_ARCH, 'Ra'], [NEW_ARCH, 'Rb'], [VIA_REF, 'Rc'], [NO_JOB, 'Rd'], [OLD_PLAIN, 'Re']] as const) {
+    bodies.set(name, body(tag))
+    if (name === OLD_PLAIN) continue
+    writeFileSync(join(srcDir, name), bodies.get(name) as string)
+    utimesSync(join(srcDir, name), hourAgo, hourAgo)
+  }
+  sh('npx', ['tsx', 'scripts/archive-sources.ts', 'archive', '--src', srcDir, '--out', archiveDir, '--workers', '1', '--no-sources'])
+  const manifest = new Map<string, any>(readFileSync(join(archiveDir, 'manifest.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l)).map((e: any) => [e.name, e]))
+  check('the archive tool archived four of the five files', manifest.size === 4 && !manifest.has(OLD_PLAIN), String(manifest.size))
+  sh('docker', ['exec', APP, 'rm', '-rf', '/archive'])
+  sh('docker', ['cp', archiveDir, `${APP}:/archive`]) // /archive lives in the container's own layer: it survives `docker restart`, not a recreate
+
+  // Inside the container: the files in done/ with their own date 40 days back, and the job log rows (UTC) of an import 8 days ago, or yesterday, or none.
+  const ref = (e: any) => JSON.stringify({ v: 1, id: e.id, name: e.name, size: e.size, sha256: e.sha256 }) + '\n'
+  const spec = [
+    { name: OLD_ARCH, text: bodies.get(OLD_ARCH), jobDaysAgo: 8 },
+    { name: OLD_PLAIN, text: bodies.get(OLD_PLAIN), jobDaysAgo: 8 },
+    { name: NEW_ARCH, text: bodies.get(NEW_ARCH), jobDaysAgo: 1 },
+    { name: `${VIA_REF}.archiveref`, text: ref(manifest.get(VIA_REF)), jobDaysAgo: 8 },
+    { name: NO_JOB, text: bodies.get(NO_JOB), jobDaysAgo: null },
+  ]
+  sh('docker', ['exec', '-i', APP, 'node', '-e', `
+    const fs = require('fs'); const Database = require('better-sqlite3');
+    const spec = JSON.parse(fs.readFileSync(0, 'utf8'));
+    const db = new Database('/app/data/ulp.db');
+    const old = new Date(Date.now() - 40 * 86400000);
+    for (const f of spec) {
+      const p = '/app/inbox/done/' + f.name;
+      fs.writeFileSync(p, f.text); fs.utimesSync(p, old, old);
+      if (f.jobDaysAgo !== null) db.prepare("INSERT INTO processing_jobs (source, filename, status, imported, skipped, duration_ms, created_at) VALUES ('inbox', ?, 'done', 1, 0, 1, datetime('now', ?))").run(f.name, '-' + f.jobDaysAgo + ' days');
+    }
+    db.close();`], process.env, JSON.stringify(spec))
+  check('five files sit in done/, every one with its own date 40 days back', spec.every(f => inboxLs('done').includes(f.name)))
+
+  sh('docker', ['restart', APP])
+  const up = await waitFor(() => sh('docker', ['inspect', '-f', '{{.State.Health.Status}}', APP]) === 'healthy', 300_000, 2000)
+  if (!check('the app restarted', !!up)) return
+  await login()
+  const left = inboxLs('done')
+  check('an archived file imported 8 days ago is gone', !left.includes(OLD_ARCH), left.join(', '))
+  check('...so is an .archiveref imported 8 days ago whose archive file exists', !left.includes(`${VIA_REF}.archiveref`))
+  check('a file imported 8 days ago that the archive does NOT hold stays (the only copy)', left.includes(OLD_PLAIN))
+  check('an archived file imported yesterday stays although the file itself is 40 days old', left.includes(NEW_ARCH))
+  check('a file the job log never imported stays', left.includes(NO_JOB))
+  const log = appLog()
+  check('the app log says what was deleted', log.includes(`cleanup: deleted ${OLD_ARCH} from done/`))
+  check('...and how many files wait for the archive', /cleanup: kept \d+ file\(s\), [\d.]+ GiB, in done\/ that were imported over 7 days ago but are not in the source archive/.test(log))
+  check('...and it did not delete the unarchived file or the one imported yesterday', !log.includes(`deleted ${OLD_PLAIN}`) && !log.includes(`deleted ${NEW_ARCH}`))
+
+  // leave the stack as the other scenarios expect it
+  sh('docker', ['exec', APP, 'sh', '-c', `rm -rf /archive; rm -f ${[OLD_ARCH, OLD_PLAIN, NEW_ARCH, `${VIA_REF}.archiveref`, NO_JOB].map(n => `'/app/inbox/done/${n}'`).join(' ')}`])
+  scanLog('after the retention scenario')
+}
+
 async function run(): Promise<number> {
   // The receiver runs the app image's node with its own entrypoint, so the image's health check (port 3000) always calls it
   // unhealthy: for it, running is what matters.
@@ -1006,6 +1080,7 @@ async function run(): Promise<number> {
   if (want('same-name')) await sameName()
   if (want('link')) await hardLinkedNames()
   if (want('progress')) await progressCards()
+  if (want('retention')) await doneRetention()
 
   scanLog('at the end')
   await recreateApp() // leave the stack on the production defaults
