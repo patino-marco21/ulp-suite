@@ -829,7 +829,7 @@ async function archiveRef(): Promise<void> {
 async function sameName(): Promise<void> {
   console.log('\n8. A used name with another size (the same-name check compares size) and the job log')
   const N = `e2e-nov-same-${RUN}.txt`
-  const first = lines('P', 0, 1_000)
+  const first = lines('SN', 0, 1_000)
   const a = await importLines(N, first)
   check('the first file of that name: 1000 new', a.status === 'done' && a.imported === 1_000 && a.known === 0, brief(a))
   const sizeA = Buffer.byteLength(text(first))
@@ -839,7 +839,7 @@ async function sameName(): Promise<void> {
   check('the same file again (same name, same size) is skipped: nothing imported, nothing read', again.status === 'done' && again.imported === 0 && again.known === 0, brief(again))
   check('...and it did not add a second ulp.sources row', Number(chQuery(`SELECT count() FROM ulp.sources WHERE filename = '${N}'`)) === 1)
 
-  const more = [...first, ...lines('P', 1_000, 1_500)]
+  const more = [...first, ...lines('SN', 1_000, 1_500)]
   const b = await importLines(N, more)
   check('another file under that name (500 more lines, another size) is imported: 500 new, 1000 known', b.status === 'done' && b.imported === 500 && b.known === 1_000, brief(b))
   check('...it has its own ulp.sources row, with its own size', chQuery(`SELECT arrayStringConcat(arraySort(groupArray(toString(size))), ',') FROM ulp.sources WHERE filename = '${N}'`)
@@ -849,7 +849,7 @@ async function sameName(): Promise<void> {
   check('that second file is skipped when it is uploaded again', b2.status === 'done' && b2.imported === 0 && b2.known === 0, brief(b2))
 
   const R = `e2e-nov-repeats-${RUN}.txt`
-  const rep = lines('R', 0, 100)
+  const rep = lines('RP', 0, 100)
   await importLines(R, [...rep, ...rep])
   const recent = ((await api('GET', '/api/upload/queue-status')).json?.recent ?? []) as Array<{ filename: string; imported: number; repeats: number | null; note: string | null }>
   const jobsOf = (name: string) => recent.filter(r => r.filename === name)
@@ -869,7 +869,7 @@ async function hardLinkedNames(): Promise<void> {
   console.log('\n9. A finished file put back into the inbox as a second name of itself (rename(2) between two names of one file does nothing)')
   const N = `e2e-nov-link-${RUN}.txt`
   const inApp = (cmd: string) => sh('docker', ['exec', APP, 'sh', '-c', cmd])
-  sh('docker', ['exec', '-i', APP, 'sh', '-c', `cat > /app/inbox/${N}`], process.env, text(lines('K', 0, 2_000)))
+  sh('docker', ['exec', '-i', APP, 'sh', '-c', `cat > /app/inbox/${N}`], process.env, text(lines('LK', 0, 2_000)))
   const first = await waitFor(async () => (await inboxJobs(N))[0], 120_000, 1000)
   check('the file dropped in the inbox is imported: 2000 new', !!first && first.status === 'done' && first.imported === 2_000, JSON.stringify(first))
   check('...and it ends in done/ only', inApp(`ls /app/inbox/done/${N} 2>/dev/null; ls /app/inbox/processing /app/inbox | grep -c "${N}" || true`).split('\n').pop() === '0')
@@ -885,7 +885,7 @@ async function hardLinkedNames(): Promise<void> {
   check('...and the rows are still in ClickHouse once', rowsFor(N) === 2_000, `rows ${rowsFor(N)}`)
 }
 
-interface CardSample { poll: number; t: number; filename: string; phase: string | null; pct: number | null; bytes_read: number | null; file_size_bytes: number; est_total_rows: number | null; rows_staged: number }
+interface CardSample { poll: number; t: number; filename: string; phase: string | null; pct: number | null; bytes_read: number | null; file_size_bytes: number; est_total_rows: number | null; eta_ms: number | null; rows_staged: number }
 
 async function progressCards(): Promise<void> {
   console.log('\n10. The progress cards of two inbox files imported at once (UPLOAD_CONCURRENCY=2), short lines and long ones')
@@ -897,9 +897,11 @@ async function progressCards(): Promise<void> {
   const pad = 'x'.repeat(90)
   const shortLines = Array.from({ length: ROWS }, (_, i) => `https://s.test/:Ps${RUN}x${i}@m.test:Pw-${RUN}x${i}`)
   const longLines = Array.from({ length: ROWS }, (_, i) => `https://shop${i % 500}.example-store.test/account/login/${pad}:Pl${RUN}x${i}@probe-mail.test:Pw-${RUN}x${i}-Xy!`)
-  const put = (name: string, ls: string[]) => sh('docker', ['exec', '-i', APP, 'sh', '-c', `cat > /app/inbox/${name}`], process.env, text(ls)) // the watcher waits for the size to stop changing
-  put(SHORT, shortLines)
-  put(LONG, longLines)
+  // Both files are written first (next to the inbox, on the same volume) and then moved in together, so the watcher finds them in the same scan and the two imports overlap.
+  const stage = (name: string, ls: string[]) => sh('docker', ['exec', '-i', APP, 'sh', '-c', `cat > /app/inbox/done/.tmp-${name}`], process.env, text(ls))
+  stage(SHORT, shortLines)
+  stage(LONG, longLines)
+  sh('docker', ['exec', APP, 'sh', '-c', `mv /app/inbox/done/.tmp-${SHORT} /app/inbox/${SHORT} && mv /app/inbox/done/.tmp-${LONG} /app/inbox/${LONG}`])
 
   const samples: CardSample[] = []
   const end = Date.now() + 240_000
@@ -909,7 +911,7 @@ async function progressCards(): Promise<void> {
     const json = (await api('GET', '/api/inbox/status')).json
     poll++
     for (const c of (json?.jobs_progress ?? []) as Array<Record<string, any>>) {
-      samples.push({ poll, t: Date.now(), filename: c.filename, phase: c.phase, pct: c.pct, bytes_read: c.bytes_read, file_size_bytes: c.file_size_bytes, est_total_rows: c.est_total_rows, rows_staged: c.rows_staged })
+      samples.push({ poll, t: Date.now(), filename: c.filename, phase: c.phase, pct: c.pct, bytes_read: c.bytes_read, file_size_bytes: c.file_size_bytes, est_total_rows: c.est_total_rows, eta_ms: c.eta_ms, rows_staged: c.rows_staged })
     }
     const done = ((json?.done_recent ?? []) as Array<{ filename: string; status: string }>).filter(r => [SHORT, LONG].includes(r.filename) && r.status === 'done').length
     finished = done >= 2
@@ -928,12 +930,23 @@ async function progressCards(): Promise<void> {
     check(`${label} lines: the share read in the card follows the bytes read (within a point)`,
       inside.length >= 2 && inside.every(x => Math.abs((x.pct as number) - Math.floor((x.bytes_read as number) / x.file_size_bytes * 100)) <= 1), JSON.stringify(inside.slice(0, 3)))
     check(`${label} lines: the share read never goes back`, reading.every((x, i) => i === 0 || (x.pct ?? 0) >= (reading[i - 1].pct ?? 0)))
+    // The rows staged trail the bytes read by the batches in flight: the parser works one batch ahead of the insert (UPLOAD_BATCH_SIZE, 100,000 rows each), so
+    // rows_staged is between (share read x rows) - 2 batches and (share read x rows), and the estimate rows_staged / share read is between rows - 2 batches / share
+    // and rows. For the 5 batches of these files that is a lot (it is why this holds the estimate to its design, not to a percentage); for a 74-million-row file
+    // 2 batches / 40% is 0.7%.
+    const BATCH = 100_000
     const real = rowsFor(name)
     const late = reading.filter(x => (x.pct ?? 0) >= 40 && x.est_total_rows)
+    const share = (x: CardSample) => (x.bytes_read as number) / x.file_size_bytes
     const worst = late.reduce((m, x) => Math.max(m, Math.abs((x.est_total_rows as number) - real) / real), 0)
-    const guess = Math.abs(Math.round(reading[0]?.file_size_bytes / 80) - real) / real   // what the old card assumed, for the report
-    check(`${label} lines: once 40% is read the estimated total is within 10% of the real ${real} rows`, late.length >= 1 && worst <= 0.1, `samples ${late.length}, worst ${(worst * 100).toFixed(1)}%`)
-    info(`${label} lines: the old 80-bytes-a-line estimate would have been off by`, `${(guess * 100).toFixed(0)}%`)
+    const guess = reading[0] ? Math.abs(Math.round(reading[0].file_size_bytes / 80) - real) / real : NaN   // what the old card assumed, for the report
+    check(`${label} lines: past 40% read the estimated total never exceeds the real ${real} rows and trails it by at most the batches in flight`,
+      late.length >= 1 && late.every(x => (x.est_total_rows as number) <= real * 1.02 && (x.est_total_rows as number) >= real - (2.2 * BATCH) / share(x)),
+      `samples ${late.length}, worst ${(worst * 100).toFixed(1)}%`)
+    info(`${label} lines: the estimate was off by at most ${(worst * 100).toFixed(0)}% on this ${(real / BATCH).toFixed(0)}-batch file; the old 80-bytes-a-line estimate would have been off by`, `${(guess * 100).toFixed(0)}%`)
+    const etas = late.filter(x => x.eta_ms !== null)
+    check(`${label} lines: past 40% read the time left is never negative and does not grow (${etas.length} samples)`,
+      etas.length >= 2 && etas.every(x => (x.eta_ms as number) >= 0) && (etas[etas.length - 1].eta_ms as number) <= (etas[0].eta_ms as number))
   }
   const lastShort = Math.max(...by(SHORT).map(x => x.t), 0)
   const lastLong = Math.max(...by(LONG).map(x => x.t), 0)
