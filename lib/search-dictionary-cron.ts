@@ -1,23 +1,28 @@
 /**
  * Keeps the search dictionary (lib/search-dictionary.ts) current. One tick every SEARCH_DICT_CRON_MINUTES (default 10; 0 disables). A tick rebuilds only
- * when the dictionary is stale or missing AND the table has been quiet: the fingerprint is read, the tick waits SEARCH_DICT_SETTLE_SECONDS (default
- * 120) and reads it again, so an import in progress is never built against. It also skips while a content mutation or another build is running,
- * and when the disk has no room for the second copy (not a failure). Failures back off: three in a row wait an hour.
+ * when the dictionary is stale or missing AND the table has been quiet: no import is queued or running (the shared upload queue), the fingerprint is
+ * read, the tick waits SEARCH_DICT_SETTLE_SECONDS (default 120) and reads it again, so an import in progress is never built against. The fingerprint alone
+ * is not enough for a big file: its commits are minutes apart, so a quiet window falls inside the batch and the build would be stale on arrival. It also
+ * skips while a content mutation or another build is running, and when the disk has no room for the second copy (not a failure). Failures back off:
+ * three in a row wait an hour.
  *
  * Production only (instrumentation.ts). The settle wait makes a tick long, so a tick never overlaps the previous one.
  */
+import { queueSize } from '@/lib/upload-queue'
 import {
   buildSearchDictionary, DictionaryHeadroomError, getSearchDictionaryStatus, readLiveState, resetSearchDictionaryCache, recordBuildOutcome,
   searchDictCronMinutes, searchDictSettleSeconds, searchDictionaryEnabled,
   type BuildResult, type DictionaryStatus, type LiveState,
 } from '@/lib/search-dictionary'
 
-export type TickOutcome = 'disabled' | 'fresh' | 'unknown' | 'building' | 'settling' | 'mutating' | 'backoff' | 'no-headroom' | 'built' | 'failed'
+export type TickOutcome = 'disabled' | 'fresh' | 'unknown' | 'building' | 'importing' | 'settling' | 'mutating' | 'backoff' | 'no-headroom' | 'built' | 'failed'
 
 export interface TickDeps {
   status: () => Promise<DictionaryStatus>
   live: () => Promise<LiveState | null>
   build: () => Promise<BuildResult>
+  /** True while an import (an inbox file or an upload) is queued or running. */
+  importing: () => boolean
   sleep: (ms: number) => Promise<void>
   now: () => number
 }
@@ -41,6 +46,7 @@ const defaultDeps = (): TickDeps => ({
   status: async () => { resetSearchDictionaryCache(); return getSearchDictionaryStatus() },
   live: () => readLiveState(),
   build: () => buildSearchDictionary(),
+  importing: () => queueSize() > 0,
   sleep: ms => new Promise<void>(resolve => setTimeout(resolve, ms)),
   now: Date.now,
 })
@@ -57,6 +63,7 @@ export async function runSearchDictionaryTick(overrides: Partial<TickDeps> = {})
 
   // stale or missing
   if (failures >= BACKOFF_AFTER_FAILURES && d.now() - lastFailureAt < BACKOFF_MS) return 'backoff'
+  if (d.importing()) return 'importing'
   const first = await d.live()
   if (!first) return 'unknown'
   if (first.mutationsRunning > 0) return 'mutating'
@@ -66,6 +73,7 @@ export async function runSearchDictionaryTick(overrides: Partial<TickDeps> = {})
   if (second.fingerprint !== first.fingerprint) return 'settling'
   if (second.mutationsRunning > 0) return 'mutating'
   if (second.buildsRunning > 0) return 'building'
+  if (d.importing()) return 'importing' // a file was claimed while the tick waited
 
   try {
     const result = await d.build()

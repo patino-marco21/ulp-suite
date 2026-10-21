@@ -5,6 +5,7 @@ vi.mock('@/lib/clickhouse', () => ({ executeQuery: vi.fn(async () => []), getCli
 import { runSearchDictionaryTick, startSearchDictionaryCron, resetCronState } from '@/lib/search-dictionary-cron'
 import { DictionaryHeadroomError, readBuildRecord, recordBuildOutcome, type DictionaryStatus, type LiveState } from '@/lib/search-dictionary'
 import { executeQuery } from '@/lib/clickhouse'
+import { uploadQueue } from '@/lib/upload-queue'
 
 const status = (state: DictionaryStatus['state']): DictionaryStatus => ({
   state, fingerprint: null, builtAt: null, pairRows: null, emailRows: null, bytes: null, lastError: null, lastBuildMs: null,
@@ -81,6 +82,37 @@ describe('runSearchDictionaryTick', () => {
     const d = deps({ live: vi.fn().mockResolvedValueOnce(live()).mockResolvedValueOnce(live({ buildsRunning: 1 })) })
     expect(await runSearchDictionaryTick(d)).toBe('building')
     expect(d.build).not.toHaveBeenCalled()
+  })
+
+  // A big file commits minutes apart from the one before it, so the 120 s of quiet that the settle check asks for fell inside a batch: on 2026-10-21 a
+  // rebuild started in the middle of a six-file batch, took 328 s instead of 215 s while the import fought it for the disks, and was stale again on arrival.
+  test('imports queued or running: no wait and no build, the next tick looks again', async () => {
+    const d = deps({ importing: vi.fn(() => true) })
+    expect(await runSearchDictionaryTick(d)).toBe('importing')
+    expect(d.live).not.toHaveBeenCalled()
+    expect(d.sleep).not.toHaveBeenCalled()
+    expect(d.build).not.toHaveBeenCalled()
+  })
+
+  test('an import that starts while the tick waits for the table to settle stops the build too', async () => {
+    const d = deps({ importing: vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true) })
+    expect(await runSearchDictionaryTick(d)).toBe('importing')
+    expect(d.sleep).toHaveBeenCalledTimes(1)
+    expect(d.build).not.toHaveBeenCalled()
+  })
+
+  test('a fresh dictionary is still just fresh while imports run', async () => {
+    const d = deps({ status: vi.fn(async () => status('fresh')), importing: vi.fn(() => true) })
+    expect(await runSearchDictionaryTick(d)).toBe('fresh')
+  })
+
+  test('by default "importing" means the shared upload queue has work, running or waiting', async () => {
+    let release = () => {}
+    const running = uploadQueue(() => new Promise<void>(resolve => { release = resolve }))
+    expect(await runSearchDictionaryTick(deps())).toBe('importing')
+    release()
+    await running
+    expect(await runSearchDictionaryTick(deps())).toBe('built')
   })
 
   test('the live state unreadable: unknown, no build', async () => {
