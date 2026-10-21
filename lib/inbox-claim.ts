@@ -21,6 +21,34 @@ import fs from 'fs'
 import path from 'path'
 
 /**
+ * Moves a file with rename(2), and finishes the move when the destination is another name of the same file.
+ *
+ * POSIX says rename(2) between two names of ONE file does nothing and reports success, so the source name stays. That happens when a file is kept under
+ * two names (an owner who moves a held or finished file back into inbox/ with a hard link): the final move of processing/X onto held/X, done/X or failed/X
+ * left X in processing/, where the next start reported it as a failed import. After the rename, a source that still exists and is the same file as the
+ * destination (same device and inode, reached through a different directory entry) is removed; the data stays under the destination name.
+ *
+ * Throws what rename throws, ENOENT for a missing source included. Moving a file onto its own path, or onto an alias of its own path through a symlinked
+ * directory, changes nothing.
+ */
+export function moveFile(src: string, dest: string): void {
+  fs.renameSync(src, dest)
+  let leftover: fs.BigIntStats
+  try {
+    leftover = fs.lstatSync(src, { bigint: true })
+  } catch {
+    return // the normal case: the source name is gone
+  }
+  try {
+    if (fs.realpathSync(src) === fs.realpathSync(dest)) return // one directory entry reached by two paths, not a second name of the file
+    const kept = fs.statSync(dest, { bigint: true })
+    if (leftover.dev === kept.dev && leftover.ino === kept.ino) fs.unlinkSync(src)
+  } catch (err) {
+    console.warn(`[inbox] moved ${path.basename(dest)}, but could not tell whether the old name of the same file is left behind: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+/**
  * Atomically claim a file for processing by moving it out of the inbox into
  * `procDir`. Returns the destination path if the claim succeeded, or null if
  * the source no longer exists (already claimed/removed by another attempt).
@@ -34,7 +62,7 @@ export function claimFileForProcessing(srcPath: string, procDir: string): string
   const dest = path.join(procDir, path.basename(srcPath))
   try {
     fs.mkdirSync(procDir, { recursive: true })
-    fs.renameSync(srcPath, dest)
+    moveFile(srcPath, dest)
     return dest
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
@@ -63,7 +91,7 @@ export function sweepProcessingToFailed(procDir: string, failDir: string): strin
     if (!entry.isFile()) continue
     try {
       fs.mkdirSync(failDir, { recursive: true })
-      fs.renameSync(path.join(procDir, entry.name), path.join(failDir, entry.name))
+      moveFile(path.join(procDir, entry.name), path.join(failDir, entry.name))
       swept.push(entry.name)
     } catch {
       /* ignore individual file errors */

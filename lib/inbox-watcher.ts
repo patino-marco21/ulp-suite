@@ -39,7 +39,7 @@ import { uploadQueue, queueSize, setCurrentJob } from '@/lib/upload-queue'
 import { logJob } from '@/lib/processing-log'
 import { processTextFile, processZipFile, processArchiveRef } from '@/lib/upload-processor'
 import { runImportJob } from '@/lib/import-runner'
-import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable } from '@/lib/inbox-claim'
+import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable, moveFile } from '@/lib/inbox-claim'
 import { sniffFileKind } from '@/lib/inbox-helpers'
 import { isIngestHeldError } from '@/lib/ingest-quality-gate'
 import { consumeGateOverride } from '@/lib/ingest-gate-store'
@@ -249,7 +249,7 @@ async function enqueueFile(filePath: string): Promise<void> {
     // bail without double-logging — same pattern as claimFileForProcessing.
     try {
       fs.mkdirSync(FAIL, { recursive: true })
-      fs.renameSync(filePath, path.join(FAIL, filename))
+      moveFile(filePath, path.join(FAIL, filename))
     } catch {
       return
     }
@@ -399,7 +399,7 @@ async function enqueueFile(filePath: string): Promise<void> {
       // Move processing/ -> done/ BEFORE logJob so a crash here still leaves the
       // file out of inbox/ (it's in processing/, swept to failed/ on restart).
       fs.mkdirSync(DONE, { recursive: true })
-      fs.renameSync(procPath, path.join(DONE, filename))
+      moveFile(procPath, path.join(DONE, filename))
       logJob({
         source:      'inbox',
         filename,
@@ -429,12 +429,12 @@ async function enqueueFile(filePath: string): Promise<void> {
         if (procPath) {
           try {
             fs.mkdirSync(HELD, { recursive: true })
-            fs.renameSync(procPath, path.join(HELD, filename))
+            moveFile(procPath, path.join(HELD, filename))
           } catch (moveErr) {
             console.error(`[inbox-watcher] could not move the held file ${filename} to held/, moving it to failed/:`, moveErr)
             try {
               fs.mkdirSync(FAIL, { recursive: true })
-              fs.renameSync(procPath, path.join(FAIL, filename))
+              moveFile(procPath, path.join(FAIL, filename))
             } catch {}
           }
         }
@@ -454,7 +454,7 @@ async function enqueueFile(filePath: string): Promise<void> {
         if (procPath) {
           try {
             fs.mkdirSync(FAIL, { recursive: true })
-            fs.renameSync(procPath, path.join(FAIL, filename))
+            moveFile(procPath, path.join(FAIL, filename))
           } catch {}
         }
       }

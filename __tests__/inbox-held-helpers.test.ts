@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getHeld, holdSpooledFile, isSafeFileName, releaseFiles } from '@/lib/inbox-helpers'
+import { getHeld, holdSpooledFile, isSafeFileName, releaseFiles, retryFiles } from '@/lib/inbox-helpers'
 
 let root: string
 let held: string
@@ -105,5 +105,28 @@ describe('holdSpooledFile', () => {
   it('returns null when the spool file is gone', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     expect(holdSpooledFile(path.join(spool, 'does-not-exist.part'), 'x.txt', held)).toBeNull()
+  })
+})
+
+describe('moving a file back to the inbox when the inbox already holds it under the same name', () => {
+  it('releaseFiles leaves one name when inbox/ has the held file as another name of the same file', () => {
+    fs.mkdirSync(held, { recursive: true })
+    fs.writeFileSync(path.join(held, 'a.txt'), 'a')
+    fs.linkSync(path.join(held, 'a.txt'), path.join(inbox, 'a.txt'))
+    expect(releaseFiles(['a.txt'], held, inbox)).toEqual(['a.txt'])
+    expect(fs.existsSync(path.join(held, 'a.txt'))).toBe(false)
+    expect(fs.readFileSync(path.join(inbox, 'a.txt'), 'utf8')).toBe('a')
+  })
+
+  it('retryFiles moves a failed file back to the inbox and reports it, also over a second name of the same file', () => {
+    const failed = path.join(root, 'inbox', 'failed')
+    fs.mkdirSync(failed, { recursive: true })
+    fs.writeFileSync(path.join(failed, 'a.txt'), 'a')
+    fs.writeFileSync(path.join(failed, 'b.txt'), 'b')
+    fs.linkSync(path.join(failed, 'b.txt'), path.join(inbox, 'b.txt'))
+    expect(retryFiles(['a.txt', 'b.txt', '../x'], failed, inbox)).toEqual(['a.txt', 'b.txt'])
+    expect(fs.readdirSync(failed)).toEqual([])
+    expect(fs.readFileSync(path.join(inbox, 'a.txt'), 'utf8')).toBe('a')
+    expect(fs.readFileSync(path.join(inbox, 'b.txt'), 'utf8')).toBe('b')
   })
 })

@@ -11,7 +11,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable } from '@/lib/inbox-claim'
+import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable, moveFile } from '@/lib/inbox-claim'
 
 let tmp: string
 beforeEach(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'inbox-claim-')) })
@@ -105,5 +105,90 @@ describe('isFileSizeStable', () => {
 
   test('returns false when the file does not exist at all', async () => {
     expect(await isFileSizeStable(path.join(tmp, 'missing.txt'), 10)).toBe(false)
+  })
+})
+
+// rename(2) between two names of ONE file does nothing and reports success (POSIX), so a plain rename leaves the source name behind. A file that is kept under
+// two names (a re-fed file whose earlier copy stayed in held/ or done/) stranded one name in processing/ per import until moveFile finished the job.
+describe('moveFile', () => {
+  test('moves a file to a new name and removes the old one', () => {
+    const src = path.join(tmp, 'a.txt')
+    const dest = path.join(tmp, 'b.txt')
+    fs.writeFileSync(src, 'data')
+    moveFile(src, dest)
+    expect(fs.existsSync(src)).toBe(false)
+    expect(fs.readFileSync(dest, 'utf8')).toBe('data')
+  })
+
+  test('replaces a different file that already has the destination name, as rename does', () => {
+    const src = path.join(tmp, 'a.txt')
+    const dest = path.join(tmp, 'b.txt')
+    fs.writeFileSync(src, 'new')
+    fs.writeFileSync(dest, 'old')
+    moveFile(src, dest)
+    expect(fs.existsSync(src)).toBe(false)
+    expect(fs.readFileSync(dest, 'utf8')).toBe('new')
+  })
+
+  test('when the destination is another name of the same file, the source name goes and the data stays', () => {
+    const src = path.join(tmp, 'a.txt')
+    const dest = path.join(tmp, 'b.txt')
+    fs.writeFileSync(src, 'data')
+    fs.linkSync(src, dest)
+    moveFile(src, dest)
+    expect(fs.existsSync(src)).toBe(false)
+    expect(fs.readFileSync(dest, 'utf8')).toBe('data')
+    expect(fs.statSync(dest).nlink).toBe(1)
+  })
+
+  test('a file moved onto its own path is left alone', () => {
+    const src = path.join(tmp, 'a.txt')
+    fs.writeFileSync(src, 'data')
+    moveFile(src, src)
+    expect(fs.readFileSync(src, 'utf8')).toBe('data')
+  })
+
+  test('two paths that reach one directory entry through a symlinked directory leave the file alone', () => {
+    const real = path.join(tmp, 'real')
+    const alias = path.join(tmp, 'alias')
+    fs.mkdirSync(real)
+    fs.symlinkSync(real, alias)
+    fs.writeFileSync(path.join(real, 'a.txt'), 'data')
+    moveFile(path.join(real, 'a.txt'), path.join(alias, 'a.txt'))
+    expect(fs.readFileSync(path.join(real, 'a.txt'), 'utf8')).toBe('data')
+  })
+
+  test('a missing source throws ENOENT, which the claim turns into "already gone"', () => {
+    expect(() => moveFile(path.join(tmp, 'missing.txt'), path.join(tmp, 'b.txt'))).toThrow(expect.objectContaining({ code: 'ENOENT' }))
+  })
+})
+
+describe('the claim and the sweep with a name that is already kept as a hard link', () => {
+  test('claiming a file whose name is already in processing/ as another name of the same file takes it out of the inbox', () => {
+    const proc = path.join(tmp, 'processing')
+    fs.mkdirSync(proc)
+    const src = path.join(tmp, 'd.txt')
+    fs.writeFileSync(src, 'data')
+    fs.linkSync(src, path.join(proc, 'd.txt'))
+
+    const dest = claimFileForProcessing(src, proc)
+
+    expect(dest).toBe(path.join(proc, 'd.txt'))
+    expect(fs.existsSync(src)).toBe(false)   // otherwise the next reconcile pass queues it a second time
+    expect(fs.readFileSync(dest as string, 'utf8')).toBe('data')
+  })
+
+  test('sweeping a leftover whose name failed/ already holds as the same file leaves one name', () => {
+    const proc = path.join(tmp, 'processing')
+    const fail = path.join(tmp, 'failed')
+    fs.mkdirSync(proc)
+    fs.mkdirSync(fail)
+    fs.writeFileSync(path.join(fail, 'x.txt'), 'data')
+    fs.linkSync(path.join(fail, 'x.txt'), path.join(proc, 'x.txt'))
+
+    expect(sweepProcessingToFailed(proc, fail)).toEqual(['x.txt'])
+
+    expect(fs.existsSync(path.join(proc, 'x.txt'))).toBe(false)
+    expect(fs.readFileSync(path.join(fail, 'x.txt'), 'utf8')).toBe('data')
   })
 })

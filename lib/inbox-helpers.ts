@@ -7,6 +7,7 @@
 
 import fs   from 'fs'
 import path from 'path'
+import { moveFile } from '@/lib/inbox-claim'
 
 export const INBOX_DIR  = path.resolve('./inbox')
 export const DONE_DIR   = path.resolve('./inbox/done')
@@ -78,12 +79,12 @@ export function getDoneCount(): number {
  * Skips filenames containing '/', '\\', or '..' (path traversal guard).
  * Returns the list of filenames actually moved.
  */
-export function retryFiles(filenames: string[]): string[] {
+export function retryFiles(filenames: string[], failedDir: string = FAILED_DIR, inboxDir: string = INBOX_DIR): string[] {
   const moved: string[] = []
   for (const name of filenames) {
     if (!isSafeFileName(name)) continue
     try {
-      fs.renameSync(path.join(FAILED_DIR, name), path.join(INBOX_DIR, name))
+      moveFile(path.join(failedDir, name), path.join(inboxDir, name))
       moved.push(name)
     } catch {
       // file missing or unreadable — skip
@@ -113,7 +114,7 @@ export function releaseFiles(filenames: string[], heldDir: string = HELD_DIR, in
   for (const name of filenames) {
     if (!isSafeFileName(name)) continue
     try {
-      fs.renameSync(path.join(heldDir, name), path.join(inboxDir, name))
+      moveFile(path.join(heldDir, name), path.join(inboxDir, name))
       moved.push(name)
     } catch {
       // file missing or unreadable — skip

@@ -2,7 +2,7 @@
  * The inbox watcher run for real against a temporary ./inbox: only the import itself, the job log and the override store are replaced.
  * The module reads ./inbox when it loads, so the test changes the working directory first.
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -160,5 +160,45 @@ describe('inbox watcher: .archiveref files', () => {
     await run('bad.txt.archiveref', '{}\n')
     expect(existsSync(dir('failed', 'bad.txt.archiveref'))).toBe(true)
     expect(logged('bad.txt.archiveref')[0]).toMatchObject({ status: 'failed', error_message: 'archive abc failed its sha256 check' })
+  })
+})
+
+describe('inbox watcher: a file that is already kept under the same name', () => {
+  // The owner moves a held or finished file back into inbox/ with a hard link, so held/ or done/ keeps the same file under the same name. The final
+  // rename of processing/X onto that name used to do nothing (same file), and X stayed in processing/ until the next start called it a failure.
+  it('leaves nothing in processing/ when a held file is held again', async () => {
+    h.processTextFile.mockRejectedValue(new IngestHeldError(REPORT))
+    mkdirSync(dir('held'), { recursive: true })
+    writeFileSync(dir('held', 'again-a.txt'), 'x\n')
+    linkSync(dir('held', 'again-a.txt'), dir('again-a.txt'))
+    forceReconcile()
+    await settled('again-a.txt')
+    expect(existsSync(dir('processing', 'again-a.txt'))).toBe(false)
+    expect(existsSync(dir('again-a.txt'))).toBe(false)
+    expect(statSync(dir('held', 'again-a.txt')).nlink).toBe(1)
+  })
+
+  it('leaves nothing in processing/ when a finished file is finished again', async () => {
+    h.processTextFile.mockResolvedValue(OK)
+    mkdirSync(dir('done'), { recursive: true })
+    writeFileSync(dir('done', 'again-b.txt'), 'x\n')
+    linkSync(dir('done', 'again-b.txt'), dir('again-b.txt'))
+    forceReconcile()
+    await settled('again-b.txt')
+    expect(existsSync(dir('processing', 'again-b.txt'))).toBe(false)
+    expect(existsSync(dir('again-b.txt'))).toBe(false)
+    expect(statSync(dir('done', 'again-b.txt')).nlink).toBe(1)
+  })
+
+  it('leaves nothing in processing/ when a failed file fails again', async () => {
+    h.processTextFile.mockRejectedValue(new Error('boom'))
+    mkdirSync(dir('failed'), { recursive: true })
+    writeFileSync(dir('failed', 'again-c.txt'), 'x\n')
+    linkSync(dir('failed', 'again-c.txt'), dir('again-c.txt'))
+    forceReconcile()
+    await settled('again-c.txt')
+    expect(existsSync(dir('processing', 'again-c.txt'))).toBe(false)
+    expect(existsSync(dir('again-c.txt'))).toBe(false)
+    expect(statSync(dir('failed', 'again-c.txt')).nlink).toBe(1)
   })
 })
