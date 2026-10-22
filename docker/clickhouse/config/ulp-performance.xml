@@ -67,18 +67,38 @@
          cache or those caches.
 
          Raised 16 GB → 18 GB on that basis: idle usage is 612 MB against either
-         ceiling, so there was real headroom. 2 GB margin kept under the
-         container's hard 20 GB mem_limit (docker-compose.yml) intentionally — if
+         ceiling, so there was real headroom. A 2 GB margin is kept under the
+         container's hard mem_limit (docker-compose.yml) intentionally — if
          ClickHouse's own tracked usage ever did reach this ceiling, the
          alternative to OvercommitTracker gracefully killing one query is the
          kernel cgroup-OOM-killing the entire server process, the failure mode
          the 2026-06-07 fix (commit 6fced4c) was protecting against. As of this
          change, imports also proactively back off before reaching this ceiling
-         (lib/clickhouse-memory-guard.ts, default threshold 75% = ~13.5 GB).
+         (lib/clickhouse-memory-guard.ts, default threshold 75% of this ceiling).
+
+         LOWERED 18 GB → 14 GB (container 20 GB → 16 GB) on 2026-10-22. The ceiling
+         has to fit the host, not only the container: on a 31 GB machine that also
+         runs a desktop session, the app and other containers, an 18 GB ceiling and
+         a 20 GB container could not both be honoured. The kernel OOM-killed
+         ClickHouse at 13-14 GB resident, swap full, while the nightly stats pass and
+         two big imports ran together. Measured ClickHouse memory: 1 GB idle, about 5 GB
+         while an import commits (7.5 GB at most; two lanes can overlap), 9.0 GB the
+         highest in the two days before the kill. Anything that goes past 14 GB now fails
+         one query with "(total) memory limit exceeded", which lib/clickhouse-retry.ts
+         retries after a wait, instead of the server dying. lib/clickhouse-query-limits.ts
+         already budgets for an effective ~14 GB.
+
+         KNOWN CONFLICT: the content-dedup stats pass (one GROUP BY over every content key,
+         report-only) does not fit this ceiling any more. Its peak grows with the table:
+         10.5 GB at 1.4 B rows, 12.2 GB at 1.9 B, and at 2.2 B rows this ceiling stopped it
+         after 57 s at 14.5 GB (16.7 GB spilled to disk) while the server stayed up. Its only
+         output is one log line, so the reference deployment switches it off
+         (DEDUP_CRON_HOURS=0 in .env) until it runs in hash buckets, which divides its peak
+         by the bucket count.
 
          max_server_memory_usage covers: query execution, query result cache,
          query condition cache, background merge buffers, connection overhead. -->
-    <max_server_memory_usage>19327352832</max_server_memory_usage>      <!-- 18 GB -->
+    <max_server_memory_usage>15032385536</max_server_memory_usage>      <!-- 14 GB -->
 
     <!-- ── Mark cache ─────────────────────────────────────────────────────────────
          Stores granule-to-column-file offsets.

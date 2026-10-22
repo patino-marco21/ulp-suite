@@ -88,8 +88,8 @@ ClickHouse       SQLite
 | Component | Default `mem_limit` | Notes |
 |---|---|---|
 | App (Node.js 24) | 8 GB | 6 GB heap (`NODE_OPTIONS`) + 2 GB headroom |
-| ClickHouse | 20 GB | `max_server_memory_usage` is 18 GB, 2 GB under the limit on purpose |
-| OS | ~4 GB | |
+| ClickHouse | 16 GB | `max_server_memory_usage` is 14 GB, 2 GB under the limit on purpose |
+| OS and desktop | ~8 GB | a desktop session with a browser and a few other containers held about 7.5 GB when measured |
 | **Total** | **32 GB** | the sizing the 1.87B-row reference deployment runs on |
 
 **Smaller machines:** lower the two `mem_limit`s in `docker-compose.yml` together with the

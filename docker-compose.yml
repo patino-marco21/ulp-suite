@@ -23,11 +23,11 @@ services:
       # The ClickHouse port is NOT exposed to the host, so no password is needed.
       CLICKHOUSE_PASSWORD: ""
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
-    # Memory: 32 GB total — 20 GB ClickHouse + 8 GB App + 4 GB OS/kernel headroom.
-    # max_server_memory_usage (ulp-performance.xml) is 18 GB, 2 GB under this
+    # Memory: 32 GB total — 16 GB ClickHouse + 8 GB App + 8 GB for the OS, the desktop and the page cache.
+    # max_server_memory_usage (ulp-performance.xml) is 14 GB, 2 GB under this
     # container limit intentionally — see the memory ceiling comment there for
-    # the live verification behind that number.
-    mem_limit: 20g
+    # the measurements behind both numbers.
+    mem_limit: 16g
     mem_reservation: 12g
     ulimits:
       nofile:
