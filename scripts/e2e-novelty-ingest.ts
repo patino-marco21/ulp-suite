@@ -564,7 +564,7 @@ async function parserV62(): Promise<void> {
     && one(`url = 'https://shopz2.example-store.test' AND email = 'v62z2${RUN}' AND password = '${pw('Z2')}'`) === 1
     && one(`url = '' AND email = 'v62z3${RUN}@probe-mail.test' AND password = '${pw('Z3')}'`) === 1)
   check('no row has a url that starts with a colon, a login that holds a slash or a scheme, or a label as its login',
-    one(`startsWith(url, ':') OR position(email, '/') > 0 OR position(email, '://') > 0 OR email IN ('Username', 'Login')`) === 0)
+    one(`(startsWith(url, ':') OR position(email, '/') > 0 OR position(email, '://') > 0 OR email IN ('Username', 'Login'))`) === 0)
 }
 
 async function monitorScenario(): Promise<void> {
@@ -808,7 +808,8 @@ async function qualityGate(): Promise<void> {
 
   // The sample check: past 8 MiB the file is read in slices before the import starts, so a file that breaks a rule on 1 line in 10 is held without a stage table
   const SAMPLE = `e2e-qg-sample-${RUN}.txt`
-  const sampleBody = Array.from({ length: 110_000 }, (_, i) => (i % 10 === 9 ? junk(i) : line('S', i)))
+  const sampleJunk = (i: number) => `https://shop${i % 500}.example-store.test/login:smp${i}${RUN}@probe-mail.test:Pw://z${i}${RUN}` // its own rows: no other scenario holds them
+  const sampleBody = Array.from({ length: 110_000 }, (_, i) => (i % 10 === 9 ? sampleJunk(i) : line('SC', i)))
   const sampled = await importLines(SAMPLE, sampleBody, 600_000)
   check('a file past 8 MiB where 1 line in 10 breaks a rule ends in error with the hold message', sampled.status === 'error' && /Held by the quality gate/.test(sampled.error ?? ''), brief(sampled))
   check('...not one row of it was stored, no stage table is left, and it waits in inbox/held', rowsFor(SAMPLE) === 0 && stageTableCount() === 0 && inboxLs('held').includes(SAMPLE), `rows ${rowsFor(SAMPLE)}, tables ${stageTableCount()}`)

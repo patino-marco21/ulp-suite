@@ -92,6 +92,14 @@ different row (the colon, and the url inside a url) and 12.9k stored rows became
 **Fuzz.** One-character runs of 200,000 characters between credential-like heads and tails (2,420 cases) and 2,000 random multi-unit lines through the new helpers,
 `parseLine`, `parseInlineLine` and the stream parser: 0 above 250 ms; the slowest were 29 ms (`parseLine`) and 16 ms (`stripLeadingColonBeforeScheme`).
 
+**Rehearsal on the candidate image (isolated stack, `REHEARSAL_APP_IMAGE`, built from commit 7ed03f7).** The alert rehearsal (fresh install, monitors, scheme-split
+repair, newest-first windows): 49 of 49 checks. The novelty-ingest rehearsal with every scenario but the disk filler: 200 checks; the one failure was my own test data (the
+sample scenario's rows collided with rows another scenario had stored, so 27,120 were "known"), fixed by giving that file its own rows; `v62` and `quality-gate` then passed 36
+of 36. The new checks: each rule stores the clean fields and the right `url_scheme` / `url_host` in a real ClickHouse; a file with 1 line in 9 a banner or a divider imports
+instead of being held; a file past 8 MiB with 1 line in 10 breaking a rule is held by the sample check with no stage table and report phase "sample", and Release imports it
+without the sample check holding it again. The reworded Held card was read on that stack (a held file with 5.00% rule-breaking rows and 2,850 banner lines): the new header, the
+shares in words and the "not counted" line render.
+
 **Whole-file verdicts with the importer's own parser and counters (production defaults: hold at 2% junk / 5% unsplit / 25% garbage, warn at 1% / 2%).**
 
 | Family | Lines | Stored | Junk before (A: a 5-slice sample; B to D: the whole file) | Junk now | Unsplit now | Garbage now | Early (1M lines) | Final | Sample check |
