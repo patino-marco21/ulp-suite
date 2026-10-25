@@ -1,7 +1,7 @@
 # Parser v6.2 and a quality gate that ignores noise: design and results (2026-10-24)
 
-Status: **implemented on 2026-10-24** (branch worktree-ingest-layout-fixes); tests, the real-data differential and the whole-file verdicts are below. Deployment, the
-rehearsal and the re-feed of the eight files are recorded at the end under "Rollout". The owner asked what "Held by the quality gate (8 files)" means and what to do
+Status: **implemented, deployed and re-fed on 2026-10-24** (main 860dc8d; the code is 7ed03f7, rollback tag `ulp-suite-app:rollback-20261025-0122z`). Tests, the real-data
+differential and the whole-file verdicts are below; the deployment and the re-feed of the eight files are recorded at the end under "Rollout". The owner asked what "Held by the quality gate (8 files)" means and what to do
 about it, was shown the diagnosis and the plan, and answered "Yes" to the parser rules (step 1), the gate changes (step 2) and the re-feed (step 3). Every number comes
 from the importer's own parser and counters run read-only over the held files, from the archived pile, or from the live table. No source file names, search terms or
 credential values appear here on purpose: the repository is public until the owner makes it private. The files are called family A to D.
@@ -130,4 +130,31 @@ separate change if the owner wants those 2.3k rows kept out.
 
 ## Rollout
 
-(Filled in after the deployment: the rollback tag, the rehearsal result, the re-feed of the eight files and what the table holds afterwards.)
+- **Archive.** The two files that were not in the source archive (family B and C; HTTP uploads are not archived, so `inbox/held` held their only copy) were archived with
+  `scripts/archive-sources.ts archive --include-unimported` (1.34 GiB of plaintext) and restored: the sha256 matches the manifest and `cmp` shows the restored files identical to
+  the originals. The other six were already archived.
+- **Deploy (2026-10-25 01:39Z).** The running image was tagged `ulp-suite-app:rollback-20261025-0122z` (78e946c5cd68, the done/ retention release) before anything was built; the
+  candidate was built from `git archive 7ed03f7` under its own tag, rehearsed (above), merged to main as a fast-forward and pushed (6c5e4a3..860dc8d); nothing in the image
+  changed between 7ed03f7 and 860dc8d (`git diff --stat` over app, lib, components, public, Dockerfile and the package files was empty), so the rehearsed image is the deployed
+  one: `docker tag ulp-suite-app:v62-candidate ulp-suite-app:latest`, then `docker compose -p ulp-suite ... up -d --no-deps --no-build app` from the primary checkout. The
+  compose settings were compared with the running container's first (T3 hard drop and the 15-country keep-list, `CONTENT_DEDUP_APPLY=false`, `UPLOAD_CONCURRENCY=2`, no gate
+  override). Healthy, 0 restarts, login page 200, the start-up sweep found no orphan stage table.
+- **Re-feed (01:40Z).** The eight files were moved from `inbox/held/` back into `inbox/` with `mv`: no Release, no override. All eight jobs finished `done` in 25 s to 403 s
+  (the 1.43 GB file in 403 s), the gate held none, and the log has no error. Every job's counts equal the offline whole-file counts above to the row.
+
+| Family | Stored rows (parser) | New | Already known | Repeats in the file | Time |
+|---|---|---|---|---|---|
+| A, file 1 (the smallest) | 1,663,441 | 433 | 1,662,715 | 293 | 68 s |
+| A, file 2 | 1,875,101 | 140,838 | 1,733,861 | 402 | 75 s |
+| A, file 3 | 2,164,081 | 162,380 | 2,001,238 | 463 | 81 s |
+| A, file 4 | 2,504,664 | 170,921 | 2,156,577 | 177,166 | 91 s |
+| A, file 5 | 2,843,034 | 213,654 | 2,628,483 | 897 | 86 s |
+| B | 13,591,389 | 377,652 | 12,725,511 | 488,226 | 403 s |
+| C | 126,584 | 10,177 | 116,203 | 204 | 39 s |
+| D | 152,207 | 122,986 | 28,900 | 321 | 25 s (gate warn recorded on the job) |
+
+  **1,199,041 new rows in all; 23,053,488 were already in the table** and were not written again (a Release of the five family A files alone would have stored about 10.8M
+  duplicates in disguise by the earlier estimate, each with an empty `url_scheme` and a `url_host` that was the whole url). `ulp.credentials` went from 2,228,307,159 to 2,229,506,200 rows: exactly the
+  sum of the new rows. In the rows these eight files added: **0** have a url that starts with a colon, 98 to 99% of the family A rows have `url_scheme` https, and the login
+  of 5,375 of the 377,652 family B rows and of up to 147 rows per family A file still holds a slash (the long tail the gate measured, 0.07 to 1.4%).
+- **Left as it was:** `inbox/held/` is empty, `inbox/processing/` is empty, the eight files are in `inbox/done/` (and in the source archive).
