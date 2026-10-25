@@ -299,7 +299,8 @@ export interface Source {
   readAll(): Promise<Buffer>
 }
 
-function fileSource(path: string): Source {
+/** A plain file as a Source: no manifest lookup, so a path that is not a file throws instead of being read as the name of an archived file (openSource does that). */
+export function fileSource(path: string): Source {
   const size = statSync(path).size
   return {
     name: basename(path),

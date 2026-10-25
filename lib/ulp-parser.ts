@@ -1,5 +1,5 @@
 /**
- * ULP credential line parser — v6.1
+ * ULP credential line parser — v6.2
  *
  * v6 (2026-10-12, docs/superpowers/specs/2026-10-12-parser-v6-and-redo-design.md): UTF-8 lines are read as UTF-8 (lib/ulp-utf8.ts), and
  * layouts that used to be rejected are read by lib/ulp-recover.ts (space-padded colons, a slash in the password, a numeric login, protocol-relative
@@ -8,6 +8,10 @@
  * v6.1 (2026-10-12, same spec, "Parser v6.1"): a pipe that joins a url, only its scheme or a one-word label and a colon-separated credential is replaced by the
  * join (joinPipedUrl: "https://| host:login:pass", "Network:| host:login:pass", "https://host/path|login:pass"); a ';' behind a credential that is already
  * complete is part of the password (holdsCredential); a ";name=value" path parameter is part of a url that has no scheme too (isUrlPathParameter).
+ *
+ * v6.2 (2026-10-24, docs/superpowers/specs/2026-10-24-parser-v6-2-and-gate-noise-design.md): four layouts the ingest quality gate caught, each stored as a wrong split
+ * before. J: a colon in front of the scheme is dropped (":https://host/path:login:pass"). K: "login;password:https://host/path" has its url last. L: a labelled pair
+ * behind a pipe ("host/|Username:login:Password:pass"). M: a "://" inside the url is not a field separator ("https://host/a?next=https://other/b:login:pass").
  *
  * Design: one algorithm, no regex in the hot path, RFC 3986-correct
  * colon disambiguation. ~150 lines for a format that is field:field:field.
@@ -27,8 +31,8 @@ import { hasGarbageIdentity, hasMojibakeSignature, hasEdgeWhitespace } from '@/l
 import { hasTelegramLink, stripTelegramTag } from '@/lib/ulp-telegram-tag'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
 import {
-  holdsCredential, isUrlPathParameter, joinPipedUrl, looksLikeUrlFragment, protocolRelativeToPlain, recoverAndroidAppLine, splitNumericLogin, splitSlashInPassword, splitSpacePaddedColons,
-  stripTrailingSemicolons,
+  cannotHoldCredential, holdsCredential, isUrlPathParameter, joinPipedUrl, looksLikeUrlFragment, protocolRelativeToPlain, recoverAndroidAppLine, splitNumericLogin, splitPipedLabelledPair,
+  splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme, stripTrailingSemicolons,
 } from '@/lib/ulp-recover'
 
 export interface ULPCredential {
@@ -463,6 +467,24 @@ function splitLoginPasswordUrl(line: string, schemeIdx: number): [string, string
   return [line.slice(lastColon + 1), login, fields.slice(firstColon + 1)]
 }
 
+/** "8443/..." behind the host of an inner url: one to five digits and a slash. */
+const INNER_PORT = /^\d{1,5}\//
+
+/**
+ * The first ':' of `s` that separates fields (parser v6.2, rule M). A ':' that opens the "://" of a url INSIDE the url does not, and neither does the port of that
+ * inner url's host: in "https://sso.example.test/login?next=https://app.example.test/home:alice:Secret1" the old split took the inner "https:" for the end of the url and
+ * stored "//app.example.test/home" as the login. For a url without an inner scheme this is `s.indexOf(':')`, exactly as before.
+ */
+function indexOfFieldColon(s: string): number {
+  let innerHost = false
+  for (let i = s.indexOf(':'); i !== -1; i = s.indexOf(':', i + 1)) {
+    if (s.charCodeAt(i + 1) === 47 && s.charCodeAt(i + 2) === 47) { innerHost = true; continue }
+    if (innerHost && INNER_PORT.test(s.slice(i + 1, i + 7))) { innerHost = false; continue }
+    return i
+  }
+  return -1
+}
+
 /**
  * Split a colon-delimited ULP line into [url, login, password].
  *
@@ -484,7 +506,7 @@ function colonSplitFields(line: string): [string, string, string] | null {
       // URL is everything up to and including the slash (absorbs port in host)
       const urlPart   = line.slice(0, slashIdx)
       const rest      = line.slice(slashIdx + 1)            // path:login:pass
-      const colon1    = rest.indexOf(':')
+      const colon1    = indexOfFieldColon(rest)             // not the colon of an inner "https://" (rule M)
       if (colon1 === -1) return null                        // no login separator
       const fullUrl   = urlPart + '/' + rest.slice(0, colon1)
       const loginRest = rest.slice(colon1 + 1)             // "login:pass" or "login"
@@ -636,7 +658,8 @@ export function parseLine(
   shouldHardDrop?: (email: string, url: string) => boolean,
   pipeJoins = 0,
 ): { credential: ULPCredential | null; reason: RejectionReason | null } {
-  let trimmed = line.trim()
+  // Rule J (parser v6.2): ":https://host/path:login:password" -- a colon in front of the scheme is an empty first field, not part of the url
+  let trimmed = stripLeadingColonBeforeScheme(line.trim())
 
   // Rule E (parser v6): "//host/path:login:password" is a protocol-relative url, not a comment. Read as a scheme-less line; a password that is a URL
   // fragment (the extra slash belonged to a path) is garbage.
@@ -665,8 +688,11 @@ export function parseLine(
   // credential in front of it parses as itself instead of being rejected or storing the tag in the password.
   trimmed = stripTelegramTag(trimmed)
 
+  // Rule L (parser v6.2): "host/|Username:alice:Password:Secret1" -- a url, a pipe and a labelled pair. Looked at before the pipe is taken for a join or a separator.
+  const labelled = trimmed.includes('|') ? splitPipedLabelledPair(trimmed) : null
+
   // Parser v6.1: a pipe between a url (or only its scheme, or a label) and a colon-separated credential is the join of the two, not the login/password separator
-  const joined = pipeJoins < MAX_PIPE_JOINS ? joinPipedUrl(trimmed) : null
+  const joined = !labelled && pipeJoins < MAX_PIPE_JOINS ? joinPipedUrl(trimmed) : null
   if (joined) return parseLine(joined.line, sourceFile, shouldHardDrop, pipeJoins + 1)
 
   // Pipe separator detection:
@@ -702,7 +728,9 @@ export function parseLine(
 
   // Rule 2: separator detection (\t beats ; beats | beats :)
   let url = '', login = '', password = ''
-  if (clean.includes('\t')) {
+  if (labelled) {
+    ;[url, login, password] = labelled
+  } else if (clean.includes('\t')) {
     const parts = clean.split('\t')
     if (parts.length >= 3) {
       url      = parts[0].trim()
@@ -748,8 +776,12 @@ export function parseLine(
     }
   } else if (clean.includes(';') && !semicolonIsUrlParameter(clean) && !holdsCredential(clean.slice(0, clean.indexOf(';')))) {
     // (Parser v6.1, rule I: a ';' behind a credential that is already complete is part of the password, so that line is split on its colons below.)
-    const parts = clean.split(';')
-    if (parts.length >= 3) {
+    // Rule K (parser v6.2): "login;password:https://host/path" has its url last.
+    const urlLast = splitSemicolonPasswordUrl(clean)
+    const parts = urlLast ? [] : clean.split(';')
+    if (urlLast) {
+      ;[url, login, password] = urlLast
+    } else if (parts.length >= 3) {
       url      = parts[0].trim()
       login    = parts[1].trim()
       password = parts.slice(2).join(';').trim()
@@ -867,9 +899,11 @@ export interface InlineResult {
 
 /** One line read on its own: parseLine, after an Android app id without its scheme (rule B) got the scheme back. The side-copy tool uses it too. */
 export function parseInlineLine(line: string, filename: string, shouldHardDrop?: (email: string, url: string) => boolean): InlineResult {
+  // The colon in front of a scheme (rule J) goes first, and a labelled pair behind a pipe (rule L) is not a join: parseLine reads both itself
+  const lead = stripLeadingColonBeforeScheme(line.trim())
   // A pipe that joins a url, a scheme or a label and a credential is replaced first (v6.1), so that the Android rule sees "HASH==@com.app/:login:pass" behind a label
-  const piped = line.includes('|') ? joinPipedUrl(line.trim()) : null
-  const text = piped ? piped.line : line
+  const piped = lead.includes('|') && !splitPipedLabelledPair(lead) ? joinPipedUrl(lead) : null
+  const text = piped ? piped.line : lead
   const android = recoverAndroidAppLine(text.trim())
   if (android) return { ...parseLine(android, filename, shouldHardDrop), androidRecovered: true }
   return { ...parseLine(text, filename, shouldHardDrop), androidRecovered: false }
@@ -1027,6 +1061,11 @@ export interface StreamBatch {
   credentials: ULPCredential[]
   rejected:    number
   breakdown:   Record<RejectionReason, number>
+  /**
+   * Of the `no_fields` rejects, the lines that cannot hold a credential in any layout (cannotHoldCredential: a banner, a divider, a bare url, a url with one field).
+   * They are still counted in `breakdown.no_fields`; the quality gate subtracts them from its "unsplit" share. Absent when there were none.
+   */
+  noCredential?: number
 }
 
 export interface ParseStreamOptions {
@@ -1060,6 +1099,7 @@ export async function* parseULPStream(
   let   batch:  ULPCredential[] = []
   let   batchRejected = 0
   let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0, tier_dropped: 0 }
+  let   batchNoCredential = 0
   let   blockState = makeBlockState()
   // Positional (label-free) state — mirrors the same logic in parseULPContent
   let   positionalUrl   = ''
@@ -1076,8 +1116,8 @@ export async function* parseULPStream(
   const androidSeen = new Set<string>()
 
   function flushBatch(): StreamBatch {
-    const out: StreamBatch = { credentials: batch, rejected: batchRejected, breakdown: batchBreakdown }
-    batch = []; batchRejected = 0
+    const out: StreamBatch = { credentials: batch, rejected: batchRejected, breakdown: batchBreakdown, ...(batchNoCredential > 0 ? { noCredential: batchNoCredential } : {}) }
+    batch = []; batchRejected = 0; batchNoCredential = 0
     batchBreakdown = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0, tier_dropped: 0 }
     return out
   }
@@ -1177,6 +1217,7 @@ export async function* parseULPStream(
       }
       // Not a login: the "URL" line was a rejected credential line, not the start of a record. Count it and read this line on its own.
       batchRejected++; batchBreakdown.no_fields++
+      if (cannotHoldCredential(positionalUrl)) batchNoCredential++
       positionalUrl = ''
     }
 
@@ -1196,7 +1237,10 @@ export async function* parseULPStream(
       positionalLogin = ''
     } else {
       batchRejected++
-      if (reason) batchBreakdown[reason]++
+      if (reason) {
+        batchBreakdown[reason]++
+        if (reason === 'no_fields' && cannotHoldCredential(trimmed)) batchNoCredential++
+      }
     }
   }
 

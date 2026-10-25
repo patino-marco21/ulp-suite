@@ -205,3 +205,73 @@ describe('classifyOldOnlyRow: a host and a path as the login', () => {
     expect(classifyOldOnlyRow({ url: '', email: 'shop.example.test/en/login', password: 'q=[a b]:80:Secret1' })).toBe('semicolon-junk')
   })
 })
+
+describe('the four layouts of parser v6.2', () => {
+  const lead = ':https://shop.example.test/login:alice:Secret1'
+  const leadFixed = row('https://shop.example.test/login', 'alice', 'Secret1')
+
+  test('a colon in front of the scheme (rule J): the new result is what the baseline gives for the line without it', () => {
+    expect(classifyChange(lead, row(':https://shop.example.test/login', 'alice', 'Secret1'), leadFixed, none('x'), undefined, undefined, leadFixed)).toBe('leading-colon')
+    expect(classifyChange(lead, none('no_fields'), leadFixed, none('x'), undefined, undefined, leadFixed)).toBe('leading-colon')
+  })
+  test('... and a result that is NOT what the baseline gives for that line stays unexplained', () => {
+    expect(classifyChange(lead, row(':https://shop.example.test/login', 'alice', 'Secret1'), row('u', 'someone', 'else'), none('x'), undefined, undefined, leadFixed)).toBe('unexplained')
+  })
+  test('a line without a colon in front of its scheme is never attributed to rule J', () => {
+    expect(classifyChange('a:b:c', row('u', 'e', 'p1'), row('u', 'e', 'p2'), row('u', 'e', 'p1'))).toBe('unexplained')
+  })
+
+  test.each([
+    ['semicolon-url-last', 'bob;Secret2:https://two.example.test/login', row('', 'bob', 'Secret2:https://two.example.test/login'), row('https://two.example.test/login', 'bob', 'Secret2')],
+    ['semicolon-url-last', 'bob;Secret2;https://two.example.test/login', row('bob', 'Secret2', 'https://two.example.test/login'), row('https://two.example.test/login', 'bob', 'Secret2')],
+    ['labelled-pair', 'three.example.test/|Username:carol:Password:Secret3', row('', 'three.example.test/', 'Username:carol:Password:Secret3'), row('three.example.test/', 'carol', 'Secret3')],
+    ['labelled-pair', 'https://three.example.test/|Username:carol:Password:Secret3', row('https://three.example.test/', 'Username', 'carol:Password:Secret3'), row('https://three.example.test/', 'carol', 'Secret3')],
+    ['nested-url', 'https://sso.example.test/x?next=https://four.example.test/y:dave:Secret4', row('https://sso.example.test/x?next=https', '//four.example.test/y', 'dave:Secret4'), row('https://sso.example.test/x?next=https://four.example.test/y', 'dave', 'Secret4')],
+  ])('%s: the wrong split the baseline stored, now the clean row (%#)', (cls, line, junk, clean) => {
+    expect(classifyChange(line, junk, clean, none('x'))).toBe(cls)
+  })
+  test('a line the baseline rejected and parser v6.2 stores is attributed the same way', () => {
+    expect(classifyChange('three.example.test/|Username:carol:Password:Secret3', none('no_fields'), row('three.example.test/', 'carol', 'Secret3'), none('x'))).toBe('labelled-pair')
+  })
+  test('a url inside a url that is no longer stored (one token behind it) is rule M too', () => {
+    const line = 'https://sso.example.test/x?next=https://four.example.test/y:Token1234567890'
+    expect(classifyChange(line, row('https://sso.example.test/x?next=https', '//four.example.test/y', 'Token1234567890'), none('no_fields'), none('x'))).toBe('nested-url')
+  })
+  test('a changed line none of the four rules reads stays unexplained', () => {
+    expect(classifyChange('plain:line:here', row('u', 'e', 'p1'), row('u', 'e', 'p2'), row('u', 'e', 'p1'))).toBe('unexplained')
+    expect(classifyChange('plain:line:here', none('no_fields'), row('u', 'e', 'p'), none('x'))).toBe('unexplained')
+  })
+  test('a rule the line does not match is not named: a semicolon line whose url is not last, a pipe without labels, one url', () => {
+    expect(classifyChange('https://shop.example.test;alice;Secret1', row('u', 'e', 'p1'), row('u', 'e', 'p2'), row('u', 'e', 'p1'))).toBe('unexplained')
+    expect(classifyChange('shop.example.test/|alice|Secret1', row('u', 'e', 'p1'), row('u', 'e', 'p2'), row('u', 'e', 'p1'))).toBe('unexplained')
+    expect(classifyChange('https://shop.example.test/login:alice:Secret1', row('u', 'e', 'p1'), row('u', 'e', 'p2'), row('u', 'e', 'p1'))).toBe('unexplained')
+  })
+})
+
+describe('classifyOldOnlyRow: the rows the baseline stored for the layouts of parser v6.2', () => {
+  test.each([
+    ['leading-colon', { url: ':https://shop.example.test/login', email: 'alice', password: 'Secret1' }],
+    ['leading-colon', { url: '::https://shop.example.test:8443/login', email: 'alice@mail.test', password: 'Secret1' }],
+    ['leading-colon', { url: '', email: ':https://shop.example.test/', password: 'Alpha:Beta:Gamma:Secret1' }],
+    ['leading-colon', { url: '', email: ':https://smtp.example.test', password: '587:alice@mail.test:Secret1' }],
+    ['semicolon-url-last', { url: '', email: 'bob', password: 'Secret2:https://two.example.test/login' }],
+    ['semicolon-url-last', { url: '', email: 'bob@mail.test', password: 'Secret2:https://two.example.test:8443/login' }],
+    ['semicolon-url-last', { url: '', email: 'bob', password: 'Sec/ret2:https://two.example.test/login' }],
+    ['semicolon-url-last', { url: '', email: 'bob', password: 'Sec:ret2:https://two.example.test/login' }],
+    ['semicolon-url-last', { url: 'bob', email: 'Secret2', password: 'Ab3:https://two.example.test/login' }],
+    ['semicolon-url-last', { url: '', email: 'bob', password: 'Secret2:https://two.example.test/My Folder/index.php' }],
+    ['semicolon-url-last', { url: 'bob', email: 'Secret2', password: 'Ab3;https://two.example.test:8443/' }],
+    ['semicolon-url-last', { url: 'bob', email: 'Secret2', password: 'https://two.example.test/login' }],
+    ['labelled-pair', { url: '', email: 'three.example.test/', password: 'Username:carol:Password:Secret3' }],
+    ['labelled-pair', { url: 'https://three.example.test/', email: 'Username', password: 'carol:Password:Secret3' }],
+    ['nested-url', { url: 'https://sso.example.test/x?next=https', email: '//four.example.test/y', password: 'dave:Secret4' }],
+    ['nested-url', { url: 'https://sso.example.test/x?next=https', email: '//four.example.test', password: '8443/y:dave:Secret4' }],
+  ])('%s: %j', (cls, r) => expect(classifyOldOnlyRow(r)).toBe(cls))
+
+  test.each([
+    [{ url: 'https://shop.example.test/login', email: 'alice', password: 'Secret1' }],
+    [{ url: 'https://shop.example.test/login', email: 'alice', password: 'see https://x.test' }],
+    [{ url: 'https://shop.example.test/login', email: 'alice@mail.test', password: 'Pass:word1' }],
+    [{ url: '', email: 'Username', password: 'Secret1' }],
+  ])('a row nothing in v6.2 explains stays unexplained: %j', r => expect(classifyOldOnlyRow(r)).toBe('unexplained'))
+})

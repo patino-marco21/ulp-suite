@@ -1,14 +1,17 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { appendManifest, archiveFile, openSource } from '@/lib/source-archive'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { appendManifest, archiveFile, openSource, type Source } from '@/lib/source-archive'
 import { parseGateConfig } from '@/lib/ingest-quality-gate'
-import { preflightSource, sliceRanges, wholeLines } from '@/lib/ingest-preflight'
+import { SAMPLE_HOLD_MARGIN, preflightSource, sampleHold, sliceRanges, wholeLines } from '@/lib/ingest-preflight'
 
 const cleanLine = (i: number) => `https://shop${i % 50}.example.test/login:user${i}@mail.test:Pw-${i}-Xy!`
 const junkLine = (i: number) => `https://shop${i % 50}.example.test/login:user${i}@mail.test:Pw://x${i}`
 const wordsLine = (i: number) => `just some words number ${i} and nothing else`
+// A banner and a divider cannot hold a credential: a file that carries many of them is not badly split.
+const bannerLine = '\u{1F4B8} Premium access \u279C $50 \u{1F4B0}'
+const dividerLine = '\u2588'.repeat(20)
 const textOf = (n: number, line: (i: number) => string) => Array.from({ length: n }, (_, i) => line(i)).join('\n') + '\n'
 const CONFIG = { ...parseGateConfig({}), minLines: 100 }
 
@@ -101,5 +104,92 @@ describe('preflightSource', () => {
     const r = await preflightSource(openSource(put('t3.txt', textOf(500, t3Line))), { config: CONFIG })
     expect(r.counters).toMatchObject({ lines: 500, stored: 0, tierDropped: 500, noFields: 0, junk: 0 })
     expect(r.verdict.level).toBe('pass')
+  })
+
+  const noisy =(every: number, other: (i: number) => string) => (i: number) =>
+    i % every !== every - 1 ? cleanLine(i) : i % (2 * every) === every - 1 ? bannerLine : other(i)
+
+  it('leaves the lines that cannot hold a credential out of the unsplit share and out of the unsplit shapes', async () => {
+    const r = await preflightSource(openSource(put('noise.txt', textOf(2_000, noisy(4, () => dividerLine)))), { config: CONFIG })
+    expect(r.counters).toMatchObject({ lines: 2_000, stored: 1_500, noFields: 500, noCredential: 500 })
+    expect(r.verdict.level).toBe('pass')
+    expect(r.verdict.report).toMatchObject({ unsplitPct: 0, noFields: 500, noCredential: 500 })
+    expect(r.unsplitShapes).toEqual([])
+  })
+
+  it('still lists, and still counts, the unsplit lines that could have been a credential', async () => {
+    const r = await preflightSource(openSource(put('noise-and-words.txt', textOf(2_000, noisy(4, wordsLine)))), { config: CONFIG })
+    expect(r.counters).toMatchObject({ lines: 2_000, noFields: 500, noCredential: 250 })
+    expect(r.verdict.report.unsplitPct).toBe(12.5)
+    expect(r.verdict.level).toBe('hold')
+    expect(r.unsplitShapes).toEqual([{ shape: 'w w w w w w w w', count: 250 }])
+  })
+
+  it('can skip the second look at the unsplit lines', async () => {
+    const r = await preflightSource(openSource(put('words-noview.txt', textOf(2_000, wordsLine))), { config: CONFIG, unsplitShapes: false })
+    expect(r.unsplitShapes).toEqual([])
+    expect(r.verdict.level).toBe('hold') // the verdict comes from the importer's own counters, not from that view
+  })
+})
+
+describe('sampleHold: the check that stops a bad big file before the import starts', () => {
+  // A "big" file for these tests is one past 200 kB, read in 3 slices of 100 kB.
+  const OPTS = { slices: 3, sliceBytes: 100_000, wholeFileMax: 200_000 }
+  const mixed = (every: number, bad: (i: number) => string) => (i: number) => (i % every === 0 ? bad(i) : cleanLine(i))
+
+  it('does not look at a file that is small enough to be read whole: the importer sees all of it anyway', async () => {
+    expect(await sampleHold(openSource(put('small-junk.txt', textOf(2_000, junkLine))), CONFIG)).toBeNull()
+  })
+
+  it('holds a big file whose slices are far past the limits, with the real limits in the reasons and no text', async () => {
+    const report = await sampleHold(openSource(put('big-junk.txt', textOf(30_000, junkLine))), CONFIG, OPTS)
+    expect(report).toMatchObject({ v: 1, phase: 'sample', level: 'hold', junkPct: 100 })
+    expect(report?.reasons).toEqual(['100.00% of the stored rows break a rule (limit 2%)'])
+    expect(report?.kinds).toEqual({ 'password-has-scheme': report?.junk })
+    expect(report?.lines).toBeLessThan(10_000) // the numbers are the sample's, not the file's
+    expect(JSON.stringify(report)).not.toContain('example.test')
+  })
+
+  it('lets a big clean file go', async () => {
+    expect(await sampleHold(openSource(put('big-clean.txt', textOf(30_000, cleanLine))), CONFIG, OPTS)).toBeNull()
+  })
+
+  it('holds only when the sample is past the limit by the margin: a file just over a limit is left to the check at the end', async () => {
+    expect(SAMPLE_HOLD_MARGIN).toBe(1.5)
+    // 2.5% of the rows break a rule: over the 2% limit, under 2% x 1.5 = 3%
+    expect(await sampleHold(openSource(put('big-2-5.txt', textOf(30_000, mixed(40, junkLine)))), CONFIG, OPTS)).toBeNull()
+    // 4% is over the margin
+    expect(await sampleHold(openSource(put('big-4.txt', textOf(30_000, mixed(25, junkLine)))), CONFIG, OPTS)).toMatchObject({ phase: 'sample', level: 'hold' })
+  })
+
+  it('holds a big file most of whose lines cannot be split', async () => {
+    const report = await sampleHold(openSource(put('big-words.txt', textOf(30_000, wordsLine))), CONFIG, OPTS)
+    expect(report).toMatchObject({ phase: 'sample', level: 'hold', unsplitPct: 100 })
+    expect(report?.reasons).toEqual(['100.00% of the lines could not be split into a login and a password (limit 5%)'])
+  })
+
+  it('does not hold a big file for its banners, dividers and bare urls', async () => {
+    // A bare url that is followed by a line that could be a login would open a three-line record, so each one is followed by a clean line.
+    const withNoise = (i: number) => (i % 4 === 0 ? `https://shop${i}.example.test/` : i % 4 === 2 ? bannerLine : cleanLine(i))
+    expect(await sampleHold(openSource(put('big-noise.txt', textOf(30_000, withNoise))), CONFIG, OPTS)).toBeNull()
+  })
+
+  it('does nothing unless the gate is in hold mode: a warn or off setting never stops a file', async () => {
+    const source = openSource(put('big-junk-modes.txt', textOf(30_000, junkLine)))
+    expect(await sampleHold(source, { ...CONFIG, mode: 'warn' }, OPTS)).toBeNull()
+    expect(await sampleHold(source, { ...CONFIG, mode: 'off' }, OPTS)).toBeNull()
+  })
+
+  it('never throws: a source that cannot be read is no reason to hold or to fail a file', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const broken: Source = {
+      name: 'broken.txt', size: 50_000_000, origin: { kind: 'file', path: '/nowhere/broken.txt' },
+      stream: () => { throw new Error('no stream') },
+      readSlice: async () => { throw new Error('no slice') },
+      readAll: async () => { throw new Error('no file') },
+    }
+    expect(await sampleHold(broken, CONFIG)).toBeNull()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('[quality-gate] sample check of broken.txt failed'))
+    warn.mockRestore()
   })
 })

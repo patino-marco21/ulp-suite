@@ -1,5 +1,8 @@
 /** Names the reason the result for one line differs between a baseline parser and parser v6 (scripts/parser-diff.ts). "unexplained" must stay at 0. */
-import { holdsCredential, isUrlPathParameter, pipeJoinAll, protocolRelativeToPlain, recoverAndroidAppLine, splitNumericLogin, splitSlashInPassword, splitSpacePaddedColons } from '@/lib/ulp-recover'
+import {
+  hasInnerScheme, holdsCredential, isUrlPathParameter, pipeJoinAll, protocolRelativeToPlain, recoverAndroidAppLine, splitNumericLogin, splitPipedLabelledPair,
+  splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme,
+} from '@/lib/ulp-recover'
 import { stripTelegramTag } from '@/lib/ulp-telegram-tag'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
 
@@ -7,11 +10,13 @@ export interface Outcome { credential: { url: string; email: string; password: s
 
 export type ChangeClass =
   | 'same' | 'padded-colons' | 'android-no-scheme' | 'slash-in-password' | 'numeric-login' | 'protocol-relative'
-  | 'utf8-recovered' | 'utf8-value' | 'utf8-lost' | 'login-equals-password' | 't3-kept' | 'pipe-scheme' | 'pipe-label' | 'pipe-url' | 'semicolon-password' | 'semicolon-parameter' | 'unexplained'
+  | 'utf8-recovered' | 'utf8-value' | 'utf8-lost' | 'login-equals-password' | 't3-kept' | 'pipe-scheme' | 'pipe-label' | 'pipe-url' | 'semicolon-password' | 'semicolon-parameter'
+  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'unexplained'
 
 export const CHANGE_CLASSES: ChangeClass[] = [
   'padded-colons', 'android-no-scheme', 'slash-in-password', 'numeric-login', 'protocol-relative',
-  'utf8-recovered', 'utf8-value', 'utf8-lost', 'login-equals-password', 't3-kept', 'pipe-scheme', 'pipe-label', 'pipe-url', 'semicolon-password', 'semicolon-parameter', 'unexplained',
+  'utf8-recovered', 'utf8-value', 'utf8-lost', 'login-equals-password', 't3-kept', 'pipe-scheme', 'pipe-label', 'pipe-url', 'semicolon-password', 'semicolon-parameter',
+  'leading-colon', 'semicolon-url-last', 'labelled-pair', 'nested-url', 'unexplained',
 ]
 
 const INERT = '\uE000'   // a private-use character: no parser rule knows it, so a line that holds it is read like one without a semicolon
@@ -45,11 +50,27 @@ const sameCred = (a: Cred, b: Cred) => a.url === b.url && a.email === b.email &&
 const sameOutcome = (a: Outcome, b: Outcome) => (a.credential && b.credential ? sameCred(a.credential, b.credential) : !a.credential && !b.credential)
 
 /**
+ * The rule of parser v6.2 that reads this line in a layout the baseline did not know, or null. Rules K, L and M are named by the SHAPE of the line (their helpers accept it,
+ * or it holds a url inside a url), not by an exact equivalent baseline run, because the baseline has no reading of those layouts to compare with.
+ */
+function v62Rule(rawLine: string): 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | null {
+  const full = stripTelegramTag(stripLeadingColonBeforeScheme(repairUtf8Line(rawLine).trim()))
+  // parseLine reads the text in front of the first pipe when a semicolon is in the line, so the semicolon rule is tried on that text too
+  const beforePipe = full.includes('|') ? full.slice(0, full.indexOf('|')).trim() : full
+  if (splitPipedLabelledPair(full)) return 'labelled-pair'
+  if (splitSemicolonPasswordUrl(full) || splitSemicolonPasswordUrl(beforePipe)) return 'semicolon-url-last'
+  return hasInnerScheme(full) ? 'nested-url' : null
+}
+
+/**
  * `oldOnRepaired` is the baseline parser run on the UTF-8-repaired line: when it already gives the new result, the repair alone explains the change.
  * `oldOnJoined` is the baseline parser run on the line with the pipe that joins a url and a credential replaced (pipeJoinAll): the new result must be exactly that.
  * `oldOnSemi` is the baseline parser run on the line with its semicolons made inert (inertSemicolons, results mapped back with restoreSemicolons).
+ * `oldOnLead` is the baseline parser run on the line without the colon in front of its scheme (stripLeadingColonBeforeScheme, parser v6.2, rule J).
  */
-export function classifyChange(rawLine: string, oldO: Outcome, newO: Outcome, oldOnRepaired: Outcome, oldOnJoined?: Outcome, oldOnSemi?: Outcome): ChangeClass {
+export function classifyChange(
+  rawLine: string, oldO: Outcome, newO: Outcome, oldOnRepaired: Outcome, oldOnJoined?: Outcome, oldOnSemi?: Outcome, oldOnLead?: Outcome,
+): ChangeClass {
   // An app id without its scheme: the old parser stored it mangled (the whole id in the login) or not at all; whatever the new result is, rule B explains it.
   if (recoverAndroidAppLine(repairUtf8Line(rawLine).trim()) && !sameOutcome(oldO, newO)) return 'android-no-scheme'
   // A pipe between a url (or only its scheme, or a label) and a credential (parser v6.1): explained when the new result is what the baseline parser gives for the joined line.
@@ -63,14 +84,16 @@ export function classifyChange(rawLine: string, oldO: Outcome, newO: Outcome, ol
     const inert = inertSemicolons(repairUtf8Line(rawLine).trim())
     if (inert) return inert.kind
   }
+  // A colon in front of the scheme (parser v6.2, rule J): explained when the new result is what the baseline parser gives for the line without it.
+  if (oldOnLead && !sameOutcome(oldO, newO) && sameOutcome(oldOnLead, newO)) return 'leading-colon'
   if (oldO.credential && newO.credential) {
     if (sameCred(oldO.credential, newO.credential)) return 'same'
-    return oldOnRepaired.credential && sameCred(oldOnRepaired.credential, newO.credential) ? 'utf8-value' : 'unexplained'
+    return oldOnRepaired.credential && sameCred(oldOnRepaired.credential, newO.credential) ? 'utf8-value' : v62Rule(rawLine) ?? 'unexplained'
   }
   if (!oldO.credential && !newO.credential) return 'same'
   // The old parser stored the line and v6 does not: explained when the UTF-8 repair alone makes the old parser reject it too (a password that is
   // two characters long once decoded, the double-encoded replacement character, ...).
-  if (oldO.credential) return repairUtf8Line(rawLine) !== rawLine && !oldOnRepaired.credential ? 'utf8-lost' : 'unexplained'
+  if (oldO.credential) return repairUtf8Line(rawLine) !== rawLine && !oldOnRepaired.credential ? 'utf8-lost' : v62Rule(rawLine) ?? 'unexplained'
   const stored = newO.credential as Cred
   if (oldO.reason === 'tier_dropped') return 't3-kept'
   if (oldOnRepaired.credential && sameCred(oldOnRepaired.credential, stored)) return 'utf8-recovered'
@@ -83,17 +106,32 @@ export function classifyChange(rawLine: string, oldO: Outcome, newO: Outcome, ol
     if (splitSlashInPassword(t)) return 'slash-in-password'
     if (splitNumericLogin(t)) return 'numeric-login'
   }
+  const v62 = v62Rule(rawLine)
+  if (v62) return v62
   if (stored.email === stored.password && !stored.email.includes('@')) return 'login-equals-password'
   return 'unexplained'
 }
 
 /** A stored row that only the baseline parser produces (stream mode): the reason it is gone. */
-export type OldOnlyClass = 'double-encoded' | 'android-mangled' | 'pipe-join' | 'semicolon-junk' | 'split-junk' | 'positional-merge' | 'utf8-text' | 'unexplained'
+export type OldOnlyClass =
+  | 'double-encoded' | 'android-mangled' | 'pipe-join' | 'semicolon-junk' | 'split-junk' | 'positional-merge' | 'utf8-text'
+  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'unexplained'
 
 export function classifyOldOnlyRow(row: { url: string; email: string; password: string }): OldOnlyClass {
   const fields = [row.url, row.email, row.password]
   if (fields.some(f => /[\u00c2-\u00ef][\u0080-\u00bf]/.test(f))) return 'double-encoded'
   if (/^[A-Za-z0-9_+-]{16,}==@/.test(row.email) || /^(android:)?\/\/[A-Za-z0-9_+-]{16,}==@/.test(row.url)) return 'android-mangled'
+  // Parser v6.2, rule J: the colon in front of the scheme stayed in the url (or, when the line had more fields than url:login:password, in the login, with no url)
+  if (/^:+[a-z][a-z0-9+.-]{0,31}:\/\//i.test(row.url) || (row.url === '' && /^:+[a-z][a-z0-9+.-]{0,31}:\/\//i.test(row.email))) return 'leading-colon'
+  // ... rule K: "login;password:https://host/path" stored the url at the end of the password (the password itself may hold a colon or a slash, a third ';' field may
+  // have become the url or the password, the path may hold spaces, and a ';' may stand in front of the url instead of a colon)
+  if (!/:\/\//.test(row.url) && !/:\/\//.test(row.email) && /[:;]https?:\/\//i.test(row.password)) return 'semicolon-url-last'
+  if (row.url !== '' && !/[:/]/.test(row.url) && /^https?:\/\/\S+$/i.test(row.password)) return 'semicolon-url-last'
+  // ... rule L: the labels of a "host/|Username:login:Password:pass" line stayed in the fields (the host as the login, or the label as the login)
+  if (/^(?:login|username|user|e-?mail|mail):.*:(?:password|pass|pwd):/i.test(row.password)) return 'labelled-pair'
+  if (/^(?:login|username|user|e-?mail|mail)$/i.test(row.email) && /:(?:password|pass|pwd):/i.test(row.password)) return 'labelled-pair'
+  // ... rule M: the "://" of a url inside the url ended the url: the scheme name stayed at the end of it and the rest of the inner url became the login
+  if (row.email.startsWith('//') && /:\/\//.test(row.url) && !row.url.endsWith('/')) return 'nested-url'
   // Parser v6.1, rule I: a ';' in the password of a colon-separated line cut the credential in two: no url, the complete credential as the login
   if (row.url === '' && holdsCredential(row.email)) return 'semicolon-junk'
   // ... and a ';name=value' path parameter in a url without a scheme: the path as the login, the parameter and the credential as the password

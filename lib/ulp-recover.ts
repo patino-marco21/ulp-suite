@@ -224,3 +224,135 @@ export function pipeJoinAll(trimmed: string): PipeJoin | null {
   }
   return { kind: first.kind, line }
 }
+
+// ─── Parser v6.2: four layouts the ingest quality gate caught in real files ──────────────────────────────────────────────────────────────────────────
+// (docs/superpowers/specs/2026-10-24-parser-v6-2-and-gate-noise-design.md.) These are NEW functions on purpose: scripts/parser-diff.ts runs the previous parser against the
+// helpers of the working tree, so an old helper changed in place would change the baseline too and hide its own effect.
+
+const LEADING_COLONS_BEFORE_SCHEME = /^:+(?=[a-z][a-z0-9+.-]{0,31}:\/\/)/i
+
+/**
+ * ":https://shop.example.test/login:alice:Secret1": some lists put a colon (an empty first field) in front of every url. The importer kept it, so the url read
+ * ":https://...", the scheme and host columns (url_scheme, url_host) came out wrong and the content key never matched the same credential from another file.
+ * Returns the line without the colons, or the line itself when it does not start with colons and a scheme. Cheap on the usual line: one character is tested first.
+ */
+export function stripLeadingColonBeforeScheme(trimmed: string): string {
+  if (trimmed.charCodeAt(0) !== 58) return trimmed
+  const m = LEADING_COLONS_BEFORE_SCHEME.exec(trimmed)
+  return m ? trimmed.slice(m[0].length) : trimmed
+}
+
+/** What a url that ends a line may look like behind its scheme: a host, an optional port, an optional path, and no other colon. */
+const URL_LAST_TAIL = /^[^/:\s]+(?::\d{1,5})?(?:\/[^:\s]*)?$/
+/** The same behind a semicolon: the semicolon already ends the login;password pair, so a colon in the path or the query is part of the url. */
+const URL_AFTER_SEMICOLON_TAIL = /^[^/\s]+(?:\/\S*)?$/
+
+/**
+ * "alice;Secret1:https://shop.example.test/login" and "alice;Secret1;https://shop.example.test/login": login;password with the url last, behind a colon or a semicolon.
+ * parseLine split such a line on its semicolons and left the url at the end of the password (or read the login as the url). Like splitLoginPasswordUrl (the colon form of the
+ * same layout) it needs an http(s) url that ends the line and holds no colon but its port, a login without white space, a slash or a colon, and something on both sides of the
+ * first semicolon. The password may hold colons and semicolons. Returns [url, login, password].
+ */
+export function splitSemicolonPasswordUrl(line: string): [string, string, string] | null {
+  const schemeIdx = line.lastIndexOf('://')
+  if (schemeIdx <= 0) return null
+  const head = line.slice(0, schemeIdx)                          // "alice;Secret1:https" or "alice;Secret1;https"
+  const urlSep = Math.max(head.lastIndexOf(':'), head.lastIndexOf(';'))
+  if (urlSep <= 0 || !/^https?$/i.test(head.slice(urlSep + 1))) return null
+  if (!(head[urlSep] === ';' ? URL_AFTER_SEMICOLON_TAIL : URL_LAST_TAIL).test(line.slice(schemeIdx + 3))) return null
+  const fields = head.slice(0, urlSep)                           // "alice;Secret1"
+  const semi = fields.indexOf(';')
+  if (semi <= 0 || semi === fields.length - 1) return null
+  const login = fields.slice(0, semi)
+  if (/[\s/:]/.test(login)) return null
+  return [line.slice(urlSep + 1), login, fields.slice(semi + 1)]
+}
+
+const LOGIN_LABELS: ReadonlySet<string> = new Set(['login', 'username', 'user', 'email', 'e-mail', 'mail'])
+const PASSWORD_LABELS: ReadonlySet<string> = new Set(['password', 'pass', 'pwd'])
+
+/**
+ * "shop.example.test/|Username:alice:Password:Secret1": a url (with or without a scheme), a pipe, and a labelled pair. parseLine took the pipe for the login/password
+ * separator: the host ended up as the login and "Username:alice:Password:Secret1" as the password (and with a scheme, the first label as the login). The first label must be
+ * a login word and the second a password word (the same vocabulary as the labelled blocks), the login and the password must not be empty, and the password may hold anything.
+ * Returns [url, login, password].
+ */
+export function splitPipedLabelledPair(trimmed: string): [string, string, string] | null {
+  const bar = trimmed.indexOf('|')
+  if (bar <= 0) return null
+  const head = trimmed.slice(0, bar).trim()
+  if (!SCHEME_URL.test(head) && !BARE_HOST.test(head)) return null
+  const rest = trimmed.slice(bar + 1).trim()
+  const first = rest.indexOf(':')
+  if (first <= 0 || !LOGIN_LABELS.has(rest.slice(0, first).toLowerCase())) return null
+  for (let p = rest.indexOf(':', first + 1); p !== -1; p = rest.indexOf(':', p + 1)) {
+    const q = rest.indexOf(':', p + 1)
+    if (q === -1) return null
+    if (!PASSWORD_LABELS.has(rest.slice(p + 1, q).toLowerCase())) continue
+    const login = rest.slice(first + 1, p)
+    const password = rest.slice(q + 1)
+    return login !== '' && password !== '' ? [head, login, password] : null
+  }
+  return null
+}
+
+/** True when the line holds a second "scheme://" behind the first: a url inside a url (rule M reads such a line differently; scripts/parser-diff.ts names the change by it). */
+export function hasInnerScheme(line: string): boolean {
+  const first = line.indexOf('://')
+  return first !== -1 && line.indexOf('://', first + 3) !== -1
+}
+
+// ─── A rejected line that carries no credential (the gate's "unsplit" count) ───────────────────────────────────────────────────────────────────────
+
+const SCHEME_LED = /^[a-z][a-z0-9+.-]*:\/\//i
+const HOST_PATH_LED = /^[\w-]+(?:\.[\w-]+)+(?::\d{1,5})?\//
+const HAS_SEPARATOR = /[:;|\t@]/
+const HAS_SYMBOL = /\p{So}/u
+const HAS_LETTER_OR_DIGIT = /[\p{L}\p{N}]/u
+/** A rejected line longer than this is counted as a possible credential: it is not a banner, and the check below should stay cheap. */
+const NO_CREDENTIAL_MAX_LENGTH = 4096
+
+/** A port: one to five digits that end the line or are followed by a slash, a colon, a query or a fragment. */
+function portAt(s: string, from: number): boolean {
+  let j = from
+  while (j < s.length && j - from < 5 && s.charCodeAt(j) >= 48 && s.charCodeAt(j) <= 57) j++
+  if (j === from) return false
+  if (j === s.length) return true
+  const next = s.charCodeAt(j)
+  return next === 47 || next === 58 || next === 63 || next === 35
+}
+
+/** Field separators of a line: colons that are not part of a "://" or a port, semicolons, pipes and tabs. */
+function fieldSeparators(s: string): number {
+  let n = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c === 58) {
+      if (s.charCodeAt(i + 1) === 47 && s.charCodeAt(i + 2) === 47) { i += 2; continue }   // the "://" of a scheme, or of a url inside a url
+      if (portAt(s, i + 1)) continue
+      n++
+    } else if (c === 59 || c === 124 || c === 9) n++
+  }
+  return n
+}
+
+/** An e-mail address as a token of the line: the line is cut at white space and at the characters that may stand beside it. */
+function hasEmailToken(s: string): boolean {
+  if (!s.includes('@')) return false
+  for (const token of s.split(/[\s:;|/,]+/)) if (EMAIL_SHAPE.test(token)) return true
+  return false
+}
+
+/**
+ * A line the parser rejected that cannot be a credential in any layout it knows, so it says nothing about whether the parser reads the file well: a banner or a divider
+ * (no field separator at all, and an emoji or symbol in it, or nothing but punctuation), a bare url, or a url (or host and path) with at most one field behind it ("https://host:8443:token",
+ * "https://host/login?next=https://other/home:token"). It is false for anything that could be a credential the parser failed to split: plain text, a line with an e-mail address, a
+ * line with two or more separators behind the url, any line with a separator that does not start with a url. The quality gate does not count the true ones as "unsplit".
+ */
+export function cannotHoldCredential(line: string): boolean {
+  const t = stripLeadingColonBeforeScheme(line.trim())
+  if (t.length > NO_CREDENTIAL_MAX_LENGTH) return false
+  if (SCHEME_LED.test(t) || HOST_PATH_LED.test(t)) return !hasEmailToken(t) && fieldSeparators(t) < 2
+  if (HAS_SEPARATOR.test(t)) return false
+  return HAS_SYMBOL.test(t) || !HAS_LETTER_OR_DIGIT.test(t)
+}

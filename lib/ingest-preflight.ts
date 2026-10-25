@@ -6,10 +6,11 @@
  * of the pile import were visible in a two-minute sample, which is what this reads.
  */
 import { parseInlineLine, parseULPStream } from '@/lib/ulp-parser'
+import { cannotHoldCredential } from '@/lib/ulp-recover'
 import { DEFAULT_HARD_KEEP_COUNTRIES, makeHardDropPredicate, parseIngestPolicy } from '@/lib/ingest-filter'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
 import {
-  SHAPE_CAP, evaluateGate, maskText, newGateCounters, recordGateBatch, type GateConfig, type GateCounters, type GateVerdict,
+  SHAPE_CAP, evaluateGate, maskText, newGateCounters, recordGateBatch, type GateConfig, type GateCounters, type GateReport, type GateVerdict,
 } from '@/lib/ingest-quality-gate'
 import type { Source } from '@/lib/source-archive'
 
@@ -24,6 +25,8 @@ export interface PreflightOptions {
   wholeFileMax?: number
   config: GateConfig
   env?: NodeJS.Dict<string>
+  /** false skips the second look at the lines no field split could read, which parses every line once more: `unsplitShapes` then stays empty. Default true. */
+  unsplitShapes?: boolean
 }
 
 export interface PreflightResult {
@@ -34,7 +37,7 @@ export interface PreflightResult {
   whole: boolean
   counters: GateCounters
   verdict: GateVerdict
-  /** The most frequent masked shapes of the lines no field split could read (a single-line view; see preflightSource). */
+  /** The most frequent masked shapes of the lines no field split could read and that could have held a credential (a single-line view; see preflightSource). */
   unsplitShapes: Array<{ shape: string; count: number }>
 }
 
@@ -94,11 +97,14 @@ export async function preflightSource(source: Source, opts: PreflightOptions): P
     for await (const batch of parseULPStream(stream, source.name, 100_000, hard, { dedupInFile: false })) recordGateBatch(counters, batch)
 
     // parseULPStream hands out counts, not the lines it rejected, and it must not change. So the lines no field split could read are looked at again, one by one,
-    // the way the design probe did: this view is exact for single-line records and an upper bound for labelled or positional blocks.
+    // the way the design probe did: this view is exact for single-line records and an upper bound for labelled or positional blocks. A line that cannot hold a
+    // credential (a banner, a divider, a bare url) is not listed, as the gate does not count it as unsplit.
+    if (opts.unsplitShapes === false) continue
     for (const line of buf.toString('latin1').split('\n')) {
       if (line.trim() === '') continue
-      const r = parseInlineLine(repairUtf8Line(line), source.name, hard)
-      if (r.credential || r.reason !== 'no_fields') continue
+      const fixed = repairUtf8Line(line)
+      const r = parseInlineLine(fixed, source.name, hard)
+      if (r.credential || r.reason !== 'no_fields' || cannotHoldCredential(fixed.trim())) continue
       const shape = maskText(line.trim(), 70)
       const key = unsplit.has(shape) || unsplit.size < SHAPE_CAP ? shape : '(other shapes)'
       unsplit.set(key, (unsplit.get(key) ?? 0) + 1)
@@ -112,5 +118,44 @@ export async function preflightSource(source: Source, opts: PreflightOptions): P
   return {
     name: source.name, size: source.size, sampledBytes: sampled, whole: source.size <= wholeFileMax,
     counters, verdict: evaluateGate(counters, opts.config, 'final'), unsplitShapes,
+  }
+}
+
+/** A sample must be this many times past a hold limit before sampleHold holds a file: slices are an estimate, and the importer's own checks still see every line. */
+export const SAMPLE_HOLD_MARGIN = 1.5
+
+export interface SampleHoldOptions {
+  slices?: number
+  sliceBytes?: number
+  wholeFileMax?: number
+  env?: NodeJS.Dict<string>
+}
+
+/**
+ * The check the importer runs BEFORE it stages a big file (docs/superpowers/specs/2026-10-24-parser-v6-2-and-gate-noise-design.md). It reads the preflight's evenly
+ * spaced slices, so a file that goes bad in the middle or at the end is seen in seconds, not after the 1,000,000 lines of the early check or the whole file.
+ *
+ * Returns a report (phase 'sample', level 'hold', the real limits in the reasons) when the sample is past a hold limit by SAMPLE_HOLD_MARGIN, else null. A file small
+ * enough to be read whole, a gate that is not in hold mode and a sample that cannot be read all give null: the importer's own early and final checks decide then.
+ * It never throws, and it writes nothing anywhere.
+ */
+export async function sampleHold(source: Source, config: GateConfig, opts: SampleHoldOptions = {}): Promise<GateReport | null> {
+  if (config.mode !== 'hold') return null
+  const wholeFileMax = opts.wholeFileMax ?? PREFLIGHT_WHOLE_FILE_MAX
+  if (source.size <= wholeFileMax) return null
+  try {
+    const sample = await preflightSource(source, { ...opts, wholeFileMax, config, unsplitShapes: false })
+    const stricter: GateConfig = {
+      ...config,
+      holdJunkPct: config.holdJunkPct * SAMPLE_HOLD_MARGIN,
+      holdUnsplitPct: config.holdUnsplitPct * SAMPLE_HOLD_MARGIN,
+      holdGarbagePct: config.holdGarbagePct * SAMPLE_HOLD_MARGIN,
+    }
+    if (evaluateGate(sample.counters, stricter, 'sample').level !== 'hold') return null
+    // A hold at 1.5 times a limit is a hold at the limit: the report names the limit the owner knows.
+    return evaluateGate(sample.counters, config, 'sample').report
+  } catch (err) {
+    console.warn(`[quality-gate] sample check of ${source.name} failed, the importer's own checks decide: ${err instanceof Error ? err.message : String(err)}`)
+    return null
   }
 }

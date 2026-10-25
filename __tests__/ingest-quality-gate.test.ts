@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { holdsCredential } from '@/lib/ulp-recover'
 import {
-  GATE_KINDS, SHAPE_CAP, IngestHeldError, classifyStoredRow, evaluateGate, isIngestHeldError, maskShape, maskText, newGateCounters,
+  GATE_KINDS, SHAPE_CAP, IngestHeldError, classifyStoredRow, describeVerdict, evaluateGate, isIngestHeldError, maskShape, maskText, newGateCounters,
   parseGateConfig, recordGateBatch, urlHoldsCredential, type GateConfig, type GateCounters, type GateKind,
 } from '@/lib/ingest-quality-gate'
 
@@ -70,8 +70,17 @@ describe('maskShape', () => {
 })
 
 describe('recordGateBatch', () => {
-  const batch = (credentials: Row[], rejected = 0, breakdown = {}) => ({
+  const batch = (credentials: Row[], rejected = 0, breakdown = {}, noCredential?: number) => ({
     credentials: credentials.map(([url, email, password]) => ({ url, email, password })), rejected, breakdown,
+    ...(noCredential === undefined ? {} : { noCredential }),
+  })
+
+  it('counts the unsplit lines that cannot hold a credential (a banner, a divider, a bare url) apart from the other unsplit lines', () => {
+    const c = newGateCounters()
+    recordGateBatch(c, batch([CLEAN], 5, { no_fields: 5 }, 3))
+    recordGateBatch(c, batch([CLEAN], 2, { no_fields: 2 })) // a batch from a caller that does not know the count (the field is optional)
+    expect(c).toMatchObject({ lines: 1 + 5 + 1 + 2, noFields: 7, noCredential: 3 })
+    expect(newGateCounters().noCredential).toBe(0)
   })
 
   it('counts the non-blank lines, the stored rows, the rejects by reason and the rows that break a rule', () => {
@@ -158,6 +167,28 @@ describe('evaluateGate', () => {
     expect(level({ ...BIG, noFields: 5_000 })).toBe('warn')
     expect(level({ ...BIG, noFields: 2_100 })).toBe('warn')
     expect(level({ ...BIG, noFields: 2_000 })).toBe('pass')
+  })
+
+  it('does not count a line that cannot hold a credential as unsplit', () => {
+    expect(level({ ...BIG, noFields: 6_000, noCredential: 3_000 })).toBe('warn') // 3.00% of the lines
+    expect(level({ ...BIG, noFields: 6_000, noCredential: 4_500 })).toBe('pass') // 1.50%
+    expect(level({ ...BIG, noFields: 12_000, noCredential: 5_000 })).toBe('hold') // 7.00%
+    expect(level({ ...BIG, noFields: 12_000, noCredential: 7_000 })).toBe('warn') // exactly 5.00%: strictly above is a hold
+    expect(level({ ...BIG, noFields: 3_000, noCredential: 9_000 })).toBe('pass') // a count that is too big cannot make the share negative
+  })
+
+  it('reports the share without them, the counts of both, and names the lines it is about', () => {
+    const v = evaluateGate(counters({ ...BIG, noFields: 12_000, noCredential: 5_000 }), cfg(), 'final')
+    expect(v.report).toMatchObject({ noFields: 12_000, noCredential: 5_000, unsplitPct: 7 })
+    expect(v.reasons).toEqual(['7.00% of the lines could not be split into a login and a password (limit 5%)'])
+    const warn = evaluateGate(counters({ ...BIG, noFields: 6_000, noCredential: 3_000 }), cfg(), 'final')
+    expect(warn.reasons).toEqual(['3.00% of the lines could not be split into a login and a password (warn limit 2%)'])
+  })
+
+  it('takes a sample phase', () => {
+    const v = evaluateGate(counters({ ...BIG, junk: 5_000 }), cfg(), 'sample')
+    expect(v.report.phase).toBe('sample')
+    expect(describeVerdict(v)).toMatch(/^hold \(sample\): 100000 lines, 90000 stored, junk 5\.56%/)
   })
 
   it('holds above 25% garbage and has no warn tier for it', () => {

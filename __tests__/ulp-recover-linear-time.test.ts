@@ -6,7 +6,10 @@
  * the line held a colon at all.
  */
 import { describe, expect, it } from 'vitest'
-import { joinPipedUrl, pipeJoin, pipeJoinAll, splitSpacePaddedColons, stripTrailingColon, stripTrailingSemicolons } from '@/lib/ulp-recover'
+import {
+  cannotHoldCredential, hasInnerScheme, joinPipedUrl, pipeJoin, pipeJoinAll, splitPipedLabelledPair, splitSemicolonPasswordUrl, splitSpacePaddedColons,
+  stripLeadingColonBeforeScheme, stripTrailingColon, stripTrailingSemicolons,
+} from '@/lib/ulp-recover'
 import { parseInlineLine, parseLine } from '@/lib/ulp-parser'
 
 /** The function as it was before: the same body with the original, quadratic regex. It is the reference of the differential. */
@@ -211,5 +214,36 @@ describe('parseLine: a degenerate pipe line does not recurse to a stack overflow
     const b = parseLine('https://shop.example.test/login:alice:Secret1', 'probe.txt')
     expect(a).toEqual(b)
     expect(b.credential).not.toBeNull()
+  })
+})
+
+describe('the helpers of parser v6.2: linear time', () => {
+  const RUN = Number(process.env.LINEAR_RUN ?? 400_000)
+  const limitMs = 1000
+  const time = (fn: () => unknown) => { const t = performance.now(); fn(); return performance.now() - t }
+  const colons = ':'.repeat(RUN)
+
+  it.each([
+    ['a run of colons in front of a scheme (rule J)', colons + 'https://a.test/x:alice:Secret1'],
+    ['a run of colons and no scheme at all', colons + 'a'],
+    ['a run of colons behind a short scheme-like word', 'https' + colons + '//a.test'],
+    ['a long login in front of a semicolon and a url (rule K)', 'a'.repeat(RUN) + ';Secret1:https://a.test/x'],
+    ['a run of semicolon-separated words and a url tail', 'a;'.repeat(RUN / 2) + ':https://b.test'],
+    ['a long password between the semicolon and the url', 'alice;' + 'p'.repeat(RUN) + ':https://a.test/x'],
+    ['a long tail behind the url', 'alice;Secret1:https://a.test/' + 'x'.repeat(RUN)],
+    ['a labelled pair with a long login (rule L)', 'h.test/|Username:' + 'a'.repeat(RUN) + ':Password:x'],
+    ['a labelled pair with a run of colons', 'h.test/|Username' + colons + 'x'],
+    ['a run of broken password labels', 'h.test/|Username:alice' + ':Passwor'.repeat(RUN / 8) + 'x'],
+    ['a url that holds a run of inner schemes (rule M)', 'https://a.test/?n=' + 'https://'.repeat(RUN / 8) + ':alice:Secret1'],
+    ['a run of ports inside a url', 'https://a.test/?n=https://b.test' + ':8443/x'.repeat(RUN / 7) + ':alice:Secret1'],
+    ['a long e-mail-shaped token just under the length cap of cannotHoldCredential', 'a@' + 'b.'.repeat(2040) + '@'],
+    ['a long line over the cap', 'https://a.test/' + 'a@b.'.repeat(RUN / 4)],
+  ])('%s', (_label, line) => {
+    expect(time(() => stripLeadingColonBeforeScheme(line))).toBeLessThan(limitMs)
+    expect(time(() => splitSemicolonPasswordUrl(line))).toBeLessThan(limitMs)
+    expect(time(() => splitPipedLabelledPair(line))).toBeLessThan(limitMs)
+    expect(time(() => hasInnerScheme(line))).toBeLessThan(limitMs)
+    expect(time(() => cannotHoldCredential(line))).toBeLessThan(limitMs)
+    expect(time(() => parseInlineLine(line, 'probe.txt'))).toBeLessThan(limitMs)
   })
 })

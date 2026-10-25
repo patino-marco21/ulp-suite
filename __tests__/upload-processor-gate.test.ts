@@ -25,6 +25,7 @@ vi.mock('@/lib/ingest-stage', async () => {
   return { ...actual, createStage: h.createStage, dropStage: h.dropStage, registerStage: h.registerStage, unregisterStage: h.unregisterStage }
 })
 
+import type { Source } from '@/lib/source-archive'
 import { processTextStream } from '@/lib/upload-processor'
 
 // The current parser stores "Pw://x" as a password, which the gate counts as a row that breaks a rule (password-has-scheme).
@@ -122,6 +123,54 @@ describe('the quality gate in the staged import', () => {
     })
     await processTextStream(stream(textOf(1_000, cleanLine)), 'clean.txt', undefined, undefined, { beforeCommit })
     expect(order).toEqual(['beforeCommit', 'commit'])
+  })
+})
+
+describe('the sample check in the staged import', () => {
+  // A source the size of a big file that reads as the same lines everywhere, without a big file on the disk: every slice the check asks for is 3,000 lines.
+  const bigSource = (line: (i: number) => string): Source & { readSlice: ReturnType<typeof vi.fn> } => ({
+    name: 'big.txt', size: 50_000_000, origin: { kind: 'file', path: '/nowhere/big.txt' },
+    stream: () => { throw new Error('the check reads slices, not the stream') },
+    readSlice: vi.fn(async () => Buffer.from(textOf(3_000, line))),
+    readAll: async () => { throw new Error('the check does not read the whole file') },
+  })
+  const cleanFile = () => stream(textOf(1_000, cleanLine))
+
+  it('holds a big file whose slices are junk before a stage table exists, whatever the stream says', async () => {
+    const source = bigSource(junkLine)
+    const err = await processTextStream(cleanFile(), 'big.txt', undefined, undefined, { sampleSource: source }).catch(e => e)
+    expect(err).toMatchObject({ name: 'IngestHeldError', report: { phase: 'sample', level: 'hold', junkPct: 100 } })
+    expect(err.report.kinds).toEqual({ 'password-has-scheme': err.report.junk }) // the sample's rows: the whole lines of five slices, not the 1,000 of the stream
+    expect(h.registerStage).not.toHaveBeenCalled()
+    expect(h.createStage).not.toHaveBeenCalled()
+    expect(h.commitStage).not.toHaveBeenCalled()
+    expect(insertedTables()).toEqual([])
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('[quality-gate] big.txt: hold (sample)'))
+  })
+
+  it('goes on to the import when the slices are clean', async () => {
+    const out = await processTextStream(cleanFile(), 'big.txt', undefined, undefined, { sampleSource: bigSource(cleanLine) })
+    expect(out.imported).toBe(1_000)
+    expect(h.commitStage).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not read a slice for a released file, for the warn and off modes, or when there is no source', async () => {
+    const source = bigSource(junkLine)
+    await processTextStream(cleanFile(), 'big.txt', undefined, undefined, { sampleSource: source, gateOverride: true })
+    vi.stubEnv('INGEST_QUALITY_GATE', 'warn')
+    await processTextStream(cleanFile(), 'big.txt', undefined, undefined, { sampleSource: source })
+    vi.stubEnv('INGEST_QUALITY_GATE', 'off')
+    await processTextStream(cleanFile(), 'big.txt', undefined, undefined, { sampleSource: source })
+    vi.stubEnv('INGEST_QUALITY_GATE', 'hold')
+    await processTextStream(cleanFile(), 'big.txt')
+    expect(source.readSlice).not.toHaveBeenCalled()
+    expect(h.commitStage).toHaveBeenCalledTimes(4)
+  })
+
+  it('beats the heartbeat around the check, so a slow disk does not look like a stalled job', async () => {
+    const beat = vi.fn()
+    await processTextStream(cleanFile(), 'big.txt', undefined, undefined, { sampleSource: bigSource(cleanLine), beat })
+    expect(beat.mock.calls.length).toBeGreaterThanOrEqual(2)
   })
 })
 

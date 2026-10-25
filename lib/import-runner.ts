@@ -9,6 +9,7 @@
  * advance while it sleeps, so a wall-clock watchdog would fail a healthy job the moment the lid reopens.
  */
 import { performance } from 'node:perf_hooks'
+import type { Source } from '@/lib/source-archive'
 
 const DEFAULT_STALL_MS = 20 * 60_000
 
@@ -72,6 +73,11 @@ export type ImportHooks = Partial<ImportContext> & {
   beforeCommit?: () => void | Promise<void>
   /** The file's identity when it was read from the source archive. */
   source?: SourceIdentity
+  /**
+   * The file being imported, as something the quality gate can read slices of before the import starts (lib/ingest-preflight.ts sampleHold). A big file that is
+   * bad throughout is held in seconds, before a stage table exists. Without it (a ZIP entry, an HTTP stream) the early and the final check decide alone.
+   */
+  sampleSource?: Source
   /** Called once, with a function that tells how many bytes of the file have been read so far (the progress line of the Inbox). */
   onSourceBytes?: (bytesRead: () => number) => void
   /**

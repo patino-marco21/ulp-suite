@@ -41,7 +41,8 @@ import {
   type GateCounters, type GateReport, type GateVerdict,
 } from '@/lib/ingest-quality-gate'
 import type { PhaseTimings } from '@/lib/phase-timings'
-import { openSource } from '@/lib/source-archive'
+import { fileSource, openSource } from '@/lib/source-archive'
+import { sampleHold } from '@/lib/ingest-preflight'
 import { ArchiveRefError, appArchiveDir, hashingStream, readArchiveRefFile } from '@/lib/archive-ref'
 
 // ─── Public result type ───────────────────────────────────────────────────────
@@ -466,6 +467,18 @@ async function importThroughStage(a: StagedImport): Promise<ProcessResult> {
     hooks.onImportProgress?.(event)
   }
 
+  // The sample check comes first: a big file that is bad throughout is held in seconds, before a stage table exists, instead of after the first million lines or
+  // the whole file. A released file skips it. A file the caller gave no source for (a ZIP entry, an HTTP stream) goes to the early and the final check alone.
+  if (gate && !hooks.gateOverride && hooks.sampleSource) {
+    hooks.beat?.()
+    const held = await sampleHold(hooks.sampleSource, gateConfig)
+    hooks.beat?.()
+    if (held) {
+      console.warn(`[quality-gate] ${filename}: ${describeVerdict({ level: held.level, reasons: held.reasons, report: held })}`)
+      throw new IngestHeldError(held)
+    }
+  }
+
   // Register BEFORE creating: the orphan sweeper (lib/ingest-stage.ts) must never see a table of ours that is not registered.
   registerStage(tables.id)
   try {
@@ -730,8 +743,13 @@ export async function processTextFile(
   if (fileSize === undefined) {
     try { fileSize = fs.statSync(filePath).size } catch { /* the read below reports a file that is gone; the check then goes by name */ }
   }
+  // The quality gate reads slices of the file before the import starts (sampleHold). A file that cannot be opened here is reported by the stream.
+  let sampleSource = hooks.sampleSource
+  if (!sampleSource) {
+    try { sampleSource = fileSource(filePath) } catch { /* the stream reports it */ }
+  }
   try {
-    return await processTextStream(webStream, filename, jobId, onBatch, { ...hooks, fileSize })
+    return await processTextStream(webStream, filename, jobId, onBatch, { ...hooks, fileSize, sampleSource })
   } finally {
     nodeStream.destroy()
   }
@@ -764,6 +782,7 @@ export async function processArchiveRef(
     return await processTextStream(stream, ref.name, undefined, onBatch, {
       ...hooks,
       source: { sha256: ref.sha256, size: ref.size, archiveId: ref.id },
+      sampleSource: source,
       beforeCommit: async () => {
         const got = digest()
         if (got !== ref.sha256) {

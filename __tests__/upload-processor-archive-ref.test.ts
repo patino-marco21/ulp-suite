@@ -62,7 +62,7 @@ afterEach(() => {
 })
 
 /** Archives a synthetic file (small frames, so the stream crosses several) and writes its reference next to it. */
-function archived(name: string, text = textOf(300, cleanLine)) {
+function archived(name: string, text: string | Buffer = textOf(300, cleanLine)) {
   const src = join(root, `src-${name}`)
   writeFileSync(src, text)
   const entry = archiveFile(src, { archiveDir, name, frameBytes: 4096, searchBytes: 512 })
@@ -146,6 +146,14 @@ describe('processArchiveRef', () => {
     const released = await processArchiveRef(refPath, undefined, { gateOverride: true })
     expect(released.gate).toMatchObject({ level: 'hold' })
     expect(h.commitStage).toHaveBeenCalledTimes(1)
+  })
+
+  it('lets the quality gate sample a big archived file: junk from its first slice is held before a stage table exists', async () => {
+    // Past the 8 MiB the check reads whole: a junk head and zeros after it, which the sample reads as nothing but the head.
+    const { refPath } = archived('arch-k.txt', Buffer.concat([Buffer.from(textOf(5_000, junkLine)), Buffer.alloc(9 * 1024 * 1024)]))
+    await expect(processArchiveRef(refPath)).rejects.toMatchObject({ name: 'IngestHeldError', report: { phase: 'sample', level: 'hold' } })
+    expect(h.createStage).not.toHaveBeenCalled()
+    expect(h.commitStage).not.toHaveBeenCalled()
   })
 
   it('runs the caller\'s own beforeCommit after the integrity check', async () => {

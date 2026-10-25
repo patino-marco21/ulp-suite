@@ -87,6 +87,11 @@ export interface GateCounters {
   garbage: number
   tierDropped: number
   dedup: number
+  /**
+   * Of the `noFields` lines, those that cannot hold a credential at all: a banner, a divider, a bare url, a url with one field (cannotHoldCredential in
+   * lib/ulp-recover.ts). The parser counts them; the unsplit share leaves them out, because a file is not badly split for carrying a heading.
+   */
+  noCredential: number
   /** Rows the classifier threw on. It never fails an import. */
   gateErrors: number
   kinds: Record<GateKind, number>
@@ -96,7 +101,7 @@ export interface GateCounters {
 
 export function newGateCounters(): GateCounters {
   return {
-    lines: 0, stored: 0, junk: 0, noFields: 0, noPassword: 0, garbage: 0, tierDropped: 0, dedup: 0, gateErrors: 0,
+    lines: 0, stored: 0, junk: 0, noFields: 0, noPassword: 0, garbage: 0, tierDropped: 0, dedup: 0, noCredential: 0, gateErrors: 0,
     kinds: Object.fromEntries(GATE_KINDS.map(k => [k, 0])) as Record<GateKind, number>,
     shapes: new Map(),
   }
@@ -107,6 +112,8 @@ export interface GateBatch {
   credentials: ReadonlyArray<{ url: string; email: string; password: string }>
   rejected: number
   breakdown: Partial<Record<RejectionReason, number>>
+  /** Of the `no_fields` rejects, how many cannot hold a credential. Absent from a batch that does not tell. */
+  noCredential?: number
 }
 
 /** Every run of letters, digits, '_', '.', '~' and '-' (any script) becomes w, white space collapses, only the punctuation stays. Looks at no more than `max` characters. */
@@ -131,6 +138,7 @@ export function recordGateBatch(c: GateCounters, batch: GateBatch): void {
   c.lines += batch.credentials.length + batch.rejected - (b.blank ?? 0)
   c.stored += batch.credentials.length
   c.noFields += b.no_fields ?? 0
+  c.noCredential += batch.noCredential ?? 0
   c.noPassword += b.no_password ?? 0
   c.garbage += b.garbage ?? 0
   c.tierDropped += b.tier_dropped ?? 0
@@ -195,15 +203,20 @@ export function parseGateConfig(env: NodeJS.Dict<string> = process.env): GateCon
 
 export type GateLevel = 'pass' | 'warn' | 'hold'
 
+/** 'early': after the first million lines; 'final': before the commit; 'sample': before the import started, from slices of the file (lib/ingest-preflight.ts sampleHold). */
+export type GatePhase = 'early' | 'final' | 'sample'
+
 export interface GateReport {
   v: 1
-  phase: 'early' | 'final'
+  phase: GatePhase
   level: GateLevel
   reasons: string[]
   lines: number
   stored: number
   junk: number
   noFields: number
+  /** The lines of `noFields` that cannot hold a credential, left out of `unsplitPct`. Absent from a report written before this was counted. */
+  noCredential?: number
   noPassword: number
   garbage: number
   tierDropped: number
@@ -236,19 +249,21 @@ const round2 = (x: number) => Math.round(x * 100) / 100
 /** n / d is above `limit` percent. Integer arithmetic where the inputs are integers, so exactly 2.00% is not above 2%. */
 const above = (n: number, d: number, limit: number) => d > 0 && n * 100 > limit * d
 
-export function evaluateGate(c: GateCounters, cfg: GateConfig, phase: 'early' | 'final'): GateVerdict {
+export function evaluateGate(c: GateCounters, cfg: GateConfig, phase: GatePhase): GateVerdict {
+  // The unsplit share counts the lines that could be a credential and could not be split; a banner or a bare url cannot be one (see GateCounters.noCredential).
+  const unsplit = Math.max(0, c.noFields - c.noCredential)
   const junkPct = round2(pct(c.junk, c.stored))
-  const unsplitPct = round2(pct(c.noFields, c.lines))
+  const unsplitPct = round2(pct(unsplit, c.lines))
   const garbagePct = round2(pct(c.garbage, c.lines))
 
   const holdReasons: string[] = []
   if (above(c.junk, c.stored, cfg.holdJunkPct)) holdReasons.push(`${junkPct.toFixed(2)}% of the stored rows break a rule (limit ${cfg.holdJunkPct}%)`)
-  if (above(c.noFields, c.lines, cfg.holdUnsplitPct)) holdReasons.push(`${unsplitPct.toFixed(2)}% of the lines could not be split (limit ${cfg.holdUnsplitPct}%)`)
+  if (above(unsplit, c.lines, cfg.holdUnsplitPct)) holdReasons.push(`${unsplitPct.toFixed(2)}% of the lines could not be split into a login and a password (limit ${cfg.holdUnsplitPct}%)`)
   if (above(c.garbage, c.lines, cfg.holdGarbagePct)) holdReasons.push(`${garbagePct.toFixed(2)}% of the lines are garbage (limit ${cfg.holdGarbagePct}%)`)
 
   const warnReasons: string[] = []
   if (above(c.junk, c.stored, cfg.warnJunkPct)) warnReasons.push(`${junkPct.toFixed(2)}% of the stored rows break a rule (warn limit ${cfg.warnJunkPct}%)`)
-  if (above(c.noFields, c.lines, cfg.warnUnsplitPct)) warnReasons.push(`${unsplitPct.toFixed(2)}% of the lines could not be split (warn limit ${cfg.warnUnsplitPct}%)`)
+  if (above(unsplit, c.lines, cfg.warnUnsplitPct)) warnReasons.push(`${unsplitPct.toFixed(2)}% of the lines could not be split into a login and a password (warn limit ${cfg.warnUnsplitPct}%)`)
   const gateErrorReason = c.stored > 0 && c.gateErrors * 1000 > c.stored ? `the gate itself failed on ${c.gateErrors} of ${c.stored} rows` : null
 
   const enough = c.lines >= cfg.minLines
@@ -277,7 +292,8 @@ export function evaluateGate(c: GateCounters, cfg: GateConfig, phase: 'early' | 
 
   const report: GateReport = {
     v: 1, phase, level, reasons,
-    lines: c.lines, stored: c.stored, junk: c.junk, noFields: c.noFields, noPassword: c.noPassword, garbage: c.garbage, tierDropped: c.tierDropped, gateErrors: c.gateErrors,
+    lines: c.lines, stored: c.stored, junk: c.junk, noFields: c.noFields, noCredential: c.noCredential, noPassword: c.noPassword, garbage: c.garbage,
+    tierDropped: c.tierDropped, gateErrors: c.gateErrors,
     junkPct, unsplitPct, garbagePct, kinds, shapes,
     thresholds: {
       minLines: cfg.minLines, holdJunkPct: cfg.holdJunkPct, holdUnsplitPct: cfg.holdUnsplitPct, holdGarbagePct: cfg.holdGarbagePct,

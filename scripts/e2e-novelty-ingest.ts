@@ -17,6 +17,8 @@
  *               and a T3 line of a kept country (Poland, stored) next to one of another country (Brazil, dropped)
  *   pipes       parser v6.1: a pipe that joins a url, only its scheme or a label and a credential ("https://| host:login:pass", "Network:| ...", "url|login:pass"),
  *               a ';' in the password of a colon-separated line, a ";name=value" path parameter in a url without a scheme, and the layouts that must not move
+ *   v62         parser v6.2: a colon in front of the scheme, "login;password:url" (the url last, with a ':' or a ';' before it), a labelled pair behind a pipe ("host/|Username:login:Password:pass"),
+ *               a url inside a url, lines that carry no credential (a banner, a divider, a bare url with one field) and the layouts that must not move
  *   monitor     a monitor alerts for rows that are new to the database, not for a row the database already held
  *   big         2.5M distinct lines + 100k repeats of early lines (past the old 2M in-file cap): exact, in 5 slabs, phases visible
  *   kill        the app is killed in the middle of the commit; after the restart the orphan stage tables are gone and a retry
@@ -27,7 +29,8 @@
  *   gate        free disk under the ingest floor while staging: the import waits (its stage exists), resumes, writes each row once
  *   off         INGEST_NOVELTY_CHECK=off: the direct path, no stage tables, rows stored again as before
  *   quality-gate  a file where 1 line in 20 breaks a rule is HELD (production defaults): zero rows stored, it waits in inbox/held with its report, Release imports it
- *                 once, and the audit row exists. (The disk gate's scenario is called "gate".)
+ *                 once, and the audit row exists; a file where 1 line in 9 is a banner or a divider is NOT held (those lines cannot hold a credential); a file past 8 MiB
+ *                 that breaks a rule on 1 line in 10 is held by the sample check before the import starts (report phase "sample"). (The disk gate's scenario is called "gate".)
  *   archive-ref   a file imported from the source archive through an .archiveref: same counts as the plain import, identity in ulp.sources, a same-name file with other
  *                 content is a new file, a damaged archive fails before one row is committed, and no plaintext copy of the file appears in the inbox
  *   same-name     the same-name check compares size: the same file again is skipped (and the job log says so), another file under that name is imported and gets its
@@ -518,6 +521,52 @@ async function parserV61(): Promise<void> {
   check('no row holds a scheme, a label or a url as its login', one(`(email IN ('https://', 'Network:') OR startsWith(email, 'https://'))`) === 0)
 }
 
+async function parserV62(): Promise<void> {
+  console.log('\n1f. Parser v6.2: a colon in front of the scheme, a url last behind a semicolon, a labelled pair behind a pipe, a url inside a url')
+  const P = `e2e-nov-v62-${RUN}.txt`
+  const pw = (k: string) => `Pw-${RUN}-${k}`
+  const ls = [
+    `:https://shopj1.example-store.test/login:v62j1${RUN}@probe-mail.test:${pw('J1')}`,                      // J: a colon in front of the scheme
+    `:https://shopj2.example-store.test:8443/login:v62j2${RUN}:${pw('J2')}`,                                  // J: ... a port, a login that is not an e-mail
+    `v62k1${RUN};${pw('K1')}:https://shopk1.example-store.test/login`,                                        // K: login;password:url
+    `v62k2${RUN}@probe-mail.test;${pw('K2')};https://shopk2.example-store.test:8443/login`,                    // K: ... a ';' before the url, an e-mail login, a port
+    `shopl1.example-store.test/|Username:v62l1${RUN}:Password:${pw('L1')}`,                                   // L: host/|Label:login:Label:password
+    `https://shopl2.example-store.test/|Login:v62l2${RUN}@probe-mail.test:Password:${pw('L2')}`,              // L: ... with a scheme, an e-mail login
+    `https://sso.example-store.test/x?next=https://shopm1.example-store.test/y:v62m1${RUN}:${pw('M1')}`,      // M: a url inside a url
+    `https://sso.example-store.test/x?next=https://shopm2.example-store.test:8443/y:v62m2${RUN}:${pw('M2')}`, // M: ... with a port on the inner host
+    // lines that carry no credential: rejected
+    '\u{1F4B8} Premium access ➜ $50 \u{1F4B0}',
+    '█'.repeat(24),
+    `https://shopn.example-store.test/login:${pw('N')}`,
+    // the layouts that must not move
+    `https://shopz1.example-store.test/login:v62z1${RUN}:${pw('Z1')}`,
+    `https://shopz2.example-store.test;v62z2${RUN};${pw('Z2')}`,
+    `v62z3${RUN}@probe-mail.test:${pw('Z3')}`,
+  ]
+  const v = await importLines(P, ls)
+  check('a file with one line per v6.2 rule, three lines that carry no credential and the layouts that must not move: 11 rows are new, none known', v.status === 'done' && v.imported === 11 && v.known === 0, brief(v))
+  check('...the 3 lines without a credential are the only ones skipped, and 11 rows are stored', v.skipped === 3 && rowsFor(P) === 11, `skipped ${v.skipped}, rows ${rowsFor(P)}`)
+  const one = (where: string) => Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND ${where}`))
+  check('J: the colon in front of the scheme is gone, and url_scheme and url_host are those of the url',
+    one(`url = 'https://shopj1.example-store.test/login' AND email = 'v62j1${RUN}@probe-mail.test' AND password = '${pw('J1')}' AND url_scheme = 'https' AND url_host = 'shopj1.example-store.test'`) === 1
+    && one(`url = 'https://shopj2.example-store.test:8443/login' AND email = 'v62j2${RUN}' AND password = '${pw('J2')}' AND url_scheme = 'https'`) === 1)
+  check('K: the url that came last is the url, the field in front of the ";" is the login and the next one the password',
+    one(`url = 'https://shopk1.example-store.test/login' AND email = 'v62k1${RUN}' AND password = '${pw('K1')}'`) === 1
+    && one(`url = 'https://shopk2.example-store.test:8443/login' AND email = 'v62k2${RUN}@probe-mail.test' AND password = '${pw('K2')}'`) === 1)
+  check('L: the host (or url) is the url, and the labels are gone from the login and the password',
+    one(`url = 'shopl1.example-store.test/' AND email = 'v62l1${RUN}' AND password = '${pw('L1')}'`) === 1
+    && one(`url = 'https://shopl2.example-store.test/' AND email = 'v62l2${RUN}@probe-mail.test' AND password = '${pw('L2')}'`) === 1)
+  check('M: the url inside the url stays in the url, and the login and the password are the two fields behind it',
+    one(`url = 'https://sso.example-store.test/x?next=https://shopm1.example-store.test/y' AND email = 'v62m1${RUN}' AND password = '${pw('M1')}'`) === 1
+    && one(`url = 'https://sso.example-store.test/x?next=https://shopm2.example-store.test:8443/y' AND email = 'v62m2${RUN}' AND password = '${pw('M2')}'`) === 1)
+  check('the layouts that must not move are stored as before',
+    one(`url = 'https://shopz1.example-store.test/login' AND email = 'v62z1${RUN}' AND password = '${pw('Z1')}'`) === 1
+    && one(`url = 'https://shopz2.example-store.test' AND email = 'v62z2${RUN}' AND password = '${pw('Z2')}'`) === 1
+    && one(`url = '' AND email = 'v62z3${RUN}@probe-mail.test' AND password = '${pw('Z3')}'`) === 1)
+  check('no row has a url that starts with a colon, a login that holds a slash or a scheme, or a label as its login',
+    one(`startsWith(url, ':') OR position(email, '/') > 0 OR position(email, '://') > 0 OR email IN ('Username', 'Login')`) === 0)
+}
+
 async function monitorScenario(): Promise<void> {
   console.log('\n2. A monitor alerts for the rows that are new to the database')
   const hook = await api('POST', '/api/monitoring/webhooks', { name: `Novelty Receiver ${RUN}`, url: `http://${RECEIVER}:9000/hook`, secret: 'rehearsal' })
@@ -747,6 +796,32 @@ async function qualityGate(): Promise<void> {
 
   const again = await importLines(H, body)
   check('the same name again is skipped by the duplicate guard, not held again', again.status === 'done' && again.imported === 0, brief(again))
+
+  // Lines that cannot hold a credential (a banner, a divider) are not "unsplit": 1 line in 9 of this file is one (11%, over twice the 5% hold limit when they were counted)
+  const NOISE = `e2e-qg-noise-${RUN}.txt`
+  const banner = (i: number) => (i % 2 === 0 ? `\u{1F4B8} Fresh logs every day \u279C ${i} \u{1F4B0}` : '\u2588'.repeat(30 + (i % 5)))
+  const noisy: string[] = []
+  lines('Q', 30_000, 54_000).forEach((l, i) => { noisy.push(l); if (i % 8 === 7) noisy.push(banner(i)) })
+  const noise = await importLines(NOISE, noisy)
+  check('a file where 1 line in 9 is a banner or a divider is imported, not held: 24000 new rows', noise.status === 'done' && noise.imported === 24_000 && noise.known === 0, brief(noise))
+  check('...the 3000 banners and dividers are skipped, 24000 rows are stored, and the file is not in inbox/held', noise.skipped === 3_000 && rowsFor(NOISE) === 24_000 && !inboxLs('held').includes(NOISE), `skipped ${noise.skipped}, rows ${rowsFor(NOISE)}`)
+
+  // The sample check: past 8 MiB the file is read in slices before the import starts, so a file that breaks a rule on 1 line in 10 is held without a stage table
+  const SAMPLE = `e2e-qg-sample-${RUN}.txt`
+  const sampleBody = Array.from({ length: 110_000 }, (_, i) => (i % 10 === 9 ? junk(i) : line('S', i)))
+  const sampled = await importLines(SAMPLE, sampleBody, 600_000)
+  check('a file past 8 MiB where 1 line in 10 breaks a rule ends in error with the hold message', sampled.status === 'error' && /Held by the quality gate/.test(sampled.error ?? ''), brief(sampled))
+  check('...not one row of it was stored, no stage table is left, and it waits in inbox/held', rowsFor(SAMPLE) === 0 && stageTableCount() === 0 && inboxLs('held').includes(SAMPLE), `rows ${rowsFor(SAMPLE)}, tables ${stageTableCount()}`)
+  const sampledEntry = ((await api('GET', '/api/inbox/status')).json?.held ?? []).find((f: any) => f.name === SAMPLE)
+  check('the report of the hold says it came from the sample, with the rule-breaking rows counted', sampledEntry?.report?.phase === 'sample' && sampledEntry?.report?.level === 'hold'
+    && sampledEntry?.report?.junkPct >= 9 && (sampledEntry?.report?.kinds?.['password-has-scheme'] ?? 0) > 0, JSON.stringify(sampledEntry?.report ?? null).slice(0, 220))
+  const sampleRelease = await api('POST', '/api/inbox/release', { filename: SAMPLE })
+  check('Release moves it back', sampleRelease.status === 200, JSON.stringify(sampleRelease.json))
+  const sampleDone = await waitFor(async () => {
+    const st = await api('GET', '/api/inbox/status')
+    return (st.json?.done_recent ?? []).find((j: any) => j.filename === SAMPLE && j.status === 'done')
+  }, 300_000, 2000)
+  check('the released file is imported without the sample check holding it again: 110000 rows', !!sampleDone && sampleDone.imported === 110_000 && rowsFor(SAMPLE) === 110_000, JSON.stringify(sampleDone ?? null))
   scanLog('after the quality-gate scenario')
 }
 
@@ -1068,6 +1143,7 @@ async function run(): Promise<number> {
   if (want('positional')) await positionalRecords()
   if (want('v6')) await parserV6()
   if (want('pipes')) await parserV61()
+  if (want('v62')) await parserV62()
   if (want('monitor')) await monitorScenario()
   if (want('big')) await bigFile()
   if (want('kill')) await killMidCommit()

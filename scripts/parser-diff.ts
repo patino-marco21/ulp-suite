@@ -22,7 +22,7 @@ import { Readable } from 'node:stream'
 import { CHANGE_CLASSES, classifyChange, classifyOldOnlyRow, inertSemicolons, restoreSemicolons, type ChangeClass, type Outcome } from '@/lib/parser-diff'
 import { DEFAULT_HARD_KEEP_COUNTRIES, makeHardDropPredicate, parseIngestPolicy } from '@/lib/ingest-filter'
 import { parseInlineLine, parseULPStream } from '@/lib/ulp-parser'
-import { pipeJoinAll } from '@/lib/ulp-recover'
+import { pipeJoinAll, stripLeadingColonBeforeScheme } from '@/lib/ulp-recover'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
 import { defaultArchiveDir, latestByName, openSource, readManifest, type Source } from '@/lib/source-archive'
 
@@ -106,7 +106,9 @@ async function main(): Promise<void> {
       const oJ = join ? toOutcome(baselineParse(join.line, baselineHard)) : undefined
       const inert = inertSemicolons(repaired.trim())
       const oS = inert ? restoreSemicolons(toOutcome(baselineParse(inert.line, baselineHard))) : undefined
-      const cls = classifyChange(line, o, n, oR, oJ, oS)
+      const lead = stripLeadingColonBeforeScheme(repaired.trim())
+      const oL = lead !== repaired.trim() ? toOutcome(baselineParse(lead, baselineHard)) : undefined
+      const cls = classifyChange(line, o, n, oR, oJ, oS, oL)
       if (cls === 'same') continue
       counts.set(cls, (counts.get(cls) ?? 0) + weight)
       raw.set(cls, (raw.get(cls) ?? 0) + 1)

@@ -31,7 +31,7 @@ vi.mock('@/lib/ingest-stage', async () => {
   }
 })
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MAX_INPROCESS_MATCHES, processTextFile, processTextStream } from '@/lib/upload-processor'
@@ -247,5 +247,24 @@ describe('the same-name check of a file on disk knows its size', () => {
     expect(other.alreadyImported).toBe(false)
     expect(h.registerStage).toHaveBeenCalledTimes(1)
     expect(sourceRows()[0][0]).toMatchObject({ filename: 'shared-name.txt', size: SEEN + 'https://shop.example.net:dave@example.net:pw-four\n'.length })
+  })
+})
+
+describe('processTextFile gives the quality gate the file to sample', () => {
+  let dir = ''
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'sample-check-')) })
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+
+  it('holds a big file that is junk from its first slice, before a stage table exists', async () => {
+    vi.stubEnv('INGEST_QUALITY_GATE_MIN_LINES', '100')
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const junkLine = (i: number) => `https://shop${i % 50}.example.test/login:user${i}@mail.test:Pw://x${i}`
+    const path = join(dir, 'big-junk.txt')
+    writeFileSync(path, Array.from({ length: 5_000 }, (_, i) => junkLine(i)).join('\n') + '\n')
+    truncateSync(path, 9 * 1024 * 1024) // the rest reads as zeros: a file past the 8 MiB that the check reads whole, with nothing but the head to sample
+    await expect(processTextFile(path, 'big-junk.txt')).rejects.toMatchObject({ name: 'IngestHeldError', report: { phase: 'sample', level: 'hold' } })
+    expect(h.registerStage).not.toHaveBeenCalled()
+    expect(h.createStage).not.toHaveBeenCalled()
+    expect(h.commitStage).not.toHaveBeenCalled()
   })
 })

@@ -232,6 +232,11 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   `INGEST_QUALITY_GATE_WARN_JUNK_PCT` (1), `INGEST_QUALITY_GATE_WARN_UNSPLIT_PCT` (2), `INGEST_QUALITY_GATE_MIN_LINES` (20000) and
   `INGEST_QUALITY_GATE_EARLY_LINES` (1000000: a big file is checked once after that many lines, so a bad 4 GB file costs a
   million lines, not the whole file). `npx tsx scripts/preflight.ts <file>...` gives the verdict from a sample before a file is imported.
+  The unsplit share leaves out the lines that cannot hold a credential in any layout (a banner, a divider, a bare link, a link with one
+  field behind it; `cannotHoldCredential` in `lib/ulp-recover.ts`), and a file over 8 MiB is also sampled before its import starts (five
+  slices of 2 MiB spread over the file, as the preflight reads them): it is held at once when the sample is past a hold limit by half
+  again, so a file that goes bad in the middle stops in seconds. Both are described in
+  `docs/superpowers/specs/2026-10-24-parser-v6-2-and-gate-noise-design.md`.
 - `ULP_ARCHIVE_HOST_DIR` — the host directory of the source archive (`scripts/archive-sources.ts`, default `~/ulp-archive`,
   which must exist), mounted read-only at `/archive`. A file named `<name>.archiveref` dropped into `inbox/` (the feeder writes
   them with `SOURCE=archive`) is imported from the archive instead of from the inbox: the plaintext is decoded on the way to the

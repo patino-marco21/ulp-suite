@@ -64,10 +64,12 @@ interface CurrentProgress {
 
 interface GateReportView {
   level:      'pass' | 'warn' | 'hold'
-  phase:      'early' | 'final'
+  phase:      'early' | 'final' | 'sample'
   reasons:    string[]
   lines:      number
   stored:     number
+  /** Unsplit lines that cannot hold a credential at all (a banner, a divider, a bare link): not part of `unsplitPct`. A report written before they were counted has none. */
+  noCredential?: number
   junkPct:    number
   unsplitPct: number
   garbagePct: number
@@ -461,7 +463,9 @@ export default function InboxPage() {
               Held by the quality gate ({data.held!.length} files)
             </CardTitle>
             <p className="text-xs text-muted-foreground">
-              These files were stopped before one row was stored: too many of their rows look wrongly split. Read the reasons; Release imports a file once anyway.
+              These files were stopped before one row was stored. Either too many of their lines could not be read as a login and a password, or too many of the rows
+              that were read break the rules of a clean row (a login that is a link, a password that holds a link). The reasons below say which. Release imports a file
+              once anyway, with its rows exactly as they were read; a layout the parser does not know yet is better fixed in the parser first.
             </p>
           </CardHeader>
           <CardContent className="pt-0 pb-4">
@@ -487,10 +491,16 @@ export default function InboxPage() {
                     <div className="pl-5 space-y-0.5 text-muted-foreground">
                       {f.report.reasons.map(r => <p key={r}>{r}</p>)}
                       <p className="tabular-nums">
-                        {fmtRows(f.report.lines)} lines read, {fmtRows(f.report.stored)} stored; {f.report.junkPct}% break a rule,
-                        {' '}{f.report.unsplitPct}% unsplit, {f.report.garbagePct}% garbage
+                        {fmtRows(f.report.lines)} lines read, {fmtRows(f.report.stored)} stored; {f.report.junkPct}% of the stored rows break a rule,
+                        {' '}{f.report.unsplitPct}% of the lines could not be split, {f.report.garbagePct}% are garbage
                         {f.report.phase === 'early' ? ' (stopped early, after the first million lines)' : ''}
+                        {f.report.phase === 'sample' ? ' (stopped before the import started; the numbers come from slices read across the file, not from all of it)' : ''}
                       </p>
+                      {(f.report.noCredential ?? 0) > 0 && (
+                        <p className="tabular-nums">
+                          {fmtRows(f.report.noCredential ?? 0)} more lines could not be split but carry no login and password at all (banners, dividers, bare links); they are not counted.
+                        </p>
+                      )}
                       {Object.keys(f.report.kinds).length > 0 && (
                         <p>{Object.entries(f.report.kinds).map(([k, n]) => `${k}: ${fmtRows(n)}`).join(', ')}</p>
                       )}
