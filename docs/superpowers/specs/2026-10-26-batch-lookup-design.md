@@ -1,11 +1,11 @@
 # Batch lookup: pasted input and long address lists — Design
 
 Date: 2026-10-26
-Status: **implemented and verified on the live table on 2026-10-26; not yet deployed.** Read-only proof: `BLK_LIVE=1 npx vitest run __tests__/batch-lookup.live.test.ts` (about 6 minutes). No DDL, no new setting.
+Status: **implemented, verified and deployed locally on 2026-10-26** (main `6f20161`; image `ulp-suite-app:latest` = `3a55b8134c9b`, built by `git archive d98fb82`, rehearsed 40/40; rollback tag `ulp-suite-app:rollback-20261026-0631z` = `94509bf36e66`, the image that was running). Read-only proof on the real table: `BLK_LIVE=1 npx vitest run __tests__/batch-lookup.live.test.ts` (about 6 minutes); proof on the built image: `npx tsx scripts/e2e-batch-lookup.ts`. No DDL, no new setting: the deployed app logged "DDL v29 already applied" and did no schema work.
 
 ## Why
 
-The report was "the email or domain batch lookup is not working". Reading the app's own `system.query_log` and then running both routes (`POST /api/lookup/batch`, used by the Batch Lookup page, and `POST /api/v1/lookup/batch`) against the real table found four causes. None of them is an error: three return HTTP 200 with "not found", which is why it looked like clean data.
+The report was "the email or domain batch lookup is not working". Reading the app's own `system.query_log` and then running both routes (`POST /api/lookup/batch`, used by the Batch Lookup page, and `POST /api/v1/lookup/batch`) against the real table found five causes. Three of them are not errors at all: the routes return HTTP 200 with "not found", which is why it looked like clean data. One is a timeout (408) and one is a documentation error (405).
 
 1. **A domain list is compared as typed.** `domain` stores the bare lower-case host: the parser (`extractDomain`) drops the scheme, the path, `user@`, the port and a leading `www.`. The routes lower-cased the pasted text and nothing else. The two real domain batches in the query log carried full URLs (scheme included) and read 0 rows. Measured with one real domain asked in ten shapes, on both routes: only the bare host was found; `https://host`, `https://host/path?x`, `http://www.host/`, `WWW.HOST`, `host:8443`, `https://user@host/path`, `host/` and padded text all returned `found=false`.
 2. **An address list is compared as typed.** Of six shapes of one real address only the exact one and the upper-case one were found; padding (the page trims, the API does not), `mailto:a@b`, `<a@b>` and `"a@b"` missed. JavaScript's `toLowerCase()` also folds non-ASCII capitals that ClickHouse's `lower()` leaves alone, so such an address could never equal its stored form.
@@ -20,6 +20,7 @@ The report was "the email or domain batch lookup is not working". Reading the ap
 
    The routes abort at `max_execution_time = 30`, so a list of about 50 or more addresses came back as the 408 "timed out" error, and the page advertises 100.
 4. **The page classifies the whole paste.** Any `@` anywhere sent every line as an e-mail (a domain in a mixed list was looked up as an address), although the API takes both lists in one request; and the Email/Domain choice was overwritten on every keystroke.
+5. **The README sent API users to an endpoint that does not exist.** Its table listed `POST /api/v1/lookup` as the batch lookup; that route exports only `GET`, so following the table gave a 405 (checked on the deployed app: 405). The batch route is `POST /api/v1/lookup/batch`, which the in-app docs always had.
 
 Ruled out, with evidence: authentication and the middleware (`/api/lookup/*` goes through the normal JWT check, only the login endpoints are rate limited), ClickHouse down or overloaded (idle, 0 merges), the client's own timeout (`request_timeout` is one hour), an index missing on some part (all 15 active parts carry the files of `idx_inv_email`, `idx_bf_email` and `idx_bf_email_lc`), and `NORM_COLS` (a pass-through for ordinary rows).
 
@@ -59,13 +60,15 @@ Cold, measured: caches dropped 3.1 s, plus `min_bytes_to_use_direct_io = 1` 3.3 
 * `emailResults` / `domainResults`: rows are matched back to the string as sent (the response keys do not change); case is folded for ASCII only on both sides; an input that stands for several stored domains gets them together, newest first, capped at 50; `searched_as` appears only when what was looked up differs from what was sent.
 * The SQL shapes the other tests pin (order, `LIMIT {cap} BY`, `optimize_use_projections = 0`, the 30 s cap, the v1 inner/outer split with `NORM_COLS`) are unchanged.
 
-The page sends `{ emails, domains }` built per line, stops overriding an explicit Email/Domain choice, shows `as <host>` beside a result that was searched under another name, and counts both kinds.
+The page sends `{ emails, domains }` built per line, stops overriding an explicit Email/Domain choice, shows `as <host>` beside a result that was searched under another name, and counts both kinds. The suggested choice (`suggestBatchKind`) is decided by the plain lines, the only ones it governs: Domain when at least half of them read as a host, else Email. This was found on the rehearsal stack: with the first version (Email as soon as any `@` appears) a mixed paste made its plain host a login and came back "not found".
 
 ## Proof
 
 * `__tests__/batch-input.test.ts`, `__tests__/batch-lookup.test.ts`: the cleaning rules, the parity of `domainEntry(url).host` with `extractDomain` over ten URLs, the planner, the matching, both routes with a mocked client; among them the guard that `hasAllTokens` never appears outside `indexHint(...)`.
 * `__tests__/lookup-routes-imported-range.test.ts` pins the `WHERE` line and was updated for the hint; every other existing batch test passes unchanged.
 * `__tests__/batch-lookup.live.test.ts` (read-only, prints no value), 2026-10-26, both routes: ten domain shapes and nine address shapes all found with the same rows as the clean form; 100 domains 0.7-1.1 s and 100 addresses 1.9-2.5 s, all found; **parity**: 89 sampled addresses (35 stored in mixed case, 25 lower case, 12 with punctuation, 4 digits-only, 8 non-ASCII, 8 absent; 88 mixed-case stored rows among those compared) in one batch return exactly the rows of a separate `lower(email) = lower(value)` query per address (no text index, no hint), **0 rows differing** on each route.
+
+* `scripts/e2e-batch-lookup.ts`, on the built candidate image against a FRESH install of the isolated rehearsal stack (production init SQL and migrations), 2026-10-26: **40/40**. The fresh table has the text index the hint assumes (`splitByNonAlpha`, preprocessor `lower(email)`); six domain shapes, the `www.` and `:port` rows of the older parser, eight address shapes in four stored casings, a non-ASCII address, both kinds in one request, 100 addresses (39 ms on 1.5M rows) and 100 domains, 101 refused with 422; EXPLAIN on 100 absent addresses: 0 of 23 granules with the hint, 23 of 23 for the bloom filter alone; v1 with a real API key (`X-API-Key` and `Bearer`), 401 without one. The page itself, driven in the browser pane with a mixed paste: a URL with an upper-case host, `<addr>`, `mailto:addr`, a plain host and an address that does not exist gave 3 email + 2 domain, 4 found, 1 clean, with `as <host>` on the cleaned ones.
 
 ## Limits and what is not done
 
