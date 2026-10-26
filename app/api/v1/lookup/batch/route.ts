@@ -26,7 +26,7 @@ import { ADDRESS_INDEX_EXPR, ADDRESS_LOOKUP_SETTING } from "@/lib/address-lookup
 import { NORM_COLS, NORM_COLS_SETTING } from '@/lib/ulp-normalize'
 import { parseImportedRange, importedRangeEchoIfSet, importedRangePlain, importedRangeAndSql } from "@/lib/imported-range"
 import { BATCH_MAX_QUERIES } from "@/lib/batch-input"
-import { RESULTS_CAP, stringList, planEmailBatch, emailResults, planDomainBatch, domainResults, type BatchResult } from "@/lib/batch-lookup"
+import { RESULTS_CAP, stringList, planEmailBatch, emailResults, planDomainBatch, domainIn, domainResults, type BatchResult } from "@/lib/batch-lookup"
 
 export const dynamic = "force-dynamic"
 
@@ -129,21 +129,19 @@ export async function POST(request: NextRequest) {
       const plan = planDomainBatch(domains)
       let rows: Row[] = []
       if (plan.values.length > 0) {
-        const domainList = plan.values.map((_, i) => `{domain${i}:String}`).join(", ")
-        const domainParams: Record<string, string> = {}
-        plan.values.forEach((v, i) => { domainParams[`domain${i}`] = v })
+        const lookup = domainIn(plan.values)
         rows = await executeQuery(
           `SELECT ${OUTER_COLS}
            FROM (
              SELECT ${RAW_COLS}
              FROM ulp.credentials
-             WHERE domain IN (${domainList})${rangeAnd}
+             WHERE ${lookup.where}${rangeAnd}
              ORDER BY domain ASC, imported_at DESC
              LIMIT {cap:UInt32} BY domain
            ) AS t
            ORDER BY t.domain ASC, t.imported_at DESC
            ${SETTINGS}`,
-          { ...domainParams, ...rangeSql.params, cap: RESULTS_CAP }
+          { ...lookup.params, ...rangeSql.params, cap: RESULTS_CAP }
         ) as Row[]
       }
       Object.assign(results, domainResults(plan.entries, rows))

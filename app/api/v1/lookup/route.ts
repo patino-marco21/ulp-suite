@@ -4,6 +4,10 @@
  * GET /api/v1/lookup?domain=example.com
  * Optional on both: &imported_after=<instant>&imported_before=<instant> (UTC; exclusive / inclusive), see lib/imported-range.ts.
  *
+ * A domain is cleaned to what ulp.credentials stores before it is compared (lib/batch-input.ts, the same cleaning as the batch lookups; design:
+ * docs/superpowers/specs/2026-10-26-batch-lookup-design.md): a URL, a `www.` host or `host:port` is looked up as the bare host. The answer echoes
+ * the domain as sent (trimmed, lower case, as before) and carries `searched_as` when the host looked up is another name.
+ *
  * Performance: queries raw domain/email columns (indexed) instead of
  * NORM_*_EXPR wrappers.  All background data-repair mutations are done
  * so stored values are correct — raw columns use bloom filters + primary key.
@@ -14,6 +18,8 @@ import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-ke
 import { executeQuery } from "@/lib/clickhouse"
 import { ADDRESS_LOOKUP_SETTING, addressEquals } from "@/lib/address-lookup"
 import { importedRangeFromSearchParams, importedRangeEchoIfSet, importedRangePlain, importedRangeAndSql } from "@/lib/imported-range"
+import { domainEntry } from "@/lib/batch-input"
+import { domainIn, searchedAsField } from "@/lib/batch-lookup"
 
 export const dynamic = 'force-dynamic'
 
@@ -66,15 +72,23 @@ export async function GET(request: NextRequest) {
       return addRateLimitHeaders(response, authResult.rateLimit)
     }
 
-    results = await executeQuery(
-      `SELECT url, email, domain, source_file, imported_at
-       FROM ulp.credentials
-       WHERE domain = {domain:String}${rangeAnd}
-       ORDER BY imported_at DESC LIMIT 100
-       ${SETTINGS}`,
-      { domain, ...rangeSql.params }
-    )
-    const response = NextResponse.json({ success: true, found: results.length > 0, domain, count: results.length, results, ...importedRangeEchoIfSet(importedRange) })
+    // The domain column holds the bare lower-case host, so what was pasted is cut to it. The values looked up are that host, its `www.` form and the text
+    // as typed (the last is what the exact comparison this replaced matched, so nothing it found is lost); text with no host in it is not looked up.
+    const entry = domainEntry(domain)
+    if (entry.candidates.length > 0) {
+      const lookup = domainIn(entry.candidates)
+      results = await executeQuery(
+        `SELECT url, email, domain, source_file, imported_at
+         FROM ulp.credentials
+         WHERE ${lookup.where}${rangeAnd}
+         ORDER BY imported_at DESC LIMIT 100
+         ${SETTINGS}`,
+        { ...lookup.params, ...rangeSql.params }
+      )
+    } else {
+      results = []
+    }
+    const response = NextResponse.json({ success: true, found: results.length > 0, domain, ...searchedAsField(entry.host, domain), count: results.length, results, ...importedRangeEchoIfSet(importedRange) })
     return addRateLimitHeaders(response, authResult.rateLimit)
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)

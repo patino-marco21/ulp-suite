@@ -156,8 +156,8 @@ describe('GET /api/v1/lookup — imported_after / imported_before', () => {
     expect(byEmail.imported_after).toBe(AFTER)
     calls.length = 0
     await getUrl(v1Lookup, `/api/v1/lookup?domain=b.co&imported_before=${encodeURIComponent(BEFORE)}`)
-    expect(calls[0].sql).toContain(`WHERE domain = {domain:String} AND ${PLAIN_BEFORE}`)
-    expect(calls[0].params).toMatchObject({ domain: 'b.co', impBefore: BEFORE_EPOCH })
+    expect(calls[0].sql).toContain(`WHERE domain IN ({domain0:String}) AND ${PLAIN_BEFORE}`)
+    expect(calls[0].params).toMatchObject({ domain0: 'b.co', impBefore: BEFORE_EPOCH })
   })
 
   test('the email lookup runs with projections off; the domain lookup keeps its settings', async () => {

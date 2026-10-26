@@ -1,6 +1,7 @@
 /**
  * The SQL parts and the answer shaping shared by POST /api/lookup/batch and POST /api/v1/lookup/batch (design:
  * docs/superpowers/specs/2026-10-26-batch-lookup-design.md). The two routes had two copies of this logic; both carried the same defects.
+ * The domain half (`domainIn`, `searchedAsField`) is also used by GET /api/v1/lookup?domain=, which cleans its one domain the same way.
  *
  * E-mail. The comparison that decides is `lower(email) IN (lower(v1), ...)` (lib/address-lookup.ts): it finds every stored casing. Its bloom
  * filter alone cannot narrow a long list (bloom_filter(0.05): 1 address keeps 4.4% of the granules, 10 keep 35%, 100 keep 98.7%), so a batch of 100
@@ -30,8 +31,16 @@ export function stringList(value: unknown): string[] {
   return Array.isArray(value) ? (value as unknown[]).filter((e): e is string => typeof e === 'string' && e.trim() !== '') : []
 }
 
+/**
+ * `searched_as` as a field to spread into an answer: what was looked up, when it is not what was typed (the caller trims and case-folds `typed` the way
+ * it echoes it). Nothing when the two agree or when there was nothing to look up (`searched` is '').
+ */
+export function searchedAsField(searched: string, typed: string): { searched_as?: string } {
+  return searched && searched !== typed ? { searched_as: searched } : {}
+}
+
 function withSearchedAs(result: BatchResult, searched: string, typed: string): BatchResult {
-  return searched && searched !== typed ? { ...result, searched_as: searched } : result
+  return { ...result, ...searchedAsField(searched, typed) }
 }
 
 // ── E-mail ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -123,6 +132,18 @@ export interface DomainBatchPlan {
 export function planDomainBatch(domains: string[]): DomainBatchPlan {
   const entries = domains.map(original => ({ original, ...domainEntry(original) }))
   return { entries, values: Array.from(new Set(entries.flatMap(e => e.candidates))) }
+}
+
+/**
+ * `domain IN ({domain0:String}, ...)` and its parameters, for the stored values to look for (at least one: `IN ()` is not SQL). `domain` is the first
+ * column of the primary key, so the list is a set of key ranges. Measured on the real table (2.23 billion rows, 15 parts), a list of one value reads
+ * exactly the rows that `domain = x` reads (524,248 / 872,272 / 3,338,255 rows for a domain of 39 / 19,574 / 2,388,325 rows) and takes 4-25 ms more
+ * (46-104 ms cold); each further value reads 0-270,000 rows more (a neighbouring block of the key per part) at no cost that shows above the noise.
+ */
+export function domainIn(values: string[]): { where: string; params: Record<string, string> } {
+  const params: Record<string, string> = {}
+  values.forEach((value, i) => { params[`domain${i}`] = value })
+  return { where: `domain IN (${values.map((_, i) => `{domain${i}:String}`).join(', ')})`, params }
 }
 
 /** Matches rows back to what was asked; an input that stands for several stored values (www., as typed) gets them together, newest first, capped. */

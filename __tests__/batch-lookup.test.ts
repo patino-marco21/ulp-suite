@@ -23,7 +23,7 @@ vi.mock('@/lib/clickhouse', () => ({
 import { NextRequest } from 'next/server'
 import { POST as uiBatch } from '@/app/api/lookup/batch/route'
 import { POST as v1Batch } from '@/app/api/v1/lookup/batch/route'
-import { RESULTS_CAP, domainResults, emailResults, planDomainBatch, planEmailBatch, stringList } from '@/lib/batch-lookup'
+import { RESULTS_CAP, domainIn, domainResults, emailResults, planDomainBatch, planEmailBatch, searchedAsField, stringList } from '@/lib/batch-lookup'
 
 const post = (handler: (request: NextRequest) => Promise<Response>, url: string, body: unknown) =>
   handler(new NextRequest(`http://localhost${url}`, { method: 'POST', body: JSON.stringify(body) }))
@@ -124,6 +124,35 @@ describe('planDomainBatch / domainResults', () => {
     const plan = planDomainBatch(['example.tld'])
     const hit = domainResults(plan.entries, [cred('a@x.tld', 'example.tld')])['example.tld']
     expect(hit).toEqual({ found: true, count: 1, results: [cred('a@x.tld', 'example.tld')] })
+  })
+})
+
+describe('domainIn', () => {
+  test('stored values become `domain IN ({domain0:String}, ...)` and the parameters that fill it, in the order given', () => {
+    expect(domainIn(['example.tld', 'www.example.tld', 'example.tld:8443'])).toEqual({
+      where: 'domain IN ({domain0:String}, {domain1:String}, {domain2:String})',
+      params: { domain0: 'example.tld', domain1: 'www.example.tld', domain2: 'example.tld:8443' },
+    })
+  })
+
+  test('one value is still an IN list (the key prunes it as it does an equality: same rows read on the real table)', () => {
+    expect(domainIn(['example.tld'])).toEqual({ where: 'domain IN ({domain0:String})', params: { domain0: 'example.tld' } })
+  })
+
+  test('the plan of a whole batch is one list of its distinct values', () => {
+    const plan = planDomainBatch(['example.tld', 'https://www.example.tld/x'])
+    expect(domainIn(plan.values).where).toBe('domain IN ({domain0:String}, {domain1:String})')
+  })
+})
+
+describe('searchedAsField', () => {
+  test('a field to spread into an answer: searched_as when what was looked up is not what was typed', () => {
+    expect(searchedAsField('example.tld', 'https://example.tld/x')).toEqual({ searched_as: 'example.tld' })
+  })
+
+  test('nothing when they agree, and nothing when there was nothing to look up', () => {
+    expect(searchedAsField('example.tld', 'example.tld')).toEqual({})
+    expect(searchedAsField('', 'https://')).toEqual({})
   })
 })
 
