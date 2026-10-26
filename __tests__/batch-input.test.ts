@@ -133,9 +133,27 @@ describe('classifyBatchLine / buildBatchRequest — one paste can hold both', ()
     expect(buildBatchRequest(text, 'email')).toEqual({ emails: ['jane@a.tld', 'c.tld', '<bob@d.tld>'], domains: ['https://www.b.tld/login'] })
   })
 
-  test('the suggested choice is Email as soon as an @ appears, else Domain', () => {
+  test('the suggested choice is decided by the plain lines, the only ones it governs', () => {
     expect(suggestBatchKind('a.tld\nb.tld')).toBe('domain')
-    expect(suggestBatchKind('a.tld\njane@b.tld')).toBe('email')
+    expect(suggestBatchKind('jane@a.tld\nbob@b.tld')).toBe('email')
+    expect(suggestBatchKind('')).toBe('domain')
+    // A mixed paste: the addresses and URLs are recognised by themselves; the plain hosts must not become logins.
+    expect(suggestBatchKind('jane@a.tld\nb.tld\nhttps://c.tld/x\nd.tld:8443')).toBe('domain')
+    // Usernames and phone numbers are not hosts.
+    expect(suggestBatchKind('john_smith\njane_doe')).toBe('email')
+    expect(suggestBatchKind('+1 555 0100\njohn_smith\nb.tld')).toBe('email')
+    expect(suggestBatchKind('jane@a.tld\njohn_smith')).toBe('email')
+    // Exactly half hosts counts as Domain (a tie is a list of hosts with a stray word).
+    expect(suggestBatchKind('b.tld\njohn_smith')).toBe('domain')
+  })
+
+  test('with that choice, a mixed paste is split the way a person reads it', () => {
+    const text = 'https://www.A.tld/login\n<Jane@B.tld>\nmailto:bob@c.tld\nd.tld\nnobody@e.tld'
+    const request = buildBatchRequest(text, suggestBatchKind(text))
+    expect(request).toEqual({
+      emails: ['<Jane@B.tld>', 'mailto:bob@c.tld', 'nobody@e.tld'],
+      domains: ['https://www.A.tld/login', 'd.tld'],
+    })
   })
 })
 

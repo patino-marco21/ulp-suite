@@ -254,7 +254,7 @@ export default function LookupPage() {
           Batch Lookup
         </h1>
         <p className="text-sm text-muted-foreground mt-0.5">
-          Paste up to 100 emails or domains — one per line — and get instant results
+          Paste up to {BATCH_MAX_QUERIES} emails, domains or URLs — one per line, mixed is fine — and get instant results
         </p>
       </div>
 

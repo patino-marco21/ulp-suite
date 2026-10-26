@@ -142,12 +142,20 @@ export function buildBatchRequest(text: string, ambiguous: BatchKind): BatchRequ
   return { emails, domains }
 }
 
+/** A line that reads as a host: labels joined by dots, then at most a `:port` and a `/path`. */
+const HOST_LIKE = /^[^\s/@:]+(\.[^\s/@:]+)+(:\d+)?(\/\S*)?$/
+
 /**
- * The Email/Domain choice a page should start with for a pasted text: Email as soon as any line carries an '@' (an address), else Domain.
- * Only lines that say neither follow it (classifyBatchLine), so a mixed list is not forced one way.
+ * The Email/Domain choice a page should start with for a pasted text. Only the plain lines (no '@', no URL: the ones classifyBatchLine leaves to
+ * the choice) depend on it, so it is decided by them: Domain when at least half of them read as a host, else Email (a username, a phone number).
+ * With no plain line it is Email when the text has an '@' and Domain otherwise. A list of addresses with a few plain hosts among them is therefore
+ * not turned into a list of logins.
  */
 export function suggestBatchKind(text: string): BatchKind {
-  return /@/.test(text) ? 'email' : 'domain'
+  const plain = parseBatchText(text).filter(line => !line.includes('@') && !line.includes('://') && !line.startsWith('//'))
+  if (plain.length === 0) return /@/.test(text) ? 'email' : 'domain'
+  const hosts = plain.filter(line => HOST_LIKE.test(line)).length
+  return hosts * 2 >= plain.length ? 'domain' : 'email'
 }
 
 // ── The index prefilter for e-mail lookups ────────────────────────────────────────────────────────────────────────────────────────
