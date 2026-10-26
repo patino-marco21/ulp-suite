@@ -138,6 +138,43 @@ describe('killQuery', () => {
   })
 })
 
+describe('the client library\'s logger', () => {
+  /** What the app hands the library as its logger (createClient\'s `log.LoggerClass`). */
+  async function loggerClass() {
+    const { getClient } = await import('@/lib/clickhouse')
+    getClient()
+    const opts = h.createClient.mock.calls[0][0] as { log?: { LoggerClass?: new () => { error(p: unknown): void; warn(p: unknown): void; info(p: unknown): void } } }
+    expect(opts.log?.LoggerClass).toBeDefined()
+    return opts.log!.LoggerClass!
+  }
+
+  it('does not print an error block for a request this app aborted on purpose', async () => {
+    const Logger = await loggerClass()
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const logger = new Logger()
+    logger.error({ module: 'Connection', message: 'Query: HTTP request error.', err: Object.assign(new Error('x'), { name: 'AbortError' }) })
+    logger.error({ module: 'Connection', message: 'Query: HTTP request error.', err: new Error('The user aborted a request.') })
+    expect(errorLog).not.toHaveBeenCalled()
+    errorLog.mockRestore()
+  })
+
+  it('still prints every other error, such as a connection reset by a ClickHouse that restarted, and every warning', async () => {
+    const Logger = await loggerClass()
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const warnLog = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const logger = new Logger()
+    logger.error({ module: 'Connection', message: 'Query: HTTP request error.', args: { query_id: 'q1' }, err: Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }) })
+    expect(errorLog).toHaveBeenCalledTimes(1)
+    expect(String(errorLog.mock.calls[0][0])).toMatch(/^\[.+\]\[ERROR\]\[@clickhouse\/client\]\[Connection\] Query: HTTP request error\.$/)
+    expect(errorLog.mock.calls[0]).toContain('\nCaused by:')
+    logger.warn({ module: 'Connection', message: 'slow' })
+    expect(warnLog).toHaveBeenCalledTimes(1)
+    logger.info({ module: 'Connection', message: 'quiet' }) // below the default WARN level: nothing
+    errorLog.mockRestore()
+    warnLog.mockRestore()
+  })
+})
+
 describe('isAbortError', () => {
   it('recognises the three shapes an abort takes and nothing else', async () => {
     const { isAbortError } = await import('@/lib/clickhouse')

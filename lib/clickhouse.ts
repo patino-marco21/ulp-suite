@@ -1,4 +1,4 @@
-import { createClient, type ClickHouseClient, type ClickHouseSettings } from '@clickhouse/client'
+import { createClient, type ClickHouseClient, type ClickHouseSettings, type ErrorLogParams, type Logger, type LogParams, type WarnLogParams } from '@clickhouse/client'
 import { randomUUID } from 'node:crypto'
 
 // ClickHouse connection configuration
@@ -52,6 +52,29 @@ function validateEnvVars() {
  */
 export function compressRequests(env: NodeJS.Dict<string> = process.env): boolean {
   return ['1', 'true', 'on', 'yes'].includes((env.CLICKHOUSE_COMPRESS_REQUESTS ?? '').trim().toLowerCase())
+}
+
+/**
+ * The client library's own logger, minus one thing: it prints a stack trace at ERROR level for every request that was aborted, and since a search the
+ * browser replaced is now aborted on purpose (executeQuery with a signal), that would be an error block in `docker logs` per click. Everything else is
+ * logged as the default logger does (WARN and above; the default level), in the same format.
+ */
+export class ClickHouseClientLogger implements Logger {
+  private line(level: string, { module, message, args }: LogParams, err?: Error): unknown[] {
+    const params: unknown[] = [`[${new Date().toISOString()}][${level}][@clickhouse/client][${module}] ${message}`]
+    if (args) params.push('\nArguments:', args)
+    if (err) params.push('\nCaused by:', err)
+    return params
+  }
+  trace(): void {}
+  debug(): void {}
+  info(): void {}
+  warn(p: WarnLogParams): void { console.warn(...this.line('WARN', p, p.err)) }
+  error(p: ErrorLogParams): void {
+    // Narrow on purpose: an ECONNRESET from a ClickHouse that restarted is a real failure and stays on the log.
+    if (p.err?.name === 'AbortError' || /aborted a request/i.test(p.err?.message ?? '')) return
+    console.error(...this.line('ERROR', p, p.err))
+  }
 }
 
 /**
@@ -141,6 +164,8 @@ function getClickHouseClient(): ClickHouseClient {
       send_progress_in_http_headers: 1,
       http_headers_progress_interval_ms: '10000',
     },
+
+    log: { LoggerClass: ClickHouseClientLogger },
 
     // ── Transport-level compression ────────────────────────────────────────
     compression: {

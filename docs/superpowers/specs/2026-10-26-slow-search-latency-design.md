@@ -49,7 +49,7 @@ The cost of the fingerprint query that guards the set: 4 ms (`system.parts` of 1
 
 ## Design
 
-**`lib/clickhouse.ts`** — `executeQuery(sql, params, signal)`: when given a signal the statement runs under an id of its own (`ulp-q-<uuid>`), and an abort sends `KILL QUERY WHERE query_id = '<id>' ASYNC` (`killQuery`: best effort, bounded to 10 s, the id is checked against a fixed shape). The listener is removed when the statement settles, so a finished query is never "killed". `isAbortError` is exported.
+**`lib/clickhouse.ts`** — `executeQuery(sql, params, signal)`: when given a signal the statement runs under an id of its own (`ulp-q-<uuid>`), and an abort sends `KILL QUERY WHERE query_id = '<id>' ASYNC` (`killQuery`: best effort, bounded to 10 s, the id is checked against a fixed shape). The listener is removed when the statement settles, so a finished query is never "killed". `isAbortError` is exported. The client library prints a stack trace at ERROR level for every aborted request, which would put an error block in `docker logs` per replaced search, so the client gets a logger (`ClickHouseClientLogger`) that drops exactly that one case and logs everything else as the default logger did.
 
 **`app/api/credentials/route.ts`** — every long query gets `request.signal`: the plain rows and totals, all plan queries (dictionary, word, substring, hit-set) and the "Newest first" windows (not the shared readiness and anchor lookups or the cached probes: another request awaits those). An aborted request ends with a quiet **499** (`signal.aborted` or an `AbortError`; an `ECONNRESET` to ClickHouse stays a logged 500). `runWithBudget` lets an `AbortError` through instead of treating it as a plan failure that deserves today's query.
 
@@ -78,7 +78,7 @@ The cost of the fingerprint query that guards the set: 4 ms (`system.parts` of 1
 
 ## Tests
 
-`__tests__/clickhouse-kill-on-abort.test.ts` (13), `__tests__/search-hit-set.test.ts` (40), `__tests__/credentials-route-hitset.test.ts` (33), `__tests__/search-hit-set-wiring.test.ts`; each guard was mutation-checked (dropping the signal, the freshness check on rows and on totals, the empty-set short circuit, the filter gate, the later-page rule, the abort handling, the post-scan fingerprint check, the part test of the conjunct: all caught; one gap found and closed by a totals-side test). `__tests__/hit-set-parity.live.test.ts` (`HSP_PARITY=1`) compares the plan with `hit_set=0` on the real table and proves that an abandoned search leaves nothing running; `scripts/e2e-hit-set.ts` rehearses it on the built image against an isolated ClickHouse, including a row imported after the set was built.
+`__tests__/clickhouse-kill-on-abort.test.ts` (15), `__tests__/search-hit-set.test.ts` (40), `__tests__/credentials-route-hitset.test.ts` (33), `__tests__/search-hit-set-wiring.test.ts`; each guard was mutation-checked (dropping the signal, the freshness check on rows and on totals, the empty-set short circuit, the filter gate, the later-page rule, the abort handling, the post-scan fingerprint check, the part test of the conjunct: all caught; one gap found and closed by a totals-side test). `__tests__/hit-set-parity.live.test.ts` (`HSP_PARITY=1`) compares the plan with `hit_set=0` on the real table and proves that an abandoned search leaves nothing running; `scripts/e2e-hit-set.ts` rehearses it on the built image against an isolated ClickHouse, including a row imported after the set was built.
 
 ## What this does not change
 
