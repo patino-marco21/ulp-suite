@@ -187,7 +187,9 @@ export async function readAnchors(
 
 /** What a route needs to run its query newest-first: everything else (readiness, anchors, windows, the time budget) is here. */
 export async function runNewestFirst(a: {
-  run: (sql: string, params?: Record<string, unknown>) => Promise<Row[]>
+  run: (sql: string, params?: Record<string, unknown>, signal?: AbortSignal) => Promise<Row[]>
+  /** The request's signal, handed to the WINDOW queries only (the long ones): they are cancelled on the server when it fires. Readiness and anchors are short and shared. */
+  signal?: AbortSignal
   /** The route's data query for one window: splice `windowSql` into its WHERE, end it with `LIMIT {nfwLimit:UInt32}`, and use the budget as max_execution_time. */
   buildWindowSql: (windowSql: string, budgetSeconds: number, window: { projected: boolean }) => string
   /** Parameters of the route's own query (search terms, filters, cursor). */
@@ -226,7 +228,7 @@ export async function runNewestFirst(a: {
     now,
     runWindow: (clause, limit, window) => {
       const budgetSeconds = Math.max(5, Math.min(300, Math.floor((deadline - now()) / 1000)))
-      return a.run(a.buildWindowSql(clause.sql, budgetSeconds, window), { ...a.baseParams, ...clause.params, nfwLimit: limit })
+      return a.run(a.buildWindowSql(clause.sql, budgetSeconds, window), { ...a.baseParams, ...clause.params, nfwLimit: limit }, a.signal)
     },
   })
   return handedOff ? null : rows

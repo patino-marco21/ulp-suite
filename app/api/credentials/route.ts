@@ -28,6 +28,10 @@ import {
   runWithBudget, probeEmailDomainRows, wordRowsMaxDomains, wordRowsGate, wordTotalsGate,
   SUBSTRING_BUDGET_SECONDS, PLAN_PROJECTIONS_OFF, WORD_ROWS_BUDGET_SECONDS, WORD_TOTALS_BUDGET_SECONDS,
 } from "@/lib/search-plan-gate"
+import {
+  resolveHitSet, hitSetConjunct, isEmptyHitSet, hitSetStillCurrent, HIT_SET_ANSWER_SETTINGS,
+  HIT_SET_ROWS_BUDGET_SECONDS, HIT_SET_TOTALS_BUDGET_SECONDS, type HitSet,
+} from "@/lib/search-hit-set"
 
 export const dynamic = 'force-dynamic'
 
@@ -120,7 +124,8 @@ const DEDUPE_WINDOW_FACTOR = 3
  *   skip_totals   '1'       data query only: total / raw_total come back null
  *   totals_only   '1'       totals only (no rows): { total, raw_total, query_ms, timed_out, plan }
  *   dictionary    '0'       run the plain query even when the domain search dictionary could answer, which also switches the word plan off (parity tests, scripts)
- *   token_plans   '0'       run the plain query even when a token plan (the substring plan, the word plan) could answer (parity tests, scripts)
+ *   token_plans   '0'       run the plain query even when a token plan (the substring plan, the word plan, the hit-set plan) could answer (parity tests, scripts)
+ *   hit_set       '0'       run the plain query even when the hit-set plan could answer (parity tests, scripts)
  */
 export async function GET(request: NextRequest) {
   const user = await validateRequest(request)
@@ -129,6 +134,9 @@ export async function GET(request: NextRequest) {
   }
 
   const sp = new URL(request.url).searchParams
+  // The browser cancels the request when a newer search replaces it, but ClickHouse does not stop a statement because its client left (lib/clickhouse.ts,
+  // killQuery): every long query below is handed this signal, and an abort kills it on the server.
+  const signal = request.signal
   const cursorToken = sp.get('cursor') || ''
   const limit = Math.min(
     MAX_CREDENTIAL_LIMIT,
@@ -182,6 +190,8 @@ export async function GET(request: NextRequest) {
 
   // Text search: uses hasToken() / bloom-filter indexes — NOT a LIKE full scan
   let qClause = ''
+  // The parameters of that clause (buildULPWhere's own): with the clause they identify the search for the hit-set plan.
+  let searchParams: Record<string, unknown> = {}
   // The same search with its word tokens written over the lowercased column, for the "Newest first" windows that read
   // proj_imported_desc: a projection has no text index, so hasToken(url, ...) there is a case-SENSITIVE function, while on the
   // table the text index (preprocessor lower(col)) answers it case-insensitively. See lib/ulp-search.ts (isIndexNeutralSearch).
@@ -190,6 +200,7 @@ export async function GET(request: NextRequest) {
   if (q.trim()) {
     const built = regex ? buildULPWhereRegex(searchTokens) : buildULPWhere(searchTokens)
     qClause = built.clause
+    searchParams = built.params
     conditions.push(`(${qClause})`)
     Object.assign(params, built.params)
     projectionQClause = regex ? qClause : buildULPWhere(searchTokens, { caseInsensitiveTokens: true }).clause
@@ -318,6 +329,22 @@ export async function GET(request: NextRequest) {
     return (wordEmailRowsMemo ??= probeEmailDomainRows(wordTerm.word, c.emailRevLiteral))
   }
 
+  // Hit-set plan (lib/search-hit-set.ts): the same searches as the substring plan (exactly one text with a special character in it), when nothing but light
+  // filters narrows them (a login type, a tier, Declutter, Unique and the sort do not; a domain, a breach, a file, a host, an e-mail domain or an imported range
+  // do, and then today's query is already cheap). When the substring plan cannot help, the search is a scan of 150 GiB, and the page asks for it twice, again for
+  // every chip. The plan scans ONCE for the positions of the few rows the text matches (shared by the rows request and the totals request, and by every
+  // later chip or sort of the same search) and answers each request through those positions, 0.2-0.3 s. null = this request keeps today's query. A request for
+  // a later page uses a set that is already there but never starts a scan. hit_set=0 and token_plans=0 force today's query.
+  const hitSetLight = !domain && !breach && !sourceFile && !urlHost && !emailDomain && !hasImportedRange(importedRange)
+  const hitSetNeedle = sp.get('hit_set') === '0' || sp.get('token_plans') === '0' || !hitSetLight
+    ? null
+    : substringNeedleFromQuery(q.trim(), regex, scope)
+  let hitSetMemo: Promise<HitSet | null> | null = null
+  const getHitSet = (): Promise<HitSet | null> => {
+    if (!hitSetNeedle) return Promise.resolve(null)
+    return (hitSetMemo ??= resolveHitSet({ key: JSON.stringify([qClause, searchParams]), qClause, searchParams, signal, allowScan: !cursorToken }))
+  }
+
   try {
     const t0 = Date.now()
 
@@ -361,10 +388,30 @@ export async function GET(request: NextRequest) {
                     max_execution_time = ${x.maxSeconds},
                     timeout_overflow_mode = '${x.overflow}',
                     use_query_cache = 0${x.settingsTail}`
-    const runPlainTotals = (): Promise<TotalsRows> => executeQuery(totalsSql(todaysTotals), params)
+    const runPlainTotals = (): Promise<TotalsRows> => executeQuery(totalsSql(todaysTotals), params, signal)
     // The same two numbers from the dictionary's candidates: one aggregate per disjoint branch, merged as aggregate states so the figure equals the
     // single scan's. Any failure falls back to the plain count (which breaks on a timeout instead of throwing, so there is nothing to re-raise).
-    let totalsPlan: 'dictionary' | 'words' | 'substring' | 'plain' = 'plain'
+    let totalsPlan: 'dictionary' | 'words' | 'substring' | 'hits' | 'plain' = 'plain'
+    // Today's count restricted to a hit set's positions (lib/search-hit-set.ts), within its own budget. null = it cannot be answered that way (more hits than the plan
+    // lists, an overrun or a failure, or the table's parts changed while it ran, which makes the positions untrustworthy): today's count runs.
+    const hitSetTotals = async (hs: HitSet): Promise<TotalsRows | null> => {
+      if (hs.parts === null) return null
+      let answered: TotalsRows
+      if (isEmptyHitSet(hs)) {
+        answered = [{ total: 0, raw_total: 0 }]
+      } else {
+        const conjunct = hitSetConjunct(hs)
+        if (!conjunct) return null
+        const outcome = await runWithBudget('hit-set totals', () => executeQuery(
+          totalsSql({ conjunct, maxSeconds: HIT_SET_TOTALS_BUDGET_SECONDS, overflow: 'throw', settingsTail: `,\n                    ${HIT_SET_ANSWER_SETTINGS}` }),
+          params,
+          signal,
+        ) as Promise<TotalsRows>)
+        if (!outcome.ok) return null
+        answered = outcome.value
+      }
+      return (await hitSetStillCurrent(hs)) ? answered : null
+    }
     const runTotals = async (): Promise<TotalsRows> => {
       const candidates = await getCandidates()
       if (candidates) {
@@ -372,7 +419,7 @@ export async function GET(request: NextRequest) {
         const sql = buildDictionaryTotalsSql({ whereRaw, dedupe, hasUserFilter, onlyIf: excludeNoise ? NOISE_FILTER : undefined, candidates })
         if (sql) {
           try {
-            const answered: TotalsRows = await executeQuery(sql, params)
+            const answered: TotalsRows = await executeQuery(sql, params, signal)
             totalsPlan = 'dictionary'
             return answered
           } catch (err) {
@@ -389,7 +436,7 @@ export async function GET(request: NextRequest) {
           text, maxSeconds: WORD_TOTALS_BUDGET_SECONDS, overflow: 'throw',
         })
         if (sql) {
-          const outcome = await runWithBudget('word totals', () => executeQuery(sql, params) as Promise<TotalsRows>, `word-totals:${wordTerm.word}`)
+          const outcome = await runWithBudget('word totals', () => executeQuery(sql, params, signal) as Promise<TotalsRows>, `word-totals:${wordTerm.word}`)
           if (outcome.ok) {
             totalsPlan = 'words'
             return outcome.value
@@ -403,10 +450,20 @@ export async function GET(request: NextRequest) {
         const outcome = await runWithBudget('substring totals', () => executeQuery(
           totalsSql({ conjunct: conjunct.sql, maxSeconds: SUBSTRING_BUDGET_SECONDS, overflow: 'throw', settingsTail: `,\n                    ${PLAN_PROJECTIONS_OFF}` }),
           { ...params, ...conjunct.params },
+          signal,
         ) as Promise<TotalsRows>, `substring-totals:${choice.token}`)
         if (outcome.ok) {
           totalsPlan = 'substring'
           return outcome.value
+        }
+      }
+      // The hit-set plan: when the substring plan could not help, one scan finds the rows and every request of the search is answered through them.
+      const hits = await getHitSet()
+      if (hits) {
+        const answered = await hitSetTotals(hits)
+        if (answered) {
+          totalsPlan = 'hits'
+          return answered
         }
       }
       return runPlainTotals()
@@ -462,7 +519,26 @@ export async function GET(request: NextRequest) {
                   ${x.settingsLine}
                   ${NORM_COLS_SETTING}`
     const dataParams = dedupeInWindow ? { ...allParams, windowLimit: limit * DEDUPE_WINDOW_FACTOR } : allParams
-    const runPlainDataQuery = (): Promise<unknown[]> => executeQuery(dataSql(todaysData), dataParams) as Promise<unknown[]>
+    const runPlainDataQuery = (): Promise<unknown[]> => executeQuery(dataSql(todaysData), dataParams, signal) as Promise<unknown[]>
+    // The data query restricted to a hit set's positions (lib/search-hit-set.ts), within its own budget; null = today's query runs (see hitSetTotals).
+    const hitSetRows = async (hs: HitSet): Promise<unknown[] | null> => {
+      if (hs.parts === null) return null
+      let answered: unknown[]
+      if (isEmptyHitSet(hs)) {
+        answered = []
+      } else {
+        const conjunct = hitSetConjunct(hs)
+        if (!conjunct) return null
+        const outcome = await runWithBudget('hit-set rows', () => executeQuery(
+          dataSql({ conjunct, maxSeconds: HIT_SET_ROWS_BUDGET_SECONDS, settingsLine: `${HIT_SET_ANSWER_SETTINGS},` }),
+          dataParams,
+          signal,
+        ) as Promise<unknown[]>)
+        if (!outcome.ok) return null
+        answered = outcome.value
+      }
+      return (await hitSetStillCurrent(hs)) ? answered : null
+    }
 
     // "Newest first" as exact time windows over proj_imported_desc (lib/newest-first.ts: 18-45 s -> well under a second for a
     // term that is not rare). The same filters, ordering, cursor and de-duplication as the plain query; only a predicate on the
@@ -474,7 +550,7 @@ export async function GET(request: NextRequest) {
     // 27,263 from the projection with the plain spelling). A window that reaches the older partition
     // (no projection there) keeps them: without them its base-table scan took 28 s instead of 17 s. Not ready (projection not rebuilt yet) or a window error that is not a timeout:
     // the plain query answers, as it always did. A timeout is not retried: the plain query would take at least as long.
-    let plan: 'windows' | 'plain' | 'dictionary' | 'words' | 'substring' = 'plain'
+    let plan: 'windows' | 'plain' | 'dictionary' | 'words' | 'substring' | 'hits' = 'plain'
 
     // The rows from the dictionary's candidates (lib/search-dictionary-plan.ts), or the plain query when the term is not eligible, the dictionary is
     // not fresh, a cap is exceeded, or the plan fails for any reason but a timeout. A timeout is not retried: the plain query would take at least as long.
@@ -490,7 +566,7 @@ export async function GET(request: NextRequest) {
         })
         if (sql) {
           try {
-            const answered = await executeQuery(sql, dedupeInWindow ? { ...allParams, windowLimit: limit * DEDUPE_WINDOW_FACTOR } : allParams) as unknown[]
+            const answered = await executeQuery(sql, dedupeInWindow ? { ...allParams, windowLimit: limit * DEDUPE_WINDOW_FACTOR } : allParams, signal) as unknown[]
             plan = 'dictionary'
             return answered
           } catch (err) {
@@ -512,7 +588,7 @@ export async function GET(request: NextRequest) {
             text, maxSeconds: WORD_ROWS_BUDGET_SECONDS,
           })
           if (sql) {
-            const outcome = await runWithBudget('word rows', () => executeQuery(sql, dataParams) as Promise<unknown[]>, `word-rows:${wordTerm.word}`)
+            const outcome = await runWithBudget('word rows', () => executeQuery(sql, dataParams, signal) as Promise<unknown[]>, `word-rows:${wordTerm.word}`)
             if (outcome.ok) {
               plan = 'words'
               return outcome.value
@@ -526,10 +602,19 @@ export async function GET(request: NextRequest) {
         const outcome = await runWithBudget('substring rows', () => executeQuery(
           dataSql({ conjunct: conjunct.sql, maxSeconds: SUBSTRING_BUDGET_SECONDS, settingsLine: `${PLAN_PROJECTIONS_OFF},` }),
           { ...dataParams, ...conjunct.params },
+          signal,
         ) as Promise<unknown[]>, `substring-rows:${choice.token}`)
         if (outcome.ok) {
           plan = 'substring'
           return outcome.value
+        }
+      }
+      const hits = await getHitSet()
+      if (hits) {
+        const answered = await hitSetRows(hits)
+        if (answered) {
+          plan = 'hits'
+          return answered
         }
       }
       return runPlainDataQuery()
@@ -539,7 +624,8 @@ export async function GET(request: NextRequest) {
       try {
         const { limit: _plainLimit, ...baseParams } = allParams
         const windowed = await runNewestFirst({
-          run: (sql, p) => executeQuery(sql, p) as Promise<Record<string, unknown>[]>,
+          run: (sql, p, sig) => executeQuery(sql, p, sig) as Promise<Record<string, unknown>[]>,
+          signal,
           baseParams,
           want: dedupe ? limit * DEDUPE_WINDOW_FACTOR : limit,
           cursorImportedAt,
@@ -601,10 +687,13 @@ export async function GET(request: NextRequest) {
       query_ms,
       timed_out,
       sort:        sortKey,
-      // Which plan answered the rows: 'windows' (lib/newest-first.ts), 'dictionary' and 'words' (lib/search-dictionary-plan.ts), 'substring' (lib/search-substring-plan.ts) or 'plain'.
+      // Which plan answered the rows: 'windows' (lib/newest-first.ts), 'dictionary' and 'words' (lib/search-dictionary-plan.ts), 'substring' (lib/search-substring-plan.ts), 'hits' (lib/search-hit-set.ts) or 'plain'.
       plan,
     })
   } catch (error) {
+    // The browser gave up on this request (a newer search replaced it): its queries were killed on the server, nobody reads an answer, and an abort is not
+    // a failure to log. The test is the request's own signal (or the AbortError it produces), not a socket error: ECONNRESET to ClickHouse stays a logged failure.
+    if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) return new NextResponse(null, { status: 499 })
     const msg = error instanceof Error ? error.message : String(error)
     const isTimeout = msg.includes('TIMEOUT_EXCEEDED') || msg.includes('timeout') || msg.includes('Timeout')
 

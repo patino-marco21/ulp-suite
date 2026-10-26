@@ -1,4 +1,5 @@
-import { createClient, type ClickHouseClient } from '@clickhouse/client'
+import { createClient, type ClickHouseClient, type ClickHouseSettings } from '@clickhouse/client'
+import { randomUUID } from 'node:crypto'
 
 // ClickHouse connection configuration
 // ALL credentials MUST come from .env.local or .env - NO HARDCODED VALUES!
@@ -171,6 +172,46 @@ export const client = new Proxy({} as ClickHouseClient, {
   }
 })
 
+/** The id of a statement the app may have to cancel: minted by executeQuery whenever it is given an AbortSignal. */
+const CANCELLABLE_QUERY_ID = /^ulp-q-[0-9a-f-]{36}$/
+/** Bounded: a ClickHouse that is frozen or unreachable must not keep an aborted request hanging on its own clean-up. */
+const KILL_TIMEOUT_MS = 10_000
+
+/**
+ * Asks ClickHouse to stop a statement this app started (`KILL QUERY ... ASYNC`); best effort, never throws.
+ *
+ * Why it exists. Closing the HTTP connection does NOT stop a SELECT that was sent with http_wait_end_of_query=1, and the Credentials routes need
+ * that setting (a time limit then arrives as an HTTP error instead of as garbled JSON in the middle of the body). Measured on ClickHouse 26.3.17
+ * (2026-10-26): a client that disconnected 3 s into a long query left it running for the 19 s the test watched, with and without
+ * cancel_http_readonly_queries_on_client_close=1. So a search that the browser had already given up on (a newer one replaced it) kept scanning
+ * all 2.2 billion rows: six pairs of 150 GiB scans in 14 minutes, three of them for results nobody was waiting for.
+ */
+export async function killQuery(queryId: string): Promise<void> {
+  if (!CANCELLABLE_QUERY_ID.test(queryId)) return
+  try {
+    await getClickHouseClient().command({
+      // Interpolated, not a parameter: the id is minted here and checked against a fixed shape.
+      query: `KILL QUERY WHERE query_id = '${queryId}' ASYNC`,
+      abort_signal: AbortSignal.timeout(KILL_TIMEOUT_MS),
+      clickhouse_settings: { max_execution_time: 10 } as unknown as ClickHouseSettings,
+    })
+  } catch (err) {
+    console.warn('[clickhouse] could not cancel an abandoned query:', err instanceof Error ? err.message : String(err))
+  }
+}
+
+/**
+ * True for the error a caller sees when its AbortSignal fired: the client library's, ours, or the socket reset that follows a destroyed connection.
+ * Normal user behaviour (a newer search replaced this one), never a failure to report.
+ */
+export function isAbortError(error: unknown): boolean {
+  return error instanceof Error && (
+    error.name === 'AbortError' ||
+    (error as any).code === 'ECONNRESET' ||
+    error.message?.toLowerCase().includes('abort')
+  )
+}
+
 /**
  * Execute query with format similar to MySQL executeQuery
  * Supports named parameters (ClickHouse format)
@@ -181,7 +222,8 @@ export const client = new Proxy({} as ClickHouseClient, {
  * 
  * @param query SQL query with named parameters: {paramName:Type}
  * @param params Object with parameter values: { paramName: value }
- * @param signal Optional AbortSignal to cancel query (if driver supports it)
+ * @param signal Optional AbortSignal. When it aborts, the connection is dropped AND the statement is killed on the server (killQuery): the
+ *   statement runs under an id of its own for exactly that purpose. Pass the request's signal for any query that can run for seconds.
  * @returns Array of results (similar to MySQL format)
  * 
  * @example
@@ -204,6 +246,7 @@ export async function executeQuery(
     throw error
   }
 
+  let stopWatching: (() => void) | undefined
   try {
     const chClient = getClickHouseClient()
     
@@ -222,6 +265,12 @@ export async function executeQuery(
     if (signal && !signal.aborted) {
       // Use abort_signal (underscore) - correct property name for @clickhouse/client v1.x
       queryOptions.abort_signal = signal
+      // Dropping the connection alone does not stop the statement (see killQuery), so it gets an id the abort can name.
+      const queryId = `ulp-q-${randomUUID()}`
+      queryOptions.query_id = queryId
+      const onAbort = () => { void killQuery(queryId) }
+      signal.addEventListener('abort', onAbort, { once: true })
+      stopWatching = () => signal.removeEventListener('abort', onAbort)
     }
     
     // Check abort again before expensive query operation
@@ -253,15 +302,7 @@ export async function executeQuery(
   } catch (error) {
     // 🛑 KEY: Detect abort errors more aggressively
     // Check name, code, and message to catch all variants of abort errors
-    const isAbort = 
-      error instanceof Error && (
-        error.name === 'AbortError' || 
-        (error as any).code === 'ECONNRESET' || 
-        error.message?.toLowerCase().includes('aborted') ||
-        error.message?.toLowerCase().includes('abort')
-      )
-
-    if (isAbort) {
+    if (isAbortError(error)) {
       // Re-throw without logging - this is normal behavior
       // Abort request is valid user behavior, not a system error
       throw error
@@ -283,5 +324,8 @@ export async function executeQuery(
     
     // Re-throw error for handling in caller
     throw error
+  } finally {
+    // Once the statement has settled there is nothing left to cancel: an abort after this point must not kill an id that is gone.
+    stopWatching?.()
   }
 }

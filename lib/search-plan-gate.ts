@@ -104,7 +104,8 @@ const overruns = new Map<string, number>()
 
 /**
  * Runs a plan's query. The budget is the max_execution_time in the plan's own SQL; when it is exceeded, or the plan fails for any other reason, the
- * answer is `ok: false` and the caller runs today's query. Never throws, and a plan's timeout is never a 408: today's query has its own 300 s.
+ * answer is `ok: false` and the caller runs today's query. Throws only when the request was abandoned (an AbortError), and a plan's timeout is never a 408:
+ * today's query has its own 300 s.
  * With a `key` (the plan and the word), an OVERRUN is remembered for ten minutes: the page turns and filter changes of that search then skip the plan
  * instead of paying its budget again. Only a timeout is remembered; any other failure may be transient.
  */
@@ -116,6 +117,8 @@ export async function runWithBudget<T>(label: string, run: () => Promise<T>, key
   try {
     return { ok: true, value: await run() }
   } catch (err) {
+    // The request itself was abandoned (its AbortSignal fired): not a failure of the plan, and today's query must not be started for nobody.
+    if (err instanceof Error && err.name === 'AbortError') throw err
     const budget = isTimeoutError(err)
     if (budget && key !== undefined) {
       overruns.delete(key)
