@@ -13,6 +13,7 @@ import { useToast } from "@/hooks/use-toast"
 import { useAuth } from "@/hooks/useAuth"
 import { localToUtcIso } from "@/lib/imported-window"
 import { ImportedWindowFilter, EMPTY_IMPORTED_WINDOW, type ImportedWindowValue } from "@/components/imported-window-filter"
+import { BATCH_MAX_QUERIES, buildBatchRequest, suggestBatchKind, type BatchKind } from "@/lib/batch-input"
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,8 @@ interface QueryResult {
   found: boolean
   count: number
   results: CredRow[]
+  /** What was looked up when it is not what was pasted (a URL's host, the address inside <...>). */
+  searched_as?: string
 }
 
 interface BatchResponse {
@@ -38,21 +41,6 @@ interface BatchResponse {
   found: number
   results: Record<string, QueryResult>
   error?: string
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function detectMode(raw: string): "email" | "domain" {
-  const trimmed = raw.trim()
-  if (trimmed.includes("@")) return "email"
-  return "domain"
-}
-
-function parseLines(raw: string): string[] {
-  return raw
-    .split(/[\n,;]+/)
-    .map(s => s.trim())
-    .filter(Boolean)
 }
 
 // ── Collapsed result row ──────────────────────────────────────────────────────
@@ -78,6 +66,11 @@ function ResultBlock({ query, res, onCopy }: {
           : <XCircle       className="h-4 w-4 shrink-0 text-muted-foreground" />
         }
         <span className="flex-1 font-mono text-xs truncate">{query}</span>
+        {res.searched_as && (
+          <span className="text-[10px] text-muted-foreground shrink-0 max-w-[40%] truncate" title={`Looked up as ${res.searched_as}`}>
+            as {res.searched_as}
+          </span>
+        )}
         {res.found && (
           <Badge variant="secondary" className="text-xs shrink-0">
             {res.count} hit{res.count !== 1 ? "s" : ""}
@@ -150,20 +143,28 @@ export default function LookupPage() {
   const { toast } = useToast()
 
   const [rawInput, setRawInput]   = useState("")
-  const [mode, setMode]           = useState<"email" | "domain">("email")
+  // What a line that is neither an address nor a URL is looked up as. Suggested from the paste until the person picks one.
+  const [mode, setMode]           = useState<BatchKind>("email")
+  const [modeChosen, setModeChosen] = useState(false)
   const [loading, setLoading]     = useState(false)
   const [response, setResponse]   = useState<BatchResponse | null>(null)
   const textareaRef               = useRef<HTMLTextAreaElement>(null)
 
-  const queries = parseLines(rawInput)
-  const overLimit = queries.length > 100
+  // Each line is an e-mail or a domain by what it looks like (an address, a URL), so one paste can hold both.
+  const lists = buildBatchRequest(rawInput, mode)
+  const queryCount = lists.emails.length + lists.domains.length
+  const overLimit = queryCount > BATCH_MAX_QUERIES
+  const many = queryCount !== 1
+  const entryNoun = lists.domains.length === 0 ? (many ? "emails" : "email")
+    : lists.emails.length === 0 ? (many ? "domains" : "domain")
+    : (many ? "entries" : "entry")
   // Optional: only matches imported in this window. The fields are local time; the API takes the UTC instants shown beneath them.
   const [importedWindow, setImportedWindow] = useState<ImportedWindowValue>(EMPTY_IMPORTED_WINDOW)
   const importedAfterIso = localToUtcIso(importedWindow.after)
   const importedBeforeIso = localToUtcIso(importedWindow.before)
 
   async function runLookup() {
-    if (queries.length === 0 || loading) return
+    if (queryCount === 0 || loading) return
     setLoading(true)
     setResponse(null)
     try {
@@ -171,9 +172,11 @@ export default function LookupPage() {
         ...(importedAfterIso ? { imported_after: importedAfterIso } : {}),
         ...(importedBeforeIso ? { imported_before: importedBeforeIso } : {}),
       }
-      const body = mode === "email"
-        ? { emails: queries, ...bound }
-        : { domains: queries, ...bound }
+      const body = {
+        ...(lists.emails.length > 0 ? { emails: lists.emails } : {}),
+        ...(lists.domains.length > 0 ? { domains: lists.domains } : {}),
+        ...bound,
+      }
 
       const res  = await fetch("/api/lookup/batch", {
         method: "POST",
@@ -228,10 +231,15 @@ export default function LookupPage() {
     URL.revokeObjectURL(url)
   }
 
-  // Auto-detect mode as user types
+  // Suggest the mode from what is pasted, until the person picks one (an explicit pick is not undone by the next keystroke).
   function handleInput(val: string) {
     setRawInput(val)
-    if (val.trim()) setMode(detectMode(val))
+    if (!modeChosen && val.trim()) setMode(suggestBatchKind(val))
+  }
+
+  function chooseMode(next: BatchKind) {
+    setMode(next)
+    setModeChosen(true)
   }
 
   const foundCount = response ? response.found : 0
@@ -256,7 +264,7 @@ export default function LookupPage() {
           {/* Mode toggle */}
           <div className="flex items-center gap-1 p-0.5 bg-muted rounded-md">
             <button
-              onClick={() => setMode("email")}
+              onClick={() => chooseMode("email")}
               className={`flex-1 flex items-center justify-center gap-1.5 text-xs py-1.5 rounded transition-colors ${
                 mode === "email"
                   ? "bg-background shadow-sm font-medium"
@@ -267,7 +275,7 @@ export default function LookupPage() {
               Email
             </button>
             <button
-              onClick={() => setMode("domain")}
+              onClick={() => chooseMode("domain")}
               className={`flex-1 flex items-center justify-center gap-1.5 text-xs py-1.5 rounded transition-colors ${
                 mode === "domain"
                   ? "bg-background shadow-sm font-medium"
@@ -278,26 +286,29 @@ export default function LookupPage() {
               Domain
             </button>
           </div>
+          <p className="text-[10px] text-muted-foreground -mt-1.5">
+            Addresses and URLs are recognised line by line; a plain line is looked up as {mode === "email" ? "an email or username" : "a domain"}.
+          </p>
 
           {/* Textarea */}
           <div className="flex-1 flex flex-col gap-1.5">
             <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
-              {mode === "email" ? "Email addresses" : "Domains"}
-              {" "}(one per line, max 100)
+              Emails, domains or URLs{" "}(one per line, max {BATCH_MAX_QUERIES})
             </label>
             <Textarea
               ref={textareaRef}
               value={rawInput}
               onChange={e => handleInput(e.target.value)}
               placeholder={mode === "email"
-                ? "alice@example.com\nbob@corp.io\n..."
-                : "example.com\ncorp.io\n..."}
+                ? "alice@example.com\nbob@corp.io\nhttps://corp.io/login\n..."
+                : "example.com\nhttps://www.corp.io/login\nalice@example.com\n..."}
               className="flex-1 resize-none font-mono text-xs min-h-[200px]"
               spellCheck={false}
             />
             <div className="flex items-center justify-between">
               <span className={`text-[10px] ${overLimit ? "text-destructive font-medium" : "text-muted-foreground"}`}>
-                {queries.length} / 100 queries
+                {queryCount} / {BATCH_MAX_QUERIES} queries
+                {lists.emails.length > 0 && lists.domains.length > 0 && ` (${lists.emails.length} email, ${lists.domains.length} domain)`}
                 {overLimit && " — too many"}
               </span>
               {rawInput && (
@@ -320,19 +331,19 @@ export default function LookupPage() {
             <div className="flex items-start gap-2 rounded-md bg-destructive/10 border border-destructive/20 p-2">
               <AlertTriangle className="h-3.5 w-3.5 text-destructive shrink-0 mt-0.5" />
               <p className="text-[11px] text-destructive">
-                Remove {queries.length - 100} entr{queries.length - 100 === 1 ? "y" : "ies"} to continue.
+                Remove {queryCount - BATCH_MAX_QUERIES} entr{queryCount - BATCH_MAX_QUERIES === 1 ? "y" : "ies"} to continue.
               </p>
             </div>
           )}
 
           <Button
             onClick={runLookup}
-            disabled={queries.length === 0 || overLimit || loading}
+            disabled={queryCount === 0 || overLimit || loading}
             className="w-full"
           >
             {loading
               ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Looking up…</>
-              : <><Search  className="mr-2 h-4 w-4" />Look up {queries.length > 0 ? queries.length : ""} {mode === "email" ? "email" : "domain"}{queries.length !== 1 ? "s" : ""}</>
+              : <><Search  className="mr-2 h-4 w-4" />Look up {queryCount > 0 ? queryCount : ""} {entryNoun}</>
             }
           </Button>
         </div>
@@ -348,7 +359,7 @@ export default function LookupPage() {
           {loading && (
             <div className="flex h-full items-center justify-center gap-2 text-muted-foreground text-sm">
               <Loader2 className="h-5 w-5 animate-spin" />
-              Querying {queries.length} {mode}s…
+              Querying {queryCount} {queryCount === 1 ? "entry" : "entries"}…
             </div>
           )}
 

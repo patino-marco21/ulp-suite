@@ -845,7 +845,7 @@ curl "${baseUrl}/api/v1/summary?imported_after=2026-10-17T16:00:00Z" \\
                   <code className="text-lg font-mono text-foreground">/api/v1/lookup/batch</code>
                 </div>
                 <CardDescription className="text-muted-foreground mt-2">
-                  Submit up to 100 email and/or domain queries in a single API call. Returns a results map keyed by query string. Each email lookup uses a bloom-filter skip index for fast exact matching that ignores letter case.
+                  Submit up to 100 email and/or domain queries in a single API call. Returns a results map keyed by the string you sent. Each email lookup is an exact match that ignores ASCII letter case, narrowed by the text and bloom-filter skip indexes (100 addresses take about 3 s); each domain lookup is an exact match on the bare host. What you send is cleaned to what is stored before it is compared, and a result carries searched_as when that differs from what you sent.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
@@ -853,8 +853,8 @@ curl "${baseUrl}/api/v1/summary?imported_after=2026-10-17T16:00:00Z" \\
                 <div>
                   <h4 className="font-semibold mb-3 text-foreground">JSON Body</h4>
                   <ParameterTable params={[
-                    { name: "emails", type: "string[]", required: false, description: "Array of email addresses to look up (exact match). Max 100 total queries." },
-                    { name: "domains", type: "string[]", required: false, description: "Array of domains to look up (exact match). Max 100 total queries." },
+                    { name: "emails", type: "string[]", required: false, description: "Array of email addresses to look up (exact match, any letter case). Padding, <address>, \"address\", mailto:address and address:password are reduced to the address. Max 100 total queries." },
+                    { name: "domains", type: "string[]", required: false, description: "Array of domains to look up (exact match on the host). A URL, a www. host, host:port or padded text is reduced to the bare host that is stored (https://www.Example.com/login?x=1 is looked up as example.com). Max 100 total queries." },
                     { name: "imported_after", type: "string", required: false, description: "Only rows imported after this UTC instant (exclusive). A date (2026-10-05, the whole day), a date-time (2026-10-05 14:37:00, read as UTC) or ISO-8601 with an offset (2026-10-05T14:37:00-05:00). Anything else is a 400. The response echoes the effective window." },
                     { name: "imported_before", type: "string", required: false, description: "Only rows imported up to and including this UTC instant (inclusive); same forms. Poll without gaps or overlap by passing the previous response's imported_before as the next imported_after." },
                   ]} />

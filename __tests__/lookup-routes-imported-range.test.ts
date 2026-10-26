@@ -40,6 +40,8 @@ const BEFORE_EPOCH = AFTER_EPOCH + 3600
 const WINDOW_PARAMS = `imported_after=${encodeURIComponent(AFTER)}&imported_before=${encodeURIComponent(BEFORE)}`
 const PLAIN_AFTER = 'imported_at > toDateTime({impAfter:Int64})'
 const PLAIN_BEFORE = 'imported_at <= toDateTime({impBefore:Int64})'
+/** The address condition of a batch e-mail lookup: the exact comparison, then the index hint built from the address's words (lib/batch-lookup.ts). */
+const EMAIL_WHERE = 'WHERE lower(email) IN (lower({email0:String})) AND indexHint(hasAllTokens(email, {tok0:Array(String)}))'
 const KEY_HI = `${IMPORTED_KEY_EXPR} < {impKeyHi:Int64}`
 
 const getUrl = (handler: (r: NextRequest) => Promise<Response>, url: string) => handler(new NextRequest(`http://localhost${url}`))
@@ -187,7 +189,7 @@ describe.each([
   test('both the email lookup and the domain lookup carry the bound beside the key, and the result echoes it', async () => {
     const body = await (await postJson(handler, url, { emails: ['A@b.co'], domains: ['b.co'], imported_after: AFTER, imported_before: BEFORE })).json()
     expect(calls).toHaveLength(2)
-    expect(calls[0].sql).toContain(`WHERE lower(email) IN (lower({email0:String})) AND ${PLAIN_AFTER} AND ${PLAIN_BEFORE}`)
+    expect(calls[0].sql).toContain(`${EMAIL_WHERE} AND ${PLAIN_AFTER} AND ${PLAIN_BEFORE}`)
     expect(calls[1].sql).toContain(`WHERE domain IN ({domain0:String}) AND ${PLAIN_AFTER} AND ${PLAIN_BEFORE}`)
     for (const c of calls) expect(c.params).toMatchObject({ impAfter: AFTER_EPOCH, impBefore: BEFORE_EPOCH, cap: 50 })
     expect(calls[0].params).toMatchObject({ email0: 'a@b.co' })
@@ -196,7 +198,7 @@ describe.each([
 
   test('no bound: the SQL and the response shape are what they were', async () => {
     const body = await (await postJson(handler, url, { emails: ['a@b.co'] })).json()
-    expect(calls[0].sql).toContain('WHERE lower(email) IN (lower({email0:String}))\n')
+    expect(calls[0].sql).toContain(`${EMAIL_WHERE}\n`)
     expect(calls[0].sql).not.toContain('impAfter')
     expect(body).not.toHaveProperty('imported_after')
   })

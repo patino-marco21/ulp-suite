@@ -9,8 +9,10 @@ describe('Lookup page and breach export — one optional imported window each (t
     expect(src).toContain('<ImportedWindowFilter value={importedWindow} onChange={setImportedWindow} />')
     expect(src).toContain('...(importedAfterIso ? { imported_after: importedAfterIso } : {})')
     expect(src).toContain('...(importedBeforeIso ? { imported_before: importedBeforeIso } : {})')
-    expect(src).toContain('{ emails: queries, ...bound }')
-    expect(src).toContain('{ domains: queries, ...bound }')
+    // The body carries each list only when it has entries (a paste can hold both kinds), then the bound.
+    expect(src).toContain('...(lists.emails.length > 0 ? { emails: lists.emails } : {})')
+    expect(src).toContain('...(lists.domains.length > 0 ? { domains: lists.domains } : {})')
+    expect(src).toMatch(/\.\.\.bound,\s*\}/)
     expect(src).not.toContain('type="datetime-local"') // the fields live in the shared component
   })
 
