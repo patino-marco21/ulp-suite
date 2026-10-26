@@ -215,6 +215,9 @@ services:
       SEARCH_WORD_ROWS_MAX_DOMAINS: ${SEARCH_WORD_ROWS_MAX_DOMAINS:-}
       SEARCH_WORD_ROWS_MAX_EMAIL_ROWS: ${SEARCH_WORD_ROWS_MAX_EMAIL_ROWS:-}
       SEARCH_WORD_TOTALS_MAX_EMAIL_ROWS: ${SEARCH_WORD_TOTALS_MAX_EMAIL_ROWS:-}
+      # Hit-set plan (lib/search-hit-set.ts) -- optional. Empty = on, at most 5000 hits listed. SEARCH_HIT_SET=0 runs every search with the original query.
+      SEARCH_HIT_SET: ${SEARCH_HIT_SET:-}
+      SEARCH_HIT_SET_MAX_HITS: ${SEARCH_HIT_SET_MAX_HITS:-}
     volumes:
       - ./uploads:/app/uploads
       - ./data:/app/data
