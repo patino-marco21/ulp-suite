@@ -462,7 +462,7 @@ Authentication: `Authorization: Bearer <api-key>` header.
 |---|---|---|
 | `GET` | `/api/v1/search/credentials` | Search credentials by email, domain, URL, password, breach |
 | `GET` | `/api/v1/search/domain` | Domain/keyword search with subdomain and path aggregation |
-| `GET` | `/api/v1/lookup?email=` or `?domain=` | One address (any casing) or one domain, newest first, up to 100 rows. The domain is compared as typed, so it must be the bare host (the batch route below cleans a URL first) |
+| `GET` | `/api/v1/lookup?email=` or `?domain=` | One address (any casing) or one domain, newest first, up to 100 rows. A domain may be a URL, a `www.` host or `host:port`: it is cleaned to the bare host that is stored, like the batch route below, and the answer carries `searched_as` when that differs from what was sent |
 | `POST` | `/api/v1/lookup/batch` | Batch lookup of up to 100 emails and/or domains (`{"emails": [...], "domains": [...]}`); URLs, `www.` hosts, `<addr>` and `mailto:` are cleaned to what is stored |
 | `POST` | `/api/v1/lookup/associate` | Which e-mail (or username, or phone) belongs to the same account as a login, with a confidence and the evidence |
 | `POST` | `/api/v1/lookup/password` | The logins that use exactly this password |

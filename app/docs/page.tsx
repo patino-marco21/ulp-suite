@@ -522,7 +522,7 @@ export default function DocsPage() {
                   <code className="text-lg font-mono text-foreground">/api/v1/lookup</code>
                 </div>
                 <CardDescription className="text-muted-foreground mt-2">
-                  Quick lookup to check if an email or domain exists. Returns summary statistics without full credential data. An email matches in any letter case; each returned row shows the login as stored.
+                  Quick lookup to check if an email or domain exists. Returns the newest matching rows (up to 100, no passwords). An email matches in any letter case; each returned row shows the login as stored. A domain is an exact match on the host: a URL, a www. host, host:port or padded text is reduced to the bare host that is stored, as in the batch lookup, and the response carries searched_as when the host looked up differs from what you sent.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
@@ -531,7 +531,7 @@ export default function DocsPage() {
                   <h4 className="font-semibold mb-3 text-foreground">Query Parameters</h4>
                   <ParameterTable params={[
                     { name: "email", type: "string", required: false, description: "Email address to lookup (use this OR domain)" },
-                    { name: "domain", type: "string", required: false, description: "Domain to lookup (use this OR email)" },
+                    { name: "domain", type: "string", required: false, description: "Domain to look up (use this OR email). An exact match on the host. A URL, a www. host, host:port or padded text is reduced to the bare host that is stored (https://www.Example.com/login?x=1 is looked up as example.com). domain in the response is what you sent (trimmed, lower case); searched_as is the host looked up, present only when it differs." },
                     { name: "imported_after", type: "string", required: false, description: "Only rows imported after this UTC instant (exclusive). A date (2026-10-05, the whole day), a date-time (2026-10-05 14:37:00, read as UTC) or ISO-8601 with an offset (2026-10-05T14:37:00-05:00). Anything else is a 400. The response echoes the effective window." },
                     { name: "imported_before", type: "string", required: false, description: "Only rows imported up to and including this UTC instant (inclusive); same forms. Poll without gaps or overlap by passing the previous response's imported_before as the next imported_after." },
                   ]} />
@@ -562,34 +562,31 @@ export default function DocsPage() {
                     Success Response
                     <Badge variant="outline" className="text-xs">200 OK</Badge>
                   </h4>
-                  <CodeBlock 
+                  <CodeBlock
                     language="json"
                     code={`{
   "success": true,
-  "data": {
-    "type": "email",
-    "query": "john@example.com",
-    "found": true,
-    "summary": {
-      "totalCredentials": 15,
-      "uniqueDevices": 3,
-      "firstSeen": "2024-01-01T00:00:00Z",
-      "lastSeen": "2024-12-01T00:00:00Z",
-      "topDomains": [
-        {"domain": "example.com", "count": 10},
-        {"domain": "test.com", "count": 5}
-      ],
-      "countries": [
-        {"country": "US", "count": 8},
-        {"country": "UK", "count": 7}
-      ]
+  "found": true,
+  "domain": "example.com",
+  "count": 2,
+  "results": [
+    {
+      "url": "https://example.com/login",
+      "email": "john@example.com",
+      "domain": "example.com",
+      "source_file": "dump_2024.txt",
+      "imported_at": "2024-03-15 09:22:00"
     }
-  },
-  "meta": {
-    "checkedAt": "2024-01-22T10:30:00Z"
-  }
+    // ... up to 100 rows, newest first
+  ]
 }`}
                   />
+                  <p className="text-sm text-muted-foreground mt-3">
+                    An email lookup answers with <code className="bg-muted/50 px-1 rounded">email</code> in place of <code className="bg-muted/50 px-1 rounded">domain</code>.
+                    Sent as <code className="bg-muted/50 px-1 rounded">https://www.Example.com/login</code>, the domain lookup above answers with{" "}
+                    <code className="bg-muted/50 px-1 rounded">&quot;domain&quot;: &quot;https://www.example.com/login&quot;</code> and{" "}
+                    <code className="bg-muted/50 px-1 rounded">&quot;searched_as&quot;: &quot;example.com&quot;</code>.
+                  </p>
                 </div>
               </CardContent>
             </Card>
