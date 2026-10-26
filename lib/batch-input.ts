@@ -56,6 +56,16 @@ export function parseBatchText(raw: string): string[] {
 
 // ── Domains ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * `s` without the characters of `chars` at its end. A loop on purpose: the regular expression `/[chars]+$/` is retried from every start of a long run
+ * of them, which is quadratic (16,000 characters took 0.46 s and 160,000 took 44 s), and the text comes from a caller (a query-string value, a batch body).
+ */
+function stripTrailing(s: string, chars: string): string {
+  let end = s.length
+  while (end > 0 && chars.includes(s[end - 1])) end--
+  return end === s.length ? s : s.slice(0, end)
+}
+
 export interface DomainEntry {
   /** The bare host the parser would store for this input ('' when there is nothing usable). */
   host: string
@@ -73,7 +83,7 @@ export interface DomainEntry {
  */
 export function domainEntry(raw: string): DomainEntry {
   const typed = raw.replace(INVISIBLE, '').trim().toLowerCase()
-  let s = typed.replace(/^[<"'`([]+/, '').replace(/[>"'`)\].,;]+$/, '')
+  let s = stripTrailing(typed.replace(/^[<"'`([]+/, ''), '>"\'`)].,;')
   const scheme = /^[a-z][a-z0-9+.-]*:\/\//.exec(s)
   if (scheme) s = s.slice(scheme[0].length)
   else if (s.startsWith('//')) s = s.slice(2)
@@ -81,7 +91,7 @@ export function domainEntry(raw: string): DomainEntry {
   if (end !== -1) s = s.slice(0, end)
   const at = s.lastIndexOf('@')
   if (at !== -1) s = s.slice(at + 1)
-  s = s.replace(/:\d+$/, '').replace(/\.+$/, '')
+  s = stripTrailing(s.replace(/:\d+$/, ''), '.')
 
   const withWww = s
   const host = s.replace(/^www\./, '')

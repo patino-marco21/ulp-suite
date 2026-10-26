@@ -42,6 +42,12 @@ describe('domainEntry — the bare host the parser stores', () => {
     ['"example.tld",', 'example.tld', ['example.tld', '"example.tld",']],
     ['example.tld.', 'example.tld', ['example.tld', 'example.tld.']],
     ['example.tld?utm=1', 'example.tld', ['example.tld', 'example.tld?utm=1']],
+    // Runs of closing punctuation and dots at the end are all taken off, and a port goes before the dots behind it.
+    ['(Example.tld).', 'example.tld', ['example.tld', '(example.tld).']],
+    ['example.tld...', 'example.tld', ['example.tld', 'example.tld...']],
+    ['example.tld.:8443', 'example.tld', ['example.tld', 'example.tld.:8443']],
+    ['https://example.tld.../x', 'example.tld', ['example.tld']],
+    ['<"[example.tld]">,;', 'example.tld', ['example.tld', '<"[example.tld]">,;']],
   ])('%s -> host %s, looks for %j', (input, host, candidates) => {
     const entry = domainEntry(input)
     expect(entry.host).toBe(host)
@@ -84,6 +90,21 @@ describe('domainEntry — the bare host the parser stores', () => {
     expect(stored).not.toBe('')
     expect(domainEntry(url).host).toBe(stored)
     expect(domainEntry(url).candidates).toContain(stored)
+  })
+})
+
+// domainEntry reads a query-string value (GET /api/v1/lookup?domain=) and every entry of a batch body, on the one thread that serves all requests.
+// A regular expression that strips a trailing run (/[...]+$/) retries from every start of the run, which is quadratic: 16,000 characters took
+// 0.46 s and 160,000 took 44 s. Cutting the end of the string with a loop is linear (about a millisecond for 200,000 characters).
+describe('domainEntry takes linear time', () => {
+  test.each([
+    ['dots, then one more character', '.'.repeat(40_000) + 'a'],
+    ['a character, dots, then one more character', 'a' + '.'.repeat(40_000) + 'a'],
+    ['quotes and brackets around one character', '("'.repeat(20_000) + 'a' + '")'.repeat(20_000) + 'b'],
+  ])('%s', (_label, text) => {
+    const started = performance.now()
+    domainEntry(text)
+    expect(performance.now() - started).toBeLessThan(250)
   })
 })
 
