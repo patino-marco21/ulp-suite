@@ -1,13 +1,14 @@
 /**
- * Rehearsal of the batch lookups (docs/superpowers/specs/2026-10-26-batch-lookup-design.md) on the BUILT candidate image, against the ISOLATED
- * rehearsal stack (docker-compose.rehearsal.yml: its own ClickHouse, app and volumes; it shares nothing with the real stack).
+ * Rehearsal of the batch lookups and of the single domain lookup GET /api/v1/lookup?domain= (docs/superpowers/specs/2026-10-26-batch-lookup-design.md)
+ * on the BUILT candidate image, against the ISOLATED rehearsal stack (docker-compose.rehearsal.yml: its own ClickHouse, app and volumes; it shares
+ * nothing with the real stack).
  *
  * It starts a FRESH install on the candidate image (the production init SQL and the app's migrations build the table and its indexes), seeds one
  * address stored in four casings, domains stored bare, with a `www.` and with a `:port` (the shapes the older parser left), a non-ASCII address,
  * 100 addresses and 100 domains for a full batch, and 1.5M filler rows (one part, about 23 granules). Then it drives the real HTTP routes with a
  * real login (and a real API key for v1) using what people paste: URLs, `www.` hosts, `<addr>`, `mailto:`, `addr:password`, any casing, both kinds
- * in one request. It also checks, on the freshly built indexes, that the text index is the one the hint assumes, and that the hint narrows 100
- * absent addresses where the bloom filter alone cannot (EXPLAIN, granules).
+ * in one request. It also checks, on the freshly built indexes, that the text index is the one the hint assumes, that the hint narrows 100
+ * absent addresses where the bloom filter alone cannot, and that the primary key narrows `domain IN (host, www. form)` (EXPLAIN, granules).
  *
  *   git archive <commit> | docker build -t ulp-suite-app:batch-candidate -
  *   npx tsx scripts/e2e-batch-lookup.ts            # about 4 minutes; --keep leaves the stack running (the session cookie goes to $COOKIE_FILE)
@@ -19,7 +20,7 @@ import { randomBytes } from 'node:crypto'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { planEmailBatch } from '@/lib/batch-lookup'
+import { domainIn, planEmailBatch } from '@/lib/batch-lookup'
 
 const PROJECT = 'ulp-rehearsal'
 const COMPOSE_FILE = 'docker-compose.rehearsal.yml'
@@ -129,10 +130,10 @@ async function main(): Promise<number> {
     if (res.status !== 200 || !auth) throw new Error(`login failed (${res.status})`)
     cookie = `auth=${auth}`
   }
-  /** Granules an index leaves for a WHERE, from EXPLAIN (text form): the first "Granules: a/b" after its "Name:" line. */
-  const granules = (where: string, params: Record<string, string>, index: string): { selected: number; initial: number } | null => {
+  /** Granules an index leaves for a WHERE, from EXPLAIN (text form): the first "Granules: a/b" after the line that names it ("Name: idx_..." or "PrimaryKey"). */
+  const granules = (where: string, params: Record<string, string>, marker: string): { selected: number; initial: number } | null => {
     const lines = chQuery(`EXPLAIN indexes = 1 SELECT count() FROM ulp.credentials WHERE ${where} SETTINGS optimize_use_projections = 0`, params).split('\n')
-    const at = lines.findIndex(l => l.includes(`Name: ${index}`))
+    const at = lines.findIndex(l => l.includes(marker))
     const m = at < 0 ? null : /Granules:\s*(\d+)\/(\d+)/.exec(lines.slice(at).find(l => /Granules:/.test(l)) ?? '')
     return m ? { selected: Number(m[1]), initial: Number(m[2]) } : null
   }
@@ -243,22 +244,31 @@ async function main(): Promise<number> {
     const group = plan.groups[0]
     const params: Record<string, string> = {}
     for (const [k, v] of Object.entries(group.params)) params[k] = Array.isArray(v) ? `[${v.map(w => `'${w}'`).join(',')}]` : v
-    const withHint = granules(group.where, params, 'idx_inv_email')
+    const withHint = granules(group.where, params, 'Name: idx_inv_email')
     const plainWhere = group.where.slice(0, group.where.indexOf(' AND indexHint('))
-    const bloomOnly = granules(plainWhere, params, 'idx_bf_email_lc')
+    const bloomOnly = granules(plainWhere, params, 'Name: idx_bf_email_lc')
     info('granules, text index with the hint', withHint ? `${withHint.selected} of ${withHint.initial}` : 'unknown')
     info('granules, bloom filter alone', bloomOnly ? `${bloomOnly.selected} of ${bloomOnly.initial}` : 'unknown')
     check('the table has enough granules to tell (at least 20)', !!withHint && withHint.initial >= 20, JSON.stringify(withHint))
     check('the bloom filter alone keeps at least 75% of the granules for 100 addresses', !!bloomOnly && bloomOnly.selected * 4 >= bloomOnly.initial * 3, JSON.stringify(bloomOnly))
     check('the hint leaves at most 25%', !!withHint && withHint.selected * 4 <= withHint.initial, JSON.stringify(withHint))
+    // The domain lookups (batch and single) compare `domain IN (...)`, built by the same function as the routes use; the key's first column is `domain`.
+    const keyed = domainIn([PORTAL, `www.${PORTAL}`])
+    const byKey = granules(keyed.where, keyed.params, 'PrimaryKey')
+    info('granules, primary key with domain IN (host, www. form)', byKey ? `${byKey.selected} of ${byKey.initial}` : 'unknown')
+    check('the primary key narrows domain IN (host, www. form) to at most 4 granules of at least 20', !!byKey && byKey.initial >= 20 && byKey.selected <= 4, JSON.stringify(byKey))
 
-    console.log('6. POST /api/v1/lookup/batch with a real API key, and the page')
+    console.log('6. POST /api/v1/lookup/batch and GET /api/v1/lookup?domain= with a real API key, and the page')
     const created = await asSession('POST', '/api/v1/api-keys', { name: `rehearsal-${RUN}`, role: 'admin' })
     const key = created.json?.data?.apiKey as string | undefined
     check('an API key was created', created.status === 200 && !!key, `status ${created.status}`)
     const v1 = async (body: unknown, headers: Record<string, string>) => call('POST', '/api/v1/lookup/batch', body, headers)
     const noKey = await v1({ domains: [PORTAL] }, {})
     check('v1 refuses a request without a key', noKey.status === 401, `status ${noKey.status}`)
+    const single = (domain: string, headers: Record<string, string>, query = '') =>
+      call('GET', `/api/v1/lookup?domain=${encodeURIComponent(domain)}${query}`, undefined, headers)
+    const noKeySingle = await single(PORTAL, {})
+    check('GET /api/v1/lookup refuses a request without a key', noKeySingle.status === 401, `status ${noKeySingle.status}`)
     if (key) {
       const sentDomain = `https://www.${PORTAL.toUpperCase()}/login?x=1`
       const sentEmail = `mailto:${ADDR.toUpperCase()}`
@@ -268,6 +278,34 @@ async function main(): Promise<number> {
       check('v1: the URL is the 3 rows of the host, the address its 5 rows in 4 casings', j.results?.[sentDomain]?.count === 3 && j.results?.[sentEmail]?.count === 5)
       const r100 = await v1({ emails: addresses }, { authorization: `Bearer ${key}` })
       check('v1: 100 addresses, all found (Bearer form of the key)', r100.status === 200 && (r100.json as BatchJson).found === 100, `status ${r100.status}`)
+
+      // The single lookup cleans the domain the same way (design: the follow-up section of docs/superpowers/specs/2026-10-26-batch-lookup-design.md).
+      const keyHeaders = { 'x-api-key': key }
+      const s0 = await single(PORTAL, keyHeaders)
+      check('GET /api/v1/lookup?domain=: a bare host answers in the shape it always had (found, the 3 rows, no searched_as)',
+        s0.status === 200 && s0.json?.found === true && s0.json.count === 3 && !('searched_as' in s0.json)
+          && JSON.stringify(Object.keys(s0.json)) === JSON.stringify(['success', 'found', 'domain', 'count', 'results']), JSON.stringify(s0.json).slice(0, 200))
+      for (const [label, sent] of shapes) {
+        const r = await single(sent, keyHeaders)
+        check(`GET /api/v1/lookup?domain=, ${label}: found, the 3 rows of the host`, r.status === 200 && r.json?.found === true && r.json.count === 3, JSON.stringify(r.json).slice(0, 160))
+      }
+      const sUrl = await single(`https://www.${PORTAL.toUpperCase()}/login?x=1`, keyHeaders)
+      check('GET /api/v1/lookup?domain=: the answer echoes what was sent (lower case) and says what was searched',
+        sUrl.json?.domain === `https://www.${PORTAL}/login?x=1` && sUrl.json?.searched_as === PORTAL, JSON.stringify(sUrl.json).slice(0, 200))
+      const sWww = await single(LEGACY_WWW, keyHeaders)
+      check('GET /api/v1/lookup?domain=: a host stored with its www. is found when typed with it', sWww.json?.found === true && sWww.json.count === 1, JSON.stringify(sWww.json).slice(0, 160))
+      const sPort = await single(LEGACY_PORT, keyHeaders)
+      check('GET /api/v1/lookup?domain=: a host stored with its :port (older parser) is still found when typed with it: no match the exact comparison found is lost',
+        sPort.json?.found === true && sPort.json.count === 1, JSON.stringify(sPort.json).slice(0, 160))
+      const sNone = await single('https://', keyHeaders)
+      check('GET /api/v1/lookup?domain=: text with no host in it is a 200, not found', sNone.status === 200 && sNone.json?.found === false && sNone.json.count === 0, JSON.stringify(sNone.json).slice(0, 160))
+      const sBlank = await single('   ', keyHeaders)
+      check('GET /api/v1/lookup?domain=: a blank domain is still a 400', sBlank.status === 400, `status ${sBlank.status}`)
+      const sAfter = await single(`https://${PORTAL}/`, keyHeaders, '&imported_after=2000-01-01')
+      const sBefore = await single(`https://${PORTAL}/`, keyHeaders, '&imported_before=2000-01-01')
+      check('GET /api/v1/lookup?domain=: the imported window composes with the host list (the 3 rows after 2000, none before; the window is echoed)',
+        sAfter.json?.count === 3 && sAfter.json.imported_after !== undefined && sBefore.json?.found === false && sBefore.json.imported_before !== undefined,
+        `${JSON.stringify(sAfter.json).slice(0, 120)} | ${JSON.stringify(sBefore.json).slice(0, 120)}`)
     }
     const page = await asSession('GET', '/lookup')
     check('the Batch Lookup page of the candidate is the new one', page.status === 200 && /Emails, domains or URLs/.test(page.text), `status ${page.status}`)

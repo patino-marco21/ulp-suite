@@ -12,7 +12,10 @@ import { describe, expect, test, vi } from 'vitest'
  *   2. a full batch of 100 domains and of 100 addresses is found in full and well inside the 30 s cap (the address batch took 26-38 s before the index hint);
  *   3. PARITY: for addresses stored in mixed case, written with punctuation, non-ASCII or absent, one batch returns exactly the rows that a separate
  *      `lower(email) = lower(value)` query per address returns (that oracle uses the bloom filter only: no text index, no hint, no prefilter);
- *   4. the words the hint is built from are what ClickHouse's own index tokenizer cuts, on 200,000 real ASCII logins.
+ *   4. the words the hint is built from are what ClickHouse's own index tokenizer cuts, on 200,000 real ASCII logins;
+ *   5. the single lookup GET /api/v1/lookup?domain= (cleaned the same way): one real domain in the same ten shapes returns exactly the rows of the bare host;
+ *   6. PARITY of the single lookup: for domains as they are stored (clean, with a `www.`, with a `:port`, with a `/path`) the route returns exactly the rows
+ *      of one `domain = value` query per value it stands for, so no row the old exact comparison found is lost.
  */
 vi.mock('@/lib/auth', () => ({
   validateRequest: async () => ({ id: 1, username: 'live-test', role: 'admin' }),
@@ -54,6 +57,38 @@ async function ask(route: Route, body: { emails?: string[]; domains?: string[] }
   return { status: res.status, found: json.found ?? null, queried: json.queried ?? null, results: json.results ?? {}, ms, error: json.error }
 }
 
+interface SingleAnswer {
+  status: number
+  json: { success?: boolean; found?: boolean; domain?: string; searched_as?: string; count?: number; results?: Array<Record<string, string>>; error?: string }
+  ms: number
+}
+
+/** GET /api/v1/lookup?domain=<value>, in process like the batch routes above. */
+async function askSingle(domain: string): Promise<SingleAnswer> {
+  const { NextRequest } = await import('next/server')
+  const { GET } = await import('@/app/api/v1/lookup/route')
+  const t = Date.now()
+  const res = await GET(new NextRequest(`http://localhost/api/v1/lookup?${new URLSearchParams({ domain })}`))
+  const ms = Date.now() - t
+  return { status: res.status, json: await res.json(), ms }
+}
+
+/** The ten ways one domain gets pasted: the same for the batch routes and for the single lookup. */
+function domainShapesOf(D: string): Array<[string, string]> {
+  return [
+    ['d0 bare host', D],
+    ['d1 https://host', `https://${D}`],
+    ['d2 https://host/path?query', `https://${D}/login?next=/a/b`],
+    ['d3 http://www.host/', `http://www.${D}/`],
+    ['d4 WWW.HOST upper-case', `WWW.${D.toUpperCase()}`],
+    ['d5 host:port', `${D}:8443`],
+    ['d6 https://user@host/path', `https://user@${D}/path`],
+    ['d7 host/ trailing slash', `${D}/`],
+    ['d8 padded with spaces', `  ${D}  `],
+    ['d9 "quoted",', `"${D}",`],
+  ]
+}
+
 const ROUTES: Route[] = ['internal', 'v1']
 const SAMPLE = 'SETTINGS max_execution_time = 120'
 // No backslashes in the patterns: they go through a template literal and a ClickHouse string literal.
@@ -79,18 +114,7 @@ describe.skipIf(!LIVE)('the batch lookups on the live table', () => {
     expect(emailRows.length, 'a sample address exists').toBe(1)
     const E = emailRows[0].email
 
-    const domainShapes: Array<[string, string]> = [
-      ['d0 bare host', D],
-      ['d1 https://host', `https://${D}`],
-      ['d2 https://host/path?query', `https://${D}/login?next=/a/b`],
-      ['d3 http://www.host/', `http://www.${D}/`],
-      ['d4 WWW.HOST upper-case', `WWW.${D.toUpperCase()}`],
-      ['d5 host:port', `${D}:8443`],
-      ['d6 https://user@host/path', `https://user@${D}/path`],
-      ['d7 host/ trailing slash', `${D}/`],
-      ['d8 padded with spaces', `  ${D}  `],
-      ['d9 "quoted",', `"${D}",`],
-    ]
+    const domainShapes = domainShapesOf(D)
     const emailShapes: Array<[string, string]> = [
       ['e0 exact address', E],
       ['e1 UPPER-CASE', E.toUpperCase()],
@@ -229,4 +253,97 @@ describe.skipIf(!LIVE)('the batch lookups on the live table', () => {
     console.log(`\n=== tokenizer parity ===\nlogins: ${rows.length}, hints built: ${tested}, logins where the hint's words differ from the index tokens: ${different}\n`)
     expect(different).toBe(0)
   }, 600_000)
+
+  test('single lookup: GET /api/v1/lookup?domain= finds the entry in every pasted shape, with exactly the rows of the bare host', async () => {
+    const { executeQuery } = await import('@/lib/clickhouse')
+    const domainRows = await executeQuery(
+      `SELECT domain FROM ulp.credentials WHERE imported_at > now() - INTERVAL 30 DAY AND NOT startsWith(domain, 'www.') AND match(domain, '${HOST}')
+       GROUP BY domain HAVING count() BETWEEN 3 AND 40 ORDER BY rand() LIMIT 1 ${SAMPLE}`, {}) as Array<{ domain: string }>
+    expect(domainRows.length, 'a sample domain exists').toBe(1)
+    const D = domainRows[0].domain
+
+    const base = await askSingle(D)
+    expect(base.status).toBe(200)
+    expect(base.json.found, 'the bare host is found (the control)').toBe(true)
+    expect(base.json, 'a bare host is answered in its old shape').not.toHaveProperty('searched_as')
+    expect(Object.keys(base.json)).toEqual(['success', 'found', 'domain', 'count', 'results'])
+    const want = digest(base.json.results!)
+
+    const lines: string[] = [`single   d0 bare host (control)       status=${base.status} found=${base.json.found} count=${base.json.count} ${base.ms} ms`]
+    for (const [label, value] of domainShapesOf(D).slice(1)) {
+      const a = await askSingle(value)
+      lines.push(`single   ${label.padEnd(28)} status=${a.status} found=${a.json.found} count=${a.json.count} ${a.ms} ms`)
+      expect(a.status, label).toBe(200)
+      expect(a.json.found, label).toBe(true)
+      expect(digest(a.json.results!), `${label}: exactly the rows of the bare host`).toEqual(want)
+      // searched_as says what was looked up whenever that is not what was typed; padding alone is not a difference.
+      if (label.startsWith('d8')) expect(a.json, label).not.toHaveProperty('searched_as')
+      else expect(a.json.searched_as, label).toBe(D)
+    }
+    console.log(`\n=== single lookup, pasted shapes (values withheld) ===\n${lines.join('\n')}\n`)
+  }, 600_000)
+
+  test('single lookup PARITY: the rows are those of one `domain = value` query per value the entry stands for; none the old exact comparison found is lost', async () => {
+    const { executeQuery } = await import('@/lib/clickhouse')
+    const { domainEntry } = await import('@/lib/batch-input')
+    type Row = Record<string, string>
+    // The old route's query, one value at a time: the oracle (a primary-key equality, no IN list, no cleaning).
+    const exact = async (value: string): Promise<Row[]> => await executeQuery(
+      `SELECT url, email, domain, source_file, imported_at FROM ulp.credentials WHERE domain = {v:String}
+       ORDER BY imported_at DESC LIMIT 100 SETTINGS max_execution_time = 60`, { v: value }) as Row[]
+    const distinctDomains = async (where: string, n: number): Promise<string[]> => (await executeQuery(
+      `SELECT domain FROM ulp.credentials WHERE ${where} LIMIT 1 BY domain LIMIT ${n} ${SAMPLE}`, {}) as Array<{ domain: string }>).map(r => r.domain)
+
+    // Domains as they are stored. The old parser left a `www.` (4,605 rows), a `:port` (226,642) or a `/path` (1.37 million) on some; those are the
+    // values an exact comparison matched and a cleaner must not lose. The legacy shapes are taken from the first granules that hold them (early exit).
+    const classes: Record<string, string[]> = {
+      clean: (await executeQuery(
+        `SELECT domain FROM ulp.credentials WHERE imported_at > now() - INTERVAL 30 DAY AND NOT startsWith(domain, 'www.') AND match(domain, '${HOST}')
+         GROUP BY domain HAVING count() BETWEEN 1 AND 30 ORDER BY rand() LIMIT 12 ${SAMPLE}`, {}) as Array<{ domain: string }>).map(r => r.domain),
+      withWww: (await executeQuery(
+        `SELECT domain FROM ulp.credentials WHERE startsWith(domain, 'www.') GROUP BY domain HAVING count() BETWEEN 1 AND 30 ORDER BY rand() LIMIT 12 ${SAMPLE}`, {}) as Array<{ domain: string }>).map(r => r.domain),
+      withPort: await distinctDomains(`match(domain, '^[a-z0-9.-]+:[0-9]+$')`, 12),
+      withPath: await distinctDomains(`match(domain, '^[a-z0-9.-]+/')`, 12),
+    }
+    const counts = Object.entries(classes).map(([k, v]) => `${k}=${v.length}`).join(' ')
+
+    const lines = [`sampled: ${counts}`]
+    for (const [name, values] of Object.entries(classes)) {
+      let compared = 0, skipped = 0, rowsCompared = 0, mismatches = 0, oldRows = 0, lost = 0, grew = 0
+      for (const value of values) {
+        const stands = domainEntry(value).candidates
+        const perValue = new Map<string, Row[]>()
+        for (const c of stands) perValue.set(c, await exact(c))
+        // What the OLD route compared: the text as typed, lower-cased and trimmed. Fetched with its own query, whatever the candidates are.
+        const asBefore = value.toLowerCase().trim()
+        const before = perValue.get(asBefore) ?? await exact(asBefore)
+        const lists = [...Array.from(perValue.values()), before]
+        if (lists.some(rows => rows.length >= 100) || Array.from(perValue.values()).reduce((n, rows) => n + rows.length, 0) >= 100) {
+          skipped++ // at the cap, ties in imported_at make the cut arbitrary
+          continue
+        }
+        const answer = await askSingle(value)
+        expect(answer.status, `${name}: status`).toBe(200)
+        const got = digest(answer.json.results ?? [])
+        const want = digest(Array.from(perValue.values()).flat())
+        compared++
+        rowsCompared += want.length
+        if (got.length !== want.length || got.some((line, i) => line !== want[i])) mismatches++
+        // Every row the old comparison returned must be in the new answer (as a multiset).
+        const old = digest(before)
+        oldRows += old.length
+        const have = new Map<string, number>()
+        for (const line of got) have.set(line, (have.get(line) ?? 0) + 1)
+        for (const line of old) { const n = have.get(line) ?? 0; if (n === 0) lost++; else have.set(line, n - 1) }
+        if (got.length > old.length) grew++
+      }
+      lines.push(`${name.padEnd(8)} compared ${compared}, skipped at the cap ${skipped}; rows in the answers ${rowsCompared}, rows the old comparison found ${oldRows}; answers differing from the per-value oracle ${mismatches}, old rows missing ${lost}, answers with more rows than before ${grew}`)
+      expect(mismatches, `${name}: the answer is the union of the exact queries`).toBe(0)
+      expect(lost, `${name}: no row the old exact comparison found is lost`).toBe(0)
+      expect(compared, `${name}: the comparison is not vacuous`).toBeGreaterThan(0)
+      expect(oldRows, `${name}: the old comparison found rows to lose`).toBeGreaterThan(0)
+      if (name === 'clean') expect(grew, 'clean: a bare host is answered exactly as before').toBe(0)
+    }
+    console.log(`\n=== single lookup parity (values withheld) ===\n${lines.join('\n')}\n`)
+  }, 900_000)
 })
