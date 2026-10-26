@@ -118,6 +118,7 @@ export default function DocsPage() {
     { id: "search-domain", label: "Search Domain", icon: Search, method: "GET" },
     { id: "lookup", label: "Lookup", icon: Database, method: "GET" },
     { id: "batch-lookup", label: "Batch Lookup", icon: Database, method: "POST" },
+    { id: "site-counts", label: "Site Counts", icon: BarChart3, method: "POST" },
     { id: "associate", label: "Associate", icon: Search, method: "POST" },
     { id: "password-lookup", label: "Password Lookup", icon: Key, method: "POST" },
     { id: "summary", label: "Summary", icon: BarChart3, method: "GET" },
@@ -919,6 +920,106 @@ curl "${baseUrl}/api/v1/summary?imported_after=2026-10-17T16:00:00Z" \\
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <CheckCircle2 className="h-4 w-4 text-emerald-500" />
                     Email addresses match in any letter case (rows come back as stored)
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
+        {/* Site Counts Section */}
+        {activeSection === "site-counts" && (
+          <div className="space-y-6">
+            <Card className="glass-card border-border/50">
+              <CardHeader>
+                <div className="flex items-center gap-3">
+                  <Badge className="bg-blue-500/10 text-blue-400 border-blue-500/30 font-mono">POST</Badge>
+                  <code className="text-lg font-mono text-foreground">/api/v1/lookup/counts</code>
+                </div>
+                <CardDescription className="text-muted-foreground mt-2">
+                  How many rows each of up to 100 sites has, without the rows (a lookup caps what it returns, so it cannot say how many there are). A site is the host you send and every subdomain of it, reported separately. A list of 100 takes about 2 s. The same counts are on the Site Counts page, which takes a pasted or uploaded list.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                {/* Body Parameters */}
+                <div>
+                  <h4 className="font-semibold mb-3 text-foreground">JSON Body</h4>
+                  <ParameterTable params={[
+                    { name: "domains", type: "string[]", required: true, description: "The sites to count. A URL, a www. host, host:port, a *.host wildcard or padded text is reduced to the bare host that is stored (https://www.Example.com/login?x=1 is counted as example.com); a path is ignored. Max 100." },
+                    { name: "imported_after", type: "string", required: false, description: "Only rows imported after this UTC instant (exclusive). A date (2026-10-05, the whole day), a date-time (2026-10-05 14:37:00, read as UTC) or ISO-8601 with an offset (2026-10-05T14:37:00-05:00). Anything else is a 400. The response echoes the effective window." },
+                    { name: "imported_before", type: "string", required: false, description: "Only rows imported up to and including this UTC instant (inclusive); same forms." },
+                  ]} />
+                </div>
+
+                {/* Example Request */}
+                <div>
+                  <h4 className="font-semibold mb-3 text-foreground">Example Request</h4>
+                  <CodeBlock code={`curl -X POST "${baseUrl}/api/v1/lookup/counts" \\
+  -H "X-API-Key: bv_your_api_key" \\
+  -H "Content-Type: application/json" \\
+  -d '{"domains":["https://www.example.com/login","quiet.example.org","localhost"]}'`} />
+                </div>
+
+                {/* Response */}
+                <div>
+                  <h4 className="font-semibold mb-3 text-foreground flex items-center gap-2">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    Success Response
+                    <Badge variant="outline" className="text-xs">200 OK</Badge>
+                  </h4>
+                  <CodeBlock
+                    language="json"
+                    code={`{
+  "success": true,
+  "queried": 3,
+  "found": 1,
+  "subdomains_counted": true,
+  "results": {
+    "https://www.example.com/login": {
+      "host": "example.com",
+      "found": true,
+      "count": 1520,
+      "host_count": 20,
+      "subdomain_count": 1500,
+      "subdomains": 3,
+      "top_subdomains": [
+        { "domain": "login.example.com", "count": 1200 },
+        { "domain": "app.example.com", "count": 280 },
+        { "domain": "api.example.com", "count": 20 }
+      ],
+      "searched_as": "example.com"
+    },
+    "quiet.example.org": {
+      "host": "quiet.example.org", "found": false, "count": 0,
+      "host_count": 0, "subdomain_count": 0, "subdomains": 0, "top_subdomains": []
+    },
+    "localhost": {
+      "host": "", "found": false, "count": null, "host_count": null,
+      "subdomain_count": null, "subdomains": null, "top_subdomains": [],
+      "error": "not a site address"
+    }
+  }
+}`}
+                  />
+                </div>
+
+                {/* Notes */}
+                <div className="grid gap-2">
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    count = host_count (the host and its www. spelling) + subdomain_count; top_subdomains lists up to 10, the ones with the most rows first
+                  </div>
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    Rows are counted, not distinct logins: a login seen in two files is two rows
+                  </div>
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    An entry that is not a site, or a site too broad to count in the time allowed, has an error and null numbers, never a 0
+                  </div>
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    subdomains_counted: false means only each host could be counted (the index that finds subdomains was being rebuilt); subdomain numbers are then null
                   </div>
                 </div>
               </CardContent>

@@ -45,9 +45,9 @@ describe('Lookup page and breach export — one optional imported window each (t
 
 describe('API docs — the window is documented on every v1 endpoint that takes it', () => {
   const src = read('app/docs/page.tsx')
-  test('imported_after and imported_before appear in the search, domain, lookup, batch, associate and password tables and the summary parameters', () => {
-    expect(src.match(/name: "imported_after"/g)).toHaveLength(7)
-    expect(src.match(/name: "imported_before"/g)).toHaveLength(7)
+  test('imported_after and imported_before appear in the search, domain, lookup, batch, site counts, associate and password tables and the summary parameters', () => {
+    expect(src.match(/name: "imported_after"/g)).toHaveLength(8)
+    expect(src.match(/name: "imported_before"/g)).toHaveLength(8)
   })
 
   test('the summary says a lower bound is required and what a window costs; associate says its own rows stay unfiltered', () => {

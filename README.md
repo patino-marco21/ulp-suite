@@ -20,6 +20,7 @@ ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores 
 - **Credential search** — query by email, domain, URL, password, or breach name; separate terms with commas (every term must match) and put `-` in front of a term to exclude it
 - **Search in** — a dropdown beside the search box: *All fields* (the default), *Login (whole word)* (about 0.2 s on 1.8 billion rows) or *Login (contains)* (anywhere in the login, a scan of the login column, about 25 s). `login:name` in the box always means a whole word in the login, whatever the dropdown says (`-login:name` excludes). A full address (`name@host`) is an exact match that ignores letter case, so every stored casing of it is found (about 0.4-2 s). Case is folded for ASCII letters only. A search for the literal text `login:…` now means the scope.
 - **Batch lookup** — paste up to 100 emails, domains or URLs (a mixed list is fine; each line is recognised on its own) and get all matches in one request; CSV export. What is pasted is cleaned to what the table stores: a URL, `www.` host or `host:port` is looked up as the bare host, and `<a@b.tld>`, `mailto:a@b.tld` or `a@b.tld:password` as the address. 100 addresses take about 3 s (`lib/batch-input.ts`, `lib/batch-lookup.ts`)
+- **Site counts** — paste or upload a list of sites (up to 2,000) and see how many rows there are for each, without the rows: the site's own host and its subdomains told apart, the subdomains with the most rows, CSV export, optionally only rows imported in a window. A URL, `www.` host, `host:port` or `*.host` is cleaned to the bare host and a path is ignored. The reversed-domain projection finds the subdomains, so a list of 100 takes about 2 s (`lib/site-counts.ts`, page `/counts`)
 - **Export** — CSV, ULP (`url:login:pass`), `login:pass` and NDJSON exports stream up to 1,000,000 rows (about 215 MiB as CSV) with a running row count on the button; JSON keeps 10,000. "Since last export" only moves when the file was not cut (a result of exactly 1,000,000 rows counts as possibly cut). A broad newest-first export can take about two minutes to start.
 - **Breach explorer** — browse all imported breach sources with credential counts and metadata
 
@@ -464,6 +465,7 @@ Authentication: `Authorization: Bearer <api-key>` header.
 | `GET` | `/api/v1/search/domain` | Domain/keyword search with subdomain and path aggregation |
 | `GET` | `/api/v1/lookup?email=` or `?domain=` | One address (any casing) or one domain, newest first, up to 100 rows. A domain may be a URL, a `www.` host or `host:port`: it is cleaned to the bare host that is stored, like the batch route below, and the answer carries `searched_as` when that differs from what was sent |
 | `POST` | `/api/v1/lookup/batch` | Batch lookup of up to 100 emails and/or domains (`{"emails": [...], "domains": [...]}`); URLs, `www.` hosts, `<addr>` and `mailto:` are cleaned to what is stored |
+| `POST` | `/api/v1/lookup/counts` | How many rows each of up to 100 sites has (`{"domains": [...]}`), without the rows: `count` = `host_count` (the host and its `www.` spelling) + `subdomain_count`, plus `subdomains` and the `top_subdomains`; a site is a host and every subdomain, a path is ignored, `error` marks an entry that is not a site or is too broad to count in the time allowed |
 | `POST` | `/api/v1/lookup/associate` | Which e-mail (or username, or phone) belongs to the same account as a login, with a confidence and the evidence |
 | `POST` | `/api/v1/lookup/password` | The logins that use exactly this password |
 | `POST` | `/api/v1/upload` | Upload ULP file (admin keys only) |
@@ -503,7 +505,7 @@ naming the parameter. It means *rows added after the cutoff*: a credential impor
 | Where | How |
 |---|---|
 | `GET /api/v1/search/credentials`, `/search/domain`, `/lookup`, `/summary` | query string |
-| `POST /api/v1/lookup/batch`, `/lookup/password`, `/lookup/associate` | JSON body (`associate`: once at the top; it limits where a *candidate* can come from, the login's own rows are always read from the whole table) |
+| `POST /api/v1/lookup/batch`, `/lookup/counts`, `/lookup/password`, `/lookup/associate` | JSON body (`associate`: once at the top; it limits where a *candidate* can come from, the login's own rows are always read from the whole table) |
 | `POST /api/export` (every format), `GET /api/credentials` | the Credentials page's own routes |
 
 `GET /api/v1/summary?imported_after=..[&imported_before=..]` returns the table-wide summary for a window (rows added, estimated distinct domains and addresses, files imported,
