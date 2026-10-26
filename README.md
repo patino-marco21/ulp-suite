@@ -462,7 +462,8 @@ Authentication: `Authorization: Bearer <api-key>` header.
 |---|---|---|
 | `GET` | `/api/v1/search/credentials` | Search credentials by email, domain, URL, password, breach |
 | `GET` | `/api/v1/search/domain` | Domain/keyword search with subdomain and path aggregation |
-| `POST` | `/api/v1/lookup` | Batch lookup up to 100 emails |
+| `GET` | `/api/v1/lookup?email=` or `?domain=` | One address (any casing) or one domain, newest first, up to 100 rows. The domain is compared as typed, so it must be the bare host (the batch route below cleans a URL first) |
+| `POST` | `/api/v1/lookup/batch` | Batch lookup of up to 100 emails and/or domains (`{"emails": [...], "domains": [...]}`); URLs, `www.` hosts, `<addr>` and `mailto:` are cleaned to what is stored |
 | `POST` | `/api/v1/lookup/associate` | Which e-mail (or username, or phone) belongs to the same account as a login, with a confidence and the evidence |
 | `POST` | `/api/v1/lookup/password` | The logins that use exactly this password |
 | `POST` | `/api/v1/upload` | Upload ULP file (admin keys only) |
