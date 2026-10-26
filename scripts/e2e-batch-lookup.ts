@@ -387,10 +387,12 @@ async function main(): Promise<number> {
       rr?.count === 20 && rr.subdomain_count === 13 && rr.subdomains === 4 && recent.json.imported_after !== undefined, JSON.stringify(rr).slice(0, 200))
     const older = await counts({ domains: [COUNTS_SITE], imported_before: '2021-01-01' })
     check('a window before 2021 leaves only the 3 old rows', older.json?.results?.[COUNTS_SITE]?.count === 3 && older.json.results[COUNTS_SITE].host_count === 0, JSON.stringify(older.json?.results?.[COUNTS_SITE]).slice(0, 200))
-    const future = await counts({ domains: [COUNTS_SITE], imported_after: '2999-01-01' })
-    check('a window with no rows counts 0, not an error', future.json?.results?.[COUNTS_SITE]?.count === 0 && future.json.results[COUNTS_SITE].found === false)
+    const future = await counts({ domains: [COUNTS_SITE], imported_after: '2100-01-01' })
+    check('a window with no rows counts 0, not an error', future.status === 200 && future.json?.results?.[COUNTS_SITE]?.count === 0 && future.json.results[COUNTS_SITE].found === false, `status ${future.status}`)
     const badWindow = await counts({ domains: [COUNTS_SITE], imported_after: 'last tuesday' })
     check('a malformed window is a 400', badWindow.status === 400, `status ${badWindow.status}`)
+    const farWindow = await counts({ domains: [COUNTS_SITE], imported_after: '2999-01-01' })
+    check('a date beyond what a DateTime holds (2106) is a 400 naming the range, not a count', farWindow.status === 400 && /supported range/.test(farWindow.json?.error ?? ''), `status ${farWindow.status}`)
 
     const sites100 = Array.from({ length: 100 }, (_, i) => (i % 2 === 0 ? `https://www.bd${i}-${RUN}.example.test/login` : `bd${i}-${RUN}.example.test`))
     const c100 = await counts({ domains: sites100 })
@@ -426,7 +428,7 @@ async function main(): Promise<number> {
       check('v1 counts take the window', v1Window.json?.results?.[COUNTS_SITE]?.count === 20)
     }
     const countsPage = await asSession('GET', '/counts')
-    check('the Site Counts page is served', countsPage.status === 200 && /Sites, domains or URLs/.test(countsPage.text) && /Upload a list/.test(countsPage.text), `status ${countsPage.status}`)
+    check('the Site Counts page is served', countsPage.status === 200 && /Sites or URLs \(one per line\)/.test(countsPage.text) && /Upload a list/.test(countsPage.text), `status ${countsPage.status}`)
 
     // Last, because it changes the table: without the reversed-domain projection on every part only hosts can be counted, and the answer says so.
     chQuery('ALTER TABLE ulp.credentials CLEAR PROJECTION proj_domain_rev SETTINGS mutations_sync = 2')

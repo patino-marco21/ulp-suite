@@ -45,22 +45,31 @@ function displayOrder(rows: CountRow[]): CountRow[] {
 
 // ── One site ──────────────────────────────────────────────────────────────────
 
+/** The columns after the site name. The breakdown columns need a wide window; below it the same numbers are in the row's detail. */
+const COLS = {
+  rows: "w-20 text-right shrink-0",
+  host: "hidden xl:block w-20 text-right shrink-0",
+  subs: "hidden xl:block w-24 text-right shrink-0",
+  distinct: "hidden 2xl:block w-20 text-right shrink-0",
+  chevron: "w-3.5 shrink-0",
+}
+
 function SiteRow({ row }: { row: CountRow }) {
   const [open, setOpen] = useState(false)
   const { site, result } = row
-  const expandable = result.top_subdomains.length > 0
+  const expandable = result.count !== null
   const muted = !result.error && result.count === 0
 
   return (
     <div className="border rounded-lg overflow-hidden">
       <button
         onClick={() => expandable && setOpen(o => !o)}
-        className={`w-full grid grid-cols-[minmax(0,1fr)_6rem_6rem_6rem_6rem_1rem] items-center gap-3 px-4 py-2.5 text-left transition-colors ${
+        className={`w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors ${
           expandable ? "hover:bg-muted/40 cursor-pointer" : "cursor-default"
         }`}
         aria-expanded={expandable ? open : undefined}
       >
-        <span className="min-w-0">
+        <span className="min-w-0 flex-1">
           <span className={`block font-mono text-xs truncate ${muted ? "text-muted-foreground" : ""}`} title={site}>{site}</span>
           {result.searched_as && (
             <span className="block text-[10px] text-muted-foreground truncate" title={`Counted as ${result.searched_as}`}>
@@ -73,29 +82,37 @@ function SiteRow({ row }: { row: CountRow }) {
             </span>
           )}
         </span>
-        <span className={`text-right text-sm font-semibold tabular-nums ${muted ? "text-muted-foreground font-normal" : ""}`}>{fmt(result.count)}</span>
-        <span className="text-right text-xs tabular-nums text-muted-foreground">{fmt(result.host_count)}</span>
-        <span className="text-right text-xs tabular-nums text-muted-foreground">{fmt(result.subdomain_count)}</span>
-        <span className="text-right text-xs tabular-nums text-muted-foreground">{fmt(result.subdomains)}</span>
-        {expandable
-          ? (open ? <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />)
-          : <span />}
+        <span className={`${COLS.rows} text-sm font-semibold tabular-nums ${muted ? "text-muted-foreground font-normal" : ""}`}>{fmt(result.count)}</span>
+        <span className={`${COLS.host} text-xs tabular-nums text-muted-foreground`}>{fmt(result.host_count)}</span>
+        <span className={`${COLS.subs} text-xs tabular-nums text-muted-foreground`}>{fmt(result.subdomain_count)}</span>
+        <span className={`${COLS.distinct} text-xs tabular-nums text-muted-foreground`}>{fmt(result.subdomains)}</span>
+        <span className={COLS.chevron}>
+          {expandable && (open ? <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />)}
+        </span>
       </button>
 
       {open && expandable && (
-        <div className="border-t bg-muted/20 px-4 py-2">
-          <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
-            Subdomains with the most rows{result.subdomains !== null && result.subdomains > result.top_subdomains.length
-              ? ` (${result.top_subdomains.length} of ${result.subdomains.toLocaleString()})` : ""}
+        <div className="border-t bg-muted/20 px-4 py-2 space-y-2">
+          <p className="text-xs text-muted-foreground">
+            <span className="tabular-nums">{fmt(result.host_count)}</span> on the site itself
+            {" · "}<span className="tabular-nums">{fmt(result.subdomain_count)}</span> on {fmt(result.subdomains)} subdomain{result.subdomains === 1 ? "" : "s"}
           </p>
-          <ul className="text-xs font-mono">
-            {result.top_subdomains.map(s => (
-              <li key={s.domain} className="flex justify-between gap-4 py-0.5">
-                <span className="truncate" title={s.domain}>{s.domain}</span>
-                <span className="tabular-nums text-muted-foreground">{s.count.toLocaleString()}</span>
-              </li>
-            ))}
-          </ul>
+          {result.top_subdomains.length > 0 && (
+            <div>
+              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                Subdomains with the most rows{result.subdomains !== null && result.subdomains > result.top_subdomains.length
+                  ? ` (${result.top_subdomains.length} of ${result.subdomains.toLocaleString()})` : ""}
+              </p>
+              <ul className="text-xs font-mono">
+                {result.top_subdomains.map(s => (
+                  <li key={s.domain} className="flex justify-between gap-4 py-0.5">
+                    <span className="truncate" title={s.domain}>{s.domain}</span>
+                    <span className="tabular-nums text-muted-foreground">{s.count.toLocaleString()}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -227,7 +244,7 @@ export default function SiteCountsPage() {
           <div className="flex-1 flex flex-col gap-1.5">
             <div className="flex items-center justify-between">
               <label htmlFor="site-list" className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                Sites, domains or URLs (one per line)
+                Sites or URLs (one per line)
               </label>
               <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => fileRef.current?.click()} disabled={running}>
                 <Upload className="mr-1 h-3 w-3" />Upload a list
@@ -334,13 +351,13 @@ export default function SiteCountsPage() {
               )}
 
               {rows.length > 0 && (
-                <div className="grid grid-cols-[minmax(0,1fr)_6rem_6rem_6rem_6rem_1rem] gap-3 px-4 text-[10px] uppercase tracking-wider text-muted-foreground">
-                  <span>Site</span>
-                  <span className="text-right">Rows</span>
-                  <span className="text-right">On the site</span>
-                  <span className="text-right">On subdomains</span>
-                  <span className="text-right">Subdomains</span>
-                  <span />
+                <div className="flex items-center gap-3 px-4 text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <span className="min-w-0 flex-1">Site</span>
+                  <span className={COLS.rows}>Rows</span>
+                  <span className={COLS.host}>On the site</span>
+                  <span className={COLS.subs}>On subdomains</span>
+                  <span className={COLS.distinct}>Subdomains</span>
+                  <span className={COLS.chevron} />
                 </div>
               )}
 
