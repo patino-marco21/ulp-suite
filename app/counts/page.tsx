@@ -57,7 +57,7 @@ const COLS = {
 function SiteRow({ row }: { row: CountRow }) {
   const [open, setOpen] = useState(false)
   const { site, result } = row
-  const expandable = result.count !== null
+  const expandable = (result.count ?? 0) > 0
   const muted = !result.error && result.count === 0
 
   return (
@@ -95,7 +95,9 @@ function SiteRow({ row }: { row: CountRow }) {
         <div className="border-t bg-muted/20 px-4 py-2 space-y-2">
           <p className="text-xs text-muted-foreground">
             <span className="tabular-nums">{fmt(result.host_count)}</span> on the site itself
-            {" · "}<span className="tabular-nums">{fmt(result.subdomain_count)}</span> on {fmt(result.subdomains)} subdomain{result.subdomains === 1 ? "" : "s"}
+            {result.subdomain_count === null
+              ? " · subdomains not counted"
+              : <>{" · "}<span className="tabular-nums">{fmt(result.subdomain_count)}</span> on {fmt(result.subdomains)} subdomain{result.subdomains === 1 ? "" : "s"}</>}
           </p>
           {result.top_subdomains.length > 0 && (
             <div>
@@ -131,6 +133,7 @@ export default function SiteCountsPage() {
   const [progress, setProgress] = useState({ done: 0, total: 0 })
   const [rows, setRows] = useState<CountRow[]>([])
   const [subdomainsCounted, setSubdomainsCounted] = useState(true)
+  const [stopped, setStopped] = useState(false)
   const [importedWindow, setImportedWindow] = useState<ImportedWindowValue>(EMPTY_IMPORTED_WINDOW)
   const fileRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -156,6 +159,7 @@ export default function SiteCountsPage() {
     const controller = new AbortController()
     abortRef.current = controller
     setRunning(true)
+    setStopped(false)
     setRows([])
     setSubdomainsCounted(true)
     setProgress({ done: 0, total: sites.length })
@@ -183,7 +187,9 @@ export default function SiteCountsPage() {
         setProgress({ done, total: sites.length })
       }
     } catch (err) {
-      if (!(err instanceof DOMException && err.name === "AbortError")) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setStopped(true)
+      } else {
         toast({
           title: "Counting failed",
           description: err instanceof Error ? err.message : "Unknown error",
@@ -230,10 +236,11 @@ export default function SiteCountsPage() {
         </p>
       </div>
 
-      <div className="flex flex-1 overflow-hidden">
+      {/* Side by side from 1024 px; below it the list sits above the counts, so the site names keep their width. */}
+      <div className="flex flex-1 flex-col overflow-auto lg:flex-row lg:overflow-hidden">
         {/* ── Left panel: the list ── */}
         <div
-          className="w-80 shrink-0 border-r flex flex-col p-4 gap-3"
+          className="w-full shrink-0 border-b lg:w-80 lg:border-b-0 lg:border-r flex flex-col p-4 gap-3"
           onDragOver={e => e.preventDefault()}
           onDrop={e => {
             e.preventDefault()
@@ -278,7 +285,7 @@ export default function SiteCountsPage() {
               </span>
               {rawInput && !running && (
                 <button
-                  onClick={() => { setRawInput(""); setFileName(null); setRows([]) }}
+                  onClick={() => { setRawInput(""); setFileName(null); setRows([]); setStopped(false) }}
                   className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-0.5"
                 >
                   <X className="h-2.5 w-2.5" />Clear
@@ -307,7 +314,7 @@ export default function SiteCountsPage() {
         </div>
 
         {/* ── Right panel: the counts ── */}
-        <div className="flex-1 overflow-auto p-4">
+        <div className="flex-1 p-4 lg:overflow-auto">
           {rows.length === 0 && !running && (
             <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
               Paste or upload a list on the left and click Count
@@ -324,6 +331,12 @@ export default function SiteCountsPage() {
                   </div>
                   <Progress value={progress.total ? (progress.done / progress.total) * 100 : 0} />
                 </div>
+              )}
+
+              {stopped && (
+                <p className="text-xs text-muted-foreground">
+                  Stopped after {progress.done.toLocaleString()} of {progress.total.toLocaleString()} sites. Count again to finish the list.
+                </p>
               )}
 
               {!subdomainsCounted && (

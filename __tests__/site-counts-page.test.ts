@@ -21,6 +21,7 @@ describe('Site Counts page', () => {
     expect(page).toContain('splitRequests(sites, SITE_COUNTS_REQUEST_SIZE)')
     expect(page).toContain('Counted ')
     expect(page).toContain('AbortController')
+    expect(page).toContain('Stopped after ')
   })
 
   test('takes a pasted list or an uploaded file, and exports what it shows', () => {
