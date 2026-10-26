@@ -1,7 +1,7 @@
 # Batch lookup: pasted input and long address lists — Design
 
 Date: 2026-10-26
-Status: **implemented, verified and deployed locally on 2026-10-26** (main `6f20161`; image `ulp-suite-app:latest` = `3a55b8134c9b`, built by `git archive d98fb82`, rehearsed 40/40; rollback tag `ulp-suite-app:rollback-20261026-0631z` = `94509bf36e66`, the image that was running). Read-only proof on the real table: `BLK_LIVE=1 npx vitest run __tests__/batch-lookup.live.test.ts` (about 6 minutes); proof on the built image: `npx tsx scripts/e2e-batch-lookup.ts`. No DDL, no new setting: the deployed app logged "DDL v29 already applied" and did no schema work.
+Status: **implemented, verified and deployed locally on 2026-10-26** (main `6f20161`; image `3a55b8134c9b` (`ulp-suite-app:latest` until the follow-up below), built by `git archive d98fb82`, rehearsed 40/40; rollback tag `ulp-suite-app:rollback-20261026-0631z` = `94509bf36e66`, the image that was running). Read-only proof on the real table: `BLK_LIVE=1 npx vitest run __tests__/batch-lookup.live.test.ts` (about 6 minutes); proof on the built image: `npx tsx scripts/e2e-batch-lookup.ts`. No DDL, no new setting: the deployed app logged "DDL v29 already applied" and did no schema work. The single lookup `GET /api/v1/lookup?domain=` was fixed the same day: see the last section.
 
 ## Why
 
@@ -75,5 +75,58 @@ The page sends `{ emails, domains }` built per line, stops overriding an explici
 * An address with a non-ASCII character is looked up without the hint. Eight of them in a batch of 89 took 8.7 s instead of 2.5 s; a batch of 100 of them would take the old 26-38 s. Validating the tokenizer for non-ASCII text would remove this; it is rare enough not to.
 * The hint is correct because `idx_inv_email` is `text(tokenizer = splitByNonAlpha, preprocessor = lower(email))`. If that index is rebuilt with another tokenizer or preprocessor, the hint prunes wrongly: run the live test.
 * A domain is an exact match on the host: its subdomains are not included, and the 4,605 rows stored with a `www.` are found only by typing `www.`.
-* `GET /api/v1/lookup?domain=` compares the typed domain the same way and has the first defect; it was not changed here.
+* `GET /api/v1/lookup?domain=` had the first defect and was not changed here; the follow-up below fixes it.
 * Not done, and not needed now: a lower false-positive rate for `idx_bf_email_lc` (a rebuild of 195 GiB of indexes) or a projection on `lower(email)`. Either would make the comparison independent of the text index, at a cost the hint does not have.
+
+## Follow-up: `GET /api/v1/lookup?domain=` (2026-10-26)
+
+Status: **implemented, verified and deployed locally on 2026-10-26** (code `7929a7b`; image `ulp-suite-app:latest` = `4145c664f865`, built by `git archive 7929a7b`, rehearsed 55/55 twice; rollback tag `ulp-suite-app:rollback-20261026-1448z` = `3a55b8134c9b`, the image that was running; the container was healthy 10 s after the restart, its compiled route holds `domain IN` and no `domain = {domain:String}`, and it logged "DDL v29 already applied" and did no schema work). No DDL, no new setting.
+
+### Why
+
+The single lookup had cause 1 above. It compared `domain = {domain:String}` with the value lower-cased and trimmed, nothing else, so a URL, a `www.` host, `host:port` or a value with quotes or a trailing comma came back HTTP 200 with `found=false`. Its e-mail branch is not part of this change.
+
+### Design
+
+* The value goes through `domainEntry` like a batch entry and is looked up as `domain IN (candidates)`: the host, its `www.` form and the text as typed (when it has no scheme), so no match the old comparison found is lost. `ORDER BY imported_at DESC LIMIT 100` and the `SETTINGS` are unchanged.
+* For a bare host the answer keeps `success, found, domain, count, results`. `domain` is still the value trimmed and lower-cased; `searched_as` follows it only when the host looked up differs from that (`searchedAsField`, the batch rule).
+* A value with no host in it (a bare scheme, a host over 512 characters) runs no query and is a 200 with `found=false`, as in the batch lookups; a blank value is still the 400.
+* `domainIn` (`lib/batch-lookup.ts`) builds the list and its parameters for this route and for both batch routes (their SQL is byte-identical to before).
+* The 100 rows are shared by the forms: typing `www.host` returns the newest 100 of the host and its `www.` form together, where it returned only the `www.` rows. A row the old comparison found can be displaced only by a newer row of the other form, and only when the forms hold more than 100 rows between them; the live parity set those values aside (below).
+
+### One query shape: `IN` costs nothing that shows
+
+2026-10-26, 2,229,506,200 rows, 15 parts, ClickHouse caches dropped, `use_query_cache = 0`, the route's own query on three real domains of 39, 19,574 and 2,388,325 rows (single runs; rows read / wall time):
+
+| form | 39 rows | 19,574 rows | 2,388,325 rows |
+|---|---|---|---|
+| `domain = x` (before) | 524,248 / 46 ms | 872,272 / 37 ms | 3,338,255 / 79 ms |
+| `domain IN (x)` | 524,248 / 50 ms | 872,272 / 46 ms | 3,338,255 / 104 ms |
+| `IN (x, www.x)` | 589,784 / 52 ms | 872,272 / 46 ms | 3,532,742 / 105 ms |
+| `IN (x, www.x, x:8443)` | 665,086 / 52 ms | 937,808 / 71 ms | 3,608,044 / 81 ms |
+
+One value reads exactly the rows of the equality (warm: 34-60 ms against 40-84 ms); each further value reads 0-270,000 rows more. So the route has one SQL shape, not an equality for one candidate and a list for several.
+
+### Found on the way: `domainEntry` was quadratic
+
+The route feeds `domainEntry` a query-string value. The way it took trailing punctuation and dots off, `/[...]+$/`, is retried from every start of a long run: 16,000 dots and one more character took 0.46 s, 160,000 took 44 s (a run of brackets and quotes: 0.25 s and 24 s), on the single thread that serves every request. The batch routes were exposed the same way through their JSON bodies, which have no length cap. `67a6dd6` makes the cut with a loop (about a millisecond for 200,000 characters). Checked against the previous implementation on 2,404,000 random inputs (of the structured ones 98% reached a host, 88% ended in a stripped character, 19% had dots before a port): 0 differences. Three timing tests (1.5-2.7 s before, limit 250 ms) now take under 1 ms. `cleanEmailEntry` has the same shape (293 ms at 16,000 characters, 27 s at 160,000) and is not changed here.
+
+### Proof
+
+* `__tests__/v1-lookup-domain-route.test.ts` (11 tests, mocked client): a bare host in its old shape and key order; upper case and padding; a URL; a `www.` host; `host:port`; quotes and a comma; a bare scheme (no query); 100 rows uncapped and in the order given; the query's order, limit and settings; the blank 400; the e-mail branch independent of the domain parameter. `__tests__/batch-lookup.test.ts` +5 (`domainIn`, `searchedAsField`), `__tests__/batch-input.test.ts` +8, and the domain pin of `__tests__/lookup-routes-imported-range.test.ts` moved to the IN form. Whole suite 4,261 passed, 95 skipped, 0 failed; both typechecks and eslint clean.
+* Live, read-only (`BLK_LIVE=1 npx vitest run __tests__/batch-lookup.live.test.ts -t "single lookup"`, about 35 s, prints no value): a real domain of 4 rows (an earlier run: 27 rows) in the ten shapes d0-d9 returns exactly the rows of the bare host in each (31-50 ms), with `searched_as` on every shape but the bare and the padded ones. PARITY: for domains as they are stored, the answer equals the union of one `domain = value` query per value the entry stands for, and no row of the old answer is missing. Twelve values were sampled per stored shape; those whose lists reach the 100-row cap are set aside, because ties in `imported_at` make the cut arbitrary:
+
+  | stored shape | compared (set aside) | rows in the answers | rows the old comparison found | differing | old rows missing | answers that grew |
+  |---|---|---|---|---|---|---|
+  | clean | 12 (0) | 45 | 45 | 0 | 0 | 0 |
+  | with `www.` | 9 (3) | 29 | 10 | 0 | 0 | 4 |
+  | with `:port` | 5 (7) | 54 | 7 | 0 | 0 | 3 |
+  | with `/path` | 10 (2) | 48 | 15 | 0 | 0 | 6 |
+
+  A clean host is answered with exactly the rows as before; the other shapes now also return the rows of the bare host (the earlier run on another sample: 0 differing, 0 missing as well).
+* `scripts/e2e-batch-lookup.ts` on the candidate image against a fresh install: **55/55** (the 40 checks of the batch lookups and 15 for this route), twice (the second run kept the stack for the docs card). The shapes of the batch check (a URL with path, query and fragment, an upper-case `www.` host, `host:port`, `user@host`, padded and quoted text) all return the 3 rows of the host; a bare host's answer keeps its keys and has no `searched_as`; a URL's answer echoes it lower-cased and says `searched_as`; the row stored with a `www.` and the one stored with a `:port` by the older parser are found when typed as stored; a bare scheme is a 200, not found; a blank domain is a 400; the imported window composes; 401 without a key. EXPLAIN on the fresh table: the primary key leaves 1 of 23 granules for `domain IN (host, www. form)`. Over HTTP on that stack a value of 15,000 dots answered in 8 ms (a request line cannot be longer), and the corrected docs card rendered in the browser pane.
+
+### Not done
+
+* `cleanEmailEntry` (above) keeps its quadratic trailing-run cut.
+* Two other routes compare a typed domain exactly and have cause 1: `GET /api/v1/search/domain?domain=` (a paginated search) and the `domain` filter of `GET /api/credentials`. They are a search and a filter with their own semantics and were not changed.
