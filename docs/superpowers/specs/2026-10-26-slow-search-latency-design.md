@@ -1,7 +1,7 @@
 # Slow searches and slow filter clicks: one scan instead of two, and no scan for a search nobody waits for — Design
 
 Date: 2026-10-26
-Status: **implemented on branch `fix/search-scan-once-and-kill`; unit, route and wiring tests green; live proof and rollout recorded in the last section (pending until that section says otherwise).** No DDL, no data change. Two settings: `SEARCH_HIT_SET`, `SEARCH_HIT_SET_MAX_HITS`.
+Status: **implemented, verified and deployed locally on 2026-10-26** (main `55042df`, code `711c341`; image `ulp-suite-app:latest` = `e2eedf7af068`, built by `git archive 711c341`; rollback tag `ulp-suite-app:rollback-20261026-2310z` = `37e4fbe4430f`, the image that was running). Rehearsed on the built image: the stack's own scenarios 49/49, `scripts/e2e-hit-set.ts` 19/19, `scripts/e2e-search-dictionary.ts` 81/81. Live proof on the real table: `HSP_PARITY=1 npx vitest run __tests__/hit-set-parity.live.test.ts` (about 10 minutes). No DDL, no data change. Two settings: `SEARCH_HIT_SET`, `SEARCH_HIT_SET_MAX_HITS`.
 
 ## Why
 
@@ -91,4 +91,21 @@ Options for the first search, for the owner to decide (none is built): (a) accep
 
 ## Rollout
 
-(to be filled in: image, rollback tag, rehearsal, live proof)
+Deployed locally on 2026-10-26 about 23:23Z: only the app container was recreated (3 s, healthy after 11 s); ClickHouse (up 4 days) was not touched, and the start-up log says "DDL v29 already applied" and does no schema work. Order followed: rollback tag on the running image first, candidate built under its own tag from `git archive`, rehearsal with `REHEARSAL_APP_IMAGE`, then `docker compose up -d --no-build app` from the primary checkout.
+
+Gates on `711c341`: `tsc` for the app, `scripts/` and `__tests__/` clean, eslint clean, 4,444 tests in 272 files (13 live files skipped).
+
+**Live proof on the final code** (real table, 2,229,506,200 rows, every plain reference run with the query cache and the condition cache dropped; one real login-page search that finds 49 rows, one invented text that finds none; rows and totals compared with `hit_set=0`: identical in every variant):
+
+| | plain rows | plan rows | plain totals | plan totals |
+|---|---|---|---|---|
+| real search, first (builds the set: one scan) | 62.7 s | 55.5 s | 56.2 s | 0.10 s |
+| real search, Email chip afterwards (38 rows) | 63.6 s | 0.19 s | 64.6 s | 0.10 s |
+| invented text, first | 63.0 s | 53.7 s | 57.1 s | 0.01 s |
+| invented text, chip afterwards | 64.2 s | 0.02 s | 63.3 s | 0.02 s |
+
+In the page, the plain rows and totals run together (121 s and 130 s measured on a quiet machine, 139-262 s as logged), so the first search is about 55 s instead of 2 minutes or more, and a chip click about 0.2 s instead of another 2-4 minutes. Both abandonment checks pass: a search abandoned 3 s after it started leaves nothing in `system.processes` (today's query: killed at once; the shared position scan: killed 1.5 s after the last waiter left).
+
+**Not verified:** the owner has not tried the page since (no credentials for the real UI: the deployed app was checked for health, environment and bundle only). The abort chain is proven in parts: `request.signal` fires on a browser disconnect in a production build of this Next version (throwaway server, 2,972 ms for a 3 s client timeout), the handler's abort kills the statement on the real ClickHouse (live test), and the built image answers aborted requests quietly (rehearsal [6]); an abort long enough to need a kill is not rehearsed on the isolated stack because its table is too small to give a scan that lasts seconds.
+
+**Re-verify:** `HSP_PARITY=1 HSP_NEEDLES='<texts>' npx vitest run __tests__/hit-set-parity.live.test.ts`; `REHEARSAL_APP_IMAGE=<tag> npx tsx scripts/e2e-alert-rehearsal.ts --keep`, then `npx tsx scripts/e2e-hit-set.ts`. After any ClickHouse upgrade re-run both: the plan depends on `_part`, `_part_offset` and the `optimize_move_to_prewhere = 0` workaround, not on the condition cache.
