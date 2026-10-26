@@ -87,7 +87,7 @@ The cost of the fingerprint query that guards the set: 4 ms (`system.parts` of 1
 * The same scan exists in the exports with a search term and in `/api/v1/search`; they are not changed here.
 * The machine: the laptop runs hot (85 °C, throttled), has 8 physical cores and 31 GiB of RAM shared with 21 sandbox containers, and its swap is full. Not touched.
 
-Options for the first search, for the owner to decide (none is built): (a) accept one minute; (b) for a text that starts with a host (`host.tld/path`, `https://host`), search the URL column of the rows whose host matches, from the dictionary (0.1-3 s), which would no longer find the text inside another host's query string or in the login or password column; (c) an n-gram text index on `url`, a DDL change on 195 GiB that would have to be measured on a copy first.
+Options for the first search, for the owner to decide (none is built): (a) accept one minute; (b) for a text that starts with a host (`host.tld/path`, `https://host`), search the URL column of the rows whose host matches, from the dictionary (0.1-3 s), which would no longer find the text inside another host's query string or in the login or password column; (c) a substring index on `url`: not available as an add-on in 26.3. A column may carry only ONE text index (`ADD INDEX ... TYPE text(tokenizer = ngrams(4))` on the faithful copy: "Column `url` must not have more than one text index"), and `idx_inv_url` is the one the word, substring and hit-set probes use. An `ngrambf_v1` bloom filter is the other kind; for 65,536-row granules of 37-byte URLs (about 2.4 MB of text per granule) it would need roughly 1.9 MB per granule at a 5% false-positive rate, about 65 GB for `url` alone (an estimate, not measured), so it was not built.
 
 ## Rollout
 
