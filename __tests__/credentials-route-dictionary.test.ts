@@ -205,6 +205,20 @@ describe('GET /api/credentials — everything else is today\'s query, untouched'
     expect(plainTotals()).toHaveLength(1)
   })
 
+  test('an abort inside the plan (the browser replaced the search) ends the request quietly: no "plan failed" warning, no plain query started', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const abort = Object.assign(new Error('Query aborted by client'), { name: 'AbortError' })
+    dictDataError = abort
+    dictTotalsError = abort
+    const rows = await get('q=ledger.com&skip_totals=1')
+    const totals = await get('q=ledger.com&totals_only=1')
+    expect([rows.status, totals.status]).toEqual([499, 499])
+    expect(plainRows()).toHaveLength(0)
+    expect(plainTotals()).toHaveLength(0)
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
   test('a timeout inside the plan is the same 408 the plain query gives, and is not retried as a second full-length query', async () => {
     dictDataError = new Error('Code: 159. DB::Exception: Timeout exceeded: TIMEOUT_EXCEEDED')
     const res = await get('q=ledger.com&skip_totals=1')

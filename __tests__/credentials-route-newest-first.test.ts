@@ -217,6 +217,16 @@ describe('GET /api/credentials — "Newest first" runs as time windows over proj
     expect(body.results).toHaveLength(2)
   })
 
+  test('an abort in a window ends the request quietly: no fallback to the plain query, nothing on the warning log', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    windowAnswers = [Object.assign(new Error('Query aborted by client'), { name: 'AbortError' })]
+    const res = await get('sort=imported_desc&limit=2&skip_totals=1')
+    expect(res.status).toBe(499)
+    expect(legacyDataCalls()).toHaveLength(0)
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
   test('a timeout in a window is a 408, not a second full-length attempt', async () => {
     windowAnswers = [new Error('Code: 159. DB::Exception: Timeout exceeded: TIMEOUT_EXCEEDED')]
     const res = await get('sort=imported_desc&limit=2&skip_totals=1')

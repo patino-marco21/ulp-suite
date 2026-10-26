@@ -35,6 +35,9 @@ import {
 
 export const dynamic = 'force-dynamic'
 
+// The error of a request the browser abandoned (its AbortSignal fired): the fallbacks below must not treat it as a plan failure.
+const isRequestAbort = (err: unknown): boolean => err instanceof Error && err.name === 'AbortError'
+
 // Valid password mask values — whitelisted so they can be safely interpolated.
 const VALID_MASKS = new Set(['alpha', 'numeric', 'alphanumeric', 'mixed', 'empty'])
 
@@ -423,6 +426,7 @@ export async function GET(request: NextRequest) {
             totalsPlan = 'dictionary'
             return answered
           } catch (err) {
+            if (isRequestAbort(err)) throw err
             console.warn('[credentials] dictionary totals failed -- using the plain count:', err instanceof Error ? err.message : String(err))
           }
         }
@@ -570,6 +574,7 @@ export async function GET(request: NextRequest) {
             plan = 'dictionary'
             return answered
           } catch (err) {
+            if (isRequestAbort(err)) throw err
             const msg = err instanceof Error ? err.message : String(err)
             if (msg.includes('TIMEOUT_EXCEEDED') || msg.includes('timeout') || msg.includes('Timeout')) throw err
             console.warn('[credentials] dictionary plan failed -- using the plain query:', msg)
@@ -652,6 +657,7 @@ export async function GET(request: NextRequest) {
           return dedupe ? dedupeRows(windowed, '_c_hash', limit) : windowed
         }
       } catch (err) {
+        if (isRequestAbort(err)) throw err
         const msg = err instanceof Error ? err.message : String(err)
         if (msg.includes('TIMEOUT_EXCEEDED') || msg.includes('timeout') || msg.includes('Timeout')) throw err
         console.warn('[credentials] newest-first windows failed -- using the plain query:', msg)
@@ -693,7 +699,7 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     // The browser gave up on this request (a newer search replaced it): its queries were killed on the server, nobody reads an answer, and an abort is not
     // a failure to log. The test is the request's own signal (or the AbortError it produces), not a socket error: ECONNRESET to ClickHouse stays a logged failure.
-    if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) return new NextResponse(null, { status: 499 })
+    if (signal.aborted || isRequestAbort(error)) return new NextResponse(null, { status: 499 })
     const msg = error instanceof Error ? error.message : String(error)
     const isTimeout = msg.includes('TIMEOUT_EXCEEDED') || msg.includes('timeout') || msg.includes('Timeout')
 
