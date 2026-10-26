@@ -1,5 +1,6 @@
 /**
- * Rehearsal of the batch lookups and of the single domain lookup GET /api/v1/lookup?domain= (docs/superpowers/specs/2026-10-26-batch-lookup-design.md)
+ * Rehearsal of the batch lookups, of the single domain lookup GET /api/v1/lookup?domain= (docs/superpowers/specs/2026-10-26-batch-lookup-design.md) and of
+ * the site counts POST /api/lookup/counts, POST /api/v1/lookup/counts (docs/superpowers/specs/2026-10-26-site-counts-design.md)
  * on the BUILT candidate image, against the ISOLATED rehearsal stack (docker-compose.rehearsal.yml: its own ClickHouse, app and volumes; it shares
  * nothing with the real stack).
  *
@@ -9,6 +10,10 @@
  * real login (and a real API key for v1) using what people paste: URLs, `www.` hosts, `<addr>`, `mailto:`, `addr:password`, any casing, both kinds
  * in one request. It also checks, on the freshly built indexes, that the text index is the one the hint assumes, that the hint narrows 100
  * absent addresses where the bloom filter alone cannot, and that the primary key narrows `domain IN (host, www. form)` (EXPLAIN, granules).
+ * The site counts are checked on a site seeded with rows on the host, on its www. spelling and on subdomains (one two labels deep, one under another
+ * listed site), plus rows that must NOT count (a name that merely ends with the site's, a :port spelling) and rows imported years ago for the window:
+ * the exact numbers, every pasted shape, both routes agreeing, 100 sites, EXPLAIN (the reversed-domain projection leaves a few granules), and last the
+ * fallback: with the projection cleared the answer says only hosts were counted, and after MATERIALIZE it counts subdomains again.
  *
  *   git archive <commit> | docker build -t ulp-suite-app:batch-candidate -
  *   npx tsx scripts/e2e-batch-lookup.ts            # about 4 minutes; --keep leaves the stack running (the session cookie goes to $COOKIE_FILE)
@@ -21,6 +26,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { domainIn, planEmailBatch } from '@/lib/batch-lookup'
+import { subdomainCountsSql } from '@/lib/site-counts'
 
 const PROJECT = 'ulp-rehearsal'
 const COMPOSE_FILE = 'docker-compose.rehearsal.yml'
@@ -42,6 +48,19 @@ const PORTAL = `portal-${RUN}.example.test`
 const LEGACY_WWW = `www.legacy-${RUN}.example.test`
 const LEGACY_PORT = `portbox-${RUN}.example.test:8443`
 const NON_ASCII = `müller.${RUN}@example.test`
+// The site counts: rows per stored domain, so the expected numbers are plain sums. Seeded in step 2 (one part), plus OLD_SUB in step 7.
+const COUNTS_SITE = `counts-${RUN}.example.test`
+const COUNTS_ROWS: Array<[string, number]> = [
+  [COUNTS_SITE, 5],                    // the site itself
+  [`www.${COUNTS_SITE}`, 2],           // a www. spelling the older parser kept: the site's own rows
+  [`login.${COUNTS_SITE}`, 7],
+  [`app.${COUNTS_SITE}`, 3],
+  [`a.b.${COUNTS_SITE}`, 2],           // two labels deep
+  [`x.login.${COUNTS_SITE}`, 1],       // under login.<site>, so it counts for that site too
+  [`${COUNTS_SITE}:8443`, 1],          // a :port the older parser kept: not counted (a parse fragment, 79 rows of 150,079 on the real table)
+  [`not-${COUNTS_SITE}`, 4],           // ends with the site's name but is not under it
+]
+const OLD_SUB = `old.${COUNTS_SITE}`   // 3 rows imported in 2020: inside the all-time count, outside any recent window
 
 const results: Array<{ ok: boolean; label: string }> = []
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
@@ -157,7 +176,7 @@ async function main(): Promise<number> {
     const lc = chOrEmpty("SELECT expr FROM system.data_skipping_indices WHERE database='ulp' AND table='credentials' AND name='idx_bf_email_lc'")
     check('and the lower(email) bloom filter', lc === 'lower(email)', lc)
 
-    console.log('2. Seed: addresses and domains as the older parser left them, 100 + 100 for a full batch, 1.5M filler rows, as ONE insert = one part')
+    console.log('2. Seed: addresses and domains as the older parser left them, a site with subdomains, 100 + 100 for a full batch, 1.5M filler rows, as ONE insert = one part')
     const row = (url: string, email: string, password: string, domain: string, i: number) =>
       `SELECT '${url}' AS url, '${email}' AS email, '${password}' AS password, '${domain}' AS domain, 'seed-${RUN}' AS source_file, 'Breach-${RUN}-${i}' AS breach_name`
     const seeds = [
@@ -167,9 +186,11 @@ async function main(): Promise<number> {
       row(`https://${LEGACY_PORT}/`, `port.${RUN}@example.test`, 'pw-q', LEGACY_PORT, 0),
       row('https://nonascii.example.test/', NON_ASCII, 'pw-n', 'nonascii.example.test', 0),
     ].join(' UNION ALL ')
+    const countsSeed = COUNTS_ROWS.map(([domain, n]) =>
+      `SELECT 'https://${domain}/x', concat('c', toString(number), '-${RUN}@example.test'), 'pw', '${domain}', 'seed-${RUN}', '' FROM numbers(${n})`).join(' UNION ALL ')
     const hundred = (pw: string) => `SELECT concat('https://bd', toString(number), '-${RUN}.example.test/'), concat('batch', toString(number), '-${RUN}@example.test'), '${pw}', concat('bd', toString(number), '-${RUN}.example.test'), 'seed-${RUN}', '' FROM numbers(100)`
     const filler = `SELECT concat('https://f', toString(number % 50), '.filler.test/'), concat('filler', toString(number), '-${RUN}@mail.test'), 'pw', concat('f', toString(number % 50), '.filler.test'), 'seed-filler-${RUN}', '' FROM numbers(1500000)`
-    chQuery(`INSERT INTO ulp.credentials (url, email, password, domain, source_file, breach_name) ${seeds} UNION ALL ${hundred('pwA')} UNION ALL ${hundred('pwB')} UNION ALL ${filler} SETTINGS max_insert_threads = 1, max_insert_block_size = 5000000, min_insert_block_size_rows = 5000000, min_insert_block_size_bytes = 1000000000`)
+    chQuery(`INSERT INTO ulp.credentials (url, email, password, domain, source_file, breach_name) ${seeds} UNION ALL ${countsSeed} UNION ALL ${hundred('pwA')} UNION ALL ${hundred('pwB')} UNION ALL ${filler} SETTINGS max_insert_threads = 1, max_insert_block_size = 5000000, min_insert_block_size_rows = 5000000, min_insert_block_size_bytes = 1000000000`)
     const partCount = chQuery("SELECT count() FROM system.parts WHERE database='ulp' AND table='credentials' AND active")
     check('the seed is one part', partCount === '1', `parts ${partCount}`)
     if (partCount !== '1') return 2
@@ -309,6 +330,115 @@ async function main(): Promise<number> {
     }
     const page = await asSession('GET', '/lookup')
     check('the Batch Lookup page of the candidate is the new one', page.status === 200 && /Emails, domains or URLs/.test(page.text), `status ${page.status}`)
+
+    console.log('7. Site counts: POST /api/lookup/counts (session) and POST /api/v1/lookup/counts (API key)')
+    // Three rows imported in 2020 under a subdomain of the site: the all-time count includes them, a recent window does not. A second part, after the checks that want one.
+    chQuery(`INSERT INTO ulp.credentials (url, email, password, domain, source_file, breach_name, imported_at)
+      SELECT 'https://${OLD_SUB}/x', concat('o', toString(number), '-${RUN}@example.test'), 'pw', '${OLD_SUB}', 'seed-${RUN}', '', toDateTime('2020-01-01 00:00:00') FROM numbers(3)`)
+    const counts = async (body: unknown) => {
+      const t = Date.now()
+      const res = await asSession('POST', '/api/lookup/counts', body)
+      return { ...res, ms: Date.now() - t }
+    }
+    const anonCounts = await call('POST', '/api/lookup/counts', { domains: [COUNTS_SITE] })
+    check('the counts route needs a session (401 without one)', anonCounts.status === 401, `status ${anonCounts.status}`)
+
+    // Rows of the site: 5 on the host + 2 on its www. spelling; on subdomains 7 (login) + 3 (app) + 2 (a.b) + 1 (x.login) + 3 (old) = 16 in 5 subdomains.
+    // The 4 rows of not-<site> and the 1 row stored as <site>:8443 are not the site's.
+    const SITE_TOP = [
+      { domain: `login.${COUNTS_SITE}`, count: 7 }, { domain: `app.${COUNTS_SITE}`, count: 3 }, { domain: OLD_SUB, count: 3 },
+      { domain: `a.b.${COUNTS_SITE}`, count: 2 }, { domain: `x.login.${COUNTS_SITE}`, count: 1 },
+    ]
+    const site = await counts({ domains: [COUNTS_SITE] })
+    const hit = site.json?.results?.[COUNTS_SITE]
+    check('a site: 23 rows = 7 on the host (with its www. spelling) + 16 on 5 subdomains; the look-alike name and the :port spelling are not counted',
+      site.status === 200 && hit?.count === 23 && hit.host_count === 7 && hit.subdomain_count === 16 && hit.subdomains === 5 && hit.found === true, JSON.stringify(hit).slice(0, 220))
+    check('its biggest subdomains come in order (most rows first, ties by name)', JSON.stringify(hit?.top_subdomains) === JSON.stringify(SITE_TOP), JSON.stringify(hit?.top_subdomains).slice(0, 260))
+    check('the answer says subdomains were counted and a bare host has no searched_as', site.json?.subdomains_counted === true && !('searched_as' in (hit ?? {})), JSON.stringify(site.json).slice(0, 120))
+
+    const nested = (await counts({ domains: [`login.${COUNTS_SITE}`] })).json?.results?.[`login.${COUNTS_SITE}`]
+    check('a subdomain listed as a site counts its own rows and what is under it: 7 + 1 = 8', nested?.count === 8 && nested.host_count === 7 && nested.subdomain_count === 1 && nested.subdomains === 1, JSON.stringify(nested).slice(0, 200))
+
+    const countShapes: Array<[string, string]> = [
+      ['https://www.host/path?query', `https://www.${COUNTS_SITE}/login?next=/a/b`],
+      ['HTTP://WWW.HOST:8080/ in capitals', `HTTP://WWW.${COUNTS_SITE.toUpperCase()}:8080/`],
+      ['host:port', `${COUNTS_SITE}:8443`],
+      ['*.host wildcard', `*.${COUNTS_SITE}`],
+      ['.host', `.${COUNTS_SITE}`],
+      ['padded and quoted', `  "${COUNTS_SITE}",  `],
+      ['host with a path', `${COUNTS_SITE}/en/some/page.html`],
+    ]
+    const shaped = await counts({ domains: countShapes.map(([, v]) => v) })
+    for (const [label, sent] of countShapes) {
+      const r = shaped.json?.results?.[sent]
+      check(`site, ${label}: the same 23 rows`, r?.count === 23 && r.host === COUNTS_SITE && r.error === undefined, JSON.stringify(r).slice(0, 160))
+    }
+    check('a pasted URL says what was counted (searched_as = the bare host)', shaped.json?.results?.[countShapes[0][1]]?.searched_as === COUNTS_SITE)
+
+    const odd = await counts({ domains: [`quiet-${RUN}.example.test`, 'localhost', 'https://', `not-${COUNTS_SITE}`] })
+    check('a site with no row is found:false with zeros, not an error', odd.json?.results?.[`quiet-${RUN}.example.test`]?.count === 0 && odd.json.results[`quiet-${RUN}.example.test`].found === false)
+    check('text that is not a site has the reason and null numbers, never a 0',
+      odd.json?.results?.localhost?.error === 'not a site address' && odd.json.results.localhost.count === null && odd.json.results['https://']?.error === 'not a site address')
+    check('the look-alike name is a site of its own: its 4 rows, none of the real site\'s', odd.json?.results?.[`not-${COUNTS_SITE}`]?.count === 4, JSON.stringify(odd.json?.results?.[`not-${COUNTS_SITE}`]).slice(0, 160))
+
+    const recent = await counts({ domains: [COUNTS_SITE], imported_after: '2021-01-01' })
+    const rr = recent.json?.results?.[COUNTS_SITE]
+    check('a window after 2021 leaves the 20 recent rows (the 3 imported in 2020 drop out: 4 subdomains) and is echoed',
+      rr?.count === 20 && rr.subdomain_count === 13 && rr.subdomains === 4 && recent.json.imported_after !== undefined, JSON.stringify(rr).slice(0, 200))
+    const older = await counts({ domains: [COUNTS_SITE], imported_before: '2021-01-01' })
+    check('a window before 2021 leaves only the 3 old rows', older.json?.results?.[COUNTS_SITE]?.count === 3 && older.json.results[COUNTS_SITE].host_count === 0, JSON.stringify(older.json?.results?.[COUNTS_SITE]).slice(0, 200))
+    const future = await counts({ domains: [COUNTS_SITE], imported_after: '2999-01-01' })
+    check('a window with no rows counts 0, not an error', future.json?.results?.[COUNTS_SITE]?.count === 0 && future.json.results[COUNTS_SITE].found === false)
+    const badWindow = await counts({ domains: [COUNTS_SITE], imported_after: 'last tuesday' })
+    check('a malformed window is a 400', badWindow.status === 400, `status ${badWindow.status}`)
+
+    const sites100 = Array.from({ length: 100 }, (_, i) => (i % 2 === 0 ? `https://www.bd${i}-${RUN}.example.test/login` : `bd${i}-${RUN}.example.test`))
+    const c100 = await counts({ domains: sites100 })
+    check('100 sites (half of them URLs): all found, 2 rows each', c100.status === 200 && c100.json?.found === 100 && sites100.every(x => c100.json.results?.[x]?.count === 2), `status ${c100.status}, found ${c100.json?.found}`)
+    info('100 sites', `${c100.ms} ms`)
+    check('and well inside one request (45 s)', c100.ms < 45_000)
+    const c101 = await counts({ domains: Array.from({ length: 101 }, (_, i) => `s${i}.example.test`) })
+    check('101 sites are refused with 422', c101.status === 422, `status ${c101.status}`)
+    check('an empty list is refused with 400', (await counts({ domains: [] })).status === 400)
+
+    // The plan on the freshly built table: the reversed-domain projection serves it and leaves a few granules (the seed is about 23).
+    const explainParams: Record<string, string> = {}
+    const explained = subdomainCountsSql([COUNTS_SITE, `login.${COUNTS_SITE}`], { lower: null, upper: null })
+    for (const [k, v] of Object.entries(explained.params)) explainParams[k] = String(v)
+    const countsPlan = chQuery(`EXPLAIN indexes = 1 ${explained.sql}`, explainParams)
+    const gr = [...countsPlan.matchAll(/Granules:\s*(\d+)\/(\d+)/g)].map(m => ({ selected: Number(m[1]), initial: Number(m[2]) }))
+    const planned = gr[gr.length - 1]
+    info('granules, subdomain counts for 2 sites', planned ? `${planned.selected} of ${planned.initial}` : 'unknown')
+    check('the plan reads the reversed-domain projection', countsPlan.includes('proj_domain_rev'))
+    check('and leaves at most 4 granules of at least 20', !!planned && planned.initial >= 20 && planned.selected <= 4, JSON.stringify(planned))
+
+    if (key) {
+      const v1c = (body: unknown, headers: Record<string, string>) => call('POST', '/api/v1/lookup/counts', body, headers)
+      const noKeyCounts = await v1c({ domains: [COUNTS_SITE] }, {})
+      check('v1 counts refuse a request without a key', noKeyCounts.status === 401, `status ${noKeyCounts.status}`)
+      const body = { domains: [COUNTS_SITE, `https://www.login.${COUNTS_SITE}/x`, 'localhost', `quiet-${RUN}.example.test`] }
+      const viaKey = await v1c(body, { 'x-api-key': key })
+      const viaBearer = await v1c(body, { authorization: `Bearer ${key}` })
+      const viaSession = await counts(body)
+      check('v1 counts answer with a key (both header forms)', viaKey.status === 200 && viaBearer.status === 200 && viaKey.json?.found === 2, `status ${viaKey.status}`)
+      check('and exactly what the page route answers for the same list', JSON.stringify(viaKey.json) === JSON.stringify(viaSession.json) && JSON.stringify(viaBearer.json) === JSON.stringify(viaSession.json))
+      const v1Window = await v1c({ domains: [COUNTS_SITE], imported_after: '2021-01-01' }, { 'x-api-key': key })
+      check('v1 counts take the window', v1Window.json?.results?.[COUNTS_SITE]?.count === 20)
+    }
+    const countsPage = await asSession('GET', '/counts')
+    check('the Site Counts page is served', countsPage.status === 200 && /Sites, domains or URLs/.test(countsPage.text) && /Upload a list/.test(countsPage.text), `status ${countsPage.status}`)
+
+    // Last, because it changes the table: without the reversed-domain projection on every part only hosts can be counted, and the answer says so.
+    chQuery('ALTER TABLE ulp.credentials CLEAR PROJECTION proj_domain_rev SETTINGS mutations_sync = 2')
+    const cleared = chOrEmpty("SELECT count() FROM system.projection_parts WHERE database='ulp' AND table='credentials' AND name='proj_domain_rev' AND active")
+    check('the projection is cleared on every part', cleared === '0', `projection parts ${cleared}`)
+    const hostsOnly = await counts({ domains: [COUNTS_SITE] })
+    const ho = hostsOnly.json?.results?.[COUNTS_SITE]
+    check('without it only the host is counted (7 rows), the subdomain numbers are null, and the answer says so',
+      hostsOnly.status === 200 && hostsOnly.json?.subdomains_counted === false && ho?.count === 7 && ho.host_count === 7 && ho.subdomain_count === null && ho.subdomains === null, JSON.stringify(ho).slice(0, 220))
+    chQuery('ALTER TABLE ulp.credentials MATERIALIZE PROJECTION proj_domain_rev SETTINGS mutations_sync = 2')
+    const restored = await counts({ domains: [COUNTS_SITE] })
+    check('after MATERIALIZE the subdomains are counted again (23 rows)', restored.json?.subdomains_counted === true && restored.json.results?.[COUNTS_SITE]?.count === 23, JSON.stringify(restored.json).slice(0, 200))
   } catch (err) {
     check('the rehearsal ran to the end', false, err instanceof Error ? err.message : String(err))
   } finally {
