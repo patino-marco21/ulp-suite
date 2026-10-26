@@ -135,6 +135,13 @@ describe.each(ROUTES)('%s', (_name, handler, url) => {
     expect(calls).toHaveLength(0)
   })
 
+  test('a body that is valid JSON but not an object is a 400 too, not a crash', async () => {
+    for (const raw of ['null', '[]', '"sites"', '3', 'true']) {
+      expect((await post(handler, url, raw)).status, raw).toBe(400)
+    }
+    expect(calls).toHaveLength(0)
+  })
+
   test('the largest allowed list is accepted', async () => {
     const full = Array.from({ length: SITE_COUNTS_MAX_PER_REQUEST }, (_, i) => `s${i}.example.tld`)
     const res = await post(handler, url, { domains: full })

@@ -23,7 +23,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
   }
 
-  let body: { domains?: unknown; imported_after?: unknown; imported_before?: unknown }
+  let body: unknown
   try {
     body = await request.json()
   } catch {

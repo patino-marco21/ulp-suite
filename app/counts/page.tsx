@@ -124,6 +124,7 @@ export default function SiteCountsPage() {
   const importedBeforeIso = localToUtcIso(importedWindow.before)
 
   async function readFile(file: File) {
+    if (running) return
     if (file.size > MAX_FILE_BYTES) {
       toast({ title: "That file is too big for a list of sites", description: `Up to ${MAX_FILE_BYTES / 1024 / 1024} MB.`, variant: "destructive" })
       return

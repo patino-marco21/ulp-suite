@@ -274,7 +274,11 @@ export interface SiteCountsReply {
  * Body: { domains: string[], imported_after?: string, imported_before?: string }; the window is the one of every other lookup (lib/imported-range.ts).
  * Answer: { success, queried, found, subdomains_counted, results: { [as pasted]: SiteCount }, imported_after?, imported_before? }.
  */
-export async function answerSiteCounts(body: { domains?: unknown; imported_after?: unknown; imported_before?: unknown }): Promise<SiteCountsReply> {
+export async function answerSiteCounts(rawBody: unknown): Promise<SiteCountsReply> {
+  // Valid JSON is not always an object (`null`, a list, a string): that is a request with no site, not a crash.
+  const body = (rawBody !== null && typeof rawBody === 'object' && !Array.isArray(rawBody) ? rawBody : {}) as {
+    domains?: unknown; imported_after?: unknown; imported_before?: unknown
+  }
   const parsedRange = parseImportedRange({ imported_after: body.imported_after, imported_before: body.imported_before })
   if (!parsedRange.ok) return { status: 400, json: { success: false, error: parsedRange.error } }
 

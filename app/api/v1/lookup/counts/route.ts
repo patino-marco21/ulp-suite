@@ -36,7 +36,7 @@ export async function POST(request: NextRequest) {
 
   await logApiRequest(authResult.apiKey!, request, "v1/lookup/counts")
 
-  let body: { domains?: unknown; imported_after?: unknown; imported_before?: unknown }
+  let body: unknown
   try {
     body = await request.json()
   } catch {
