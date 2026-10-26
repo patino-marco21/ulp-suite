@@ -1,7 +1,7 @@
 # Site counts: how many rows a list of sites has — Design
 
 Date: 2026-10-26
-Status: **implemented and verified (unit, live parity, rehearsal); rollout recorded at the end.**
+Status: **implemented, verified (4,347 tests, live parity, rehearsal 90 of 90) and deployed locally on 2026-10-26** (main `fc62653`; image `ulp-suite-app:latest` = `37e4fbe4430f`, built by `git archive e3bab14`; the image that ran before, `4145c664f865`, is tagged `ulp-suite-app:rollback-20261026-1705z`). Rollout at the end.
 
 ## Why
 
@@ -81,3 +81,7 @@ All reversals happen in SQL, never in JavaScript: ClickHouse's `reverse` is byte
 - E-mail-domain hits (the staff accounts of the site, `@corp.tld`): the monitors have that mode (`proj_email_domain_rev`); not asked for here.
 - Subdomains stored with a port or a path (`app.corp.tld:8443`) are not under any reversed prefix. The same fragments on a host are 0.05% of rows.
 - A list is counted sequentially (about 22 ms a site; 2,000 ordinary sites take about 45 s).
+
+## Rollout (2026-10-26, local only)
+
+Checked first: no import job running, `inbox/processing` empty, ClickHouse idle (0 queries, 0 merges). The running image was tagged `ulp-suite-app:rollback-20261026-1705z` before anything was built (containerd drops an image when its tag moves). The candidate `37e4fbe4430f` (`git archive e3bab14`, tag `counts-candidate`) was rehearsed 90 of 90 on a fresh install and looked at in the browser pane (800 px and 1440 px). `ulp-suite-app:latest` was moved to it and `docker compose up -d --no-deps --no-build app` was run from the primary checkout (from a worktree it would blank `.env`). The app was healthy after the restart with 0 restarts and no error in its log, said "DDL v29 already applied" (no schema work), mounts `uploads`, `data`, `inbox` under the primary checkout and the archive directory, has `JWT_SECRET`, and its server bundle holds the counting SQL (the prune condition and the projection setting) and no `indexHint` in it. Without credentials: `POST /api/v1/lookup/counts` and `POST /api/lookup/counts` answer 401, `GET /counts` redirects to the sign-in page, and the lookups answer as before. The deployed routes could not be called with a key (none was available to the session); what ran was the same code in process against the real table (the live test) and the same image on the rehearsal stack. Rollback: `docker tag ulp-suite-app:rollback-20261026-1705z ulp-suite-app:latest`, then the same `compose up` from the primary checkout; nothing else changed (no DDL, no setting, ClickHouse untouched).
