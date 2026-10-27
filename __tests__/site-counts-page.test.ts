@@ -52,3 +52,10 @@ describe('Site Counts page', () => {
     expect(page).toContain('useAuth(true)')
   })
 })
+
+describe('Site Counts page — how its rows relate to the Credentials page', () => {
+  test('says that Declutter and Unique are not applied here, so a search on the Credentials page can show fewer rows', () => {
+    expect(page).toContain('Declutter and Unique are not applied')
+    expect(page).toContain('.php pages')
+  })
+})

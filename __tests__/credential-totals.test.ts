@@ -1,5 +1,7 @@
 import { describe, test, expect } from 'vitest'
 import {
+  matchingHint,
+  matchingLabel,
   parseTotals,
   recordsLabel,
   resultsLabel,
@@ -85,5 +87,50 @@ describe('labels', () => {
     expect(resultsLabel({ total: 42 })).toBe(`${(42).toLocaleString()} results`)
     expect(resultsLabel(null)).toBe('')
     expect(resultsLabel(undefined)).toBe('')
+  })
+})
+
+describe('matchingLabel and matchingHint — what the dim "of N" in the header counts', () => {
+  const n = (x: number) => x.toLocaleString()
+  const hidden: TotalsFields = { total: 3036, raw_total: 5025 }
+
+  test('with a search or filter it says "matching", with none it says "total imported"', () => {
+    expect(matchingLabel(hidden, true)).toBe(`of ${n(5025)} matching`)
+    expect(matchingLabel(hidden, false)).toBe(`of ${n(5025)} total imported`)
+  })
+
+  test('nothing is said while counting, after a failed count, or when no row is hidden', () => {
+    expect(matchingLabel(withPendingTotals(hidden), true)).toBeNull()
+    expect(matchingLabel({ ...hidden, totalFailed: true }, true)).toBeNull()
+    expect(matchingLabel({ total: 5025, raw_total: 5025 }, true)).toBeNull()
+    expect(matchingLabel({ total: 5025, raw_total: null }, true)).toBeNull()
+    expect(matchingLabel({ total: 5025 }, true)).toBeNull()
+  })
+
+  test('the tooltip says how many rows match, how many the view shows and what hides the rest', () => {
+    expect(matchingHint(hidden, { declutter: true, unique: true }, true)).toBe(
+      `${n(5025)} rows match this search; this view shows ${n(3036)}. ` +
+      'Declutter hides .php pages, IP-address hosts, URLs with a :port and mangled hosts; ' +
+      'Unique shows one row per credential (counted approximately). Turn them off to see every row.',
+    )
+  })
+
+  test('with no search the rows are the imported ones, not matches', () => {
+    expect(matchingHint(hidden, { declutter: true, unique: true }, false)).toContain(`${n(5025)} rows are imported; this view shows ${n(3036)}.`)
+  })
+
+  test('only the chips that are on are named', () => {
+    const declutterOnly = matchingHint(hidden, { declutter: true, unique: false }, true)!
+    expect(declutterOnly).toContain('Declutter hides')
+    expect(declutterOnly).not.toContain('Unique')
+    expect(declutterOnly).toContain('Turn it off to see every row.')
+    const uniqueOnly = matchingHint(hidden, { declutter: false, unique: true }, true)!
+    expect(uniqueOnly).toContain('Unique shows one row per credential')
+    expect(uniqueOnly).not.toContain('Declutter')
+  })
+
+  test('there is no tooltip when there is nothing to explain', () => {
+    expect(matchingHint({ total: 5025, raw_total: 5025 }, { declutter: true, unique: true }, true)).toBeUndefined()
+    expect(matchingHint(withPendingTotals(hidden), { declutter: true, unique: true }, true)).toBeUndefined()
   })
 })

@@ -48,6 +48,18 @@ describe('Credentials page — rows and totals are fetched separately on a first
     expect(source).toContain('{resultsLabel(data)}')
   })
 
+  test('the dim "of N" after the records says what it counts, and its tooltip names the chips that hide the rest', () => {
+    expect(source).toContain('matchingLabel(data, hasFilters)')
+    expect(source).toContain('matchingHint(data, { declutter: excludeNoise, unique: dedupe }, hasFilters)')
+    // the old wording read as "everything imported for this site"
+    expect(source).not.toContain('total imported</span>')
+  })
+
+  test('the Declutter chip says it hides every URL ending in .php, not only login pages', () => {
+    expect(source).toContain('URLs ending in .php')
+    expect(source).not.toContain('.php login pages')
+  })
+
   test('an empty page with a pending count says it is counting rather than "No credentials found"', () => {
     expect(source).toMatch(/data\?\.totalPending\s*\?\s*<span[^>]*>No rows yet — counting matches…<\/span>/)
   })

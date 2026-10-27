@@ -338,7 +338,7 @@ Three layers, from non-destructive view filters to permanent ingest-time drops.
 
 In the Credentials Browser:
 
-- **Declutter** — hides low-signal rows (IP-host / `:port` / `.php` / `localhost` URLs). Backed by a precomputed `is_noise` column, so it's a cheap filter, not a per-row scan.
+- **Declutter** — hides low-signal rows (IP-host / `:port` / `.php` / `localhost` URLs, and rows the parser mangled). Backed by a precomputed `is_noise` column, so it's a cheap filter, not a per-row scan. It hides every URL ending in `.php`, a site's own `index.php` and `login.php` included, so a search for a site that runs on PHP can lose a large share of its rows (the header's "of N matching" counts the rows the search matched before Declutter and Unique; hover it for how many the chips hide). The Site counts page applies neither chip.
 - **Unique** — collapses `(url, email, password)` duplicates to one row each (`LIMIT 1 BY`), ignoring URL scheme and a trailing slash — `http://`, `https://`, and no-scheme captures of the same host+path count as the same row; email/password stay exact.
 
 Both are view-only — storage is untouched; toggle off to see everything.

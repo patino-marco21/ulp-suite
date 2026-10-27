@@ -343,6 +343,7 @@ export default function SiteCountsPage() {
           )}
           <p className="text-[10px] text-muted-foreground">
             A site is its host and every subdomain. A path in an entry is ignored. A count is rows, so a login seen in two files counts twice.
+            Declutter and Unique are not applied, so a search on the Credentials page can show fewer rows (Declutter hides .php pages, IP hosts and ports).
           </p>
         </div>
 

@@ -26,7 +26,7 @@ import {
   DEFAULT_CREDENTIAL_SORT,
 } from "@/lib/credential-browse-defaults"
 import type { SortKey } from "@/lib/cursor-pagination"
-import { parseTotals, recordsLabel, resultsLabel, totalsParams, withPendingTotals, withTotals } from "@/lib/credential-totals"
+import { matchingHint, matchingLabel, parseTotals, recordsLabel, resultsLabel, totalsParams, withPendingTotals, withTotals } from "@/lib/credential-totals"
 import {
   epochSecondsToIso, utcIsoToDisplay,
   searchFingerprint, readMark, writeMark, markStorageKey, sinceLastExportWindow, markAfterExport, type ExportMark,
@@ -1066,11 +1066,20 @@ export default function CredentialsPage() {
               <>
                 <p className="text-sm text-muted-foreground">
                   {recordsLabel(data)}
-                  {!data.totalPending && !data.totalFailed && data.raw_total != null && data.raw_total !== data.total && (
-                    <span className="opacity-50">
-                      {' '}of {data.raw_total.toLocaleString()} total imported
-                    </span>
-                  )}
+                  {(() => {
+                    // The larger number is every row the search matched before Declutter and Unique, not the rows of one site: its tooltip says
+                    // how many rows the chips hide (lib/credential-totals.ts).
+                    const matching = matchingLabel(data, hasFilters)
+                    if (matching === null) return null
+                    return (
+                      <span
+                        className="opacity-50 cursor-help underline decoration-dotted underline-offset-2"
+                        title={matchingHint(data, { declutter: excludeNoise, unique: dedupe }, hasFilters)}
+                      >
+                        {' '}{matching}
+                      </span>
+                    )
+                  })()}
                   {(() => {
                     // total_ms is wall clock (request → parsed response) — what you
                     // actually waited. query_ms is ClickHouse-only time and is shown
@@ -1370,7 +1379,7 @@ export default function CredentialsPage() {
           {/* Declutter — hide IP-host / :port / .php / localhost noise (non-destructive) */}
           <button
             onClick={() => { const v = !excludeNoise; setExcludeNoise(v); resetCursor(); load(null, { excludeNoise: v }) }}
-            title="Hide low-signal rows: IP-address hosts, URLs with a :port, .php login pages, and localhost. Non-destructive — toggle off to show every row."
+            title="Hide low-signal rows: IP-address hosts, URLs with a :port, URLs ending in .php (a site's own index.php and login.php too), localhost and mangled hosts. Non-destructive — toggle off to show every row."
             className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${excludeNoise ? 'border-primary/30 bg-primary/10 text-primary font-medium' : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted'}`}
           >
             <Sparkles className="h-3 w-3" />

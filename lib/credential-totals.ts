@@ -68,3 +68,34 @@ export function resultsLabel(page: TotalsFields | null | undefined): string {
   if (page.totalFailed) return '—'
   return `${page.total.toLocaleString()} results`
 }
+
+/** The two chips that narrow the view of a search without changing which rows match it. */
+export interface ViewChips {
+  declutter: boolean
+  unique: boolean
+}
+
+/**
+ * The dim text after the records label: what the larger number counts. It is every row the search matched, BEFORE Declutter and Unique, which is not
+ * "the rows of one site" (Site Counts counts those): a search for a domain also matches hosts that merely contain the text and the e-mail addresses on it.
+ * `filtered` is whether a search or filter is in force; with none the larger number is simply everything imported.
+ * null while counting, after a failed count, and when the view hides nothing.
+ */
+export function matchingLabel(page: TotalsFields, filtered: boolean): string | null {
+  if (page.totalPending || page.totalFailed) return null
+  if (page.raw_total == null || page.raw_total === page.total) return null
+  return `of ${page.raw_total.toLocaleString()} ${filtered ? 'matching' : 'total imported'}`
+}
+
+/** The tooltip of that text: how many rows match, how many the view shows, and which of the chips that are on hide the rest. */
+export function matchingHint(page: TotalsFields, view: ViewChips, filtered: boolean): string | undefined {
+  if (matchingLabel(page, filtered) === null) return undefined
+  const raw = (page.raw_total as number).toLocaleString()
+  const hiding: string[] = []
+  if (view.declutter) hiding.push('Declutter hides .php pages, IP-address hosts, URLs with a :port and mangled hosts')
+  // Unique's count is a HyperLogLog estimate on a filtered search (lib/ulp-dedupe.ts), so it is not promised to the row.
+  if (view.unique) hiding.push('Unique shows one row per credential (counted approximately)')
+  const head = `${raw} rows ${filtered ? 'match this search' : 'are imported'}; this view shows ${page.total.toLocaleString()}.`
+  if (hiding.length === 0) return head
+  return `${head} ${hiding.join('; ')}. Turn ${hiding.length === 2 ? 'them' : 'it'} off to see every row.`
+}
