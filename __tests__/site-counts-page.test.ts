@@ -30,6 +30,19 @@ describe('Site Counts page', () => {
     expect(page).toContain('onDrop')
   })
 
+  test('sorts by a column when its header is clicked, and exports in the order it shows', () => {
+    expect(page).toContain('nextSiteSort(')
+    expect(page).toContain('orderSiteRows(rows, sort)')
+    expect(page).toContain('siteCountsCsv(ordered)')
+    for (const key of ['count', 'host_count', 'subdomain_count', 'subdomains']) expect(page).toContain(`sortKey="${key}"`)
+  })
+
+  test('every sortable column is on screen from the xl breakpoint, so each can be clicked at a laptop width', () => {
+    expect(page).toMatch(/host: "hidden xl:block/)
+    expect(page).toMatch(/subs: "hidden xl:block/)
+    expect(page).toMatch(/distinct: "hidden xl:block/)
+  })
+
   test('says when only hosts could be counted, and never shows a failed count as a zero', () => {
     expect(page).toContain('subdomains_counted === false')
     expect(page).toContain('fmt = (n: number | null) => (n === null ? "—"')

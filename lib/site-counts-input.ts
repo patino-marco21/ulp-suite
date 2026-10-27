@@ -83,6 +83,41 @@ export function splitRequests<T>(items: T[], size: number): T[][] {
   return runs
 }
 
+/** The numbers of a site's row a person can sort by: the number columns of the Site Counts table. */
+export type SiteSortKey = 'count' | 'host_count' | 'subdomain_count' | 'subdomains'
+
+export interface SiteSort {
+  key: SiteSortKey
+  direction: 'desc' | 'asc'
+}
+
+/**
+ * The sort after a click on a column header: the first click sorts that column biggest first (these are counts), a second one reverses it and a third
+ * goes back to the default order (null); a click on another column starts that one over. The Credentials table cycles its headers the same way.
+ */
+export function nextSiteSort(current: SiteSort | null, key: SiteSortKey): SiteSort | null {
+  if (current === null || current.key !== key) return { key, direction: 'desc' }
+  return current.direction === 'desc' ? { key, direction: 'asc' } : null
+}
+
+/**
+ * The rows in the order the table shows them. With no sort: what needs attention first (not counted), then the most rows, then the sites with none.
+ * With one: by that number, biggest or smallest first. A site with no number for the column (not counted, or only its host counted) goes last whichever
+ * way, never as a zero; sites that tie keep the default order, so equal numbers still list the biggest sites first. The list given is not changed.
+ */
+export function orderSiteRows<T extends { result: SiteCount }>(rows: T[], sort: SiteSort | null): T[] {
+  const rank = (r: SiteCount) => (r.error ? 0 : r.count && r.count > 0 ? 1 : 2)
+  const byDefault = (a: T, b: T) => rank(a.result) - rank(b.result) || (b.result.count ?? 0) - (a.result.count ?? 0)
+  if (sort === null) return [...rows].sort(byDefault)
+  const sign = sort.direction === 'desc' ? -1 : 1
+  return [...rows].sort((a, b) => {
+    const x = a.result[sort.key]
+    const y = b.result[sort.key]
+    if (x === null || y === null) return x === y ? byDefault(a, b) : x === null ? 1 : -1
+    return sign * (x - y) || byDefault(a, b)
+  })
+}
+
 const CSV_HEADER = 'site,counted_as,rows,on_host,on_subdomains,subdomains,top_subdomains,note'
 
 /** A number as a cell: empty when it was not counted, so a blank is never read as a zero. */

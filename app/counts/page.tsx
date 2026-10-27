@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic"
 
 import { useRef, useState } from "react"
 import {
-  BarChart3, Loader2, X, Download, Upload, ChevronDown, ChevronUp, AlertTriangle, Square,
+  BarChart3, Loader2, X, Download, Upload, ChevronDown, ChevronUp, ArrowUpDown, AlertTriangle, Square,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -15,7 +15,8 @@ import { localToUtcIso } from "@/lib/imported-window"
 import { ImportedWindowFilter, EMPTY_IMPORTED_WINDOW, type ImportedWindowValue } from "@/components/imported-window-filter"
 import { parseBatchText } from "@/lib/batch-input"
 import {
-  SITE_COUNTS_MAX_PER_LIST, SITE_COUNTS_REQUEST_SIZE, siteCountsCsv, splitRequests, type SiteCount,
+  SITE_COUNTS_MAX_PER_LIST, SITE_COUNTS_REQUEST_SIZE, nextSiteSort, orderSiteRows, siteCountsCsv, splitRequests,
+  type SiteCount, type SiteSort, type SiteSortKey,
 } from "@/lib/site-counts-input"
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -37,21 +38,48 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024
 
 const fmt = (n: number | null) => (n === null ? "—" : n.toLocaleString())
 
-/** Needs attention first (not counted), then the most rows, then the sites with none. */
-function displayOrder(rows: CountRow[]): CountRow[] {
-  const rank = (r: SiteCount) => (r.error ? 0 : r.count && r.count > 0 ? 1 : 2)
-  return [...rows].sort((a, b) => rank(a.result) - rank(b.result) || (b.result.count ?? 0) - (a.result.count ?? 0))
-}
-
 // ── One site ──────────────────────────────────────────────────────────────────
 
-/** The columns after the site name. The breakdown columns need a wide window; below it the same numbers are in the row's detail. */
+/**
+ * The columns after the site name. The breakdown columns need a wide window (xl); below it the same numbers are in the row's detail. The headers of the
+ * number columns are sort buttons, and their widths leave room for the arrow in front of the label.
+ */
 const COLS = {
   rows: "w-20 text-right shrink-0",
-  host: "hidden xl:block w-20 text-right shrink-0",
-  subs: "hidden xl:block w-24 text-right shrink-0",
-  distinct: "hidden 2xl:block w-20 text-right shrink-0",
+  host: "hidden xl:block w-24 text-right shrink-0",
+  subs: "hidden xl:block w-28 text-right shrink-0",
+  distinct: "hidden xl:block w-24 text-right shrink-0",
   chevron: "w-3.5 shrink-0",
+}
+
+/** The header of a number column, as a button: its arrow says whether the table is sorted by the column and which way (the Credentials headers look the same). */
+function SortHeader({ label, sortKey, sort, onSort, className }: {
+  label: string
+  sortKey: SiteSortKey
+  sort: SiteSort | null
+  onSort: (key: SiteSortKey) => void
+  className: string
+}) {
+  const current = sort !== null && sort.key === sortKey ? sort : null
+  const Arrow = current === null ? ArrowUpDown : current.direction === "desc" ? ChevronDown : ChevronUp
+  const state = current === null ? "" : current.direction === "desc" ? ", sorted biggest first" : ", sorted smallest first"
+  const hint = current === null ? `Sort by ${label.toLowerCase()}`
+    : current.direction === "desc" ? "Biggest first. Click for smallest first"
+    : "Smallest first. Click to go back to the default order"
+  return (
+    <button
+      type="button"
+      onClick={() => onSort(sortKey)}
+      className={`${className} group/th cursor-pointer select-none uppercase transition-colors hover:text-foreground ${current ? "text-foreground" : ""}`}
+      aria-label={`${label}${state}`}
+      title={hint}
+    >
+      <span className="inline-flex items-center">
+        <Arrow className={`mr-1 h-3 w-3 shrink-0 ${current ? "text-primary" : "opacity-20 transition-opacity group-hover/th:opacity-60"}`} />
+        {label}
+      </span>
+    </button>
+  )
 }
 
 function SiteRow({ row }: { row: CountRow }) {
@@ -135,6 +163,8 @@ export default function SiteCountsPage() {
   const [subdomainsCounted, setSubdomainsCounted] = useState(true)
   const [stopped, setStopped] = useState(false)
   const [importedWindow, setImportedWindow] = useState<ImportedWindowValue>(EMPTY_IMPORTED_WINDOW)
+  // The column the table is sorted by (null: the default order). It is a way of looking at the rows, so counting again keeps it.
+  const [sort, setSort] = useState<SiteSort | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef<AbortController | null>(null)
 
@@ -142,6 +172,9 @@ export default function SiteCountsPage() {
   const overLimit = sites.length > SITE_COUNTS_MAX_PER_LIST
   const importedAfterIso = localToUtcIso(importedWindow.after)
   const importedBeforeIso = localToUtcIso(importedWindow.before)
+  // The rows as the table shows them, which is also the order of the CSV.
+  const ordered = orderSiteRows(rows, sort)
+  const onSort = (key: SiteSortKey) => setSort(current => nextSiteSort(current, key))
 
   async function readFile(file: File) {
     if (running) return
@@ -207,7 +240,7 @@ export default function SiteCountsPage() {
   }
 
   function downloadCSV() {
-    const blob = new Blob([siteCountsCsv(displayOrder(rows))], { type: "text/csv" })
+    const blob = new Blob([siteCountsCsv(ordered)], { type: "text/csv" })
     const url = URL.createObjectURL(blob)
     const a = document.createElement("a")
     a.href = url
@@ -366,16 +399,16 @@ export default function SiteCountsPage() {
               {rows.length > 0 && (
                 <div className="flex items-center gap-3 px-4 text-[10px] uppercase tracking-wider text-muted-foreground">
                   <span className="min-w-0 flex-1">Site</span>
-                  <span className={COLS.rows}>Rows</span>
-                  <span className={COLS.host}>On the site</span>
-                  <span className={COLS.subs}>On subdomains</span>
-                  <span className={COLS.distinct}>Subdomains</span>
+                  <SortHeader label="Rows" sortKey="count" sort={sort} onSort={onSort} className={COLS.rows} />
+                  <SortHeader label="On the site" sortKey="host_count" sort={sort} onSort={onSort} className={COLS.host} />
+                  <SortHeader label="On subdomains" sortKey="subdomain_count" sort={sort} onSort={onSort} className={COLS.subs} />
+                  <SortHeader label="Subdomains" sortKey="subdomains" sort={sort} onSort={onSort} className={COLS.distinct} />
                   <span className={COLS.chevron} />
                 </div>
               )}
 
               <div className="flex flex-col gap-2">
-                {displayOrder(rows).map(row => <SiteRow key={row.site} row={row} />)}
+                {ordered.map(row => <SiteRow key={row.site} row={row} />)}
               </div>
             </div>
           )}

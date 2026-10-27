@@ -3,6 +3,8 @@ import {
   SITE_COUNTS_MAX_PER_LIST,
   SITE_COUNTS_MAX_PER_REQUEST,
   SITE_COUNTS_REQUEST_SIZE,
+  nextSiteSort,
+  orderSiteRows,
   planSites,
   siteCountsCsv,
   siteEntry,
@@ -78,6 +80,97 @@ describe('splitRequests', () => {
 
   test('a size below one is one entry per request, not an endless loop', () => {
     expect(splitRequests([1, 2], 0)).toEqual([[1], [2]])
+  })
+})
+
+describe('orderSiteRows and nextSiteSort — the table sorted by a clicked column', () => {
+  const counted = (host: string, count: number, hostCount: number, subdomainCount: number, subdomains: number): SiteCount => ({
+    host, found: count > 0, count, host_count: hostCount, subdomain_count: subdomainCount, subdomains, top_subdomains: [],
+  })
+  const notCounted = (host: string): SiteCount => ({
+    host, found: false, count: null, host_count: null, subdomain_count: null, subdomains: null, top_subdomains: [], error: 'not a site address',
+  })
+  // Only the host could be counted (the reversed-domain key was missing): the subdomain numbers are null, the rest is real.
+  const hostOnly = (host: string, count: number): SiteCount => ({
+    host, found: count > 0, count, host_count: count, subdomain_count: null, subdomains: null, top_subdomains: [],
+  })
+  const row = (site: string, result: SiteCount) => ({ site, result })
+  const names = (rows: Array<{ site: string }>) => rows.map(r => r.site)
+
+  // In the order they were pasted. rows / on the site / on subdomains / how many subdomains:
+  const pasted = [
+    row('small', counted('small.tld', 10, 10, 0, 0)),
+    row('quiet', counted('quiet.tld', 0, 0, 0, 0)),
+    row('broken', notCounted('broken.tld')),
+    row('spread', counted('spread.tld', 50, 5, 45, 9)),
+    row('huge', counted('huge.tld', 100, 100, 0, 0)),
+    row('deep', counted('deep.tld', 70, 20, 50, 2)),
+  ]
+
+  test('with no sort chosen: what needs attention first, then the most rows, then the sites with none', () => {
+    expect(names(orderSiteRows(pasted, null))).toEqual(['broken', 'huge', 'deep', 'spread', 'small', 'quiet'])
+  })
+
+  test('a column sorts biggest first, and smallest first the other way', () => {
+    expect(names(orderSiteRows(pasted, { key: 'count', direction: 'desc' }))).toEqual(['huge', 'deep', 'spread', 'small', 'quiet', 'broken'])
+    expect(names(orderSiteRows(pasted, { key: 'count', direction: 'asc' }))).toEqual(['quiet', 'small', 'spread', 'deep', 'huge', 'broken'])
+    expect(names(orderSiteRows(pasted, { key: 'host_count', direction: 'desc' }))).toEqual(['huge', 'deep', 'small', 'spread', 'quiet', 'broken'])
+    expect(names(orderSiteRows(pasted, { key: 'host_count', direction: 'asc' }))).toEqual(['quiet', 'spread', 'small', 'deep', 'huge', 'broken'])
+    expect(names(orderSiteRows(pasted, { key: 'subdomains', direction: 'desc' }))).toEqual(['spread', 'deep', 'huge', 'small', 'quiet', 'broken'])
+  })
+
+  test('sites that tie keep the default order (the most rows first), whichever way the column goes', () => {
+    // huge, small and quiet all have 0 rows on subdomains
+    expect(names(orderSiteRows(pasted, { key: 'subdomain_count', direction: 'desc' }))).toEqual(['deep', 'spread', 'huge', 'small', 'quiet', 'broken'])
+    expect(names(orderSiteRows(pasted, { key: 'subdomain_count', direction: 'asc' }))).toEqual(['huge', 'small', 'quiet', 'spread', 'deep', 'broken'])
+  })
+
+  test('a site with no number for the column goes last both ways, and is never taken for a zero', () => {
+    const withHostOnly = [...pasted, row('hosty', hostOnly('hosty.tld', 30))]
+    // not counted at all, then host-only (both have no subdomain number), after every real number
+    expect(names(orderSiteRows(withHostOnly, { key: 'subdomain_count', direction: 'desc' })))
+      .toEqual(['deep', 'spread', 'huge', 'small', 'quiet', 'broken', 'hosty'])
+    expect(names(orderSiteRows(withHostOnly, { key: 'subdomain_count', direction: 'asc' })))
+      .toEqual(['huge', 'small', 'quiet', 'spread', 'deep', 'broken', 'hosty'])
+    // the host-only site does have rows and an on-the-site number, so there it sorts like any other
+    expect(names(orderSiteRows(withHostOnly, { key: 'count', direction: 'desc' })))
+      .toEqual(['huge', 'deep', 'spread', 'hosty', 'small', 'quiet', 'broken'])
+    expect(names(orderSiteRows(withHostOnly, { key: 'host_count', direction: 'asc' })))
+      .toEqual(['quiet', 'spread', 'small', 'deep', 'hosty', 'huge', 'broken'])
+  })
+
+  test('returns a new list and leaves the one it was given as it was', () => {
+    const before = names(pasted)
+    const sorted = orderSiteRows(pasted, { key: 'count', direction: 'desc' })
+    expect(sorted).not.toBe(pasted)
+    expect(names(pasted)).toEqual(before)
+    expect(orderSiteRows(pasted, null)).not.toBe(pasted)
+  })
+
+  test('the same rows come back, none lost or doubled', () => {
+    for (const key of ['count', 'host_count', 'subdomain_count', 'subdomains'] as const) {
+      for (const direction of ['desc', 'asc'] as const) {
+        expect(names(orderSiteRows(pasted, { key, direction })).sort()).toEqual(names(pasted).sort())
+      }
+    }
+  })
+
+  test('an empty list stays empty', () => {
+    expect(orderSiteRows([], { key: 'count', direction: 'desc' })).toEqual([])
+    expect(orderSiteRows([], null)).toEqual([])
+  })
+
+  test('a first click sorts biggest first, a second reverses it, a third goes back to the default order', () => {
+    const first = nextSiteSort(null, 'host_count')
+    expect(first).toEqual({ key: 'host_count', direction: 'desc' })
+    const second = nextSiteSort(first, 'host_count')
+    expect(second).toEqual({ key: 'host_count', direction: 'asc' })
+    expect(nextSiteSort(second, 'host_count')).toBeNull()
+  })
+
+  test('a click on another column starts that column over, biggest first', () => {
+    expect(nextSiteSort({ key: 'count', direction: 'asc' }, 'subdomains')).toEqual({ key: 'subdomains', direction: 'desc' })
+    expect(nextSiteSort({ key: 'count', direction: 'desc' }, 'subdomain_count')).toEqual({ key: 'subdomain_count', direction: 'desc' })
   })
 })
 
