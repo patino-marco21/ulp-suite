@@ -56,11 +56,15 @@ describe('Credentials page — rows and totals are fetched separately on a first
     expect(source).not.toContain('total imported</span>')
   })
 
-  test('every request records the view it asked for, and a cleared search is the browse view', () => {
-    expect(source).toContain('setApplied(appliedViewOf(params))')
+  test('the rows and the view they were asked for arrive together, so the header never wears the next search\'s wording over the last one\'s numbers', () => {
+    expect(load).toContain('const view = appliedViewOf(params)')
+    // applied with the rows (the page, and a timed-out answer), never when the request starts
+    expect((source.match(/setApplied\(view\)/g) ?? []).length).toBeGreaterThanOrEqual(2)
+    expect(source).not.toContain('setApplied(appliedViewOf(params))')
     expect(source).toMatch(/const \[applied, setApplied\] = useState<AppliedView>\(BROWSE_VIEW\)/)
+    // and a cleared search is the browse view, once its rows are in
     const clearAll = source.slice(source.indexOf('const clearAll'), source.indexOf('const copy = '))
-    expect(clearAll).toContain('setApplied(BROWSE_VIEW)')
+    expect(clearAll).toMatch(/if \(json\.success\) \{ setData\([^\n]*; setApplied\(BROWSE_VIEW\)/)
   })
 
   test('Declutter follows the kind of search until the chip is clicked: null is automatic, a click fixes it, Clear gives it back', () => {
@@ -76,9 +80,10 @@ describe('Credentials page — rows and totals are fetched separately on a first
     expect(clearAll).toContain('exclude_noise=1&dedupe=1')
   })
 
-  test('the chip shows and toggles the view that was asked for, and a click on it is kept', () => {
-    expect(source).toContain('const v = !applied.declutter; setDeclutterChoice(v)')
-    expect(source).toContain("{applied.declutter ? 'Decluttered' : 'Declutter'}")
+  test('the chip follows a click at once and otherwise the view the rows on screen were asked for, and a click on it is kept', () => {
+    expect(source).toContain('const chipOn = declutterChoice ?? applied.declutter')
+    expect(source).toContain('const v = !chipOn; setDeclutterChoice(v)')
+    expect(source).toContain("{chipOn ? 'Decluttered' : 'Declutter'}")
   })
 
   test('an export asks for the Declutter state the typed search would get', () => {

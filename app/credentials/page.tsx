@@ -786,7 +786,7 @@ export default function CredentialsPage() {
     const t0 = performance.now()
     try {
       const params = buildParams(cursor, overrides)
-      setApplied(appliedViewOf(params))
+      const view = appliedViewOf(params)
       syncWindowToUrl(params)
       // First page: the rows and the whole-table totals are two requests, so the table renders as soon
       // as its rows are ready instead of waiting for a count that scans the table (11 s for a
@@ -810,6 +810,7 @@ export default function CredentialsPage() {
           if (splitTotals) return withPendingTotals({ ...json, total_ms })
           return json.total == null ? { ...json, total: prev?.total ?? 0, total_ms } : { ...json, total_ms }
         })
+        setApplied(view)
         setCurrentCursor(cursor)
         // The totals are applied only if this is still the current request; this runs after the rows above
         // were set, whichever of the two requests answered first.
@@ -820,6 +821,7 @@ export default function CredentialsPage() {
         // 408 timeout: show the structured timeout response in the results panel
         // instead of a toast — the user can see why and what to do.
         setData({ ...json, results: [], total_ms })
+        setApplied(view)
         setCurrentCursor(cursor)
       } else {
         toast({ title: 'Failed to load', variant: 'destructive' })
@@ -862,7 +864,6 @@ export default function CredentialsPage() {
     setEmailDomainFilter(''); setSourceFileFilter(''); setUrlHostFilter('')
     setRegexMode(false)
     setDeclutterChoice(null)
-    setApplied(BROWSE_VIEW)
     setDedupe(true)
     setSortKey(DEFAULT_CREDENTIAL_SORT); setLimit(DEFAULT_CREDENTIAL_LIMIT)
     // Fetch directly with shared defaults — all state setters above are async,
@@ -877,7 +878,7 @@ export default function CredentialsPage() {
     const t0 = performance.now()
     fetch(`/api/credentials?limit=${DEFAULT_CREDENTIAL_LIMIT}&sort=${DEFAULT_CREDENTIAL_SORT}&exclude_noise=1&dedupe=1`, { signal: controller.signal })
       .then(r => r.json())
-      .then(json => { if (json.success) { setData({ ...json, total_ms: Math.round(performance.now() - t0) }); setCurrentCursor(null) } })
+      .then(json => { if (json.success) { setData({ ...json, total_ms: Math.round(performance.now() - t0) }); setApplied(BROWSE_VIEW); setCurrentCursor(null) } })
       .catch((err) => {
         if (err instanceof DOMException && err.name === 'AbortError') return
         toast({ title: 'Failed to load', variant: 'destructive' })
@@ -926,6 +927,9 @@ export default function CredentialsPage() {
   const declutterNow = declutterChoice ?? declutterByDefault({
     q, scope, regex: regexMode, domain, urlHost: urlHostFilter, emailDomain: emailDomainFilter,
   })
+
+  // What the chip shows: a click at once, otherwise the view the rows on screen were asked for (so it does not move while a search is being typed).
+  const chipOn = declutterChoice ?? applied.declutter
 
   // "The same search" for the since-last-export memory: every field that narrows the rows, none of date, sort, format or page size.
   const markKey = markStorageKey(searchFingerprint({
@@ -1394,12 +1398,12 @@ export default function CredentialsPage() {
 
           {/* Declutter — hide IP-host / :port / .php / localhost noise (non-destructive) */}
           <button
-            onClick={() => { const v = !applied.declutter; setDeclutterChoice(v); resetCursor(); load(null, { excludeNoise: v }) }}
+            onClick={() => { const v = !chipOn; setDeclutterChoice(v); resetCursor(); load(null, { excludeNoise: v }) }}
             title="Hide low-signal rows: IP-address hosts, URLs with a :port, URLs ending in .php (a site's own index.php and login.php too), localhost and mangled hosts. Non-destructive — toggle off to show every row."
-            className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${applied.declutter ? 'border-primary/30 bg-primary/10 text-primary font-medium' : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted'}`}
+            className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${chipOn ? 'border-primary/30 bg-primary/10 text-primary font-medium' : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted'}`}
           >
             <Sparkles className="h-3 w-3" />
-            {applied.declutter ? 'Decluttered' : 'Declutter'}
+            {chipOn ? 'Decluttered' : 'Declutter'}
           </button>
 
           {/* Dedupe — collapse exact (url,email,password) duplicates (non-destructive) */}
