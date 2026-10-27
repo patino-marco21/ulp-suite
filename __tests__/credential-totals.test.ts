@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'vitest'
 import {
+  appliedViewOf,
   matchingHint,
   matchingLabel,
   parseTotals,
@@ -132,5 +133,33 @@ describe('matchingLabel and matchingHint — what the dim "of N" in the header c
   test('there is no tooltip when there is nothing to explain', () => {
     expect(matchingHint({ total: 5025, raw_total: 5025 }, { declutter: true, unique: true }, true)).toBeUndefined()
     expect(matchingHint(withPendingTotals(hidden), { declutter: true, unique: true }, true)).toBeUndefined()
+  })
+})
+
+describe('appliedViewOf — the view a request asked for, read from its own parameters', () => {
+  const p = (s: string) => new URLSearchParams(s)
+
+  test('the chips are the exclude_noise and dedupe parameters', () => {
+    expect(appliedViewOf(p('limit=200&sort=domain_asc&exclude_noise=1&dedupe=1'))).toMatchObject({ declutter: true, unique: true })
+    expect(appliedViewOf(p('limit=200&sort=domain_asc&dedupe=1'))).toMatchObject({ declutter: false, unique: true })
+    expect(appliedViewOf(p('limit=200&sort=domain_asc&exclude_noise=1'))).toMatchObject({ declutter: true, unique: false })
+    expect(appliedViewOf(p('limit=200&sort=domain_asc'))).toMatchObject({ declutter: false, unique: false })
+  })
+
+  test('with nothing but the sort, the page size, the page and the chips it is not a filtered view', () => {
+    expect(appliedViewOf(p('limit=200&sort=domain_asc&exclude_noise=1&dedupe=1')).filtered).toBe(false)
+    expect(appliedViewOf(p('limit=200&sort=imported_desc&cursor=abc&skip_totals=1&totals_only=1')).filtered).toBe(false)
+  })
+
+  test.each([
+    ['a search text', 'q=example.tld'],
+    ['a scope', 'scope=login'],
+    ['the Domain box', 'domain=example.tld'],
+    ['a window', 'imported_after=2026-10-01T00%3A00%3A00.000Z'],
+    ['a tier', 'tier_include=T1'],
+    ['a host filter', 'url_host=example.tld'],
+    ['a regex', 'regex=1'],
+  ])('%s makes it a filtered view', (_what, qs) => {
+    expect(appliedViewOf(p(`limit=200&sort=domain_asc&exclude_noise=1&dedupe=1&${qs}`)).filtered).toBe(true)
   })
 })

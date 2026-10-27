@@ -49,10 +49,40 @@ describe('Credentials page — rows and totals are fetched separately on a first
   })
 
   test('the dim "of N" after the records says what it counts, and its tooltip names the chips that hide the rest', () => {
-    expect(source).toContain('matchingLabel(data, hasFilters)')
-    expect(source).toContain('matchingHint(data, { declutter: excludeNoise, unique: dedupe }, hasFilters)')
+    // read from the view the request asked for, not from what is typed in the filter bar, so it cannot disagree with the rows on screen
+    expect(source).toContain('matchingLabel(data, applied.filtered)')
+    expect(source).toContain('matchingHint(data, applied, applied.filtered)')
     // the old wording read as "everything imported for this site"
     expect(source).not.toContain('total imported</span>')
+  })
+
+  test('every request records the view it asked for, and a cleared search is the browse view', () => {
+    expect(source).toContain('setApplied(appliedViewOf(params))')
+    expect(source).toMatch(/const \[applied, setApplied\] = useState<AppliedView>\(BROWSE_VIEW\)/)
+    const clearAll = source.slice(source.indexOf('const clearAll'), source.indexOf('const copy = '))
+    expect(clearAll).toContain('setApplied(BROWSE_VIEW)')
+  })
+
+  test('Declutter follows the kind of search until the chip is clicked: null is automatic, a click fixes it, Clear gives it back', () => {
+    expect(source).toMatch(/const \[declutterChoice, setDeclutterChoice\] = useState<boolean \| null>\(null\)/)
+    expect(source).not.toMatch(/const \[excludeNoise, setExcludeNoise\]/)
+    // the default is worked out from the values the request carries: a click on an e-mail or a domain in a row hands them over as overrides
+    const build = source.slice(source.indexOf('const buildParams'), source.indexOf('const loadAbortRef'))
+    expect(build).toContain('overrides?.excludeNoise ?? declutterChoice ?? declutterByDefault({')
+    expect(build).toMatch(/q: effectiveQ,[\s\S]*domain: effectiveDomain,[\s\S]*urlHost: urlHostFilter,[\s\S]*emailDomain: emailDomainFilter/)
+    const clearAll = source.slice(source.indexOf('const clearAll'), source.indexOf('const copy = '))
+    expect(clearAll).toContain('setDeclutterChoice(null)')
+    // the fetch of the cleared view asks for both chips, which is what an empty search gets
+    expect(clearAll).toContain('exclude_noise=1&dedupe=1')
+  })
+
+  test('the chip shows and toggles the view that was asked for, and a click on it is kept', () => {
+    expect(source).toContain('const v = !applied.declutter; setDeclutterChoice(v)')
+    expect(source).toContain("{applied.declutter ? 'Decluttered' : 'Declutter'}")
+  })
+
+  test('an export asks for the Declutter state the typed search would get', () => {
+    expect(source).toContain("exclude_noise: declutterNow ? '1' : ''")
   })
 
   test('the Declutter chip says it hides every URL ending in .php, not only login pages', () => {

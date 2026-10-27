@@ -99,3 +99,23 @@ export function matchingHint(page: TotalsFields, view: ViewChips, filtered: bool
   if (hiding.length === 0) return head
   return `${head} ${hiding.join('; ')}. Turn ${hiding.length === 2 ? 'them' : 'it'} off to see every row.`
 }
+
+/** The two chips of a request, and whether it carried any search or filter: the view the rows on screen were asked for. */
+export interface AppliedView extends ViewChips {
+  filtered: boolean
+}
+
+/** The view of an empty search, which is what the page opens on and what Clear returns to. */
+export const BROWSE_VIEW: AppliedView = { declutter: true, unique: true, filtered: false }
+
+/** What does not narrow a search: how it is sorted, paged and counted, and the two view chips. Every other parameter is a search or a filter. */
+const NOT_A_FILTER = new Set(['limit', 'sort', 'cursor', 'skip_totals', 'totals_only', 'exclude_noise', 'dedupe'])
+
+/** The view a request asked for, read from its own parameters, so the header can never disagree with the rows it came with. */
+export function appliedViewOf(params: URLSearchParams): AppliedView {
+  return {
+    declutter: params.get('exclude_noise') === '1',
+    unique: params.get('dedupe') === '1',
+    filtered: Array.from(params.keys()).some(key => !NOT_A_FILTER.has(key)),
+  }
+}

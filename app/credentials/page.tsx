@@ -26,7 +26,8 @@ import {
   DEFAULT_CREDENTIAL_SORT,
 } from "@/lib/credential-browse-defaults"
 import type { SortKey } from "@/lib/cursor-pagination"
-import { matchingHint, matchingLabel, parseTotals, recordsLabel, resultsLabel, totalsParams, withPendingTotals, withTotals } from "@/lib/credential-totals"
+import { appliedViewOf, BROWSE_VIEW, matchingHint, matchingLabel, parseTotals, recordsLabel, resultsLabel, totalsParams, withPendingTotals, withTotals, type AppliedView } from "@/lib/credential-totals"
+import { declutterByDefault } from "@/lib/declutter-default"
 import {
   epochSecondsToIso, utcIsoToDisplay,
   searchFingerprint, readMark, writeMark, markStorageKey, sinceLastExportWindow, markAfterExport, type ExportMark,
@@ -691,9 +692,13 @@ export default function CredentialsPage() {
   const [tierInclude, setTierInclude] = useState<string[]>([])
   const [tierExclude, setTierExclude] = useState<string[]>([])
   const [tierOpen, setTierOpen]       = useState(false)
-  // Declutter: hide low-signal rows (IP-host / :port / .php / localhost URLs).
-  // On by default — non-destructive, toggle off to reveal everything.
-  const [excludeNoise, setExcludeNoise] = useState(true)
+  // Declutter: hide low-signal rows (IP-host / :port / .php / localhost URLs). Non-destructive: toggle off to reveal everything.
+  // null = automatic (lib/declutter-default.ts): on for the bare browse and for broad searches, off for a lookup of one site, address or text,
+  // where it would hide real rows. A click on the chip sets it for good, until Clear.
+  const [declutterChoice, setDeclutterChoice] = useState<boolean | null>(null)
+  // The view the rows on screen were asked for (the chips and whether a search was in force), read from the request itself: the chip and the
+  // header's "of N matching" follow it, not what is typed in the filter bar.
+  const [applied, setApplied] = useState<AppliedView>(BROWSE_VIEW)
   // Dedupe: collapse exact (url,email,password) duplicates to one row each.
   // On by default — non-destructive view filter, toggle off to show every copy.
   const [dedupe, setDedupe] = useState(true)
@@ -726,7 +731,10 @@ export default function CredentialsPage() {
     const effectiveLimit = overrides?.limit  ?? limit
     const effectiveQ     = overrides?.q      ?? q
     const effectiveDomain = overrides?.domain ?? domain
-    const effectiveExcludeNoise = overrides?.excludeNoise ?? excludeNoise
+    // Worked out from the values this request carries: a click on an e-mail or a domain in a row hands them over as overrides, before the state renders.
+    const effectiveExcludeNoise = overrides?.excludeNoise ?? declutterChoice ?? declutterByDefault({
+      q: effectiveQ, scope, regex: regexMode, domain: effectiveDomain, urlHost: urlHostFilter, emailDomain: emailDomainFilter,
+    })
     const effectiveDedupe = overrides?.dedupe ?? dedupe
     const ps = new URLSearchParams({ limit: String(effectiveLimit), sort: effectiveSort })
     if (cursor) ps.set('cursor', cursor)
@@ -757,7 +765,7 @@ export default function CredentialsPage() {
     if (regexMode)          ps.set('regex', '1')
     return ps
   }, [
-    q, scope, domain, breach, loginType, pwMask, isCorporate, urlScheme, tierInclude, tierExclude, excludeNoise, dedupe,
+    q, scope, domain, breach, loginType, pwMask, isCorporate, urlScheme, tierInclude, tierExclude, declutterChoice, dedupe,
     importedAfter, importedBefore, pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode,
     sortKey, limit,
   ])
@@ -778,6 +786,7 @@ export default function CredentialsPage() {
     const t0 = performance.now()
     try {
       const params = buildParams(cursor, overrides)
+      setApplied(appliedViewOf(params))
       syncWindowToUrl(params)
       // First page: the rows and the whole-table totals are two requests, so the table renders as soon
       // as its rows are ready instead of waiting for a count that scans the table (11 s for a
@@ -852,7 +861,8 @@ export default function CredentialsPage() {
     setImportedWindow(EMPTY_IMPORTED_WINDOW); setPwLenMin(''); setPwLenMax('')
     setEmailDomainFilter(''); setSourceFileFilter(''); setUrlHostFilter('')
     setRegexMode(false)
-    setExcludeNoise(true)
+    setDeclutterChoice(null)
+    setApplied(BROWSE_VIEW)
     setDedupe(true)
     setSortKey(DEFAULT_CREDENTIAL_SORT); setLimit(DEFAULT_CREDENTIAL_LIMIT)
     // Fetch directly with shared defaults — all state setters above are async,
@@ -911,10 +921,16 @@ export default function CredentialsPage() {
     return <ArrowUpDown className="h-3.5 w-3.5 ml-0.5 shrink-0 opacity-20 group-hover/th:opacity-60 transition-opacity" />
   }
 
+  // The Declutter state a search typed now would get: the chip's own once clicked, otherwise the rule's (lib/declutter-default.ts). An export and the
+  // "same search" key below use it, because both read the filter bar, not the last request.
+  const declutterNow = declutterChoice ?? declutterByDefault({
+    q, scope, regex: regexMode, domain, urlHost: urlHostFilter, emailDomain: emailDomainFilter,
+  })
+
   // "The same search" for the since-last-export memory: every field that narrows the rows, none of date, sort, format or page size.
   const markKey = markStorageKey(searchFingerprint({
     q, scope: scope === 'all' ? '' : scope, domain, breach, loginType, pwMask, isCorporate, urlScheme, tierInclude, tierExclude, pwLenMin, pwLenMax,
-    emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode, excludeNoise, dedupe,
+    emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode, excludeNoise: declutterNow, dedupe,
   }))
   useEffect(() => { setExportMark(readMark(browserStorage(), markKey)) }, [markKey])
 
@@ -983,7 +999,7 @@ export default function CredentialsPage() {
           email_domain:  emailDomainFilter,
           source_file:   sourceFileFilter,
           regex_mode:    regexMode,
-          exclude_noise: excludeNoise ? '1' : '',
+          exclude_noise: declutterNow ? '1' : '',
           dedupe:        dedupe ? '1' : '',
         }),
       })
@@ -1040,7 +1056,7 @@ export default function CredentialsPage() {
     }
   }, [q, scope, domain, breach, tierInclude, tierExclude, loginType, pwMask, urlScheme, isCorporate, sortKey, exportFmt,
       importedAfter, importedBefore, exportMark, markKey,
-      pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode, excludeNoise, dedupe,
+      pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode, declutterNow, dedupe,
       toast])
 
   const tierBadgeClass = (t: string) =>
@@ -1069,12 +1085,12 @@ export default function CredentialsPage() {
                   {(() => {
                     // The larger number is every row the search matched before Declutter and Unique, not the rows of one site: its tooltip says
                     // how many rows the chips hide (lib/credential-totals.ts).
-                    const matching = matchingLabel(data, hasFilters)
+                    const matching = matchingLabel(data, applied.filtered)
                     if (matching === null) return null
                     return (
                       <span
                         className="opacity-50 cursor-help underline decoration-dotted underline-offset-2"
-                        title={matchingHint(data, { declutter: excludeNoise, unique: dedupe }, hasFilters)}
+                        title={matchingHint(data, applied, applied.filtered)}
                       >
                         {' '}{matching}
                       </span>
@@ -1378,12 +1394,12 @@ export default function CredentialsPage() {
 
           {/* Declutter — hide IP-host / :port / .php / localhost noise (non-destructive) */}
           <button
-            onClick={() => { const v = !excludeNoise; setExcludeNoise(v); resetCursor(); load(null, { excludeNoise: v }) }}
+            onClick={() => { const v = !applied.declutter; setDeclutterChoice(v); resetCursor(); load(null, { excludeNoise: v }) }}
             title="Hide low-signal rows: IP-address hosts, URLs with a :port, URLs ending in .php (a site's own index.php and login.php too), localhost and mangled hosts. Non-destructive — toggle off to show every row."
-            className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${excludeNoise ? 'border-primary/30 bg-primary/10 text-primary font-medium' : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted'}`}
+            className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${applied.declutter ? 'border-primary/30 bg-primary/10 text-primary font-medium' : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted'}`}
           >
             <Sparkles className="h-3 w-3" />
-            {excludeNoise ? 'Decluttered' : 'Declutter'}
+            {applied.declutter ? 'Decluttered' : 'Declutter'}
           </button>
 
           {/* Dedupe — collapse exact (url,email,password) duplicates (non-destructive) */}
