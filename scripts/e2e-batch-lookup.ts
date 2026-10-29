@@ -14,6 +14,8 @@
  * listed site), plus rows that must NOT count (a name that merely ends with the site's, a :port spelling) and rows imported years ago for the window:
  * the exact numbers, every pasted shape, both routes agreeing, 100 sites, EXPLAIN (the reversed-domain projection leaves a few granules), and last the
  * fallback: with the projection cleared the answer says only hosts were counted, and after MATERIALIZE it counts subdomains again.
+ * The site marks (docs/superpowers/specs/2026-10-29-site-marks-design.md) are checked on the same site: POST and PUT /api/lookup/marks with a session, one
+ * mark for every spelling of the site, the refusals, and that a mark and its note survive recreating only the app (its data volume is kept).
  *
  *   git archive <commit> | docker build -t ulp-suite-app:batch-candidate -
  *   npx tsx scripts/e2e-batch-lookup.ts            # about 4 minutes; --keep leaves the stack running (the session cookie goes to $COOKIE_FILE)
@@ -429,6 +431,53 @@ async function main(): Promise<number> {
     }
     const countsPage = await asSession('GET', '/counts')
     check('the Site Counts page is served', countsPage.status === 200 && /Sites or URLs \(one per line\)/.test(countsPage.text) && /Upload a list/.test(countsPage.text), `status ${countsPage.status}`)
+
+    console.log('8. Site marks: POST and PUT /api/lookup/marks (session), kept when only the app container is recreated')
+    const marks = {
+      read: (hosts: string[]) => asSession('POST', '/api/lookup/marks', { hosts }),
+      change: (body: unknown) => asSession('PUT', '/api/lookup/marks', body),
+    }
+    const anonRead = await call('POST', '/api/lookup/marks', { hosts: [COUNTS_SITE] })
+    const anonChange = await call('PUT', '/api/lookup/marks', { host: COUNTS_SITE, status: 'done' })
+    check('the marks route needs a session (401 without one, both verbs)', anonRead.status === 401 && anonChange.status === 401, `${anonRead.status} / ${anonChange.status}`)
+    const unmarked = await marks.read([COUNTS_SITE])
+    check('a site nobody marked has no mark', unmarked.status === 200 && unmarked.json?.success === true && Object.keys(unmarked.json.marks ?? {}).length === 0, JSON.stringify(unmarked.json).slice(0, 160))
+    const setTodo = await marks.change({ host: COUNTS_SITE, status: 'todo' })
+    check('PUT sets a status, and answers with what is stored and who set it',
+      setTodo.status === 200 && setTodo.json?.mark?.status === 'todo' && setTodo.json.mark.note === null && setTodo.json.mark.updated_by === secrets.REHEARSAL_ADMIN_EMAIL, JSON.stringify(setTodo.json).slice(0, 220))
+    // The page keeps a mark under the host the counts name, so the three spellings below must all be counted under one host and show the one mark.
+    const spellings = [COUNTS_SITE, `https://www.${COUNTS_SITE}/login`, `*.${COUNTS_SITE}`]
+    const spelled = await counts({ domains: spellings })
+    const spelledHosts = spellings.map(s => spelled.json?.results?.[s]?.host as string)
+    check('three spellings of the site are counted under one host', spelledHosts.every(h => h === COUNTS_SITE), JSON.stringify(spelledHosts))
+    const shared = await marks.read(spelledHosts)
+    check('and show the one mark', Object.keys(shared.json?.marks ?? {}).length === 1 && shared.json.marks[COUNTS_SITE]?.status === 'todo', JSON.stringify(shared.json).slice(0, 200))
+    const noted = await marks.change({ host: COUNTS_SITE, note: '  looked at the login page  ' })
+    check('a note is trimmed and the status stays', noted.json?.mark?.note === 'looked at the login page' && noted.json.mark.status === 'todo', JSON.stringify(noted.json).slice(0, 220))
+    const refusals = await Promise.all([
+      marks.change({ host: `https://www.${COUNTS_SITE}/login`, status: 'done' }), // a host as typed, not as the counts name it
+      marks.change({ host: COUNTS_SITE, status: 'finished' }),
+      marks.change({ host: COUNTS_SITE, note: 'x'.repeat(501) }),
+      marks.change({ host: COUNTS_SITE }),
+      marks.read([]),
+    ])
+    check('a host as typed, a status outside the list, a note over 500 characters, an empty change and an empty read are all refused (400)', refusals.every(r => r.status === 400), refusals.map(r => r.status).join(','))
+    const unchanged = await marks.read([COUNTS_SITE])
+    check('and none of them changed the mark', unchanged.json?.marks?.[COUNTS_SITE]?.status === 'todo' && unchanged.json.marks[COUNTS_SITE].note === 'looked at the login page', JSON.stringify(unchanged.json).slice(0, 220))
+
+    // The data volume outlives the container: recreate only the app (as scripts/e2e-disk-gate.ts does) and read the mark back.
+    compose(['up', '-d', '--no-deps', '--force-recreate', 'app'])
+    const appBack = await waitFor('the recreated app healthy', appHealthy, 300_000)
+    check('the app was recreated and came back healthy', !!appBack)
+    if (appBack) {
+      await login()
+      const afterRecreate = await marks.read([COUNTS_SITE])
+      const kept = afterRecreate.json?.marks?.[COUNTS_SITE]
+      check('after the recreate the status and the note are still there', kept?.status === 'todo' && kept.note === 'looked at the login page', JSON.stringify(afterRecreate.json).slice(0, 220))
+      const cleared = await marks.change({ host: COUNTS_SITE, status: null, note: null })
+      const gone = await marks.read([COUNTS_SITE])
+      check('clearing both removes the mark', cleared.status === 200 && cleared.json?.mark === null && Object.keys(gone.json?.marks ?? {}).length === 0, JSON.stringify(cleared.json).slice(0, 160))
+    }
 
     // Last, because it changes the table: without the reversed-domain projection on every part only hosts can be counted, and the answer says so.
     chQuery('ALTER TABLE ulp.credentials CLEAR PROJECTION proj_domain_rev SETTINGS mutations_sync = 2')
