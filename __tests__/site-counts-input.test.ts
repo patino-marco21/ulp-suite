@@ -222,3 +222,44 @@ describe('siteCountsCsv', () => {
     expect(csv.split('\n')[1].startsWith(`"'=HYPERLINK(""http://x.tld"")"`)).toBe(true)
   })
 })
+
+describe('orderSiteRows — the Mark column', () => {
+  const counted = (host: string, count: number): SiteCount => ({
+    host, found: count > 0, count, host_count: count, subdomain_count: 0, subdomains: 0, top_subdomains: [],
+  })
+  const row = (site: string, count: number) => ({ site, result: counted(`${site}.tld`, count) })
+  const names = (rows: Array<{ site: string }>) => rows.map(r => r.site)
+
+  // In the order pasted, with the rank the page gives each row's mark: 3 to look at, 2 no mark, 1 done, 0 skip, null cannot show a mark.
+  const pasted = [row('a', 10), row('b', 50), row('c', 30), row('d', 20), row('e', 40), row('f', 5)]
+  const ranks: Record<string, number | null> = { a: 1, b: 3, c: 2, d: null, e: 3, f: 0 }
+  const rankOf = (r: { site: string }) => ranks[r.site]
+
+  test('the first click puts what is left to look at on top; rows that tie keep the default order, the most rows first', () => {
+    expect(names(orderSiteRows(pasted, { key: 'mark', direction: 'desc' }, rankOf))).toEqual(['b', 'e', 'c', 'a', 'f', 'd'])
+  })
+
+  test('the other way reverses the ranks, and a row that cannot show a mark is last both ways, never taken for a rank', () => {
+    expect(names(orderSiteRows(pasted, { key: 'mark', direction: 'asc' }, rankOf))).toEqual(['f', 'a', 'c', 'b', 'e', 'd'])
+  })
+
+  test('without a rank function every row ties, so the default order stands', () => {
+    expect(names(orderSiteRows(pasted, { key: 'mark', direction: 'desc' }))).toEqual(names(orderSiteRows(pasted, null)))
+    expect(names(orderSiteRows(pasted, { key: 'mark', direction: 'asc' }))).toEqual(names(orderSiteRows(pasted, null)))
+  })
+
+  test('the rank function is not asked about the number columns', () => {
+    const asked: string[] = []
+    orderSiteRows(pasted, { key: 'count', direction: 'desc' }, r => { asked.push(r.site); return 0 })
+    expect(asked).toEqual([])
+  })
+
+  test('the Mark header cycles like the number columns: biggest rank first, reversed, then the default order', () => {
+    const first = nextSiteSort(null, 'mark')
+    expect(first).toEqual({ key: 'mark', direction: 'desc' })
+    const second = nextSiteSort(first, 'mark')
+    expect(second).toEqual({ key: 'mark', direction: 'asc' })
+    expect(nextSiteSort(second, 'mark')).toBeNull()
+    expect(nextSiteSort({ key: 'count', direction: 'asc' }, 'mark')).toEqual({ key: 'mark', direction: 'desc' })
+  })
+})

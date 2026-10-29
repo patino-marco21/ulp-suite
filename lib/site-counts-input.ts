@@ -83,8 +83,8 @@ export function splitRequests<T>(items: T[], size: number): T[][] {
   return runs
 }
 
-/** The numbers of a site's row a person can sort by: the number columns of the Site Counts table. */
-export type SiteSortKey = 'count' | 'host_count' | 'subdomain_count' | 'subdomains'
+/** What a person can sort the Site Counts table by: its number columns, and the Mark column (whose rank the page supplies: see orderSiteRows). */
+export type SiteSortKey = 'count' | 'host_count' | 'subdomain_count' | 'subdomains' | 'mark'
 
 export interface SiteSort {
   key: SiteSortKey
@@ -104,15 +104,19 @@ export function nextSiteSort(current: SiteSort | null, key: SiteSortKey): SiteSo
  * The rows in the order the table shows them. With no sort: what needs attention first (not counted), then the most rows, then the sites with none.
  * With one: by that number, biggest or smallest first. A site with no number for the column (not counted, or only its host counted) goes last whichever
  * way, never as a zero; sites that tie keep the default order, so equal numbers still list the biggest sites first. The list given is not changed.
+ * The Mark column has no number in the counts: `markRankOf` gives each row's rank (markRank in lib/site-marks-input.ts), null for a row that cannot show a
+ * mark, which goes last like a site with no number. Without it every row ties on the Mark column.
  */
-export function orderSiteRows<T extends { result: SiteCount }>(rows: T[], sort: SiteSort | null): T[] {
+export function orderSiteRows<T extends { result: SiteCount }>(rows: T[], sort: SiteSort | null, markRankOf?: (row: T) => number | null): T[] {
   const rank = (r: SiteCount) => (r.error ? 0 : r.count && r.count > 0 ? 1 : 2)
   const byDefault = (a: T, b: T) => rank(a.result) - rank(b.result) || (b.result.count ?? 0) - (a.result.count ?? 0)
   if (sort === null) return [...rows].sort(byDefault)
-  const sign = sort.direction === 'desc' ? -1 : 1
+  const { key, direction } = sort
+  const sign = direction === 'desc' ? -1 : 1
+  const valueOf = (row: T): number | null => (key === 'mark' ? (markRankOf?.(row) ?? null) : row.result[key])
   return [...rows].sort((a, b) => {
-    const x = a.result[sort.key]
-    const y = b.result[sort.key]
+    const x = valueOf(a)
+    const y = valueOf(b)
     if (x === null || y === null) return x === y ? byDefault(a, b) : x === null ? 1 : -1
     return sign * (x - y) || byDefault(a, b)
   })
