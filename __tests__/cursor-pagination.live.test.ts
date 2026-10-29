@@ -14,6 +14,9 @@ import { NOISE_FILTER } from '@/lib/ulp-noise'
  *   - the primary key (and, for imported_asc, the partition key) PRUNES: EXPLAIN selects far fewer granules than the table has;
  *   - the superset changes no row: fifteen pages followed through the route, inside one big domain, from a cursor in the middle of it and across the end of it, hand back the
  *     cursors of one ordered read of the same table (a skipped or a repeated row at a page boundary would shift every cursor after it).
+ * CURSOR_TIMING_FILE=<path to a JSON file> adds one more test: how long the pages of ONE search take through the route (cold query and condition caches, the
+ * page cache as it is). The file is {"q": "<the search text>", "start": {domain, email, imported_at, url, password} | null, "extra": "&login_type=email", "pages": 3}:
+ * it holds a real search, so it lives in YOUR scratch directory, never in this repository. `start` is the cursor to begin from (null = the first page).
  * The walks use Declutter (exclude_noise=1), as the page does by default: the first group of the key, (domain, email, imported_at) all empty, is a run of
  * legacy junk rows so long that no ordered read of the whole table finishes in 100 s, with or without a cursor.
  * Nothing here names a search term or a domain: the middle of the table is "the first domain after 'm'".
@@ -184,4 +187,29 @@ describe.skipIf(!LIVE)('cursor on the live table', () => {
     expect(ref[0].domain, 'the rows after the last row of a domain belong to a later domain').not.toBe(d)
     expect(await walk(last, pages)).toEqual(lastOfEachPage(ref))
   }, 10 * 60_000)
+
+  test.skipIf(!process.env.CURSOR_TIMING_FILE)('timing: the pages of one search through the route (CURSOR_TIMING_FILE)', async () => {
+    const { readFileSync } = await import('node:fs')
+    const spec = JSON.parse(readFileSync(process.env.CURSOR_TIMING_FILE as string, 'utf8')) as { q: string; start: Key | null; extra?: string; pages?: number }
+    const { GET } = await import('@/app/api/credentials/route')
+    const { NextRequest } = await import('next/server')
+    const { encodeCursor } = await import('@/lib/cursor-pagination')
+    const { getClient } = await import('@/lib/clickhouse')
+    const { resetSearchHitSetCache } = await import('@/lib/search-hit-set')
+    const { resetSearchPlanGateCache } = await import('@/lib/search-plan-gate')
+    resetSearchHitSetCache()
+    resetSearchPlanGateCache()
+    await getClient().command({ query: 'SYSTEM DROP QUERY CACHE' })
+    await getClient().command({ query: 'SYSTEM DROP QUERY CONDITION CACHE' })
+    let token = spec.start ? encodeCursor('domain_asc', spec.start as unknown as Record<string, unknown>) : ''
+    for (let p = 1; p <= (spec.pages ?? 3); p++) {
+      const t0 = Date.now()
+      const res = await GET(new NextRequest(`http://localhost/api/credentials?q=${encodeURIComponent(spec.q)}&sort=domain_asc&limit=${PAGE}&dedupe=1&skip_totals=1${spec.extra ?? ''}${token ? `&cursor=${encodeURIComponent(token)}` : ''}`))
+      const body = await res.json()
+      console.info(`TIMING page ${p}${p === 1 && spec.start ? ' (from the given cursor)' : ''}: ${((Date.now() - t0) / 1000).toFixed(1)} s, ${body.results?.length ?? 0} rows, plan ${body.plan}, ${body.next_cursor ? 'has a next page' : 'last page'}`)
+      expect(body.success, JSON.stringify(body).slice(0, 200)).toBe(true)
+      if (!body.next_cursor) break
+      token = body.next_cursor
+    }
+  }, 30 * 60_000)
 })

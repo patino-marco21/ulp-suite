@@ -1,7 +1,7 @@
 # Next page, endless scrolling and an Email default for a search — Design
 
 Date: 2026-10-28
-Status: **in progress** (phase A: the cursor, endless scrolling and the Email default). Phase B (the hit-set plan for more than 5,000 matches) is measured here and not built.
+Status: **phase A implemented, verified and deployed locally on 2026-10-29 04:50Z** (code `7acdc99`; image `ulp-suite-app:latest` = `47655cc245ca`, built by `git archive 7acdc99`; the image that ran before, `2a3c26aa59aa`, is tagged `ulp-suite-app:rollback-20261029-0426z`). Phase A is the cursor, endless scrolling and the Email default; the page turns of a rare search are about half as long deep in the table and unchanged near its start. Phase B (the hit-set plan for more than 5,000 matches) is measured here and not built. No DDL, no data change, no setting. Rollout at the end.
 
 ## Why
 
@@ -59,7 +59,7 @@ The clause is parenthesised as a whole, because the three routes that use it app
 
 ### B. Endless scrolling (`app/credentials/page.tsx`, new `lib/credential-pages.ts`)
 
-* The table keeps its rows. When the end of the list comes within 1,500 px of the bottom of the table's scroll box, the next 200 rows (the page size) are fetched with the cursor of the last page and appended. A fetch never replaces the table; a new search does.
+* The table keeps its rows. When the end of the list comes within 1,500 px of the bottom of what scrolls, the next 200 rows (the page size) are fetched with the cursor of the last page and appended. A fetch never replaces the table; a new search does. What scrolls is the nearest ancestor that really does (more content than room), else the viewport (`scrollParentOf`): in this layout the table's own box has `overflow: auto` but grows with its rows (141,775 px for 3,456 rows) and the document scrolls. An observer rooted on that box, the first version, saw the end of the list as visible all the time and fetched every page at once; it was found only by driving the page in a browser.
 * The next page continues the search **on screen**, not the filter bar: the query string of the first page is kept (`appliedQueryRef`), so editing a box without pressing Apply, then scrolling, cannot mix two searches. (The Next button used the bar's current values with the old cursor.)
 * A search that is replaced while a page is loading drops the late answer (a generation counter) and aborts the request, which the route already turns into a `KILL QUERY` (`lib/clickhouse.ts`).
 * The footer says how many rows are loaded, shows the seconds a slow page has taken so far with a Stop button, and on an error or a stop shows a Retry button instead of clearing the rows. Nothing retries by itself.
@@ -80,11 +80,27 @@ Lift the hit-set plan from 5,000 positions to about 200,000: the list travels in
 
 ## Proof
 
-* `__tests__/cursor-pagination.test.ts`: the shape of each clause (the superset first, the exact tuple last, the same parameters).
-* `__tests__/cursor-pagination.live.test.ts` (`CURSOR_PARITY=1`, the real table): for each sort, a walk of 30 pages through the route equals one ordered read, from the start and from a cursor deep in the table; `EXPLAIN` selects fewer granules than the tuple form.
-* `scripts/e2e-cursor-pages.ts` (the rehearsal stack, the built image): a table with ties on `(domain, email, imported_at)` and on the whole sort key; every page of every sort equals the one ordered read, and the primary key prunes.
-* Unit tests for `lib/login-type-default.ts` and `lib/credential-pages.ts`; the page itself driven in the browser on the rehearsal app.
+* `__tests__/cursor-pagination.test.ts`: the shape of each clause (the superset first, the exact tuple last, the same parameters, one parenthesised expression).
+* `__tests__/cursor-pagination.live.test.ts` (`CURSOR_PARITY=1`, the real table, 8 s): `EXPLAIN` selects 13,583 of 34,296 granules for a mid-table `domain_asc` cursor (the tuple form 34,296), 20,724 for `domain_desc`, 12,814 for `imported_asc` (34,296); fifteen pages through one big domain, a resume from a cursor inside it, a cursor on the last row of a domain and cursors in the middle of runs that tie on email and `imported_at` all equal one ordered read. Breaking the superset (`imported_at >=` to `>`) fails only the tie test, which is why it exists. With `CURSOR_TIMING_FILE` it also times the pages of one search through the route.
+* `scripts/e2e-cursor-pages.ts` (the rehearsal stack, the built image, 25 checks, twice): 3,456 rows tied in groups of 25 on `(domain, email, imported_at)` over twelve domains; every one of the eight sorts followed to the end in pages of 7 or 40 equals one ordered read; 1,120 cursors (ties, the first and last row of every domain) continue exactly; a word search through the same pages equals it; the default view (Declutter and Unique) accepts the cursor; 1.4 million rows show the key pruning (14 of 24 granules for a mid-table cursor, the tuple form 24 of 24).
+* The older rehearsals on the built image: the stack's own scenarios 49/49 (first candidate), `scripts/e2e-hit-set.ts` 19/19, `scripts/e2e-search-dictionary.ts` 81/81 (they follow cursors through the hit-set and dictionary plans, which splice the clause into their own SQL).
+* Unit tests for `lib/login-type-default.ts`, `lib/credential-pages.ts` (including `scrollParentOf` with fake elements, among them the layout's own shape) and source pins for the page's wiring (this page has no component-test harness): 4,542 tests in 276 files, `tsc` for the app, `scripts/` and `__tests__/`, and eslint clean.
+* The page driven in a browser on the rehearsal app (the built image, a throwaway admin, 3,486 seeded rows; all on `47655cc245ca`): the Email chip lights as soon as a search is typed and the 30 username/phone rows are hidden (3,456 records); one more page of 200 arrives per trip to the bottom (200, 400, 600, 800 rows) and not before; a request that hangs shows the seconds and Stop, and Stop keeps the rows, shows Retry and does not retry by itself; a failed request says so and keeps the rows; Retry continues; the end reads "3,456 rows · end of the results" with 3,456 distinct rows over 18 pages; Username and All types are kept across searches until Clear; Clear returns to the bare browse (All types, the free total, no Clear button lit); "Search this email" on a username row finds that row.
 
 ## Rollout
 
-(filled in when it ships)
+Deployed locally on 2026-10-29 about 04:50Z (laptop time 23:50 on 10-28): only the app container was recreated (healthy after 6 s); ClickHouse (up 6 days) was not touched, and the start-up log says "DDL v29 already applied". Order followed: rollback tag on the running image first, candidate built under its own tag from `git archive`, rehearsal with `REHEARSAL_APP_IMAGE`, then `docker compose up -d --no-build app` from the primary checkout. Nothing was importing (`inbox/processing` empty, no ingest lines in the log). Inside the running container: the three routes that use the cursor (`/api/credentials`, `/api/search`, `/api/v1/search/credentials`) carry the new clause and the page bundle carries the footer.
+
+**One search, through the deployed route code on the live table** (the search of the report, 125,760 matches, Email chip, Unique, domain A→Z, 200 rows a page; ClickHouse's query and condition caches dropped first, the page cache as it was; the first page started from the cursor the owner's page 2 had used):
+
+| page | before (the app's log) | now | rows read, before / now (rerun of the same statement for page 3) |
+|---|---|---|---|
+| the owner's page 2 (its cursor is early in the table) | 67.9 s | 63.2 s | nothing to prune that early |
+| the page after it | 59.2 s | 24.1 s | 2,169M / 706M |
+| the next | not measured | 36.3 s | |
+
+So the fix pays in proportion to how deep the cursor is: almost nothing for the second page of a search whose first rows are far apart, 2.5 times for the pages after the first few hundred rows. What is left is the scan itself (phase B). **The first page and the count of such a search are unchanged** (97 s and 110 s): nothing in phase A touches a request without a cursor.
+
+**Not verified:** the owner has not tried the page since (no credentials for the real UI: the deployed app was checked for health, start-up log and bundle only; the page itself was driven on the rehearsal app, which runs the same image). The endless list's "Stop" ends the request in the browser and the route turns the abort into a `KILL QUERY` (lib/clickhouse.ts, proven in the 2026-10-26 design); a stop of a long scan was not rehearsed because the rehearsal table cannot give one.
+
+**Re-verify:** `CURSOR_PARITY=1 npx vitest run __tests__/cursor-pagination.live.test.ts`; `REHEARSAL_APP_IMAGE=<tag> npx tsx scripts/e2e-alert-rehearsal.ts --keep`, then `npx tsx scripts/e2e-cursor-pages.ts`, `npx tsx scripts/e2e-hit-set.ts` and `npx tsx scripts/e2e-search-dictionary.ts`. After any ClickHouse upgrade re-run the live test: the whole change rests on ClickHouse 26.3 not pruning a tuple comparison (if a later version does, the superset is harmless and can go).
