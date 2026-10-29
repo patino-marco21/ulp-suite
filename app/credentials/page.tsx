@@ -29,7 +29,7 @@ import type { SortKey } from "@/lib/cursor-pagination"
 import { appliedViewOf, BROWSE_VIEW, matchingHint, matchingLabel, parseTotals, recordsLabel, totalsParams, withPendingTotals, withTotals, type AppliedView } from "@/lib/credential-totals"
 import { declutterByDefault } from "@/lib/declutter-default"
 import { effectiveLoginType } from "@/lib/login-type-default"
-import { appendPage, listFooter, shouldAutoLoad, LOAD_AHEAD_PX, type ListFooter } from "@/lib/credential-pages"
+import { appendPage, listFooter, scrollParentOf, shouldAutoLoad, LOAD_AHEAD_PX, type ListFooter } from "@/lib/credential-pages"
 import {
   epochSecondsToIso, utcIsoToDisplay,
   searchFingerprint, readMark, writeMark, markStorageKey, sinceLastExportWindow, markAfterExport, type ExportMark,
@@ -1010,9 +1010,9 @@ export default function CredentialsPage() {
     }
   }, [data?.next_cursor, loading])
 
-  // The end of the rows and the box that scrolls them: when the end comes within LOAD_AHEAD_PX of the bottom of the box, the next page is fetched. The observer
-  // is made again after every page (and every search), so that a page that does not fill the box is followed by the next at once.
-  const scrollRef = useRef<HTMLDivElement | null>(null)
+  // The end of the rows and what scrolls them: when the end comes within LOAD_AHEAD_PX of the bottom of the scroller (the viewport, in this layout: the table's
+  // box grows with its rows and the document scrolls; see scrollParentOf), the next page is fetched. The observer is made again after every page (and every
+  // search), so that a page that does not fill the screen is followed by the next at once.
   const sentinelRef = useRef<HTMLDivElement | null>(null)
   const loadMoreRef = useRef(loadMore)
   useEffect(() => { loadMoreRef.current = loadMore }, [loadMore])
@@ -1021,12 +1021,11 @@ export default function CredentialsPage() {
   const autoLoad = shouldAutoLoad(listState)
   const footerKind = listFooter(listState)
   useEffect(() => {
-    const root = scrollRef.current
     const target = sentinelRef.current
-    if (!autoLoad || !root || !target || typeof IntersectionObserver === 'undefined') return
+    if (!autoLoad || !target || typeof IntersectionObserver === 'undefined') return
     const observer = new IntersectionObserver(
       entries => { if (entries.some(e => e.isIntersecting)) void loadMoreRef.current() },
-      { root, rootMargin: `0px 0px ${LOAD_AHEAD_PX}px 0px` },
+      { root: scrollParentOf(target), rootMargin: `0px 0px ${LOAD_AHEAD_PX}px 0px` },
     )
     observer.observe(target)
     return () => observer.disconnect()
@@ -1738,7 +1737,7 @@ export default function CredentialsPage() {
       </div>
 
       {/* ── Table ──────────────────────────────────────────────────────────── */}
-      <div ref={scrollRef} className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto">
         {loading ? (
           <div className="flex h-full items-center justify-center">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -1796,7 +1795,7 @@ export default function CredentialsPage() {
               ))}
             </tbody>
           </table>
-          {/* The end of the rows: the next page is fetched when this comes within LOAD_AHEAD_PX of the bottom of the box (lib/credential-pages.ts) */}
+          {/* The end of the rows: the next page is fetched when this comes within LOAD_AHEAD_PX of the bottom of the scroller (lib/credential-pages.ts) */}
           <div ref={sentinelRef} aria-hidden="true" className="h-px" />
           <ListFooterLine kind={footerKind} rows={data.results.length} error={moreError} onLoadMore={loadMore} onStop={() => moreAbortRef.current?.abort()} />
           </>

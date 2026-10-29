@@ -8,7 +8,7 @@ describe('Credentials page — rows and totals are fetched separately on a first
   const source = readFileSync(new URL('../app/credentials/page.tsx', import.meta.url), 'utf8')
   // load() is a new search (its first page); loadMore() is a later page of the search on screen
   const load = source.slice(source.indexOf('const load = useCallback'), source.indexOf('const loadMore = useCallback'))
-  const loadMore = source.slice(source.indexOf('const loadMore = useCallback'), source.indexOf('// The end of the rows and the box that scrolls them'))
+  const loadMore = source.slice(source.indexOf('const loadMore = useCallback'), source.indexOf('// The end of the rows and what scrolls them'))
 
   test('imports the totals helpers', () => {
     expect(source).toMatch(/from "@\/lib\/credential-totals"/)

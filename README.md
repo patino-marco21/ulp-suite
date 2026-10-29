@@ -340,10 +340,11 @@ In the Credentials Browser:
 
 - **Declutter** — hides low-signal rows (IP-host / `:port` / `.php` / `localhost` URLs, and rows the parser mangled). Backed by a precomputed `is_noise` column, so it's a cheap filter, not a per-row scan. It hides every URL ending in `.php`, a site's own `index.php` and `login.php` included, so it starts **off** for a lookup of one thing (a domain, an IP address, an address, a text with a path or a symbol in it, the Domain box and the host / e-mail domain filters), where it would hide real rows, and **on** for the bare browse and for broad searches (a word, a login, a pattern), where it removes router and parser junk (`lib/declutter-default.ts`). A click on the chip is kept until Clear. The header's "of N matching" counts the rows the search matched before Declutter and Unique; hover it for how many the chips hide. The Site counts page applies neither chip.
 - **Unique** — collapses `(url, email, password)` duplicates to one row each (`LIMIT 1 BY`), ignoring URL scheme and a trailing slash — `http://`, `https://`, and no-scheme captures of the same host+path count as the same row; email/password stay exact.
+- **Login type** — Email / Phone / Username / All types. A search (a text or the Domain box) starts on **Email**; the bare browse and the "View what this added" views start on All types, so they show everything and keep their free total. A click on a chip is kept until Clear, "All types" included (`lib/login-type-default.ts`). The API is unchanged: no `login_type` parameter still means every type.
 
 Both are view-only — storage is untouched; toggle off to see everything.
 
-The browser defaults to 200 rows per page, globally ordered Domain A→Z. Page size and sort order remain selectable in the UI and API.
+The browser defaults to 200 rows per page, globally ordered Domain A→Z, and the list is endless: the next page is appended as the end of the list comes into view (it stops by itself at 5,000 rows; a button continues). Page size and sort order remain selectable in the UI and API.
 
 ### Domain search dictionary (speed)
 
@@ -394,6 +395,14 @@ The page now scans once for the **positions** of the matching rows (`_part` and 
 - The answering queries have a 20 s budget; over it, or on any error, today's query runs.
 - `SEARCH_HIT_SET=0` (or `SEARCH_TOKEN_PLANS=0`) switches it off (no rebuild needed); `/api/credentials?...&hit_set=0` (or `&token_plans=0`) forces the original query for one request, and the response's `plan` says `hits` when the plan answered.
 - Design and measurements: `docs/superpowers/specs/2026-10-26-slow-search-latency-design.md`.
+
+### The next page (speed)
+
+ClickHouse 26.3 does not use a tuple comparison to prune the primary key (`EXPLAIN indexes = 1`: `Condition: true`, every granule selected, even for a prefix of the key). The cursor was `(domain, email, imported_at, url, password) > (...)`, so every next page restarted at the first granule: page 3 of one rare search read 2.17 billion rows (160 GiB, 52 s). The cursor of the Domain A→Z, Domain Z→A and Oldest first sorts now carries a **scalar superset** (`domain > d OR (domain = d AND (email > e OR (email = e AND imported_at >= t)))`) in front of the exact tuple, which stays as the last condition: the rows, their order and the next cursor are the same, and the primary key (or, for Oldest first, the partition key) skips what lies before the cursor. Measured on the live table with the logged statements of one search that has 125,760 matches: page 3 went from 52.3 s and 2,169M rows to 25.3 s and 706M rows (19,275 of 34,299 granules); a page deep in the dense part from 51.3 s to 18.8 s. A live test (`CURSOR_PARITY=1 npx vitest run __tests__/cursor-pagination.live.test.ts`) follows pages through one big domain, resumes from cursors inside runs of equal keys and crosses from one domain into the next, and every page equals one ordered read; `scripts/e2e-cursor-pages.ts` does the same on the rehearsal stack with a table built to tie.
+
+The Credentials list is **endless**: the next page is fetched when the end of the rows comes within 1,500 px of the bottom of the table, with the cursor of the last page and for the search that is on screen (not the filter bar), and it is appended, so the rows you are reading stay. A slow page shows the seconds it has taken and a Stop button; an error or a stop keeps the rows and offers a Retry (nothing retries by itself).
+
+A rare text is still a scan under any cursor, because the data is in 15 parts and a part whose next match is far away must be read up to it (18.8 s is the floor of the plain query on the search above). Above 5,000 matches the hit-set plan (previous section) does not apply, so such a search stays at 19-25 s a page. Listing all the positions (125,760 here, 1.26 MB of SQL, `max_query_size` raised) measured 4-13 s a page; that is designed and not built. Design and measurements: `docs/superpowers/specs/2026-10-28-next-page-speed-design.md`.
 
 ### Abandoned searches are cancelled (speed)
 

@@ -7,8 +7,8 @@ import { describe, test, expect } from 'vitest'
 const source = readFileSync(new URL('../app/credentials/page.tsx', import.meta.url), 'utf8')
 const between = (from: string, to: string) => source.slice(source.indexOf(from), source.indexOf(to))
 const load = between('const load = useCallback', 'const loadMore = useCallback')
-const loadMore = between('const loadMore = useCallback', '// The end of the rows and the box that scrolls them')
-const observer = between('// The end of the rows and the box that scrolls them', '// First load. An address that names')
+const loadMore = between('const loadMore = useCallback', '// The end of the rows and what scrolls them')
+const observer = between('// The end of the rows and what scrolls them', '// First load. An address that names')
 
 describe('Credentials page — one endless list instead of pages', () => {
   test('the previous/next buttons and the page-cursor state are gone', () => {
@@ -54,14 +54,15 @@ describe('Credentials page — one endless list instead of pages', () => {
     expect(loadMore).toContain("'Stopped.'")
     // the observer exists only while the list may load by itself (shouldAutoLoad is false after an error)
     expect(source).toContain('error: moreError !== null')
-    expect(observer).toMatch(/if \(!autoLoad \|\| !root \|\| !target/)
+    expect(observer).toMatch(/if \(!autoLoad \|\| !target \|\| typeof IntersectionObserver === 'undefined'\) return/)
     expect(source).toContain('onStop={() => moreAbortRef.current?.abort()}')
   })
 
-  test('the observer watches the end of the rows in the table\'s own scroll box, LOAD_AHEAD_PX early, and is made again after every page and search', () => {
-    expect(observer).toContain('{ root, rootMargin: `0px 0px ${LOAD_AHEAD_PX}px 0px` }')
+  test('the observer watches the end of the rows against what REALLY scrolls (the table\'s box grows with its rows, the document scrolls), LOAD_AHEAD_PX early, and is made again after every page and search', () => {
+    expect(observer).toContain('{ root: scrollParentOf(target), rootMargin: `0px 0px ${LOAD_AHEAD_PX}px 0px` }')
     expect(observer).toMatch(/\}, \[autoLoad, rowCount\]\)/)
-    expect(source).toContain('<div ref={scrollRef} className="flex-1 overflow-auto">')
+    // rooted on the table's own box it saw the end of the list as visible all the time and fetched every page at once (3,456 rows in a few seconds)
+    expect(source).not.toContain('scrollRef')
     expect(source).toContain('<div ref={sentinelRef} aria-hidden="true" className="h-px" />')
   })
 

@@ -1,5 +1,5 @@
-import { describe, expect, test } from 'vitest'
-import { AUTO_LOAD_ROW_CAP, appendPage, listFooter, shouldAutoLoad, type ListState } from '@/lib/credential-pages'
+import { describe, expect, test, vi } from 'vitest'
+import { AUTO_LOAD_ROW_CAP, appendPage, listFooter, scrollParentOf, shouldAutoLoad, type ListState } from '@/lib/credential-pages'
 
 const state = (over: Partial<ListState> = {}): ListState => ({ rows: 200, hasMore: true, loading: false, loadingMore: false, error: false, ...over })
 
@@ -75,5 +75,38 @@ describe('listFooter — what the line under the rows says', () => {
 
   test('a page that is loading wins over an old error (the retry started it)', () => {
     expect(listFooter(state({ loadingMore: true, error: true }))).toBe('loading')
+  })
+})
+
+describe('scrollParentOf — what the end of the list is measured against', () => {
+  type Fake = { parentElement: Fake | null; overflowY: string; scrollHeight: number; clientHeight: number }
+  const el = (parent: Fake | null, overflowY = 'visible', scrollHeight = 100, clientHeight = 100): Fake => ({ parentElement: parent, overflowY, scrollHeight, clientHeight })
+
+  const withDom = (body: Fake, html: Fake, run: () => void) => {
+    vi.stubGlobal('document', { body, documentElement: html })
+    vi.stubGlobal('getComputedStyle', (e: Fake) => ({ overflowY: e.overflowY }))
+    try { run() } finally { vi.unstubAllGlobals() }
+  }
+  const asEl = (f: Fake) => f as unknown as HTMLElement
+
+  test('a box with overflow:auto that grows with its rows does not scroll: the viewport is the root (the page\'s layout)', () => {
+    const html = el(null); const body = el(html); const main = el(body); const box = el(main, 'auto', 141_775, 141_775); const sentinel = el(box)
+    withDom(body, html, () => expect(scrollParentOf(asEl(sentinel))).toBeNull())
+  })
+
+  test('a box that really scrolls (more content than room) is the root', () => {
+    const html = el(null); const body = el(html); const box = el(body, 'auto', 5_000, 600); const sentinel = el(box)
+    withDom(body, html, () => expect(scrollParentOf(asEl(sentinel))).toBe(box))
+  })
+
+  test('the nearest scroller wins, and overflow:visible never counts, however much it holds', () => {
+    const html = el(null); const body = el(html)
+    const outer = el(body, 'scroll', 9_000, 600); const inner = el(outer, 'auto', 4_000, 300); const plain = el(inner, 'visible', 8_000, 100); const sentinel = el(plain)
+    withDom(body, html, () => expect(scrollParentOf(asEl(sentinel))).toBe(inner))
+  })
+
+  test('it stops at the body: the document scrolling is the viewport, which is null', () => {
+    const html = el(null, 'auto', 9_000, 700); const body = el(html, 'auto', 9_000, 700); const sentinel = el(body)
+    withDom(body, html, () => expect(scrollParentOf(asEl(sentinel))).toBeNull())
   })
 })

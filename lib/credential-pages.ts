@@ -53,3 +53,17 @@ export function listFooter(s: ListState): ListFooter {
   if (!s.hasMore) return 'end'
   return s.rows >= AUTO_LOAD_ROW_CAP ? 'capped' : 'more'
 }
+
+/**
+ * The element an IntersectionObserver must measure the end of the list against: the nearest ancestor that REALLY scrolls (an overflow of auto or scroll AND more
+ * content than room), or null, which means the viewport. In the page's layout the table's own box has `overflow: auto` but grows with its rows (it was 141,775 px
+ * tall for 3,456 rows), and the whole document scrolls; an observer rooted on that box saw the end of the list as visible all the time and fetched every page at
+ * once. Where a box does scroll, it is the root.
+ */
+export function scrollParentOf(el: HTMLElement): HTMLElement | null {
+  for (let p = el.parentElement; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
+    const overflowY = getComputedStyle(p).overflowY
+    if ((overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') && p.scrollHeight > p.clientHeight + 1) return p
+  }
+  return null
+}
