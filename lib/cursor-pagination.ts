@@ -71,6 +71,16 @@ export function decodeCursor(token: string): CursorPayload | null {
   }
 }
 
+/**
+ * The condition that keeps only the rows AFTER the cursor, as one parenthesised expression (the routes append it with AND).
+ *
+ * ClickHouse 26.3 does not use a tuple comparison, `(a, b, c) > (x, y, z)`, to prune the primary key: `EXPLAIN indexes = 1` says `Condition: true` and
+ * selects every granule, even for a prefix of the key. A cursor that is only a tuple therefore restarts the read at the first granule on every page: page 3
+ * of a rare search read 2.17 billion rows (docs/superpowers/specs/2026-10-28-next-page-speed-design.md). So where the sort starts with the primary key
+ * (domain, email, imported_at), or with imported_at (the partition key), a SUPERSET of the cursor condition is written with scalar comparisons the key can
+ * use and ANDed in front of the exact tuple, which stays as the last conjunct. The superset keeps every row the tuple keeps, so the rows, their order and
+ * the next cursor are the same; it only lets ClickHouse skip the granules before the cursor (page 3: 52.3 s -> 25.3 s).
+ */
 export function buildCursorWhere(
   sort: SortKey,
   cursor: CursorPayload,
@@ -79,7 +89,8 @@ export function buildCursorWhere(
   switch (sort) {
     case 'imported_asc':
       return {
-        clause: `(imported_at, domain, email, url, password) > ({c_ia:DateTime}, {c_d:String}, {c_e:String}, {c_u:String}, {c_pw:String})`,
+        // imported_at is the partition key (toYYYYMM) and has a min-max index: the bound drops the older months and granules.
+        clause: `(imported_at >= {c_ia:DateTime} AND (imported_at, domain, email, url, password) > ({c_ia:DateTime}, {c_d:String}, {c_e:String}, {c_u:String}, {c_pw:String}))`,
         params: { c_ia: v.imported_at, c_d: v.domain, c_e: v.email, c_u: v.url, c_pw: v.password },
       }
     case 'imported_desc':
@@ -89,17 +100,22 @@ export function buildCursorWhere(
       }
     case 'domain_asc':
       return {
-        clause: `(domain, email, imported_at, url, password) > ({c_d:String}, {c_e:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String})`,
+        // The primary key is (domain, email, imported_at): the same three columns as scalar comparisons the key can prune with.
+        clause: `((domain > {c_d:String} OR (domain = {c_d:String} AND (email > {c_e:String} OR (email = {c_e:String} AND imported_at >= {c_ia:DateTime})))) AND `
+          + `(domain, email, imported_at, url, password) > ({c_d:String}, {c_e:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String}))`,
         params: { c_d: v.domain, c_e: v.email, c_ia: v.imported_at, c_u: v.url, c_pw: v.password },
       }
     case 'domain_desc':
       return {
-        clause: `(domain < {c_d:String} OR (domain = {c_d:String} AND (email, imported_at, url, password) > ({c_e:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String})))`,
+        // Rows of a smaller domain are all after the cursor; inside the cursor's own domain the key columns narrow the read the same way.
+        clause: `(domain < {c_d:String} OR (domain = {c_d:String} AND (email > {c_e:String} OR (email = {c_e:String} AND imported_at >= {c_ia:DateTime})) AND `
+          + `(email, imported_at, url, password) > ({c_e:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String})))`,
         params: { c_d: v.domain, c_e: v.email, c_ia: v.imported_at, c_u: v.url, c_pw: v.password },
       }
     case 'email_asc':
       return {
-        clause: `(email, domain, imported_at, url, password) > ({c_e:String}, {c_d:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String})`,
+        // Not a prefix of the primary key, so no scalar bound could prune: the plain tuple, in parentheses like the others.
+        clause: `((email, domain, imported_at, url, password) > ({c_e:String}, {c_d:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String}))`,
         params: { c_e: v.email, c_d: v.domain, c_ia: v.imported_at, c_u: v.url, c_pw: v.password },
       }
     case 'email_desc':

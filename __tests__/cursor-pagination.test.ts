@@ -74,18 +74,66 @@ describe('buildCursorWhere', () => {
     expect(params).toHaveProperty('c_ia')
   })
 
-  test('domain_asc: tuple greater-than clause', () => {
+  const TUPLE_DOMAIN_ASC = '(domain, email, imported_at, url, password) > ({c_d:String}, {c_e:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String})'
+
+  test('domain_asc: the exact tuple comparison stays, as the last conjunct', () => {
     const payload = { sort: 'domain_asc' as SortKey, v: { ...baseRow } }
     const { clause, params } = buildCursorWhere('domain_asc', payload)
-    expect(clause).toBe('(domain, email, imported_at, url, password) > ({c_d:String}, {c_e:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String})')
-    expect(Object.keys(params)).toEqual(expect.arrayContaining(['c_d', 'c_e', 'c_ia', 'c_u', 'c_pw']))
+    expect(clause.endsWith(`${TUPLE_DOMAIN_ASC})`)).toBe(true)
+    expect(Object.keys(params).sort()).toEqual(['c_d', 'c_e', 'c_ia', 'c_pw', 'c_u'])
   })
 
-  test('domain_desc: descending OR expansion', () => {
+  // ClickHouse 26.3 does not use a tuple comparison for primary-key analysis (EXPLAIN: `Condition: true`, every granule selected), so a cursor that is only a
+  // tuple restarts the read at the first granule on every page. The scalar form below is what the primary key (domain, email, imported_at) can prune with.
+  test('domain_asc: a superset the primary key can use comes first, on the three key columns', () => {
+    const { clause } = buildCursorWhere('domain_asc', { sort: 'domain_asc' as SortKey, v: { ...baseRow } })
+    const seek = clause.slice(0, clause.indexOf(TUPLE_DOMAIN_ASC))
+    expect(seek).toContain('domain > {c_d:String}')
+    expect(seek).toContain('domain = {c_d:String}')
+    expect(seek).toContain('email > {c_e:String}')
+    expect(seek).toContain('email = {c_e:String}')
+    expect(seek).toContain('imported_at >= {c_ia:DateTime}')
+    // nothing outside the key in the superset: a column that is not in the primary key cannot prune and would only add work
+    expect(seek).not.toMatch(/\burl\b|\bpassword\b/)
+  })
+
+  test('every cursor clause is one parenthesised expression, because the routes append it with AND', () => {
+    for (const sort of ['imported_asc', 'imported_desc', 'domain_asc', 'domain_desc', 'email_asc', 'email_desc', 'pw_len_asc', 'pw_len_desc'] as SortKey[]) {
+      const { clause } = buildCursorWhere(sort, { sort, v: { ...baseRow, password_length: 8 } })
+      let depth = 0
+      let closedAtDepthZero = 0
+      for (const ch of clause) {
+        if (ch === '(') depth++
+        if (ch === ')') { depth--; if (depth === 0) closedAtDepthZero++ }
+        expect(depth).toBeGreaterThanOrEqual(0)
+      }
+      expect(depth).toBe(0)
+      expect(clause.startsWith('(')).toBe(true)
+      expect(closedAtDepthZero).toBe(1)
+    }
+  })
+
+  test('domain_desc: descending OR expansion, narrowed inside the cursor domain by the key columns', () => {
     const payload = { sort: 'domain_desc' as SortKey, v: { ...baseRow } }
     const { clause } = buildCursorWhere('domain_desc', payload)
     expect(clause).toContain('domain < {c_d:String}')
     expect(clause).toContain('domain = {c_d:String}')
+    expect(clause).toContain('email > {c_e:String}')
+    expect(clause).toContain('imported_at >= {c_ia:DateTime}')
+    expect(clause.endsWith('(email, imported_at, url, password) > ({c_e:String}, {c_ia:DateTime}, {c_u:String}, {c_pw:String})))')).toBe(true)
+  })
+
+  test('imported_asc: a scalar lower bound on imported_at (partition and min-max pruning) comes before the exact tuple', () => {
+    const { clause } = buildCursorWhere('imported_asc', { sort: 'imported_asc' as SortKey, v: { ...baseRow } })
+    expect(clause.indexOf('imported_at >= {c_ia:DateTime}')).toBeGreaterThan(-1)
+    expect(clause.indexOf('imported_at >= {c_ia:DateTime}')).toBeLessThan(clause.indexOf('(imported_at, domain, email, url, password) >'))
+  })
+
+  test('the sorts the primary key cannot serve keep the plain tuple (a scalar bound would prune nothing)', () => {
+    for (const sort of ['email_asc', 'pw_len_asc'] as SortKey[]) {
+      const { clause } = buildCursorWhere(sort, { sort, v: { ...baseRow, password_length: 8 } })
+      expect(clause).not.toContain('domain > {c_d:String}')
+    }
   })
 
   test('email_asc: tuple greater-than', () => {
