@@ -6,18 +6,25 @@ import { describe, test, expect } from 'vitest'
 // credential-totals.test.ts and the server side in credentials-route-totals.test.ts.
 describe('Credentials page — rows and totals are fetched separately on a first page', () => {
   const source = readFileSync(new URL('../app/credentials/page.tsx', import.meta.url), 'utf8')
-  const load = source.slice(source.indexOf('const load = useCallback'), source.indexOf('useEffect(() => { load(null) }'))
+  // load() is a new search (its first page); loadMore() is a later page of the search on screen
+  const load = source.slice(source.indexOf('const load = useCallback'), source.indexOf('const loadMore = useCallback'))
+  const loadMore = source.slice(source.indexOf('const loadMore = useCallback'), source.indexOf('// The end of the rows and the box that scrolls them'))
 
   test('imports the totals helpers', () => {
     expect(source).toMatch(/from "@\/lib\/credential-totals"/)
   })
 
-  test('only a first page (no cursor) splits the totals out', () => {
-    expect(load).toMatch(/const splitTotals = cursor === null/)
+  test('only the first page of a search asks for the totals; a later page never does and keeps the ones on screen', () => {
+    expect(load).toContain('totalsParams(params)')
+    expect(loadMore).not.toContain('totalsParams')
+    expect(loadMore).not.toContain('withTotals')
+    // appendPage keeps total, raw_total and the pending/failed flags of the page on screen (a cursor page carries total: null)
+    expect(loadMore).toContain('appendPage(prev, json)')
   })
 
-  test('the rows request asks the server to skip the totals', () => {
-    expect(load).toContain("${splitTotals ? '&skip_totals=1' : ''}")
+  test('the rows request asks the server to skip the totals, on a later page too', () => {
+    expect(load).toContain('${params}&skip_totals=1`')
+    expect(loadMore).toContain('&skip_totals=1`')
   })
 
   test('the totals request uses the same filters (totalsParams) and the same AbortController as the rows', () => {
@@ -34,7 +41,7 @@ describe('Credentials page — rows and totals are fetched separately on a first
     const totalsAt = load.indexOf('withTotals(prev, totals)')
     expect(rowsAt).toBeGreaterThan(-1)
     expect(totalsAt).toBeGreaterThan(rowsAt)
-    expect(load).toMatch(/if \(loadAbortRef\.current === controller\) setData\(prev => withTotals\(prev, totals\)\)/)
+    expect(load).toMatch(/if \(searchRef\.current === search\) setData\(prev => withTotals\(prev, totals\)\)/)
   })
 
   test('the spinner is cleared by the rows, not held until the totals arrive', () => {
@@ -43,9 +50,9 @@ describe('Credentials page — rows and totals are fetched separately on a first
     expect(load).toMatch(/finally \{[\s\S]*setLoading\(false\)/)
   })
 
-  test('the header and the footer render through the label helpers', () => {
+  test('the header renders the count through the label helper, and the line under the rows through the list footer', () => {
     expect(source).toContain('{recordsLabel(data)}')
-    expect(source).toContain('{resultsLabel(data)}')
+    expect(source).toContain('<ListFooterLine kind={footerKind} rows={data.results.length}')
   })
 
   test('the dim "of N" after the records says what it counts, and its tooltip names the chips that hide the rest', () => {
@@ -64,7 +71,7 @@ describe('Credentials page — rows and totals are fetched separately on a first
     expect(source).toMatch(/const \[applied, setApplied\] = useState<AppliedView>\(BROWSE_VIEW\)/)
     // and a cleared search is the browse view, once its rows are in
     const clearAll = source.slice(source.indexOf('const clearAll'), source.indexOf('const copy = '))
-    expect(clearAll).toMatch(/if \(json\.success\) \{ setData\([^\n]*; setApplied\(BROWSE_VIEW\)/)
+    expect(clearAll).toMatch(/if \(json\.success && searchRef\.current === search\) \{ setData\([^\n]*; setApplied\(BROWSE_VIEW\)/)
   })
 
   test('Declutter follows the kind of search until the chip is clicked: null is automatic, a click fixes it, Clear gives it back', () => {

@@ -53,8 +53,7 @@ describe('Credentials page — the imported window', () => {
   test('a change from the pill searches at once, with the values it just set (state is not rendered yet)', () => {
     const onChange = src.slice(src.indexOf('const onWindowChange'), src.indexOf('const sinceLastExport'))
     expect(onChange).toContain('setImportedWindow(next)')
-    expect(onChange).toContain('resetCursor()')
-    expect(onChange).toContain('load(null, { importedAfter: next.after, importedBefore: next.before')
+    expect(onChange).toContain('load({ importedAfter: next.after, importedBefore: next.before')
     expect(chips).toContain('onChange={onWindowChange}')
   })
 
@@ -78,7 +77,7 @@ describe('Credentials page — the imported window', () => {
     expect(mountEffect).toContain('readWindowFromSearch(window.location.search, browserOffsetAt)')
     expect(mountEffect).toContain('setImportedWindow({ after: fromUrl.after, before: fromUrl.before, source: null })')
     expect(mountEffect).toContain('setSourceFileFilter(fromUrl.sourceFile)')
-    expect(mountEffect).toContain('load(null, { importedAfter: fromUrl.after, importedBefore: fromUrl.before, sourceFile: fromUrl.sourceFile')
+    expect(mountEffect).toContain('load({ importedAfter: fromUrl.after, importedBefore: fromUrl.before, sourceFile: fromUrl.sourceFile')
     expect(mountEffect).toContain("'imported_desc' as const") // a window opens on Newest first
     expect(mountEffect).toContain('was ignored') // a bad value is said out loud
     const load = src.slice(src.indexOf('const load = useCallback'), src.indexOf('// First load. An address that names'))

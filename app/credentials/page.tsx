@@ -1,9 +1,9 @@
 "use client"
 export const dynamic = "force-dynamic"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import { memo, useState, useEffect, useCallback, useRef } from "react"
 import {
-  ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Loader2,
+  ChevronUp, ChevronDown, Loader2,
   Copy, Filter, X, Globe, Download, ArrowUpDown,
   ExternalLink, FileText, Shield, Clock, Building2,
   Mail, Lock, AtSign, CheckCheck, SlidersHorizontal,
@@ -26,8 +26,10 @@ import {
   DEFAULT_CREDENTIAL_SORT,
 } from "@/lib/credential-browse-defaults"
 import type { SortKey } from "@/lib/cursor-pagination"
-import { appliedViewOf, BROWSE_VIEW, matchingHint, matchingLabel, parseTotals, recordsLabel, resultsLabel, totalsParams, withPendingTotals, withTotals, type AppliedView } from "@/lib/credential-totals"
+import { appliedViewOf, BROWSE_VIEW, matchingHint, matchingLabel, parseTotals, recordsLabel, totalsParams, withPendingTotals, withTotals, type AppliedView } from "@/lib/credential-totals"
 import { declutterByDefault } from "@/lib/declutter-default"
+import { effectiveLoginType } from "@/lib/login-type-default"
+import { appendPage, listFooter, shouldAutoLoad, LOAD_AHEAD_PX, type ListFooter } from "@/lib/credential-pages"
 import {
   epochSecondsToIso, utcIsoToDisplay,
   searchFingerprint, readMark, writeMark, markStorageKey, sinceLastExportWindow, markAfterExport, type ExportMark,
@@ -156,6 +158,8 @@ function syncWindowToUrl(ps: URLSearchParams): void {
 interface LoadOverrides {
   sort?: string; limit?: number; q?: string; domain?: string; excludeNoise?: boolean; dedupe?: boolean
   importedAfter?: string; importedBefore?: string; sourceFile?: string
+  /** null = automatic (lib/login-type-default.ts), '' = All types; undefined = whatever the state says. */
+  loginTypeChoice?: string | null
 }
 
 /** localStorage can be blocked (private windows, site data cleared): the "since last export" memory is a convenience, so null is fine. */
@@ -286,7 +290,8 @@ function CredentialDetailSheet({
   cred: Credential | null
   open: boolean
   onClose: () => void
-  onSearchEmail: (email: string) => void
+  /** The login and its type: a row that is not Email-type is only in the answer of a search that does not filter by Email. */
+  onSearchEmail: (email: string, loginType: string) => void
   onSearchDomain: (domain: string) => void
 }) {
   const [related, setRelated]             = useState<RelatedData | null>(null)
@@ -399,7 +404,7 @@ function CredentialDetailSheet({
               size="sm"
               variant="ghost"
               className="h-7 text-xs gap-1 flex-1 text-muted-foreground hover:text-foreground border border-border/60"
-              onClick={() => { onSearchEmail(cred.email); onClose() }}
+              onClick={() => { onSearchEmail(cred.email, cred.login_type); onClose() }}
               title={`Filter for all credentials matching ${cred.email}`}
             >
               <Mail className="h-3 w-3" />
@@ -662,6 +667,129 @@ function CredentialDetailSheet({
   )
 }
 
+// ─── Result row ───────────────────────────────────────────────────────────────
+
+const rowTierClass = (t: string) =>
+  t === 'T1' ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20' :
+  t === 'T2' ? 'bg-blue-500/10 text-blue-600 border-blue-500/20' :
+  t === 'T3' ? 'bg-amber-500/10 text-amber-600 border-amber-500/20' : ''
+
+/**
+ * One result row. Memoised: the list is endless and can hold thousands of rows, and a page appended, a row selected or the footer's seconds ticking must
+ * not render the rows that did not change (they keep their object, `cred`, and the page keeps `onOpen` and `onCopy` stable).
+ */
+const CredentialRow = memo(function CredentialRow({ cred, selected, onOpen, onCopy }: {
+  cred: Credential
+  selected: boolean
+  onOpen: (cred: Credential) => void
+  onCopy: (text: string) => void
+}) {
+  return (
+    <tr
+      className={`border-b hover:bg-muted/40 group cursor-pointer transition-colors ${selected ? 'bg-primary/5 border-l-2 border-l-primary' : ''}`}
+      onClick={() => onOpen(cred)}
+    >
+      <td className="max-w-xs truncate px-4 py-2 font-mono text-xs text-muted-foreground" title={cred.url}>
+        {cred.url}
+      </td>
+      <td className="max-w-xs truncate px-4 py-2 font-mono text-xs" title={cred.email}>
+        {cred.email}
+      </td>
+      <td className="max-w-xs truncate px-4 py-2 font-mono text-xs font-medium" title={cred.password}>
+        {cred.password}
+      </td>
+      <td className="px-4 py-2">
+        <Badge
+          variant="outline"
+          className="text-xs font-normal max-w-[8rem] truncate block"
+          title={cred.breach_name ? `${cred.domain} · ${cred.breach_name}` : cred.domain}
+        >
+          {cred.domain}
+        </Badge>
+      </td>
+      <td className="px-4 py-2">
+        {cred.country_tier ? (
+          <span className={`text-xs font-mono font-semibold px-1.5 py-0.5 rounded border ${rowTierClass(cred.country_tier)}`}>
+            {cred.country_tier}
+          </span>
+        ) : <span className="text-muted-foreground/30 text-xs">—</span>}
+      </td>
+      <td className="px-4 py-2">
+        {cred.password_mask ? (
+          <span className={`text-xs px-1.5 py-0.5 rounded border ${MASK_COLORS[cred.password_mask] || ''}`}>
+            {cred.password_mask}
+          </span>
+        ) : null}
+      </td>
+      <td className="px-4 py-2 text-xs text-muted-foreground tabular-nums">
+        {cred.password_length}
+      </td>
+      <td className="px-2 py-2">
+        <Button
+          size="icon"
+          variant="ghost"
+          className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+          onClick={e => { e.stopPropagation(); onCopy(`${cred.email}:${cred.password}`) }}
+          title="Copy email:password"
+        >
+          <Copy className="h-3 w-3" />
+        </Button>
+      </td>
+    </tr>
+  )
+})
+
+// ─── Line under the rows ──────────────────────────────────────────────────────
+
+/**
+ * What the endless list says under its rows: that more comes by scrolling, that a page is loading (with the seconds it has taken: a page of a rare search
+ * can take a minute, and a spinner alone does not say whether anything is happening) and a button to stop it, a retry after an error or a stop, a button
+ * past the row cap, and the end. It owns the seconds counter, so that the table does not render once a second.
+ */
+function ListFooterLine({ kind, rows, error, onLoadMore, onStop }: {
+  kind: ListFooter
+  rows: number
+  error: string | null
+  onLoadMore: () => void
+  onStop: () => void
+}) {
+  const [seconds, setSeconds] = useState(0)
+  const loading = kind === 'loading'
+  useEffect(() => {
+    if (!loading) { setSeconds(0); return }
+    const started = Date.now()
+    const id = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [loading])
+
+  const count = rows.toLocaleString('en-US')
+  return (
+    <div className="flex items-center justify-center gap-3 border-t px-4 py-3 text-sm text-muted-foreground" role="status" aria-live="polite">
+      {kind === 'loading' && (
+        <>
+          <Loader2 className="h-4 w-4 animate-spin" />
+          <span className="tabular-nums">{count} rows loaded · loading the next rows… {seconds} s{seconds >= 15 ? ' (a rare search scans the whole table; a page can take a minute)' : ''}</span>
+          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={onStop}>Stop</Button>
+        </>
+      )}
+      {kind === 'error' && (
+        <>
+          <span className="text-amber-600 dark:text-amber-400">{error ?? 'The next rows could not be loaded.'}</span>
+          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={onLoadMore}>Retry</Button>
+        </>
+      )}
+      {kind === 'more' && <span className="tabular-nums">{count} rows loaded · scroll for more</span>}
+      {kind === 'capped' && (
+        <>
+          <span className="tabular-nums">{count} rows loaded</span>
+          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={onLoadMore}>Load the next rows</Button>
+        </>
+      )}
+      {kind === 'end' && <span className="tabular-nums">{count} rows · end of the results</span>}
+    </div>
+  )
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function CredentialsPage() {
@@ -672,9 +800,10 @@ export default function CredentialsPage() {
   const [exportLoading, setExportLoading] = useState(false)
   // Rows received so far by a streamed export (null until the first rows arrive).
   const [exportRows, setExportRows]       = useState<number | null>(null)
-  const [cursorStack, setCursorStack]     = useState<Array<string | null>>([])
-  const [currentCursor, setCurrentCursor] = useState<string | null>(null)
-  const resetCursor = () => { setCursorStack([]); setCurrentCursor(null) }
+  // The list is endless: `data.results` is every row loaded so far, and loadMore() appends the next page to it (lib/credential-pages.ts).
+  const [loadingMore, setLoadingMore]     = useState(false)
+  // A later page failed or was stopped: the rows stay on screen, the footer offers a retry, and nothing retries by itself.
+  const [moreError, setMoreError]         = useState<string | null>(null)
 
   // Credential detail sheet
   const [selectedCred, setSelectedCred] = useState<Credential | null>(null)
@@ -685,7 +814,9 @@ export default function CredentialsPage() {
   const [scope, setScope]               = useState<SearchScope>('all')
   const [domain, setDomain]           = useState('')
   const [breach, setBreach]           = useState('')
-  const [loginType, setLoginType]     = useState('')
+  // Login type chips. null = automatic (lib/login-type-default.ts): Email for a search, every type for a browse. A click is a choice, 'All types' ('')
+  // included, and holds until Clear.
+  const [loginTypeChoice, setLoginTypeChoice] = useState<string | null>(null)
   const [pwMask, setPwMask]           = useState<string[]>([])
   const [isCorporate, setIsCorporate] = useState(false)
   const [urlScheme, setUrlScheme]     = useState('')
@@ -726,7 +857,7 @@ export default function CredentialsPage() {
 
   const { toast } = useToast()
 
-  const buildParams = useCallback((cursor: string | null, overrides?: LoadOverrides) => {
+  const buildParams = useCallback((overrides?: LoadOverrides) => {
     const effectiveSort  = overrides?.sort   ?? sortKey
     const effectiveLimit = overrides?.limit  ?? limit
     const effectiveQ     = overrides?.q      ?? q
@@ -737,12 +868,13 @@ export default function CredentialsPage() {
     })
     const effectiveDedupe = overrides?.dedupe ?? dedupe
     const ps = new URLSearchParams({ limit: String(effectiveLimit), sort: effectiveSort })
-    if (cursor) ps.set('cursor', cursor)
     if (effectiveQ.trim())     ps.set('q', effectiveQ.trim())
     if (scope !== 'all')       ps.set('scope', scope)
     if (effectiveDomain)       ps.set('domain', effectiveDomain)
     if (breach)             ps.set('breach', breach)
-    if (loginType)          ps.set('login_type', loginType)
+    // The same rule as the chips show (lib/login-type-default.ts), from the values this request carries.
+    const effectiveType = effectiveLoginType(overrides?.loginTypeChoice !== undefined ? overrides.loginTypeChoice : loginTypeChoice, { q: effectiveQ, domain: effectiveDomain })
+    if (effectiveType)      ps.set('login_type', effectiveType)
     if (pwMask.length)      ps.set('pw_mask', pwMask.join(','))
     if (isCorporate)          ps.set('is_corporate', '1')
     if (urlScheme)            ps.set('url_scheme', urlScheme)
@@ -765,7 +897,7 @@ export default function CredentialsPage() {
     if (regexMode)          ps.set('regex', '1')
     return ps
   }, [
-    q, scope, domain, breach, loginType, pwMask, isCorporate, urlScheme, tierInclude, tierExclude, declutterChoice, dedupe,
+    q, scope, domain, breach, loginTypeChoice, pwMask, isCorporate, urlScheme, tierInclude, tierExclude, declutterChoice, dedupe,
     importedAfter, importedBefore, pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode,
     sortKey, limit,
   ])
@@ -776,53 +908,59 @@ export default function CredentialsPage() {
   // two full heavy queries contend for resources at once, AND whichever HTTP
   // response lands last wins, even if it was the stale request.
   const loadAbortRef = useRef<AbortController | null>(null)
+  // A page after the first (loadMore) has its own controller: scrolling must not cancel the first page's totals request, which can still be counting.
+  // A new search cancels both.
+  const moreAbortRef = useRef<AbortController | null>(null)
+  // Counts the searches. An answer that arrives for an older one (a later page, or the totals) is dropped.
+  const searchRef = useRef(0)
+  // The query string of the search the rows on screen belong to, without a cursor. The next page continues THIS search, not whatever the filter bar says by
+  // then: a box edited and not applied, then a scroll, must not mix two searches.
+  const shownQueryRef = useRef('')
+  // One later page at a time, also between two renders (the observer can fire twice before a state update shows).
+  const moreInFlightRef = useRef(false)
 
-  const load = useCallback(async (cursor: string | null, overrides?: LoadOverrides) => {
+  /** A new search: the first page replaces the rows on screen. */
+  const load = useCallback(async (overrides?: LoadOverrides) => {
+    const search = ++searchRef.current
     loadAbortRef.current?.abort()
+    moreAbortRef.current?.abort()
+    moreInFlightRef.current = false
     const controller = new AbortController()
     loadAbortRef.current = controller
 
     setLoading(true)
+    setLoadingMore(false)
+    setMoreError(null)
     const t0 = performance.now()
     try {
-      const params = buildParams(cursor, overrides)
+      const params = buildParams(overrides)
       const view = appliedViewOf(params)
       syncWindowToUrl(params)
-      // First page: the rows and the whole-table totals are two requests, so the table renders as soon
+      shownQueryRef.current = params.toString()
+      // The rows and the whole-table totals are two requests, so the table renders as soon
       // as its rows are ready instead of waiting for a count that scans the table (11 s for a
       // domain-token search on 1.39B rows against ~3 s for the first page). Both share this request's
       // AbortController, so a newer load() cancels both.
-      const splitTotals = cursor === null
-      const totalsRequest = splitTotals
-        ? fetch(`/api/credentials?${totalsParams(params)}`, { signal: controller.signal })
-            .then(r => r.json())
-            .then(parseTotals)
-            .catch(() => null)
-        : null
-      const res  = await fetch(`/api/credentials?${params}${splitTotals ? '&skip_totals=1' : ''}`, { signal: controller.signal })
+      const totalsRequest = fetch(`/api/credentials?${totalsParams(params)}`, { signal: controller.signal })
+        .then(r => r.json())
+        .then(parseTotals)
+        .catch(() => null)
+      const res  = await fetch(`/api/credentials?${params}&skip_totals=1`, { signal: controller.signal })
       const json = await res.json()
       const total_ms = Math.round(performance.now() - t0)
       if (json.success) {
-        // On deeper cursor pages the server skips the count() and returns
-        // total:null — carry the page-1 total forward so the header/footer keep
-        // showing the real count instead of flashing to 0.
-        setData(prev => {
-          if (splitTotals) return withPendingTotals({ ...json, total_ms })
-          return json.total == null ? { ...json, total: prev?.total ?? 0, total_ms } : { ...json, total_ms }
-        })
+        setData(withPendingTotals({ ...json, total_ms }))
         setApplied(view)
-        setCurrentCursor(cursor)
-        // The totals are applied only if this is still the current request; this runs after the rows above
+        // The totals are applied only if this is still the current search; this runs after the rows above
         // were set, whichever of the two requests answered first.
-        totalsRequest?.then(totals => {
-          if (loadAbortRef.current === controller) setData(prev => withTotals(prev, totals))
+        totalsRequest.then(totals => {
+          if (searchRef.current === search) setData(prev => withTotals(prev, totals))
         })
       } else if (json.timed_out) {
         // 408 timeout: show the structured timeout response in the results panel
         // instead of a toast — the user can see why and what to do.
         setData({ ...json, results: [], total_ms })
         setApplied(view)
-        setCurrentCursor(cursor)
       } else {
         toast({ title: 'Failed to load', variant: 'destructive' })
       }
@@ -831,11 +969,68 @@ export default function CredentialsPage() {
       if (err instanceof DOMException && err.name === 'AbortError') return
       toast({ title: 'Failed to load', variant: 'destructive' })
     } finally {
-      // Only the still-current request may clear the spinner — an aborted
+      // Only the still-current search may clear the spinner — an aborted
       // request's finally must not stomp on a newer in-flight request's state.
-      if (loadAbortRef.current === controller) setLoading(false)
+      if (searchRef.current === search) setLoading(false)
     }
   }, [buildParams, toast])
+
+  /**
+   * The next page of the search on screen, appended to its rows. The server skips the count on a cursor page (total: null), so the totals stay as the first
+   * page left them. A failure or a stop leaves the rows alone and shows a retry; a new search while this page loads drops its answer.
+   */
+  const loadMore = useCallback(async () => {
+    const cursor = data?.next_cursor
+    if (!cursor || loading || moreInFlightRef.current) return
+    const search = searchRef.current
+    const controller = new AbortController()
+    moreAbortRef.current = controller
+    moreInFlightRef.current = true
+    setLoadingMore(true)
+    setMoreError(null)
+    try {
+      const ps = new URLSearchParams(shownQueryRef.current)
+      ps.set('cursor', cursor)
+      const res  = await fetch(`/api/credentials?${ps}&skip_totals=1`, { signal: controller.signal })
+      const json = await res.json()
+      if (searchRef.current !== search) return
+      if (json.success) {
+        setData(prev => (prev ? appendPage(prev, json) : prev))
+      } else {
+        setMoreError(json.timed_out ? 'The next rows timed out. Narrow the search, or try again.' : 'The next rows could not be loaded.')
+      }
+    } catch (err) {
+      if (searchRef.current !== search) return
+      setMoreError(err instanceof DOMException && err.name === 'AbortError' ? 'Stopped.' : 'The next rows could not be loaded.')
+    } finally {
+      if (searchRef.current === search) {
+        moreInFlightRef.current = false
+        setLoadingMore(false)
+      }
+    }
+  }, [data?.next_cursor, loading])
+
+  // The end of the rows and the box that scrolls them: when the end comes within LOAD_AHEAD_PX of the bottom of the box, the next page is fetched. The observer
+  // is made again after every page (and every search), so that a page that does not fill the box is followed by the next at once.
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const sentinelRef = useRef<HTMLDivElement | null>(null)
+  const loadMoreRef = useRef(loadMore)
+  useEffect(() => { loadMoreRef.current = loadMore }, [loadMore])
+  const rowCount = data?.results.length ?? 0
+  const listState = { rows: rowCount, hasMore: !!data?.next_cursor, loading, loadingMore, error: moreError !== null }
+  const autoLoad = shouldAutoLoad(listState)
+  const footerKind = listFooter(listState)
+  useEffect(() => {
+    const root = scrollRef.current
+    const target = sentinelRef.current
+    if (!autoLoad || !root || !target || typeof IntersectionObserver === 'undefined') return
+    const observer = new IntersectionObserver(
+      entries => { if (entries.some(e => e.isIntersecting)) void loadMoreRef.current() },
+      { root, rootMargin: `0px 0px ${LOAD_AHEAD_PX}px 0px` },
+    )
+    observer.observe(target)
+    return () => observer.disconnect()
+  }, [autoLoad, rowCount])
 
   // First load. An address that names a window or a file (a bookmark, or "View what this added" on an import job) is applied before the
   // search runs; the sort switches to Newest first for a window, as it does when the pill sets one.
@@ -845,20 +1040,20 @@ export default function CredentialsPage() {
       toast({ title: `${fromUrl.invalid.join(' and ')} in the address ${fromUrl.invalid.length > 1 ? 'are' : 'is'} not a date and was ignored`, variant: 'destructive' })
     }
     if (!fromUrl.after && !fromUrl.before && !fromUrl.sourceFile) {
-      load(null)
+      load()
       return
     }
     const sort = fromUrl.after ? 'imported_desc' as const : undefined
     setImportedWindow({ after: fromUrl.after, before: fromUrl.before, source: null })
     setSourceFileFilter(fromUrl.sourceFile)
     if (sort) setSortKey(sort)
-    load(null, { importedAfter: fromUrl.after, importedBefore: fromUrl.before, sourceFile: fromUrl.sourceFile, ...(sort ? { sort } : {}) })
+    load({ importedAfter: fromUrl.after, importedBefore: fromUrl.before, sourceFile: fromUrl.sourceFile, ...(sort ? { sort } : {}) })
   }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
-  const applyFilters = () => { resetCursor(); load(null) }
+  const applyFilters = () => { load() }
 
   const clearAll = () => {
-    setQ(''); setScope('all'); setDomain(''); setBreach(''); setLoginType(''); setPwMask([])
+    setQ(''); setScope('all'); setDomain(''); setBreach(''); setLoginTypeChoice(null); setPwMask([])
     setIsCorporate(false); setUrlScheme(''); setTierInclude([]); setTierExclude([])
     setImportedWindow(EMPTY_IMPORTED_WINDOW); setPwLenMin(''); setPwLenMax('')
     setEmailDomainFilter(''); setSourceFileFilter(''); setUrlHostFilter('')
@@ -869,41 +1064,51 @@ export default function CredentialsPage() {
     // Fetch directly with shared defaults — all state setters above are async,
     // so calling load() here would still see the old values via its closure.
     // exclude_noise=1 + dedupe=1 keep the default-on declutter + dedupe after a clear.
+    const search = ++searchRef.current
     setLoading(true)
-    setCursorStack([]); setCurrentCursor(null)
+    setLoadingMore(false)
+    setMoreError(null)
     syncWindowToUrl(new URLSearchParams())
     loadAbortRef.current?.abort()
+    moreAbortRef.current?.abort()
+    moreInFlightRef.current = false
     const controller = new AbortController()
     loadAbortRef.current = controller
+    const defaults = `limit=${DEFAULT_CREDENTIAL_LIMIT}&sort=${DEFAULT_CREDENTIAL_SORT}&exclude_noise=1&dedupe=1`
+    shownQueryRef.current = defaults
     const t0 = performance.now()
-    fetch(`/api/credentials?limit=${DEFAULT_CREDENTIAL_LIMIT}&sort=${DEFAULT_CREDENTIAL_SORT}&exclude_noise=1&dedupe=1`, { signal: controller.signal })
+    fetch(`/api/credentials?${defaults}`, { signal: controller.signal })
       .then(r => r.json())
-      .then(json => { if (json.success) { setData({ ...json, total_ms: Math.round(performance.now() - t0) }); setApplied(BROWSE_VIEW); setCurrentCursor(null) } })
+      .then(json => { if (json.success && searchRef.current === search) { setData({ ...json, total_ms: Math.round(performance.now() - t0) }); setApplied(BROWSE_VIEW) } })
       .catch((err) => {
         if (err instanceof DOMException && err.name === 'AbortError') return
         toast({ title: 'Failed to load', variant: 'destructive' })
       })
-      .finally(() => { if (loadAbortRef.current === controller) setLoading(false) })
+      .finally(() => { if (searchRef.current === search) setLoading(false) })
   }
 
-  const copy = (text: string) => {
+  // Stable, so the memoised rows (CredentialRow) are not rendered again when something else changes.
+  const copy = useCallback((text: string) => {
     navigator.clipboard.writeText(text)
     toast({ title: 'Copied' })
-  }
+  }, [toast])
 
-  const openDetail = (cred: Credential) => {
+  const openDetail = useCallback((cred: Credential) => {
     setSelectedCred(cred)
     setSheetOpen(true)
-  }
+  }, [])
 
   // Quick-action callbacks from the detail sheet
-  const handleSearchEmail = (email: string) => {
+  const handleSearchEmail = (email: string, rowLoginType: string) => {
     setQ(email)
-    resetCursor(); load(null, { q: email })
+    // A username or a phone number is not in an Email search: the row that was clicked must be in the answer, so the type is dropped for it.
+    const choice = rowLoginType === 'email' ? loginTypeChoice : ''
+    if (choice !== loginTypeChoice) setLoginTypeChoice(choice)
+    load({ q: email, loginTypeChoice: choice })
   }
   const handleSearchDomain = (dom: string) => {
     setDomain(dom)
-    resetCursor(); load(null, { domain: dom })
+    load({ domain: dom })
   }
 
   /** Cycle sort: unsorted → asc → desc → reset; updates the dropdown in sync. */
@@ -912,7 +1117,7 @@ export default function CredentialsPage() {
                : sortKey === descKey ? DEFAULT_CREDENTIAL_SORT
                : ascKey
     setSortKey(next)
-    resetCursor(); load(null, { sort: next })
+    load({ sort: next })
   }
 
   /** Render the correct sort icon for a column header. */
@@ -931,9 +1136,13 @@ export default function CredentialsPage() {
   // What the chip shows: a click at once, otherwise the view the rows on screen were asked for (so it does not move while a search is being typed).
   const chipOn = declutterChoice ?? applied.declutter
 
+  // The login type a search typed now would get: the click made, otherwise the default of what is typed (lib/login-type-default.ts: Email for a search,
+  // every type for a browse). The chips show it, and the export and the "same search" key use it for the same reason as declutterNow.
+  const loginTypeNow = effectiveLoginType(loginTypeChoice, { q, domain })
+
   // "The same search" for the since-last-export memory: every field that narrows the rows, none of date, sort, format or page size.
   const markKey = markStorageKey(searchFingerprint({
-    q, scope: scope === 'all' ? '' : scope, domain, breach, loginType, pwMask, isCorporate, urlScheme, tierInclude, tierExclude, pwLenMin, pwLenMax,
+    q, scope: scope === 'all' ? '' : scope, domain, breach, loginType: loginTypeNow, pwMask, isCorporate, urlScheme, tierInclude, tierExclude, pwLenMin, pwLenMax,
     emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode, excludeNoise: declutterNow, dedupe,
   }))
   useEffect(() => { setExportMark(readMark(browserStorage(), markKey)) }, [markKey])
@@ -946,8 +1155,7 @@ export default function CredentialsPage() {
     const sort = next.after && sortKey !== 'imported_desc' && sortKey !== 'imported_asc' ? 'imported_desc' as const : undefined
     setImportedWindow(next)
     if (sort) setSortKey(sort)
-    resetCursor()
-    load(null, { importedAfter: next.after, importedBefore: next.before, ...(sort ? { sort } : {}) })
+    load({ importedAfter: next.after, importedBefore: next.before, ...(sort ? { sort } : {}) })
   }
 
   /** The popover's "Since last export": (the last complete export's cut, now minus the lag]. */
@@ -971,8 +1179,7 @@ export default function CredentialsPage() {
   /** The file named by a "View what this added" link (or typed under Advanced) is dropped; the search runs again. */
   const clearSourceFile = () => {
     setSourceFileFilter('')
-    resetCursor()
-    load(null, { sourceFile: '' })
+    load({ sourceFile: '' })
   }
 
   const doExport = useCallback(async () => {
@@ -991,7 +1198,7 @@ export default function CredentialsPage() {
           breach_name:   breach,
           tier_include:  tierInclude.join(','),
           tier_exclude:  tierExclude.join(','),
-          login_type:    loginType,
+          login_type:    loginTypeNow,
           pw_mask:       pwMask.join(','),
           url_scheme:    urlScheme,
           is_corporate:  isCorporate ? '1' : '',
@@ -1058,17 +1265,12 @@ export default function CredentialsPage() {
       setExportLoading(false)
       setExportRows(null)
     }
-  }, [q, scope, domain, breach, tierInclude, tierExclude, loginType, pwMask, urlScheme, isCorporate, sortKey, exportFmt,
+  }, [q, scope, domain, breach, tierInclude, tierExclude, loginTypeNow, pwMask, urlScheme, isCorporate, sortKey, exportFmt,
       importedAfter, importedBefore, exportMark, markKey,
       pwLenMin, pwLenMax, emailDomainFilter, sourceFileFilter, urlHostFilter, regexMode, declutterNow, dedupe,
       toast])
 
-  const tierBadgeClass = (t: string) =>
-    t === 'T1' ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20' :
-    t === 'T2' ? 'bg-blue-500/10 text-blue-600 border-blue-500/20' :
-    t === 'T3' ? 'bg-amber-500/10 text-amber-600 border-amber-500/20' : ''
-
-  const hasBasicFilters = !!(q || scope !== 'all' || domain || breach || loginType || pwMask.length || isCorporate || urlScheme || tierInclude.length || tierExclude.length || importedAfter || importedBefore)
+  const hasBasicFilters = !!(q || scope !== 'all' || domain || breach || (loginTypeChoice ?? '') !== '' || pwMask.length || isCorporate || urlScheme || tierInclude.length || tierExclude.length || importedAfter || importedBefore)
   const hasAdvFilters   = !!(pwLenMin || pwLenMax || emailDomainFilter || sourceFileFilter || urlHostFilter || regexMode)
   const hasFilters      = hasBasicFilters || hasAdvFilters
 
@@ -1161,7 +1363,7 @@ export default function CredentialsPage() {
               <ArrowUpDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
               <select
                 value={sortKey}
-                onChange={e => { const s = e.target.value as SortKey; setSortKey(s); resetCursor(); load(null, { sort: s }) }}
+                onChange={e => { const s = e.target.value as SortKey; setSortKey(s); load({ sort: s }) }}
                 className={selectCls}
               >
                 {SORT_OPTIONS.map(o => (
@@ -1173,7 +1375,7 @@ export default function CredentialsPage() {
             {/* Page size */}
             <select
               value={limit}
-              onChange={e => { const l = Number(e.target.value); setLimit(l); resetCursor(); load(null, { limit: l }) }}
+              onChange={e => { const l = Number(e.target.value); setLimit(l); load({ limit: l }) }}
               className={selectCls}
               title="Rows per page"
             >
@@ -1346,12 +1548,13 @@ export default function CredentialsPage() {
             )
           })()}
 
-          {/* Login type */}
+          {/* Login type: Email starts on for a search (lib/login-type-default.ts); a click is a choice that holds until Clear */}
           {LOGIN_TYPE_OPTIONS.map(lt => (
             <button
               key={lt || 'all-lt'}
-              onClick={() => setLoginType(loginType === lt ? '' : lt)}
-              className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${loginType === lt ? 'border-primary/30 bg-primary/10 text-primary font-medium' : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted'}`}
+              onClick={() => setLoginTypeChoice(loginTypeNow === lt ? '' : lt)}
+              title={lt === 'email' ? 'Logins that are e-mail addresses. On by default for a search; pick Username, Phone or All types to change it.' : undefined}
+              className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${loginTypeNow === lt ? 'border-primary/30 bg-primary/10 text-primary font-medium' : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted'}`}
             >
               {lt === '' ? 'All types' : LOGIN_TYPE_SHORT[lt] ?? lt}
             </button>
@@ -1398,7 +1601,7 @@ export default function CredentialsPage() {
 
           {/* Declutter — hide IP-host / :port / .php / localhost noise (non-destructive) */}
           <button
-            onClick={() => { const v = !chipOn; setDeclutterChoice(v); resetCursor(); load(null, { excludeNoise: v }) }}
+            onClick={() => { const v = !chipOn; setDeclutterChoice(v); load({ excludeNoise: v }) }}
             title="Hide low-signal rows: IP-address hosts, URLs with a :port, URLs ending in .php (a site's own index.php and login.php too), localhost and mangled hosts. Non-destructive — toggle off to show every row."
             className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${chipOn ? 'border-primary/30 bg-primary/10 text-primary font-medium' : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted'}`}
           >
@@ -1408,7 +1611,7 @@ export default function CredentialsPage() {
 
           {/* Dedupe — collapse exact (url,email,password) duplicates (non-destructive) */}
           <button
-            onClick={() => { const v = !dedupe; setDedupe(v); resetCursor(); load(null, { dedupe: v }) }}
+            onClick={() => { const v = !dedupe; setDedupe(v); load({ dedupe: v }) }}
             title="Show one row per unique credential (same url + email + password). Non-destructive — toggle off to show every duplicate copy."
             className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${dedupe ? 'border-primary/30 bg-primary/10 text-primary font-medium' : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted'}`}
           >
@@ -1535,12 +1738,13 @@ export default function CredentialsPage() {
       </div>
 
       {/* ── Table ──────────────────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-auto">
+      <div ref={scrollRef} className="flex-1 overflow-auto">
         {loading ? (
           <div className="flex h-full items-center justify-center">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
           </div>
         ) : data && data.results.length > 0 ? (
+          <>
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-background border-b z-10">
               <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
@@ -1588,61 +1792,14 @@ export default function CredentialsPage() {
             </thead>
             <tbody>
               {data.results.map((cred, i) => (
-                <tr
-                  key={i}
-                  className={`border-b hover:bg-muted/40 group cursor-pointer transition-colors ${selectedCred === cred && sheetOpen ? 'bg-primary/5 border-l-2 border-l-primary' : ''}`}
-                  onClick={() => openDetail(cred)}
-                >
-                  <td className="max-w-xs truncate px-4 py-2 font-mono text-xs text-muted-foreground" title={cred.url}>
-                    {cred.url}
-                  </td>
-                  <td className="max-w-xs truncate px-4 py-2 font-mono text-xs" title={cred.email}>
-                    {cred.email}
-                  </td>
-                  <td className="max-w-xs truncate px-4 py-2 font-mono text-xs font-medium" title={cred.password}>
-                    {cred.password}
-                  </td>
-                  <td className="px-4 py-2">
-                    <Badge
-                      variant="outline"
-                      className="text-xs font-normal max-w-[8rem] truncate block"
-                      title={cred.breach_name ? `${cred.domain} · ${cred.breach_name}` : cred.domain}
-                    >
-                      {cred.domain}
-                    </Badge>
-                  </td>
-                  <td className="px-4 py-2">
-                    {cred.country_tier ? (
-                      <span className={`text-xs font-mono font-semibold px-1.5 py-0.5 rounded border ${tierBadgeClass(cred.country_tier)}`}>
-                        {cred.country_tier}
-                      </span>
-                    ) : <span className="text-muted-foreground/30 text-xs">—</span>}
-                  </td>
-                  <td className="px-4 py-2">
-                    {cred.password_mask ? (
-                      <span className={`text-xs px-1.5 py-0.5 rounded border ${MASK_COLORS[cred.password_mask] || ''}`}>
-                        {cred.password_mask}
-                      </span>
-                    ) : null}
-                  </td>
-                  <td className="px-4 py-2 text-xs text-muted-foreground tabular-nums">
-                    {cred.password_length}
-                  </td>
-                  <td className="px-2 py-2">
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
-                      onClick={e => { e.stopPropagation(); copy(`${cred.email}:${cred.password}`) }}
-                      title="Copy email:password"
-                    >
-                      <Copy className="h-3 w-3" />
-                    </Button>
-                  </td>
-                </tr>
+                <CredentialRow key={i} cred={cred} selected={selectedCred === cred && sheetOpen} onOpen={openDetail} onCopy={copy} />
               ))}
             </tbody>
           </table>
+          {/* The end of the rows: the next page is fetched when this comes within LOAD_AHEAD_PX of the bottom of the box (lib/credential-pages.ts) */}
+          <div ref={sentinelRef} aria-hidden="true" className="h-px" />
+          <ListFooterLine kind={footerKind} rows={data.results.length} error={moreError} onLoadMore={loadMore} onStop={() => moreAbortRef.current?.abort()} />
+          </>
         ) : (
           <div className="flex h-full items-center justify-center text-center p-6">
             {loading ? null : (
@@ -1666,37 +1823,6 @@ export default function CredentialsPage() {
           </div>
         )}
       </div>
-
-      {/* ── Pagination ─────────────────────────────────────────────────────── */}
-      {(cursorStack.length > 0 || data?.next_cursor) && (
-        <div className="flex items-center justify-center gap-3 border-t px-4 py-3">
-          <Button
-            size="sm" variant="outline"
-            disabled={cursorStack.length === 0 || loading}
-            onClick={() => {
-              const prev = cursorStack[cursorStack.length - 1] ?? null
-              setCursorStack(s => s.slice(0, -1))
-              load(prev)
-            }}
-          >
-            <ChevronLeft className="h-4 w-4" />
-          </Button>
-          <span className="text-sm text-muted-foreground tabular-nums">
-            {resultsLabel(data)}
-          </span>
-          <Button
-            size="sm" variant="outline"
-            disabled={!data?.next_cursor || loading}
-            onClick={() => {
-              const next = data!.next_cursor!
-              setCursorStack(s => [...s, currentCursor])
-              load(next)
-            }}
-          >
-            <ChevronRight className="h-4 w-4" />
-          </Button>
-        </div>
-      )}
 
       {/* ── Credential detail sheet ─────────────────────────────────────────── */}
       <CredentialDetailSheet
