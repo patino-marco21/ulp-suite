@@ -1,7 +1,7 @@
 "use client"
 export const dynamic = "force-dynamic"
 
-import { useRef, useState } from "react"
+import { useMemo, useRef, useState, useSyncExternalStore } from "react"
 import {
   BarChart3, Loader2, X, Download, Upload, ChevronDown, ChevronUp, ArrowUpDown, AlertTriangle, Square,
 } from "lucide-react"
@@ -15,16 +15,15 @@ import { localToUtcIso } from "@/lib/imported-window"
 import { ImportedWindowFilter, EMPTY_IMPORTED_WINDOW, type ImportedWindowValue } from "@/components/imported-window-filter"
 import { parseBatchText } from "@/lib/batch-input"
 import {
-  SITE_COUNTS_MAX_PER_LIST, SITE_COUNTS_REQUEST_SIZE, nextSiteSort, orderSiteRows, siteCountsCsv, splitRequests,
+  SITE_COUNTS_MAX_PER_LIST, SITE_COUNTS_REQUEST_SIZE, nextSiteSort, orderSiteRows, planSites, siteCountsCsv, splitRequests,
   type SiteCount, type SiteSort, type SiteSortKey,
 } from "@/lib/site-counts-input"
+import { markFilterCounts, markRank, markStateOf, matchesMarkFilter, type MarkFilter, type MarkState, type SiteMarkPatch } from "@/lib/site-marks-input"
+import { createSiteMarksStore } from "@/lib/site-marks-client"
+import { COLS, SiteRow, type CountRow } from "@/components/site-count-row"
+import { SiteMarkFilter } from "@/components/site-mark-filter"
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-
-interface CountRow {
-  site: string
-  result: SiteCount
-}
 
 interface CountsResponse {
   success: boolean
@@ -36,29 +35,19 @@ interface CountsResponse {
 /** The biggest list file the page reads: a list of sites is a few KB, this only stops a wrong file from freezing the tab. */
 const MAX_FILE_BYTES = 2 * 1024 * 1024
 
-const fmt = (n: number | null) => (n === null ? "—" : n.toLocaleString())
-
-// ── One site ──────────────────────────────────────────────────────────────────
+// ── One column header ─────────────────────────────────────────────────────────
 
 /**
- * The columns after the site name. The breakdown columns need a wide window (xl); below it the same numbers are in the row's detail. The headers of the
- * number columns are sort buttons, and their widths leave room for the arrow in front of the label.
+ * The header of a sortable column, as a button: its arrow says whether the table is sorted by the column and which way (the Credentials headers look the
+ * same). Off while there is nothing to sort by (the Mark column before the marks are loaded).
  */
-const COLS = {
-  rows: "w-20 text-right shrink-0",
-  host: "hidden xl:block w-24 text-right shrink-0",
-  subs: "hidden xl:block w-28 text-right shrink-0",
-  distinct: "hidden xl:block w-24 text-right shrink-0",
-  chevron: "w-3.5 shrink-0",
-}
-
-/** The header of a number column, as a button: its arrow says whether the table is sorted by the column and which way (the Credentials headers look the same). */
-function SortHeader({ label, sortKey, sort, onSort, className }: {
+function SortHeader({ label, sortKey, sort, onSort, className, disabled = false }: {
   label: string
   sortKey: SiteSortKey
   sort: SiteSort | null
   onSort: (key: SiteSortKey) => void
   className: string
+  disabled?: boolean
 }) {
   const current = sort !== null && sort.key === sortKey ? sort : null
   const Arrow = current === null ? ArrowUpDown : current.direction === "desc" ? ChevronDown : ChevronUp
@@ -70,82 +59,16 @@ function SortHeader({ label, sortKey, sort, onSort, className }: {
     <button
       type="button"
       onClick={() => onSort(sortKey)}
-      className={`${className} group/th cursor-pointer select-none uppercase transition-colors hover:text-foreground ${current ? "text-foreground" : ""}`}
+      disabled={disabled}
+      className={`${className} group/th cursor-pointer select-none uppercase transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 ${current ? "text-foreground" : ""}`}
       aria-label={`${label}${state}`}
-      title={hint}
+      title={disabled ? "Not available until the marks are loaded" : hint}
     >
       <span className="inline-flex items-center">
         <Arrow className={`mr-1 h-3 w-3 shrink-0 ${current ? "text-primary" : "opacity-20 transition-opacity group-hover/th:opacity-60"}`} />
         {label}
       </span>
     </button>
-  )
-}
-
-function SiteRow({ row }: { row: CountRow }) {
-  const [open, setOpen] = useState(false)
-  const { site, result } = row
-  const expandable = (result.count ?? 0) > 0
-  const muted = !result.error && result.count === 0
-
-  return (
-    <div className="border rounded-lg overflow-hidden">
-      <button
-        onClick={() => expandable && setOpen(o => !o)}
-        className={`w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors ${
-          expandable ? "hover:bg-muted/40 cursor-pointer" : "cursor-default"
-        }`}
-        aria-expanded={expandable ? open : undefined}
-      >
-        <span className="min-w-0 flex-1">
-          <span className={`block font-mono text-xs truncate ${muted ? "text-muted-foreground" : ""}`} title={site}>{site}</span>
-          {result.searched_as && (
-            <span className="block text-[10px] text-muted-foreground truncate" title={`Counted as ${result.searched_as}`}>
-              counted as {result.searched_as}
-            </span>
-          )}
-          {result.error && (
-            <span className="flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400">
-              <AlertTriangle className="h-3 w-3 shrink-0" />{result.error}
-            </span>
-          )}
-        </span>
-        <span className={`${COLS.rows} text-sm font-semibold tabular-nums ${muted ? "text-muted-foreground font-normal" : ""}`}>{fmt(result.count)}</span>
-        <span className={`${COLS.host} text-xs tabular-nums text-muted-foreground`}>{fmt(result.host_count)}</span>
-        <span className={`${COLS.subs} text-xs tabular-nums text-muted-foreground`}>{fmt(result.subdomain_count)}</span>
-        <span className={`${COLS.distinct} text-xs tabular-nums text-muted-foreground`}>{fmt(result.subdomains)}</span>
-        <span className={COLS.chevron}>
-          {expandable && (open ? <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />)}
-        </span>
-      </button>
-
-      {open && expandable && (
-        <div className="border-t bg-muted/20 px-4 py-2 space-y-2">
-          <p className="text-xs text-muted-foreground">
-            <span className="tabular-nums">{fmt(result.host_count)}</span> on the site itself
-            {result.subdomain_count === null
-              ? " · subdomains not counted"
-              : <>{" · "}<span className="tabular-nums">{fmt(result.subdomain_count)}</span> on {fmt(result.subdomains)} subdomain{result.subdomains === 1 ? "" : "s"}</>}
-          </p>
-          {result.top_subdomains.length > 0 && (
-            <div>
-              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
-                Subdomains with the most rows{result.subdomains !== null && result.subdomains > result.top_subdomains.length
-                  ? ` (${result.top_subdomains.length} of ${result.subdomains.toLocaleString()})` : ""}
-              </p>
-              <ul className="text-xs font-mono">
-                {result.top_subdomains.map(s => (
-                  <li key={s.domain} className="flex justify-between gap-4 py-0.5">
-                    <span className="truncate" title={s.domain}>{s.domain}</span>
-                    <span className="tabular-nums text-muted-foreground">{s.count.toLocaleString()}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
   )
 }
 
@@ -167,14 +90,34 @@ export default function SiteCountsPage() {
   const [sort, setSort] = useState<SiteSort | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef<AbortController | null>(null)
+  // The marks (design: docs/superpowers/specs/2026-10-29-site-marks-design.md): kept per site on the server, shown beside the counts, and read here
+  // through a store that orders the saves and puts a failed one back.
+  const marksStore = useMemo(
+    () => createSiteMarksStore({
+      fetch: (input, init) => fetch(input, init),
+      onSaveFailed: message => toast({ title: "The mark was not saved", description: message, variant: "destructive" }),
+    }),
+    [toast],
+  )
+  const marksSnap = useSyncExternalStore(marksStore.subscribe, marksStore.getSnapshot, marksStore.getSnapshot)
+  // The chip that narrows the table by mark. Like the sort, it is a way of looking at the rows, so counting again keeps it.
+  const [markFilter, setMarkFilter] = useState<MarkFilter>("all")
 
   const sites = parseBatchText(rawInput)
   const overLimit = sites.length > SITE_COUNTS_MAX_PER_LIST
   const importedAfterIso = localToUtcIso(importedWindow.after)
   const importedBeforeIso = localToUtcIso(importedWindow.before)
-  // The rows as the table shows them, which is also the order of the CSV.
-  const ordered = orderSiteRows(rows, sort)
+  // What each row can show of its mark. While the marks are not loaded none can, and nothing is filtered by mark, or the table would empty itself.
+  const marksLoaded = marksSnap.status === "ready"
+  const markStateOfRow = (row: CountRow): MarkState => markStateOf(row.result.host, marksSnap.marks, marksLoaded)
+  const effectiveFilter: MarkFilter = marksLoaded ? markFilter : "all"
+  const markAvailability = marksSnap.status === "ready" ? "ready" : marksSnap.status === "failed" ? "failed" : "loading"
+  // The rows as the table shows them, which is also the order and the content of the CSV: sorted, then narrowed by the mark chip.
+  const ordered = orderSiteRows(rows, sort, row => markRank(markStateOfRow(row)))
+  const shown = ordered.filter(row => matchesMarkFilter(markStateOfRow(row), effectiveFilter))
+  const chipCounts = markFilterCounts(rows.map(markStateOfRow))
   const onSort = (key: SiteSortKey) => setSort(current => nextSiteSort(current, key))
+  const onMarkChange = (host: string, patch: SiteMarkPatch) => { void marksStore.change(host, patch) }
 
   async function readFile(file: File) {
     if (running) return
@@ -196,6 +139,8 @@ export default function SiteCountsPage() {
     setRows([])
     setSubdomainsCounted(true)
     setProgress({ done: 0, total: sites.length })
+    // The marks of the whole list, asked for once alongside the first request, so a row arrives with its mark.
+    void marksStore.load(planSites(sites).hosts)
     const bound = {
       ...(importedAfterIso ? { imported_after: importedAfterIso } : {}),
       ...(importedBeforeIso ? { imported_before: importedBeforeIso } : {}),
@@ -240,7 +185,7 @@ export default function SiteCountsPage() {
   }
 
   function downloadCSV() {
-    const blob = new Blob([siteCountsCsv(ordered)], { type: "text/csv" })
+    const blob = new Blob([siteCountsCsv(shown)], { type: "text/csv" })
     const url = URL.createObjectURL(blob)
     const a = document.createElement("a")
     a.href = url
@@ -382,6 +327,16 @@ export default function SiteCountsPage() {
                 </div>
               )}
 
+              {marksSnap.status === "failed" && (
+                <div className="flex items-start gap-2 rounded-md bg-amber-500/10 border border-amber-500/30 p-2" role="alert">
+                  <AlertTriangle className="h-3.5 w-3.5 text-amber-600 shrink-0 mt-0.5" />
+                  <p className="flex-1 text-[11px] text-amber-700 dark:text-amber-400">
+                    The marks could not be loaded ({marksSnap.error}). The counts are fine; marking, the mark filter and the sort by mark are off until they load.
+                  </p>
+                  <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => void marksStore.retry()}>Retry</Button>
+                </div>
+              )}
+
               {rows.length > 0 && (
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <div className="flex items-center gap-2 flex-wrap">
@@ -392,14 +347,27 @@ export default function SiteCountsPage() {
                     <span className="text-xs text-muted-foreground">{totalRows.toLocaleString()} rows in all</span>
                   </div>
                   <Button size="sm" variant="outline" onClick={downloadCSV}>
-                    <Download className="mr-1.5 h-3.5 w-3.5" />Export CSV
+                    <Download className="mr-1.5 h-3.5 w-3.5" />Export CSV{effectiveFilter !== "all" ? ` (${shown.length.toLocaleString()})` : ""}
                   </Button>
+                </div>
+              )}
+
+              {rows.length > 0 && (
+                <div className="flex items-center gap-3 flex-wrap">
+                  <SiteMarkFilter value={effectiveFilter} counts={chipCounts} disabled={!marksLoaded} onChange={setMarkFilter} />
+                  {effectiveFilter !== "all" && (
+                    <span className="text-xs text-muted-foreground">
+                      Showing {shown.length.toLocaleString()} of {rows.length.toLocaleString()} ·{" "}
+                      <button type="button" className="underline underline-offset-2 hover:text-foreground" onClick={() => setMarkFilter("all")}>Show all</button>
+                    </span>
+                  )}
                 </div>
               )}
 
               {rows.length > 0 && (
                 <div className="flex items-center gap-3 px-4 text-[10px] uppercase tracking-wider text-muted-foreground">
                   <span className="min-w-0 flex-1">Site</span>
+                  <SortHeader label="Mark" sortKey="mark" sort={sort} onSort={onSort} className={COLS.mark} disabled={!marksLoaded} />
                   <SortHeader label="Rows" sortKey="count" sort={sort} onSort={onSort} className={COLS.rows} />
                   <SortHeader label="On the site" sortKey="host_count" sort={sort} onSort={onSort} className={COLS.host} />
                   <SortHeader label="On subdomains" sortKey="subdomain_count" sort={sort} onSort={onSort} className={COLS.subs} />
@@ -409,7 +377,21 @@ export default function SiteCountsPage() {
               )}
 
               <div className="flex flex-col gap-2">
-                {ordered.map(row => <SiteRow key={row.site} row={row} />)}
+                {shown.map(row => (
+                  <SiteRow
+                    key={row.site}
+                    row={row}
+                    mark={marksSnap.marks[row.result.host] ?? null}
+                    availability={markAvailability}
+                    onMarkChange={onMarkChange}
+                  />
+                ))}
+                {rows.length > 0 && shown.length === 0 && (
+                  <p className="py-6 text-center text-sm text-muted-foreground">
+                    No sites with this mark.{" "}
+                    <button type="button" className="underline underline-offset-2 hover:text-foreground" onClick={() => setMarkFilter("all")}>Show all</button>
+                  </p>
+                )}
               </div>
             </div>
           )}
