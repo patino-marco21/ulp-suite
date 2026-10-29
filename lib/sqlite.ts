@@ -321,6 +321,19 @@ function initSchema(db: Database.Database): void {
     )
   `)
 
+  // Marks on the Site Counts page (lib/site-marks.ts): a status and a note per site, kept under the host the counts name. Additive, so an image that does
+  // not know the table ignores it. The status is checked in code, so a fourth one needs no migration; the CHECK only keeps a row from being empty.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS site_marks (
+      host       TEXT PRIMARY KEY,
+      status     TEXT,
+      note       TEXT,
+      updated_by TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      CHECK (status IS NOT NULL OR note IS NOT NULL)
+    )
+  `)
+
   // Add rescan columns to existing databases (idempotent — catch swallows "duplicate column" errors)
   try { db.exec(`ALTER TABLE domain_monitors ADD COLUMN rescan_mode TEXT NOT NULL DEFAULT 'dedup' CHECK(rescan_mode IN ('dedup','digest'))`) } catch {}
   try { db.exec(`ALTER TABLE domain_monitors ADD COLUMN rescan_interval_hours INTEGER NOT NULL DEFAULT 24`) } catch {}
