@@ -1,6 +1,6 @@
 /**
  * Independent recount of imported pile files. For each file it re-runs the app's OWN parser + policy offline (no ClickHouse writes,
- * no app involvement), hashes every importable row with the table's own content-key expression inside ClickHouse, and compares
+ * no app involvement), hashes every importable row with the table's own key expression inside ClickHouse (the exact key, or the normalised one for a job whose match_key is 'norm'), and compares
  * with (a) the job record in SQLite and (b) what ulp.credentials / ulp.sources hold now.
  *
  *   npx tsx scripts/pile/verify-file.ts [--jobs N] <dir with a COPY of ulp.db(+wal,shm)> <since 'YYYY-MM-DD HH:MM:SS' UTC> <file> [<file> ...]
@@ -35,6 +35,7 @@ import Database from 'better-sqlite3'
 import { parseULPStream } from '@/lib/ulp-parser'
 import { DEFAULT_HARD_KEEP_COUNTRIES, parseIngestPolicy, makeHardDropPredicate } from '@/lib/ingest-filter'
 import { openSource } from '@/lib/source-archive'
+import { exactKeySql, normKeySql } from '@/lib/url-content-key'
 
 const PILE = process.env.PILE_DIR ?? `${process.env.HOME}/Downloads/AyuGram Desktop`
 const CH = process.env.CH_CONTAINER ?? 'ulpsuite_clickhouse'
@@ -61,7 +62,11 @@ const shouldHardDrop = makeHardDropPredicate(policy)
 
 const hex = (s: string) => Buffer.from(s, 'utf8').toString('hex')
 const sqlStr = (s: string) => `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
-const CONTENT_KEY = `cityHash64(replaceRegexpOne(replaceRegexpOne(unhex(u), '^(?i:https?://)', ''), '/$', ''), unhex(e), unhex(p))`
+// The file's rows are staged as hex (u, e, p), so a key is computed over unhex(...) with the SAME builders the importer's tables use. A job that matched on the
+// normalised key (processing_jobs.match_key = 'norm') is recounted on norm_key_hash; every other job, including one from before the column, on content_key_hash.
+type KeyColumn = 'norm_key_hash' | 'content_key_hash'
+const UNHEX = { url: 'unhex(u)', email: 'unhex(e)', password: 'unhex(p)' }
+const hashSql = (column: KeyColumn) => (column === 'norm_key_hash' ? normKeySql(UNHEX) : exactKeySql(UNHEX))
 const BATCH_ROWS = Number(process.env.VERIFY_BATCH_ROWS ?? 1_000_000)
 const BUCKET_HASHES = Math.max(1, Number(process.env.VERIFY_BUCKET_HASHES ?? 16_000_000))
 const MAX_MEMORY = process.env.VERIFY_MAX_MEMORY ?? '6000000000'
@@ -76,25 +81,25 @@ function clickhouse(query: string): string {
 }
 
 /** Streams `input` (tab-separated hex triples) into the scratch table: the content hash is computed by ClickHouse's own expression while the rows come in. */
-function stageRows(input: string): void {
+function stageRows(input: string, column: KeyColumn): void {
   const args = ['exec', '-i', CH, 'clickhouse-client', `--max_memory_usage=${MAX_MEMORY}`, `--max_execution_time=${MAX_SECONDS}`,
-    '-q', `INSERT INTO ${SCRATCH} SELECT ${CONTENT_KEY} FROM input('u String, e String, p String') FORMAT TSV`]
+    '-q', `INSERT INTO ${SCRATCH} SELECT ${hashSql(column)} FROM input('u String, e String, p String') FORMAT TSV`]
   const r = spawnSync('docker', args, { input, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
   if (r.status !== 0) throw new Error(`staging failed: ${r.stderr.slice(0, 400)}`)
 }
 
 const db = new Database(`${dir}/ulp.db`, { readonly: true })
-// repeats and note exist on a database from the release that recorded them; a copy from before has neither, and those checks are then left out.
+// repeats, note and match_key exist on a database from the release that recorded them; a copy from before has none of them, and those checks are then left out (no match_key means the exact key).
 const jobColumns = new Set((db.prepare('PRAGMA table_info(processing_jobs)').all() as Array<{ name: string }>).map(c => c.name))
-const optional = ['repeats', 'note'].filter(c => jobColumns.has(c)).map(c => `, ${c}`).join('')
-interface JobRow { status: string; imported: number; known: number; skipped: number; repeats?: number | null; note?: string | null }
+const optional = ['repeats', 'note', 'match_key'].filter(c => jobColumns.has(c)).map(c => `, ${c}`).join('')
+interface JobRow { status: string; imported: number; known: number; skipped: number; repeats?: number | null; note?: string | null; match_key?: string | null }
 const jobOf = (filename: string) =>
   db.prepare(`SELECT status, imported, known, skipped${optional} FROM processing_jobs WHERE filename = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 1`).get(filename, since) as JobRow | undefined
 
 interface Probe { staged: number; distinct: number; present: number; own: number }
 
 /** One pass over the table for the bucket k of `buckets` (all of the file's hashes when there is one bucket). */
-function probeBucket(filename: string, buckets: number, k: number): Probe {
+function probeBucket(filename: string, buckets: number, k: number, column: KeyColumn): Probe {
   const only = buckets > 1 ? ` WHERE h % ${buckets} = ${k}` : ''
   const q = `
     SELECT
@@ -102,8 +107,8 @@ function probeBucket(filename: string, buckets: number, k: number): Probe {
       (SELECT uniqExact(h) FROM ${SCRATCH}${only}) AS distinct_hashes,
       p.present, p.own
     FROM (
-      SELECT uniqExact(content_key_hash) AS present, uniqExactIf(content_key_hash, source_file = ${sqlStr(filename)}) AS own
-      FROM ulp.credentials WHERE content_key_hash IN (SELECT h FROM ${SCRATCH}${only})
+      SELECT uniqExact(${column}) AS present, uniqExactIf(${column}, source_file = ${sqlStr(filename)}) AS own
+      FROM ulp.credentials WHERE ${column} IN (SELECT h FROM ${SCRATCH}${only})
     ) AS p
     FORMAT TSV`
   const [staged, distinct, present, own] = clickhouse(q).split('\t').map(Number)
@@ -154,6 +159,8 @@ async function main(): Promise<void> {
     if (!job) { failures++; console.log('FAIL no job row since', since); continue }
     if (job.status !== 'done') { failures++; console.log('FAIL job status is', job.status); continue }
     if (job.note === 'already-imported') { console.log('info: the same-name check skipped this file (nothing was imported); nothing to recount'); continue }
+    const column: KeyColumn = job.match_key === 'norm' ? 'norm_key_hash' : 'content_key_hash'
+    console.log(`info: recounted on the ${column === 'norm_key_hash' ? 'normalised' : 'exact'} key (the job recorded ${job.match_key ?? 'nothing, which means the exact key'})`)
 
     // 1. offline parse with the same options the staged import uses (dedupInFile off, hard-drop predicate for T3); the hashes of its rows are staged in ClickHouse in batches
     clickhouse(`DROP TABLE IF EXISTS ${SCRATCH}`)
@@ -163,7 +170,7 @@ async function main(): Promise<void> {
     try {
       const stream = Readable.toWeb(openSource(path).stream()) as unknown as ReadableStream<Uint8Array>
       let batch: string[] = []
-      const flush = () => { if (batch.length) { stageRows(batch.join('\n') + '\n'); batch = [] } }
+      const flush = () => { if (batch.length) { stageRows(batch.join('\n') + '\n', column); batch = [] } }
       const breakdown: Record<string, number> = {}
       for await (const b of parseULPStream(stream, filename, 100_000, shouldHardDrop, { dedupInFile: false })) {
         staged += b.credentials.length
@@ -183,7 +190,7 @@ async function main(): Promise<void> {
       const buckets = Math.max(1, Math.ceil(staged / BUCKET_HASHES))
       ;[S, D, present, own] = [0, 0, 0, 0]
       for (let k = 0; k < buckets; k++) {
-        const probe = probeBucket(filename, buckets, k)
+        const probe = probeBucket(filename, buckets, k, column)
         S += probe.staged; D += probe.distinct; present += probe.present; own += probe.own
       }
     } finally {
