@@ -139,7 +139,7 @@ describe('commitStage', () => {
     expect(out).toMatchObject({ distinct: 1000, known: 400, inserted: 600, inFileDuplicates: 0 })
     expect(out.rows).toBe(out.inserted + out.known + out.inFileDuplicates)
     const insert = db.calls.find(c => c.sql.startsWith('INSERT INTO ulp.credentials'))!
-    expect(insert.sql).toContain('NOT IN (SELECT content_key_hash FROM ulp.zz_import_known_0123456789ab)')
+    expect(insert.sql).toContain('NOT IN (SELECT key_hash FROM ulp.zz_import_known_0123456789ab)')
     expect(insert.sql).toContain('LIMIT 1 BY content_key_hash')
   })
 
@@ -292,7 +292,7 @@ describe('commitStage', () => {
         { monitorId: 7, ...row(3) },
       ])
       const q = db.calls.find(c => c.sql.startsWith('SELECT url, email, password, domain FROM ('))!
-      expect(q.sql).toContain('NOT IN (SELECT content_key_hash FROM ulp.zz_import_known_0123456789ab)')
+      expect(q.sql).toContain('NOT IN (SELECT key_hash FROM ulp.zz_import_known_0123456789ab)')
       expect(q.sql).toMatch(/LIMIT 5$/)
     })
 
@@ -396,5 +396,40 @@ describe('commitStage: how long the check and the insert took', () => {
   it('is zero for an empty stage', async () => {
     const { db, now } = timed({ stageRows: 0, distinct: [], known: [] })
     expect(await commitStage(options(db, { parsedRows: 0, now }))).toMatchObject({ checkMs: 0, commitMs: 0 })
+  })
+})
+
+
+describe('commitStage with the normalised key', () => {
+  it('cuts the slabs, probes the table and inserts on norm_key_hash, and sorts the new rows by (url, email)', async () => {
+    const db = makeDb({ stageRows: 2000, distinct: [900, 800], known: [100, 0] })
+    await commitStage(options(db, { parsedRows: 2000, slabRows: 1000, keyColumn: 'norm_key_hash' }))
+    for (const c of db.calls) expect(c.sql).not.toContain('content_key_hash')
+    expect(db.calls.find(c => c.sql.startsWith('SELECT uniqExact'))!.sql).toContain('uniqExact(norm_key_hash)')
+    const inserts = db.calls.filter(c => c.sql.startsWith('INSERT INTO ulp.credentials'))
+    expect(inserts).toHaveLength(2)
+    expect(inserts[0].sql).toContain('norm_key_hash % 2 = 0')
+    expect(inserts[1].sql).toContain('norm_key_hash % 2 = 1')
+    for (const i of inserts) {
+      expect(i.sql).toContain('NOT IN (SELECT key_hash FROM ulp.zz_import_known_0123456789ab)')
+      expect(i.sql).toContain('ORDER BY url, email\nLIMIT 1 BY norm_key_hash')
+    }
+  })
+
+  it('asks the monitor question on the same key, sorted the same way', async () => {
+    const db = makeDb({ stageRows: 100, distinct: [100], known: [10], monitorRows: [] })
+    await commitStage(options(db, {
+      parsedRows: 100, keyColumn: 'norm_key_hash', monitors: [{ id: 1, domains: ['example.test'], match_mode: 'both' }], matchCap: 5,
+    }))
+    const q = db.calls.find(c => c.sql.startsWith('SELECT url, email, password, domain FROM ('))!
+    expect(q.sql).toContain('norm_key_hash NOT IN (SELECT key_hash FROM ulp.zz_import_known_0123456789ab)')
+    expect(q.sql).toContain('ORDER BY url, email\nLIMIT 1 BY norm_key_hash')
+  })
+
+  it('keeps the statements it always had when no key is given', async () => {
+    const db = makeDb({ stageRows: 100, distinct: [100], known: [10] })
+    await commitStage(options(db, { parsedRows: 100 }))
+    for (const c of db.calls) expect(c.sql).not.toContain('norm_key_hash')
+    expect(db.calls.find(c => c.sql.startsWith('INSERT INTO ulp.credentials'))!.sql).not.toContain('ORDER BY')
   })
 })

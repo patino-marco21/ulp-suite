@@ -14,6 +14,9 @@
  * The table is probed with the SMALL side (the slab's hashes), never `NOT IN (SELECT ... FROM <the big table>)`, which would
  * build a set of the whole table in memory (the lesson recorded in lib/content-dedup.ts).
  *
+ * Which hash the slabs, the probe and the insert use is a parameter (`KeyColumn`): the exact `content_key_hash` as before, or `norm_key_hash`
+ * (lib/norm-key-ready.ts decides per import). On the normalised key the insert and the monitor query pick the first row of a key by (url, email).
+ *
  * Settings travel as client settings: the client's default max_execution_time is 60 s and a slab takes minutes.
  */
 import { randomUUID } from 'node:crypto'
@@ -22,8 +25,9 @@ import { getClient } from '@/lib/clickhouse'
 import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 import { buildNormalizedDomainSetMatch, type MatchedCredential, type MatchMode } from '@/lib/domain-match'
 import { waitForDiskSpace } from '@/lib/ingest-disk-gate'
-import { COMMIT_MAX_EXECUTION_S, commitInsertThreads, slabCount } from '@/lib/ingest-novelty-config'
+import { COMMIT_EXTERNAL_SORT_BYTES, COMMIT_MAX_EXECUTION_S, commitInsertThreads, slabCount } from '@/lib/ingest-novelty-config'
 import type { StageTables } from '@/lib/ingest-stage'
+import type { KeyColumn } from '@/lib/norm-key-ready'
 
 // ── SQL builders (pure) ─────────────────────────────────────────────────────────────────────────────
 
@@ -34,31 +38,40 @@ function qualified(name: string): string {
   return name
 }
 
-/** The stage rows of slab `k` of `K`: the hash decides, so a credential always lands in the same slab. */
-export function slabPredicate(K: number, k: number): string {
+/** The key a statement is built on when none is given: the exact one, so a caller that does not choose gets the statements it always had. */
+export const DEFAULT_KEY: KeyColumn = 'content_key_hash'
+
+/** The stage rows of slab `k` of `K`: the key decides, so a credential (and, on the normalised key, every look-alike of it) always lands in the same slab. */
+export function slabPredicate(K: number, k: number, key: KeyColumn = DEFAULT_KEY): string {
   if (!Number.isInteger(K) || !Number.isInteger(k) || K < 1 || k < 0 || k >= K) throw new Error(`bad slab ${k} of ${K}`)
-  return `content_key_hash % ${K} = ${k}`
+  return `${key} % ${K} = ${k}`
 }
 
 export const stageCountSql = (t: StageTables) => `SELECT count() AS c FROM ${t.stage}`
 
-export const slabDistinctSql = (t: StageTables, K: number, k: number) =>
-  `SELECT uniqExact(content_key_hash) AS c FROM ${t.stage} WHERE ${slabPredicate(K, k)}`
+export const slabDistinctSql = (t: StageTables, K: number, k: number, key: KeyColumn = DEFAULT_KEY) =>
+  `SELECT uniqExact(${key}) AS c FROM ${t.stage} WHERE ${slabPredicate(K, k, key)}`
 
 export const knownResetSql = (t: StageTables) => `TRUNCATE TABLE ${t.known}`
 
-export const knownFillSql = (t: StageTables, against: string, K: number, k: number) =>
+export const knownFillSql = (t: StageTables, against: string, K: number, k: number, key: KeyColumn = DEFAULT_KEY) =>
   `INSERT INTO ${t.known}\n` +
-  `SELECT DISTINCT content_key_hash FROM ${qualified(against)}\n` +
-  `WHERE content_key_hash IN (SELECT content_key_hash FROM ${t.stage} WHERE ${slabPredicate(K, k)})`
+  `SELECT DISTINCT ${key} FROM ${qualified(against)}\n` +
+  `WHERE ${key} IN (SELECT ${key} FROM ${t.stage} WHERE ${slabPredicate(K, k, key)})`
 
 export const knownCountSql = (t: StageTables) => `SELECT count() AS c FROM ${t.known}`
 
-export const commitInsertSql = (t: StageTables, target: string, K: number, k: number) =>
+/**
+ * One row per key. On the normalised key the row kept is the first by (url, email), so that the monitor query below reports the row that was stored
+ * (look-alikes can differ in the login's case, and a monitor fingerprint uses the login as stored). On the exact key the statement is the one it
+ * always was: exact twins differ only in the scheme or one slash, so any of them will do.
+ */
+export const commitInsertSql = (t: StageTables, target: string, K: number, k: number, key: KeyColumn = DEFAULT_KEY) =>
   `INSERT INTO ${qualified(target)} (url, email, password, domain, source_file, breach_name)\n` +
   `SELECT url, email, password, domain, source_file, breach_name FROM ${t.stage}\n` +
-  `WHERE ${slabPredicate(K, k)} AND content_key_hash NOT IN (SELECT content_key_hash FROM ${t.known})\n` +
-  `LIMIT 1 BY content_key_hash`
+  `WHERE ${slabPredicate(K, k, key)} AND ${key} NOT IN (SELECT key_hash FROM ${t.known})\n` +
+  (key === 'norm_key_hash' ? `ORDER BY url, email\n` : '') +
+  `LIMIT 1 BY ${key}`
 
 /**
  * The new rows of slab k that one monitor matches. The normalisation (lib/ulp-normalize.ts) is computed once per row in the inner
@@ -72,6 +85,7 @@ export function monitorStageSql(
   k: number,
   monitor: { domains: string[]; match_mode: MatchMode },
   limit: number,
+  key: KeyColumn = DEFAULT_KEY,
 ): { sql: string; params: Record<string, unknown> } | null {
   const domains = monitor.domains.map(d => d.trim()).filter(d => d !== '')
   const cap = Math.floor(limit)
@@ -79,11 +93,12 @@ export function monitorStageSql(
   const match = buildNormalizedDomainSetMatch(domains, monitor.match_mode)
   const sql =
     `SELECT url, email, password, domain FROM (\n` +
-    `  SELECT url, email, password, domain, content_key_hash, ${match.normalizedColumns}\n` +
+    `  SELECT url, email, password, domain, ${key}, ${match.normalizedColumns}\n` +
     `  FROM ${t.stage}\n` +
-    `  WHERE ${slabPredicate(K, k)} AND content_key_hash NOT IN (SELECT content_key_hash FROM ${t.known})\n` +
+    `  WHERE ${slabPredicate(K, k, key)} AND ${key} NOT IN (SELECT key_hash FROM ${t.known})\n` +
     `) WHERE ${match.clause}\n` +
-    `LIMIT 1 BY content_key_hash\n` +
+    (key === 'norm_key_hash' ? `ORDER BY url, email\n` : '') +
+    `LIMIT 1 BY ${key}\n` +
     `LIMIT ${cap}`
   return { sql, params: match.params }
 }
@@ -106,6 +121,8 @@ const COMMIT_SETTINGS = {
   insert_deduplicate: 0,
   async_insert: 0,
   use_query_cache: 0,
+  // Only a statement with an ORDER BY (the normalised key's) looks at this; it spills the sort to disk instead of growing memory.
+  max_bytes_before_external_sort: COMMIT_EXTERNAL_SORT_BYTES,
 } as unknown as ClickHouseSettings
 
 const QUERY_ID = /^novelty-[0-9a-f-]{36}$/
@@ -247,6 +264,8 @@ export interface CommitOptions {
   target: string
   /** Table probed for rows already held. The same table in production; a probe may read the live table and write a clone. */
   noveltyAgainst: string
+  /** The hash the slabs, the probe and the insert use: 'content_key_hash' (the exact key, the default) or 'norm_key_hash' (lib/norm-key-ready.ts). */
+  keyColumn?: KeyColumn
   /** Rows the parser kept and sent to the stage: the file's importable lines. */
   parsedRows: number
   slabRows: number
@@ -315,6 +334,7 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
   const monitors = (opts.monitors ?? []).filter(m => m.domains.some(d => d.trim() !== ''))
   const matchCap = Math.max(0, Math.floor(opts.matchCap ?? 0))
   const insertThreads = opts.insertThreads ?? commitInsertThreads()
+  const key = opts.keyColumn ?? DEFAULT_KEY
   const now = opts.now ?? Date.now
   let checkMs = 0
   let commitMs = 0
@@ -347,12 +367,12 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
 
     try {
       signal.throwIfAborted()
-      const slabDistinct = await step(id => countRows(db, slabDistinctSql(t, slabs, k), { queryId: id, signal }))
+      const slabDistinct = await step(id => countRows(db, slabDistinctSql(t, slabs, k, key), { queryId: id, signal }))
       if (slabDistinct > 0) {
         opts.onPhase?.({ phase: 'checking', slab: k + 1, slabs })
         const checkStart = now()
         await step(id => db.exec(knownResetSql(t), { queryId: id, signal }))
-        await step(id => db.exec(knownFillSql(t, opts.noveltyAgainst, slabs, k), { queryId: id, signal }))
+        await step(id => db.exec(knownFillSql(t, opts.noveltyAgainst, slabs, k, key), { queryId: id, signal }))
         const slabKnown = await step(id => countRows(db, knownCountSql(t), { queryId: id, signal }))
         checkMs += now() - checkStart
         if (slabKnown > slabDistinct) {
@@ -366,7 +386,7 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
           opts.onPhase?.({ phase: 'inserting', slab: k + 1, slabs })
           const insertStart = now()
           const { writtenRows } = await step(id =>
-            db.exec(commitInsertSql(t, opts.target, slabs, k), { queryId: id, signal, settings: { max_insert_threads: insertThreads } }))
+            db.exec(commitInsertSql(t, opts.target, slabs, k, key), { queryId: id, signal, settings: { max_insert_threads: insertThreads } }))
           commitMs += now() - insertStart
           if (writtenRows === null) {
             console.warn(`[ingest-novelty] slab ${k + 1}/${slabs}: the server sent no written-rows count; the accounting check was skipped`)
@@ -382,7 +402,7 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
           for (const monitor of monitors) {
             const room = matchCap - matches.length
             if (room <= 0) break
-            const q = monitorStageSql(t, slabs, k, monitor, room)
+            const q = monitorStageSql(t, slabs, k, monitor, room, key)
             if (!q) continue
             try {
               const rows = await step(id => db.select<MonitorRow>(q.sql, { queryId: id, signal, params: q.params }))

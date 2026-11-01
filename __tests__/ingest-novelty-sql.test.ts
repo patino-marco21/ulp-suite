@@ -58,7 +58,7 @@ describe('SQL builders', () => {
     expect(commitInsertSql(t, 'ulp.credentials', 3, 1)).toBe(
       'INSERT INTO ulp.credentials (url, email, password, domain, source_file, breach_name)\n' +
       'SELECT url, email, password, domain, source_file, breach_name FROM ulp.zz_import_stage_0123456789ab\n' +
-      'WHERE content_key_hash % 3 = 1 AND content_key_hash NOT IN (SELECT content_key_hash FROM ulp.zz_import_known_0123456789ab)\n' +
+      'WHERE content_key_hash % 3 = 1 AND content_key_hash NOT IN (SELECT key_hash FROM ulp.zz_import_known_0123456789ab)\n' +
       'LIMIT 1 BY content_key_hash',
     )
   })
@@ -72,7 +72,7 @@ describe('SQL builders', () => {
     it('matches the not-yet-known rows of the slab with one normalisation per row', () => {
       const q = monitorStageSql(t, 3, 1, { domains: [' Example.test ', 'other.test'], match_mode: 'both' }, 50)!
       expect(q.sql).toContain('FROM ulp.zz_import_stage_0123456789ab')
-      expect(q.sql).toContain('WHERE content_key_hash % 3 = 1 AND content_key_hash NOT IN (SELECT content_key_hash FROM ulp.zz_import_known_0123456789ab)')
+      expect(q.sql).toContain('WHERE content_key_hash % 3 = 1 AND content_key_hash NOT IN (SELECT key_hash FROM ulp.zz_import_known_0123456789ab)')
       expect(q.sql).toContain('arrayExists')
       expect(q.sql).toMatch(/LIMIT 1 BY content_key_hash\nLIMIT 50$/)
       expect(q.params).toEqual({ matchDomains: ['example.test', 'other.test'], matchSuffixes: ['.example.test', '.other.test'] })
@@ -91,6 +91,40 @@ describe('SQL builders', () => {
   })
 })
 
+describe('SQL builders with the normalised key', () => {
+  it('cut the slabs, count and probe on norm_key_hash, so every look-alike lands in the slab of its credential', () => {
+    expect(slabPredicate(3, 1, 'norm_key_hash')).toBe('norm_key_hash % 3 = 1')
+    expect(slabDistinctSql(t, 3, 1, 'norm_key_hash')).toBe(
+      'SELECT uniqExact(norm_key_hash) AS c FROM ulp.zz_import_stage_0123456789ab WHERE norm_key_hash % 3 = 1',
+    )
+    expect(knownFillSql(t, 'ulp.credentials', 3, 1, 'norm_key_hash')).toBe(
+      'INSERT INTO ulp.zz_import_known_0123456789ab\n' +
+      'SELECT DISTINCT norm_key_hash FROM ulp.credentials\n' +
+      'WHERE norm_key_hash IN (SELECT norm_key_hash FROM ulp.zz_import_stage_0123456789ab WHERE norm_key_hash % 3 = 1)',
+    )
+  })
+
+  it('insert the first row of each key by (url, email); the exact key keeps the statement it always had', () => {
+    expect(commitInsertSql(t, 'ulp.credentials', 3, 1, 'norm_key_hash')).toBe(
+      'INSERT INTO ulp.credentials (url, email, password, domain, source_file, breach_name)\n' +
+      'SELECT url, email, password, domain, source_file, breach_name FROM ulp.zz_import_stage_0123456789ab\n' +
+      'WHERE norm_key_hash % 3 = 1 AND norm_key_hash NOT IN (SELECT key_hash FROM ulp.zz_import_known_0123456789ab)\n' +
+      'ORDER BY url, email\n' +
+      'LIMIT 1 BY norm_key_hash',
+    )
+    expect(commitInsertSql(t, 'ulp.credentials', 3, 1, 'content_key_hash')).not.toContain('ORDER BY')
+    expect(commitInsertSql(t, 'ulp.credentials', 3, 1)).toBe(commitInsertSql(t, 'ulp.credentials', 3, 1, 'content_key_hash'))
+  })
+
+  it('sort the monitor query the same way, after its WHERE, so it sorts only the matching rows', () => {
+    const monitor = { domains: ['example.test'], match_mode: 'both' as const }
+    const q = monitorStageSql(t, 3, 1, monitor, 50, 'norm_key_hash')!
+    expect(q.sql).toContain('WHERE norm_key_hash % 3 = 1 AND norm_key_hash NOT IN (SELECT key_hash FROM ulp.zz_import_known_0123456789ab)')
+    expect(q.sql).toMatch(/\) WHERE [\s\S]*\nORDER BY url, email\nLIMIT 1 BY norm_key_hash\nLIMIT 50$/)
+    expect(monitorStageSql(t, 3, 1, monitor, 50)!.sql).not.toContain('ORDER BY')
+  })
+})
+
 describe('clickhouseNoveltyDb', () => {
   it('runs a statement with the commit settings (not the client default of 60 s) and reports the written rows', async () => {
     h.command.mockResolvedValue({ query_id: 'q', summary: { written_rows: '2452248', read_rows: '1' } })
@@ -101,7 +135,9 @@ describe('clickhouseNoveltyDb', () => {
     expect(call.query).toBe('INSERT INTO ulp.x SELECT 1')
     expect(call.query_id).toBe('novelty-q1')
     expect(call.abort_signal).toBe(never)
-    expect(call.clickhouse_settings).toEqual({ max_execution_time: 3300, insert_deduplicate: 0, async_insert: 0, use_query_cache: 0 })
+    expect(call.clickhouse_settings).toEqual({
+      max_execution_time: 3300, insert_deduplicate: 0, async_insert: 0, use_query_cache: 0, max_bytes_before_external_sort: 1_073_741_824,
+    })
   })
 
   it('reports no written-rows count when the server sent no summary or a malformed one', async () => {

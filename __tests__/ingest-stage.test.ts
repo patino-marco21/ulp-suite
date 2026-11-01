@@ -18,7 +18,7 @@ import {
   unregisterStage,
   type StageSweepDb,
 } from '@/lib/ingest-stage'
-import { URL_CONTENT_KEY } from '@/lib/url-content-key'
+import { NORM_CONTENT_KEY, URL_CONTENT_KEY } from '@/lib/url-content-key'
 
 const squash = (s: string) => s.replace(/\s+/g, '')
 
@@ -63,12 +63,13 @@ describe('DDL', () => {
       expect(ddl).toContain(column)
     }
     expect(squash(ddl)).toContain(squash(`content_key_hash UInt64 MATERIALIZED cityHash64(${URL_CONTENT_KEY}, email, password)`))
+    expect(squash(ddl)).toContain(squash(`norm_key_hash UInt64 MATERIALIZED ${NORM_CONTENT_KEY}`))
     expect(ddl).toContain('non_replicated_deduplication_window = 10000')
   })
 
   it('makes a small known table ordered by the hash', () => {
     expect(knownDdl(t)).toBe(
-      'CREATE TABLE IF NOT EXISTS ulp.zz_import_known_0123456789ab (content_key_hash UInt64) ENGINE = MergeTree ORDER BY content_key_hash',
+      'CREATE TABLE IF NOT EXISTS ulp.zz_import_known_0123456789ab (key_hash UInt64) ENGINE = MergeTree ORDER BY key_hash',
     )
   })
 
@@ -79,6 +80,7 @@ describe('DDL', () => {
     expect(squash(initSql)).toContain(`content_key_hashUInt64MATERIALIZED${expected}`)
     expect(squash(migrations)).toContain(squash('cityHash64(${URL_CONTENT_KEY}, email, password)'))
     expect(squash(stageDdl(t))).toContain(expected)
+    expect(squash(stageDdl(t))).toContain(squash(NORM_CONTENT_KEY))
   })
 })
 

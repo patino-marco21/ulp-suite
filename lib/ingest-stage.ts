@@ -2,7 +2,7 @@
  * Per-import stage tables for novelty-aware ingest (docs/superpowers/specs/2026-10-02-novelty-aware-ingest-design.md).
  *
  * Every file being imported is parsed into its own stage table, `ulp.zz_import_stage_<id>`, a plain MergeTree with the six insert
- * columns and the same `content_key_hash` the live table materialises. `ulp.zz_import_known_<id>` holds, one slab at a time, the
+ * columns and the same `content_key_hash` and `norm_key_hash` the live table materialises (an import matches on one of them: lib/norm-key-ready.ts). `ulp.zz_import_known_<id>` holds, one slab at a time, the
  * hashes of the stage that the live table already has. Both are dropped when the import ends; if the process dies first, the
  * sweeper drops what it left (at start-up, before the inbox starts, and hourly). The names start with `zz_`, which the backup
  * script already excludes.
@@ -12,7 +12,7 @@
  */
 import { randomBytes } from 'node:crypto'
 import { getClient } from '@/lib/clickhouse'
-import { URL_CONTENT_KEY } from '@/lib/url-content-key'
+import { NORM_CONTENT_KEY, URL_CONTENT_KEY } from '@/lib/url-content-key'
 import { withClickHouseRetry, type ClickHouseRetryOptions } from '@/lib/clickhouse-retry'
 
 const DB = 'ulp'
@@ -51,13 +51,15 @@ export function stageDdl(t: StageTables): string {
   domain String,
   source_file String,
   breach_name String,
-  content_key_hash UInt64 MATERIALIZED cityHash64(${URL_CONTENT_KEY}, email, password)
+  content_key_hash UInt64 MATERIALIZED cityHash64(${URL_CONTENT_KEY}, email, password),
+  norm_key_hash UInt64 MATERIALIZED ${NORM_CONTENT_KEY}
 ) ENGINE = MergeTree ORDER BY tuple()
 SETTINGS non_replicated_deduplication_window = 10000, parts_to_delay_insert = 3000, parts_to_throw_insert = 6000`
 }
 
 export function knownDdl(t: StageTables): string {
-  return `CREATE TABLE IF NOT EXISTS ${t.known} (content_key_hash UInt64) ENGINE = MergeTree ORDER BY content_key_hash`
+  // One column whatever the key: it holds the slab's hashes that the live table already has, of content_key_hash or of norm_key_hash.
+  return `CREATE TABLE IF NOT EXISTS ${t.known} (key_hash UInt64) ENGINE = MergeTree ORDER BY key_hash`
 }
 
 /** Idempotent (`IF NOT EXISTS`), so it is safe inside the transient-error retry loop. */
