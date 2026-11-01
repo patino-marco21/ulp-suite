@@ -1,7 +1,7 @@
 # Near-duplicates: one credential, several spellings — Design
 
 Date: 2026-11-01
-Status: **design approved by the owner on 2026-11-01; not built, and nothing on the running system has changed.** Two stages. **Stage 1** (stop new look-alikes: a second key column, a supervised backfill and an intake check) is the first implementation plan. **Stage 2** (remove the look-alikes already stored) is designed here and needs its own explicit go from the owner; it is not part of that plan.
+Status: **Stage 1 implemented and deployed locally on 2026-11-01** (main `867c296`, CI green, image `b784aa285d4b`, rollback tag `rollback-20261101-1952z`); the backfill finished the same evening and the exact look-alike share is 6.94%; the first import on the normalised key has not run yet (see "As deployed"). **Stage 2** (remove the look-alikes already stored) is designed here, needs its own explicit go from the owner and is not started.
 Related: `2026-06-28-credential-url-content-key-design.md` (the exact key), `2026-07-07-content-dedup-rewrite-swap-design.md` (the rewrite engine), `2026-10-02-novelty-aware-ingest-design.md` (the intake this changes).
 Measured read-only on 2026-11-01 on the live server (ClickHouse 26.3.17.4). `ulp.credentials` held 2,585M rows when the measurements were taken and 2,606M rows (241.65 GiB, 16 active parts) when this was written; the root disk has 247 GiB free. File names, search terms and credential values are deliberately absent (the repository is public); the examples use invented `.example` hosts.
 
@@ -71,7 +71,7 @@ A `user:pw@` in an http(s) host is lower-cased with the host (0.30% of the rows 
 | blanks around the login or the password | 0 |
 | **the rule (www, host case, trailing slashes, login case)** | **8.02%** |
 
-The measured set also folded the default ports; they add 0.002%, below the precision of the figure. Between the 24 ranges the standard error is about 0.4 points, so 7.2% to 8.8%, that is 186M to 228M of the 2,585M rows (point estimate 207M); by range 2.15% to 10.72%. The ranges are consecutive domain prefixes and not a random sample, so read the figure as an estimate good to a point or two. The exact figure comes cheaply after the Stage 1 backfill: a 1/64 bucket of `norm_key_hash` holds whole groups, so rows minus distinct keys inside it is an unbiased estimate (about 40M rows, 16 s). It replaces this estimate before Stage 2 is proposed. Twin groups are 96.8% pairs, 2.7% triples and 0.5% larger.
+The measured set also folded the default ports; they add 0.002%, below the precision of the figure. Between the 24 ranges the standard error is about 0.4 points, so 7.2% to 8.8%, that is 186M to 228M of the 2,585M rows (point estimate 207M); by range 2.15% to 10.72%. The ranges are consecutive domain prefixes and not a random sample, so read the figure as an estimate good to a point or two. The exact figure comes cheaply after the Stage 1 backfill: a 1/64 bucket of `norm_key_hash` holds whole groups, so rows minus distinct keys inside it is an unbiased estimate (about 40M rows, 16 s). It replaces this estimate before Stage 2 is proposed: **measured after the backfill, 6.94% (about 181M rows), below this band; see "As deployed".** Twin groups are 96.8% pairs, 2.7% triples and 0.5% larger.
 
 **Not folded, and what folding would add** (8 ranges, 47.7M rows):
 
@@ -114,7 +114,7 @@ DDL v30 is `ADD COLUMN IF NOT EXISTS` only: metadata, instant. It does not fire 
 
 `scripts/materialize-norm-key.sh`, in the shape of `scripts/materialize-address-index.sh`: a dry run by default, `APPLY=1` to run. It runs `MATERIALIZE COLUMN norm_key_hash IN PARTITION <p>` one partition at a time, the smallest first (202611: 38.2M rows, 5.2 GiB on the day of writing), so the first run measures the rate and the disk change before the 140 GiB partition (202610; its largest part is 98.24 GiB). It refuses to start while another mutation runs on the table or while free disk is under 170 GiB, and kills its mutation under 155 GiB (floor 140.5). It ends by checking that (a) the readiness query below says ready, (b) in a 1/64 sample (`content_key_hash % 64 = 0`) the stored value equals the expression for every row (0 mismatches), and (c) it prints the exact twin share from that sample.
 
-Cost: the key computes at 5.4M rows a second on 8 threads at a load of about 16, so about 8 minutes of computing for the whole table. Wall time is an estimate of 15 to 30 minutes, to be replaced by the first partition's measurement. A column mutation should hard-link the files it does not touch (none of the three projections depends on the column), so the transient disk is about the new column only; the first partition shows it (its size grows by about its column, not by its projections). Run it with no import running: it competes for CPU on a thermally limited laptop.
+Cost: the key computes at 5.4M rows a second on 8 threads at a load of about 16, so about 8 minutes of computing for the whole table. Wall time was estimated at 15 to 30 minutes; the run took 46 minutes of mutation (see "As deployed"). A column mutation should hard-link the files it does not touch (none of the three projections depends on the column), so the transient disk is about the new column only; the first partition shows it (its size grows by about its column, not by its projections). Run it with no import running: it competes for CPU on a thermally limited laptop.
 
 ### Choosing the key for an import
 
@@ -186,7 +186,7 @@ Not in the first plan. What is fixed now, and what its own plan decides.
 
 Recommended: A, if the owner will drop `credentials_predup_auto`; B only after it is shown on a copy of one partition.
 
-**What changes afterwards.** Counts drop by about 8% (207M rows). Disk is neutral: -19 GiB of rows, +19.5 GiB of column. The per-file recount holds as rows in the table + rows in the archive = rows the job added. Monitor fingerprints live in SQLite and are untouched; a survivor whose own spelling never alerted can alert once on a rescan.
+**What changes afterwards.** Counts drop by 6.94% (about 181M rows; the design estimate was 8%, 207M, see "As deployed"). Disk falls by about 18 GiB (6.94% of the table's 261.08 GiB with the column), which pays back most of the 19.4 GiB the column took. The per-file recount holds as rows in the table + rows in the archive = rows the job added. Monitor fingerprints live in SQLite and are untouched; a survivor whose own spelling never alerted can alert once on a rescan.
 
 ## Rejected
 
@@ -218,3 +218,30 @@ Recommended: A, if the owner will drop `credentials_predup_auto`; B only after i
 2. The backfill finished, the readiness query says ready, the 1/64 check has 0 mismatches, and the exact twin share is on record.
 3. The first import after it records `norm`; the accounting identity holds; the 1/64 bucket check (no group with a row imported after the flip) gives 0; the exact-duplicate check still gives 0.
 4. The rehearsal passed (existing and new scenarios), the cost gate held, CI is green, and the README, `.env.example` and both compose files carry the setting.
+
+## As deployed (Stage 1, checked on the running system on 2026-11-01)
+
+Numbers only. Items 1, 2 and 4 of "Done when" are met; item 3 (the first import on the normalised key) is still to be seen.
+
+**Release.** Main `867c296`; CI on it passed in 3 min 1 s. Image `b784aa285d4b`, rollback tag `rollback-20261101-1952z` (`2ca4ce8ad568`). DDL v30 applied at the app's start-up as a metadata change; free disk did not move (246 GiB). No import ran between the deploy and the end of the backfill, so none could have used the exact key by mistake or the normalised key too early.
+
+**Rehearsal on that image** (fresh isolated stack). Alert rehearsal 50 of 50. Full end-to-end run 254 of 254, including the new scenarios `golden` (13 of 13 edge cases), `lookalikes` and `norm-not-ready`. Cost gate at the 10,000,000-row cap: time ratio 0.92, peak memory 7.09 GiB against 7.49 GiB (0.95). The backfill script on a real ClickHouse: dry run, one partition and the whole table (44M rows in 58 s). Read-only parity on the live table, 3 ranges and 19.3M rows: the independent form equals the table's expression.
+
+**The backfill on the live table** (4 mutations, run partition by partition, smallest first, no import running):
+
+| Partition | Rows | Time |
+|---|---|---|
+| 202611 | 38.2M | 52 s |
+| 202608 | 496.7M | 633 s |
+| 202607 | 897.7M | 1,099 s |
+| 202610 | 1,173.7M | 997 s |
+
+In all 2,606,332,363 rows in 2,781 s (46.4 minutes), then under 2 minutes of final checks. The first partition's rate predicted 59 minutes for the table; the run took 22% less because the parts of a partition are rewritten in parallel (a partition takes as long as its largest part: 833M rows in 997 s). Free disk went from 245 GiB to 226.1 GiB, in small steps as parts finished, never by the size of a part, so the unchanged column files were hard-linked. The column is 19.41 GiB (8.00 bytes a row) and the table 261.08 GiB (241.65 GiB before). The lowest free disk seen was 226.1 GiB, against the warning level of 187.4 GiB, the floor of 140.5 GiB and the script's own limits (refuse under 170, abort under 155).
+
+**Checks at the end.** All 16 parts hold the column. In the 1/64 sample (`content_key_hash % 64 = 0`, 40,722,205 rows) the stored value equals the expression for every row (0 mismatches). The exact-duplicate check on the same sample: 40,722,205 rows and 40,722,205 distinct exact keys.
+
+**The exact look-alike share.** In a 1/64 bucket of `norm_key_hash` (it keeps whole groups, so rows minus distinct keys is an unbiased estimate): bucket 0 has 2,826,735 surplus rows of 40,721,523 (6.94%); buckets 1 and 2 have 2,825,191 of 40,713,226 and 2,824,730 of 40,730,411 (6.94% each). So 6.94% of the table, about 181M rows, collapse into another row. That is below the design estimate (8.02%, band 7.2% to 8.8%), which came from 24 consecutive domain ranges that were not a random sample (by range 2.15% to 10.72%). The three buckets agree to 0.01 points, and the rule was checked directly (stored value equals the expression on the sample, the independent form equals it on 3 live ranges, 13 of 13 edge cases), so the gap is the data and not the key. Removing the stored look-alikes (Stage 2) would free about 18 GiB.
+
+**The existence check at full size.** The import's per-slab pass, measured read-only on the live table (the distinct keys of the table that are in a 10,000,000-key set matching nothing): 25.4 s on `norm_key_hash`, 25.4 s on `content_key_hash`, 25.5 s on a repeat of `norm_key_hash`. The normalised key costs the same per pass as the exact one. The slab cap adds one such pass for every extra 10,000,000 staged rows: a 48,000,000-row file goes from 3 passes to 5, about 51 s more.
+
+**Still to see.** The first import on the normalised key: its recorded `match_key`, that `imported + known + repeats + skipped` adds up, its `known` and `repeats` against a file of its kind before, and the bucket check that no group of look-alikes holds a row imported after it.

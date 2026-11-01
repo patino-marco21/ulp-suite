@@ -32,6 +32,19 @@ Every task's requirements include these (values copied from the spec).
 - **Commits** end with `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
 - **Working copy**: a worktree under `.claude/worktrees/` branched from `origin/main` (it has the spec); a fresh one needs `npm install`. Run `npm test` once before Task 1 so any failure that is already there is known.
 
+## Changes made while executing (2026-11-01)
+
+The tasks below are the plan as written. Execution departed from it in the places listed here, each for the reason given; where a bullet and a task disagree, the bullet is what shipped.
+
+- **A slab cap and a memory gate (Tasks 4, 8 and 9; the cost-gate constraint above).** The first run of the cost gate, at the 20,000,000-row slab, passed on time (the sorted statement took 0.91 of the old one) and failed on memory: it peaked at 10.6 GiB against 7.9 to 8.1 GiB for the old statement, and a server limited to 9 GiB killed it (Code 241). The spill bound does not keep the sort's memory flat, and the production ceiling is 14.0 GiB with a commit started only under 75% of it. A slab on the normalised key is therefore capped at `NORM_KEY_MAX_SLAB_ROWS` = 10,000,000 rows (the exact key keeps its slab size). At that size the peak is 7.1 GiB against 7.5 GiB (time ratio 0.92); at 5,000,000 rows it is 4.3 against 4.95 GiB. `scripts/measure-commit-sort-cost.ts` now runs at 10,000,000 rows by default and also checks the peak memory from `system.query_log` (limit 1.10 times the old statement). The price is one more pass over the key column per 10,000,000 rows of a file.
+- **The rehearsal ClickHouse needs more memory for the cost gate (Task 9).** Its 4 GiB cap (3.6 GiB usable) cannot run even the old statement at 20,000,000 rows. Raise the throwaway container for the gate (`docker update --memory 10g --memory-swap 10g`, then `docker restart`); the compose file is unchanged and the script header says so.
+- **Tests that forbade `MATERIALIZE` (Tasks 2 and 3).** The v30 `ADD COLUMN` text contains the word MATERIALIZED, so `/MATERIALIZE/` matched the correct code in three tests (`clickhouse-migrations-startup`, `newest-first-schema`, `country-tier-expression`); they use `/\bMATERIALIZE\b/`. The last two were found only by the full suite, so run the FULL suite at the end of any task that touches `lib/clickhouse-migrations.ts`.
+- **The readiness test helper (Task 3).** `warnings()` in `__tests__/norm-key-ready.test.ts` joins every `console.warn` argument: the module passes the error as the second argument, which `String(c[0])` missed.
+- **The cost-gate script writes 4 x ROWS (Task 8)**, not 2 x: one slab per timed run, about 8 GiB at 20,000,000 rows.
+- **A fixture-tag collision (Task 9).** In the full run the `lookalikes` monitor's 20 filler rows used the tag `LK`, which the `link` scenario had already stored (253 of 254 passed); the filler now uses `LMON`. A run of only the new scenarios cannot see this.
+- **The build gate (Task 9).** The Dockerfile runs `npm run build`, so building the candidate image is the build gate; there was no separate build in the worktree.
+- **One vitest process at a time.** The suite shares one template database under `/tmp`: a parallel single-file run invalidated the first baseline (107 files failed). Rerun alone it was 282 files and 4,678 tests passed.
+
 ## File Structure
 
 | File | Responsibility | Task |
