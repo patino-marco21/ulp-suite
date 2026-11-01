@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import {
+  COMMIT_EXTERNAL_SORT_BYTES,
   COMMIT_MAX_EXECUTION_S,
   DEFAULT_COMMIT_INSERT_THREADS,
   DEFAULT_NOVELTY_SLAB_ROWS,
   MIN_NOVELTY_SLAB_ROWS,
   commitInsertThreads,
+  normKeyEnabled,
   noveltyConfig,
   slabCount,
 } from '@/lib/ingest-novelty-config'
@@ -65,5 +67,23 @@ describe('commitInsertThreads', () => {
 
   it.each(['', '  ', 'abc', '0', '-1', '0.5', '17', '100', 'NaN'])('falls back to 4 for INGEST_COMMIT_INSERT_THREADS=%j (the range is 1 to 16)', raw => {
     expect(commitInsertThreads(env({ INGEST_COMMIT_INSERT_THREADS: raw }))).toBe(4)
+  })
+})
+
+describe('normKeyEnabled', () => {
+  it('is on by default', () => {
+    expect(normKeyEnabled(env())).toBe(true)
+  })
+
+  it.each(['off', 'OFF', '0', 'false', ' False '])('INGEST_NORM_KEY=%j switches it off', raw => {
+    expect(normKeyEnabled(env({ INGEST_NORM_KEY: raw }))).toBe(false)
+  })
+
+  it.each(['', 'on', '1', 'true', 'yes'])('INGEST_NORM_KEY=%j leaves it on', raw => {
+    expect(normKeyEnabled(env({ INGEST_NORM_KEY: raw }))).toBe(true)
+  })
+
+  it('bounds the memory of the commit sort at 1 GiB before it spills to disk', () => {
+    expect(COMMIT_EXTERNAL_SORT_BYTES).toBe(1_073_741_824)
   })
 })

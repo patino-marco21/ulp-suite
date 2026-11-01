@@ -33,4 +33,11 @@ describe('novelty-aware ingest wiring', () => {
     expect(read('README.md')).toContain('INGEST_NOVELTY_CHECK')
     expect(read('README.md')).toContain('INGEST_NOVELTY_SLAB_ROWS')
   })
+
+  it('forwards INGEST_NORM_KEY through the production compose file, lets the rehearsal compose choose it, and documents it', () => {
+    expect(read('docker-compose.yml')).toContain('INGEST_NORM_KEY: ${INGEST_NORM_KEY:-}')
+    expect(read('docker-compose.rehearsal.yml')).toContain('INGEST_NORM_KEY: ${REHEARSAL_INGEST_NORM_KEY:-}')
+    expect(read('.env.example')).toContain('INGEST_NORM_KEY')
+    expect(read('README.md')).toContain('INGEST_NORM_KEY')
+  })
 })

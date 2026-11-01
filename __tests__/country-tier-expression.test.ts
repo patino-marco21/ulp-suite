@@ -71,7 +71,7 @@ describe('DDL v26 — swapping the expression on the live table', () => {
     expect(block).toContain('buildCountryTierModifySql()')
     expect(block).toMatch(/try \{[\s\S]*\} catch/)
     // App start must not be coupled to a mutation over 1.39B rows (see v23): the backfill is supervised.
-    expect(block).not.toMatch(/MATERIALIZE/)
+    expect(block).not.toMatch(/\bMATERIALIZE\b/) // the block runs to the end of the DDL steps, where the v30 column definition says MATERIALIZED
     expect(block).toContain('materialize-country-tier.sh')
   })
 

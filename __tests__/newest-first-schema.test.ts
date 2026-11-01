@@ -40,7 +40,7 @@ describe('DDL v27 — proj_imported_desc with is_noise and content_key_hash', ()
     expect(block).toContain('buildImportedDescProjectionCurrentSql()')
     expect(block.indexOf('buildImportedDescProjectionCurrentSql()')).toBeLessThan(block.indexOf('buildDropImportedDescProjectionSql()'))
     expect(block.indexOf('buildDropImportedDescProjectionSql()')).toBeLessThan(block.indexOf('buildAddImportedDescProjectionSql()'))
-    expect(block).not.toMatch(/MATERIALIZE/)
+    expect(block).not.toMatch(/\bMATERIALIZE\b/) // the block runs to the end of the DDL steps, where the v30 column definition says MATERIALIZED
     expect(block).toContain('rebuild-imported-desc-projection.sh')
   })
 

@@ -158,6 +158,10 @@ services:
       # commit step.
       INGEST_NOVELTY_CHECK: ${INGEST_NOVELTY_CHECK:-}
       INGEST_NOVELTY_SLAB_ROWS: ${INGEST_NOVELTY_SLAB_ROWS:-}
+      # Near-duplicates (docs/superpowers/specs/2026-11-01-near-duplicates-design.md) -- optional; forwarded explicitly (see above). On by default: an import
+      # matches on the normalised key (a leading www., capitals in the host or the login and extra trailing slashes ignored) once every part of
+      # ulp.credentials holds norm_key_hash, and on the exact key before that. INGEST_NORM_KEY=off matches on the exact key everywhere.
+      INGEST_NORM_KEY: ${INGEST_NORM_KEY:-}
       # Fast ingest, step A (docs/superpowers/specs/2026-10-12-fast-ingest-design.md) -- optional; forwarded explicitly (see above).
       # INGEST_COMMIT_INSERT_THREADS (empty = 4, 1 to 16) is max_insert_threads for the commit insert. CLICKHOUSE_COMPRESS_REQUESTS=1 gzips
       # INSERT bodies again (off by default: the app reaches ClickHouse over the Docker network, where gzip only costs CPU).

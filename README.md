@@ -217,6 +217,12 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   holds costs the parse and one scan of one column. `off` imports straight into `ulp.credentials` as before.
 - `INGEST_NOVELTY_SLAB_ROWS` — rows per commit step (default `20000000`, at least `1000`). Files below
   this are committed in one step; larger ones in hash slabs, one slab at a time across all imports.
+- `INGEST_NORM_KEY` — near-duplicates, on by default (`lib/norm-key-ready.ts`,
+  `docs/superpowers/specs/2026-11-01-near-duplicates-design.md`). An import matches a credential on `norm_key_hash`
+  (a leading `www.`, capitals in the host or the login and extra trailing slashes ignored; path, port, query and
+  password as typed) once every part of `ulp.credentials` holds the column, and on `content_key_hash` before that; each
+  job records the rule it used (`processing_jobs.match_key`). `off`, `0` or `false` matches on `content_key_hash`
+  everywhere. DDL v30 adds the column; `scripts/materialize-norm-key.sh` fills it (supervised, one partition at a time).
 - `INGEST_COMMIT_INSERT_THREADS` — `max_insert_threads` for the commit insert (default `4`, `1` to `16`). Measured on the exact
   statement against the live table definition: 142k rows/s with the server's default, 452k with 4, nothing more with 8
   (`docs/superpowers/specs/2026-10-12-fast-ingest-design.md`, step A2).
@@ -407,6 +413,10 @@ A rare text is still a scan under any cursor, because the data is in 15 parts an
 ### Abandoned searches are cancelled (speed)
 
 When a newer search or filter click replaces a request, the browser drops the old one, but ClickHouse does not stop a statement because its client left (measured on 26.3: a query kept running for the 19 s the test watched after the connection closed, with and without `cancel_http_readonly_queries_on_client_close`; the Credentials queries need `http_wait_end_of_query=1`, so that a time limit arrives as an HTTP error instead of as garbled JSON). Searches the page had given up on kept scanning, and every click added two more: in one 14-minute stretch six of the twelve 150 GiB scans were for searches that had been replaced before they finished, and while they ran the default page took 21 s instead of 1 s and the related-records panel hit its 30 s limit. `/api/credentials` now runs its long queries under an id of their own and `KILL QUERY`s them when the request is aborted (the response is a quiet 499).
+
+### Near-duplicates
+
+The Unique toggle and the storage dedup below compare the exact key: the URL without its scheme and one trailing slash, and the login and the password as stored. Rows that differ only by a leading `www.`, capitals in the host or in the login, or extra trailing slashes are therefore separate rows (about 8% of the table when measured on 2026-11-01). Imports match on the normalised key (`INGEST_NORM_KEY`) once the `norm_key_hash` backfill is done, so those look-alikes are counted as already in the database and are not stored again. The ones already stored stay until an explicit, separately approved removal (Stage 2 of `docs/superpowers/specs/2026-11-01-near-duplicates-design.md`).
 
 ### Content deduplication (storage)
 

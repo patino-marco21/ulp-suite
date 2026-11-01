@@ -6,6 +6,8 @@
  *   INGEST_NOVELTY_SLAB_ROWS  default 20,000,000, at least 1,000. A file is committed in slabs of about this many staged rows.
  *   INGEST_COMMIT_INSERT_THREADS  default 4, 1 to 16. The commit INSERT ... SELECT runs with this many insert threads
  *                                 (docs/superpowers/specs/2026-10-12-fast-ingest-design.md, step A2).
+ *   INGEST_NORM_KEY           default on. off | 0 | false matches imports on the exact key (content_key_hash) everywhere. When on, the normalised key
+ *                             (norm_key_hash) is used once every part of ulp.credentials holds it (lib/norm-key-ready.ts).
  */
 
 export const DEFAULT_NOVELTY_SLAB_ROWS = 20_000_000
@@ -17,6 +19,9 @@ const MAX_COMMIT_INSERT_THREADS = 16
 
 /** Every commit statement may run this long, in seconds. The client's own default is 60, far too short for a slab. */
 export const COMMIT_MAX_EXECUTION_S = 3300
+
+/** The sort of a normalised-key commit spills to disk above this many bytes (max_bytes_before_external_sort) instead of growing ClickHouse's memory. */
+export const COMMIT_EXTERNAL_SORT_BYTES = 1_073_741_824
 
 export interface NoveltyConfig {
   enabled: boolean
@@ -30,6 +35,12 @@ export function noveltyConfig(env: NodeJS.Dict<string> = process.env): NoveltyCo
   const parsed = raw === undefined || raw.trim() === '' ? Number.NaN : Math.floor(Number(raw))
   const slabRows = Number.isFinite(parsed) && parsed >= MIN_NOVELTY_SLAB_ROWS ? parsed : DEFAULT_NOVELTY_SLAB_ROWS
   return { enabled, slabRows }
+}
+
+/** INGEST_NORM_KEY: on unless `off`, `0` or `false`. Whether the normalised key may be used at all; lib/norm-key-ready.ts decides when it can be. */
+export function normKeyEnabled(env: NodeJS.Dict<string> = process.env): boolean {
+  const flag = (env.INGEST_NORM_KEY ?? '').trim().toLowerCase()
+  return !(flag === 'off' || flag === '0' || flag === 'false')
 }
 
 /**

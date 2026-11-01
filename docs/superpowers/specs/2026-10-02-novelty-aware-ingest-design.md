@@ -3,6 +3,7 @@
 Status: **implemented 2026-10-11 (approved the same day; revised from the 2026-10-02 proposal).** Sub-project 2 of the 2026-10-11 plan (sub-project 1,
 `2026-10-11-disk-safety-and-hygiene-design.md`, shipped the same day; the import-reliability work it builds on is
 `2026-10-02-import-reliability-design.md`).
+Follow-up: the key an import matches on can be the normalised one (a leading www., capitals in the host or the login and extra trailing slashes ignored): docs/superpowers/specs/2026-11-01-near-duplicates-design.md.
 Reference table: `ulp.credentials`, 1,394,459,025 rows, 128.88 GiB (about 99 bytes per row on disk), ordered by `(domain, email, imported_at)`.
 Every timing below is cold (query cache and condition cache off) on the one 16-thread laptop, against the live server, using throwaway
 `ulp.zz_*` tables that were dropped afterwards (live row counts identical before and after). The operator's file names and channel names are
