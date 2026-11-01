@@ -41,6 +41,12 @@
  *                 follows the bytes read and not an assumed line length, the estimated total converges on the real one, and one file finishing leaves the other's card
  *   retention     inbox/done at start-up: a file imported over 7 days ago is removed only when the source archive holds it (a real archive, an .archiveref, a restart); a
  *                 file the archive does not hold, one imported yesterday although its own date is 40 days old, and one the job log never imported all stay
+ *   golden        the normalised key on the edge cases of docs/superpowers/specs/2026-11-01-near-duplicates-design.md, computed by ClickHouse itself: the host part and the rest of 13
+ *                 URLs, and how many distinct keys five spellings of one credential and six different credentials give (the exact key tells the five apart)
+ *   lookalikes    look-alikes (www., scheme, host case, slashes, login case) against the exact key (INGEST_NORM_KEY=off: all stored) and the normalised key (known, not stored);
+ *                 look-alikes inside one file count as repeats; a path or a password that differs stays a different credential; the monitor alerts with the row that was stored;
+ *                 each job records its key; the per-file recount (scripts/pile/verify-file.ts) agrees with the job for both keys
+ *   norm-not-ready  the column dropped and added again (existing parts lack it): the import keeps the exact key and says so; after MATERIALIZE COLUMN the next one matches on the normalised key
  *
  *   docker compose build app
  *   npx tsx scripts/e2e-alert-rehearsal.ts --keep    # brings the rehearsal stack up (about 4 minutes) and leaves it running
@@ -55,6 +61,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { NORM_CONTENT_KEY, exactKeySql, normHostSql, normKeySql, normRestSql } from '../lib/url-content-key'
 
 const APP = 'ulprehearsal_app'
 const CH = 'ulprehearsal_clickhouse'
@@ -99,6 +106,7 @@ const chQuery = (sql: string) => sh('docker', ['exec', CH, 'clickhouse-client', 
 const inList = (names: string[]) => names.map(n => `'${n}'`).join(', ')
 const rowsFor = (...names: string[]) => Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file IN (${inList(names)})`))
 const distinctFor = (...names: string[]) => Number(chQuery(`SELECT uniqExact(content_key_hash) FROM ulp.credentials WHERE source_file IN (${inList(names)})`))
+const distinctNormFor = (...names: string[]) => Number(chQuery(`SELECT uniqExact(norm_key_hash) FROM ulp.credentials WHERE source_file IN (${inList(names)})`))
 const sourceLine = (name: string) => chQuery(`SELECT line_count FROM ulp.sources WHERE filename = '${name}'`)
 const stageTableCount = () => Number(chQuery("SELECT count() FROM system.tables WHERE database = 'ulp' AND name LIKE 'zz_import_%'"))
 const freeBytes = () => Number(chQuery("SELECT unreserved_space FROM system.disks WHERE name = 'default'"))
@@ -177,7 +185,7 @@ async function api(method: string, path: string, body?: unknown): Promise<{ stat
   return { status: res.status, json }
 }
 
-interface AppSettings { concurrency?: string; novelty?: string; slab?: string; floorBytes?: number }
+interface AppSettings { concurrency?: string; novelty?: string; slab?: string; normKey?: string; floorBytes?: number }
 
 /** Looks for an accounting failure in the log of the container that is about to be replaced (its log goes with it). */
 function scanLog(label: string): void {
@@ -202,6 +210,7 @@ async function recreateApp(s: AppSettings = {}): Promise<boolean> {
     REHEARSAL_UPLOAD_CONCURRENCY: s.concurrency ?? '',
     REHEARSAL_INGEST_NOVELTY_CHECK: s.novelty ?? '',
     REHEARSAL_INGEST_NOVELTY_SLAB_ROWS: s.slab ?? '',
+    REHEARSAL_INGEST_NORM_KEY: s.normKey ?? '',
     REHEARSAL_INGEST_MIN_FREE_BYTES: s.floorBytes === undefined ? '' : String(s.floorBytes),
     REHEARSAL_INGEST_DISK_GATE: '',
   }
@@ -1109,6 +1118,189 @@ async function doneRetention(): Promise<void> {
   scanLog('after the retention scenario')
 }
 
+// ── near-duplicates: docs/superpowers/specs/2026-11-01-near-duplicates-design.md ──────────────────────────
+
+/** The match_key the newest job row of a file recorded: 'missing' when there is no row yet, 'null' when the column is empty. Read from SQLite inside the app container. */
+function matchKeyOf(name: string): string {
+  return sh('docker', ['exec', '-i', APP, 'node', '-e', `
+    const Database = require('better-sqlite3');
+    const name = require('fs').readFileSync(0, 'utf8');
+    const db = new Database('/app/data/ulp.db', { readonly: true });
+    const row = db.prepare('SELECT match_key FROM processing_jobs WHERE filename = ? ORDER BY id DESC LIMIT 1').get(name);
+    process.stdout.write(row === undefined ? 'missing' : String(row.match_key));
+    db.close();`], process.env, name)
+}
+
+/** Waits for the job row (it is written just after the job's last event) and returns its match_key. */
+const jobMatchKey = (name: string) => waitFor(() => { const k = matchKeyOf(name); return k === 'missing' ? null : k }, 20_000, 1000)
+
+async function goldenKey(): Promise<void> {
+  console.log("\n12. The normalised key on the design's edge cases, computed by ClickHouse itself")
+  // [url, host part, rest]: the table of "The rule" in the design, checked on ClickHouse 26.3.17.4.
+  const cases: Array<[string, string, string]> = [
+    ['https://www.Example.COM/Path/', 'example.com', '/Path'],
+    ['http://example.com/Path', 'example.com', '/Path'],
+    ['HTTPS://WWW.example.com', 'example.com', ''],
+    ['https://example.com:8443/a//', 'example.com:8443', '/a'],
+    ['HTTP://www.Example.com:80/a/', 'example.com:80', '/a'],
+    ['https://example.com/a#frag', 'example.com', '/a#frag'],
+    ['https://example.com/?x=1/', 'example.com', '/?x=1'],
+    ['https://www.www.example.com/', 'www.example.com', ''],
+    ['https://user:Pw@Host.com/x', 'user:pw@host.com', '/x'],
+    ['ftp://www.x.com/a', 'ftp:', '//www.x.com/a'],
+    ['android://abcDEF@com.app.name/', 'android:', '//abcDEF@com.app.name'],
+    ['https://www.com', 'com', ''],
+    ['', '', ''],
+  ]
+  const urls = cases.map(([u]) => `'${u}'`).join(', ')
+  const out = chQuery(`SELECT url, ${normHostSql('url')} AS host, ${normRestSql('url')} AS rest FROM (SELECT arrayJoin([${urls}]) AS url) FORMAT JSONEachRow`)
+  const got = new Map((out.split('\n').map(l => JSON.parse(l)) as Array<{ url: string; host: string; rest: string }>).map(r => [r.url, r]))
+  for (const [url, host, rest] of cases) {
+    const g = got.get(url)
+    check(`${JSON.stringify(url)}: host ${JSON.stringify(host)}, rest ${JSON.stringify(rest)}`, g?.host === host && g?.rest === rest, JSON.stringify(g))
+  }
+
+  // How many distinct keys a set of spellings gives. Rows are [url, login, password].
+  const distinctKeys = (key: (c: { url: string; email: string; password: string }) => string, rows: Array<[string, string, string]>) =>
+    Number(chQuery(`SELECT uniqExact(${key({ url: 't.1', email: 't.2', password: 't.3' })}) FROM (SELECT arrayJoin([${rows.map(r => `('${r[0]}', '${r[1]}', '${r[2]}')`).join(', ')}]) AS t)`))
+  const oneCredential: Array<[string, string, string]> = [
+    ['https://www.Shop.example/login/', 'Sam@Mail.example', 'pw-1'],
+    ['http://shop.example/login', 'sam@mail.example', 'pw-1'],
+    ['HTTPS://SHOP.EXAMPLE/login//', 'SAM@MAIL.EXAMPLE', 'pw-1'],
+    ['shop.example/login', 'sam@mail.EXAMPLE', 'pw-1'],
+    ['https://WWW.shop.example/login///', 'Sam@mail.example', 'pw-1'],
+  ]
+  const differentCredentials: Array<[string, string, string]> = [
+    ['https://shop.example/login', 'sam@mail.example', 'pw-1'],
+    ['https://shop.example/Login', 'sam@mail.example', 'pw-1'], // path case
+    ['https://shop.example/login2', 'sam@mail.example', 'pw-1'], // another path
+    ['https://shop.example:8443/login', 'sam@mail.example', 'pw-1'], // a port
+    ['https://shop.example/login', 'sam@mail.example', 'PW-1'], // password case
+    ['https://shop.example/login?x=1', 'sam@mail.example', 'pw-1'], // a query
+  ]
+  check('five spellings of one credential give one normalised key', distinctKeys(normKeySql, oneCredential) === 1, String(distinctKeys(normKeySql, oneCredential)))
+  check('...and five exact keys: the old key cannot see that they are one', distinctKeys(exactKeySql, oneCredential) === 5, String(distinctKeys(exactKeySql, oneCredential)))
+  check('six credentials that differ by path, path case, port, query or password give six normalised keys', distinctKeys(normKeySql, differentCredentials) === 6, String(distinctKeys(normKeySql, differentCredentials)))
+  // The stored column against the TypeScript text, on two look-alikes written straight into the table: one stored value for both, equal to the expression.
+  const G = `e2e-nov-golden-${RUN}.txt`
+  chQuery(`INSERT INTO ulp.credentials (url, email, password, domain, source_file) VALUES
+    ('https://www.Golden.example/x/', 'G@x.example', 'pw', 'golden.example', '${G}'), ('http://golden.example/x', 'g@x.example', 'pw', 'golden.example', '${G}')`)
+  const stored = chQuery(`SELECT uniqExact(norm_key_hash), countIf(norm_key_hash != ${NORM_CONTENT_KEY}) FROM ulp.credentials WHERE source_file = '${G}'`)
+  check('the column ClickHouse stores equals the TypeScript expression, and two look-alikes share one value', stored === '1\t0', stored)
+}
+
+async function lookAlikes(): Promise<void> {
+  console.log('\n13. Look-alikes are one credential: the exact key stores them, the normalised key counts them as known')
+  scanLog('before the look-alike scenario')
+  const since = new Date(Date.now() - 60_000).toISOString().replace('T', ' ').slice(0, 19) // SQLite stamps jobs in UTC
+  const partition = new Date().toISOString().slice(0, 7).replace('-', '')
+  const site = (tag: string) => `lk-${tag}-${RUN}.example-store.test`
+  // The first file stores three credentials. The second brings look-alikes of two of them (B1 and B2) and two credentials that are different (B3, B4).
+  const first = (tag: string) => [
+    `https://www.${site(tag)}/login/:Sam${RUN}@probe-mail.test:Pw-${tag}-one`, // A1
+    `https://${site(tag)}/Shop:user${RUN}@probe-mail.test:Pw-${tag}-two`, // A2
+    `https://${site(tag)}/cart:cart${RUN}@probe-mail.test:Pw-${tag}-three`, // A3
+  ]
+  const second = (tag: string) => [
+    `http://${site(tag)}/login:sam${RUN}@probe-mail.test:Pw-${tag}-one`, // B1: A1 without www., on http, no trailing slash, a lower-case login
+    `https://${site(tag).toUpperCase()}/Shop//:USER${RUN}@probe-mail.test:Pw-${tag}-two`, // B2: A2 in another host case, with extra slashes and login case
+    `https://${site(tag)}/shop:user${RUN}@probe-mail.test:Pw-${tag}-two`, // B3: another path case, so another credential
+    `https://${site(tag)}/cart:cart${RUN}@probe-mail.test:Pw-${tag}-THREE`, // B4: another password case, so another credential
+  ]
+
+  // 1. The exact key: every line is a new row, which also proves the fixtures really are different to the old key.
+  const X1 = `e2e-nov-lk-x1-${RUN}.txt`
+  const X2 = `e2e-nov-lk-x2-${RUN}.txt`
+  if (!check('the rehearsal app restarted with INGEST_NORM_KEY=off', await recreateApp({ normKey: 'off' }))) return
+  const x1 = await importLines(X1, first('x'))
+  const x2 = await importLines(X2, second('x'))
+  check('under the exact key every look-alike is a new row: 3 + 4 stored, none known', x1.imported === 3 && x2.imported === 4 && (x2.known ?? 0) === 0, `${brief(x1)} ${brief(x2)}`)
+  check('...the exact key tells all 7 rows apart, the normalised one sees B1 and B2 as the copies they are (5 distinct)',
+    distinctFor(X1, X2) === 7 && distinctNormFor(X1, X2) === 5, `exact ${distinctFor(X1, X2)}, norm ${distinctNormFor(X1, X2)}`)
+  check('...and both jobs recorded the exact key', (await jobMatchKey(X1)) === 'exact' && (await jobMatchKey(X2)) === 'exact')
+
+  // 2. The normalised key (the production default; a fresh stack has the column complete).
+  const Y1 = `e2e-nov-lk-y1-${RUN}.txt`
+  const Y2 = `e2e-nov-lk-y2-${RUN}.txt`
+  if (!check('the rehearsal app restarted with the production defaults', await recreateApp())) return
+  const y1 = await importLines(Y1, first('y'))
+  const y2 = await importLines(Y2, second('y'))
+  check('the first file stores its 3 rows', y1.imported === 3 && (y1.known ?? 0) === 0, brief(y1))
+  check('the second file: the 2 look-alikes are known, the 2 different credentials are new', y2.imported === 2 && y2.known === 2 && y2.inFileDuplicates === 0, brief(y2))
+  check('...only those 2 were stored, and the table holds 5 distinct credentials of the two files', rowsFor(Y2) === 2 && distinctNormFor(Y1, Y2) === 5, `rows ${rowsFor(Y2)}, norm ${distinctNormFor(Y1, Y2)}`)
+  check('...and both jobs recorded the normalised key', (await jobMatchKey(Y1)) === 'norm' && (await jobMatchKey(Y2)) === 'norm')
+
+  // 3. Look-alikes inside one file.
+  const Z = `e2e-nov-lk-z-${RUN}.txt`
+  const z = await importLines(Z, [
+    `https://www.${site('z')}/login:Zed${RUN}@probe-mail.test:Pw-z-one`,
+    `https://${site('z')}/login/:zed${RUN}@probe-mail.test:Pw-z-one`,
+    `https://${site('z')}/login:other${RUN}@probe-mail.test:Pw-z-two`,
+  ])
+  check('inside one file the pair is one stored row and one repeat', z.imported === 2 && z.inFileDuplicates === 1 && (z.known ?? 0) === 0 && rowsFor(Z) === 2, brief(z))
+
+  // 4. The monitor reports the row that was stored.
+  const BRAND2 = `lookalike-brand-${RUN}.test`
+  const hook = await api('POST', '/api/monitoring/webhooks', { name: `Look-alike Receiver ${RUN}`, url: `http://${RECEIVER}:9000/hook`, secret: 'rehearsal' })
+  const hookId = hook.json?.data?.id as number | undefined
+  if (check('a webhook to the receiver is accepted', hook.status === 200 && !!hookId, `status ${hook.status}: ${hook.json?.error ?? ''}`)) {
+    const mon = await api('POST', '/api/monitoring/monitors', {
+      name: `Look-alike Monitor ${RUN}`, domains: [BRAND2], match_mode: 'both', webhook_ids: [hookId], rescan_mode: 'dedup', rescan_interval_hours: 1,
+    })
+    if (check('a monitor on the look-alike brand domain is created', mon.status === 200 && !!mon.json?.data?.id, `status ${mon.status}`)) {
+      const M = `e2e-nov-lk-mon-${RUN}.txt`
+      const m = await importLines(M, [
+        `https://${BRAND2}/login:pick${RUN}@${BRAND2}:Pw-pick-Xy!`, // the lower-case login comes first in the file...
+        `https://${BRAND2}/login:Pick${RUN}@${BRAND2}:Pw-pick-Xy!`, // ...and the capital P sorts before the lower-case p
+        ...lines('LK', 0, 20),
+      ])
+      check('the pair is one stored row and one repeat; the 20 other rows are new', m.imported === 21 && m.inFileDuplicates === 1, brief(m))
+      const stored = chQuery(`SELECT email FROM ulp.credentials WHERE source_file = '${M}' AND lower(email) = 'pick${RUN}@${BRAND2}'`)
+      check('the stored spelling is the first by (url, email), not the first in the file', stored === `Pick${RUN}@${BRAND2}`, stored)
+      const alert = await waitFor(() => receiverLines().find(l => l.source_file === M), 90_000, 2000)
+      check('the monitor alerted once, with the spelling that was stored', !!alert && alert.total_matches === 1 && alert.match_emails?.[0] === stored, JSON.stringify(alert))
+    }
+  }
+
+  // 5. The per-file recount agrees with the job, for the normalised key and for the exact one.
+  const data = mkdtempSync(join(tmpdir(), 'e2e-nov-data-'))
+  try {
+    sh('docker', ['cp', `${APP}:/app/data/.`, data])
+    const recount = (name: string) => spawnSync('npx', ['tsx', 'scripts/pile/verify-file.ts', data, since, name], {
+      env: { ...process.env, PILE_DIR: work, CH_CONTAINER: CH, PARTITION: partition }, encoding: 'utf8', maxBuffer: 64 << 20,
+    })
+    const vy = recount(Y2)
+    check('the recount of the second file on the normalised key agrees with its job', vy.status === 0 && /recounted on the normalised key/.test(vy.stdout) && /ALL CHECKS PASSED/.test(vy.stdout), (vy.stdout + vy.stderr).slice(-500))
+    const vx = recount(X2)
+    check('the recount of the exact-key file agrees with its job', vx.status === 0 && /recounted on the exact key/.test(vx.stdout) && /ALL CHECKS PASSED/.test(vx.stdout), (vx.stdout + vx.stderr).slice(-500))
+  } finally {
+    rmSync(data, { recursive: true, force: true })
+  }
+  scanLog('after the look-alike scenario')
+}
+
+async function normNotReady(): Promise<void> {
+  console.log('\n14. The normalised key is used only when every part holds the column')
+  chQuery('ALTER TABLE ulp.credentials DROP COLUMN norm_key_hash')
+  chQuery(`ALTER TABLE ulp.credentials ADD COLUMN norm_key_hash UInt64 MATERIALIZED ${NORM_CONTENT_KEY}`)
+  const partsNow = () => Number(chQuery("SELECT count() FROM system.parts WHERE database = 'ulp' AND table = 'credentials' AND active"))
+  const withColumn = () => Number(chQuery("SELECT uniqExact(name) FROM system.parts_columns WHERE database = 'ulp' AND table = 'credentials' AND active AND column = 'norm_key_hash'"))
+  check('after the column was dropped and added again the existing parts lack it (the upgrade state)', partsNow() > 0 && withColumn() < partsNow(), `parts ${partsNow()}, with the column ${withColumn()}`)
+  if (!check('the rehearsal app restarted (its readiness answer is cold)', await recreateApp())) return
+  const site = `lk-nr-${RUN}.example-store.test`
+  const N = (n: string) => `e2e-nov-nr-${n}-${RUN}.txt`
+  const a = await importLines(N('a'), [`https://www.${site}/login:Nina${RUN}@probe-mail.test:Pw-nr`])
+  const b = await importLines(N('b'), [`http://${site}/login/:nina${RUN}@probe-mail.test:Pw-nr`])
+  check('while the column is incomplete the import matches on the exact key: the look-alike is a new row', a.imported === 1 && b.imported === 1 && (b.known ?? 0) === 0, `${brief(a)} ${brief(b)}`)
+  check('...and both jobs say so', (await jobMatchKey(N('a'))) === 'exact' && (await jobMatchKey(N('b'))) === 'exact')
+  chQuery('ALTER TABLE ulp.credentials MATERIALIZE COLUMN norm_key_hash SETTINGS mutations_sync = 2')
+  check('MATERIALIZE COLUMN completed the column in every part', withColumn() === partsNow(), `parts ${partsNow()}, with the column ${withColumn()}`)
+  await sleep(6_000) // a not-ready answer is remembered for 5 s
+  const c = await importLines(N('c'), [`https://WWW.${site}/login//:NINA${RUN}@probe-mail.test:Pw-nr`])
+  check('once it is complete the next import matches on the normalised key: the third spelling is known', c.imported === 0 && c.known === 1, brief(c))
+  check('...and the job says so', (await jobMatchKey(N('c'))) === 'norm')
+}
+
 async function run(): Promise<number> {
   // The receiver runs the app image's node with its own entrypoint, so the image's health check (port 3000) always calls it
   // unhealthy: for it, running is what matters.
@@ -1158,6 +1350,9 @@ async function run(): Promise<number> {
   if (want('link')) await hardLinkedNames()
   if (want('progress')) await progressCards()
   if (want('retention')) await doneRetention()
+  if (want('golden')) await goldenKey()
+  if (want('lookalikes')) await lookAlikes()
+  if (want('norm-not-ready')) await normNotReady()
 
   scanLog('at the end')
   await recreateApp() // leave the stack on the production defaults
