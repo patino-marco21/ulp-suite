@@ -154,6 +154,7 @@ export const MIGRATION_COLUMNS = [
   'password_entropy_band',
   'is_noise',
   'content_key_hash',
+  'norm_key_hash',
   'was_duplicated',
 ]
 

@@ -29,7 +29,7 @@ import {
   buildDropImportedDescProjectionSql,
   buildImportedDescProjectionCurrentSql,
 } from './credentials-projections'
-import { URL_CONTENT_KEY } from './url-content-key'
+import { NORM_CONTENT_KEY, URL_CONTENT_KEY } from './url-content-key'
 import { SOURCES_IDENTITY_ALTER } from './source-archive'
 
 // Per-process guard (still useful to avoid redundant calls within one process)
@@ -270,14 +270,20 @@ let retryNotBefore = 0
 //      exact match. ADD INDEX IF NOT EXISTS is metadata only: parts written from now on carry the index. Existing parts get it with MATERIALIZE INDEX, NOT fired here (see v23: start-up
 //      must not be coupled to a mutation): scripts/materialize-address-index.sh, supervised, BEFORE the image whose queries depend on it is deployed. Until then a lookup is correct but scans.
 //      The queries depend on the index, so a failed ADD is not recorded as done and the next start tries again.
-const DDL_VERSION = 29
+// v30: norm_key_hash, the key an import matches on once every part holds it (docs/superpowers/specs/2026-11-01-near-duplicates-design.md): a leading www., capitals in the host or the login
+//      and extra trailing slashes are ignored. ADD COLUMN IF NOT EXISTS is metadata only; parts written from now on carry the value. Existing parts get it with MATERIALIZE COLUMN, NOT fired
+//      here (see v23: start-up must not be coupled to a mutation): scripts/materialize-norm-key.sh, supervised. Until every part has it the importer keeps the exact key
+//      (lib/norm-key-ready.ts), so the image can be deployed first. A failed ADD is not recorded as done and the next start tries again.
+const DDL_VERSION = 30
 const DDL_BEFORE_SOURCES_IDENTITY = 27
 const DDL_BEFORE_ADDRESS_INDEX = 28
+const DDL_BEFORE_NORM_KEY = 29
 
-/** The DDL version to record after a run: a failed v28 ALTER (ulp.sources identity columns) or a failed v29 ADD INDEX is not recorded as done, so the next start tries it again. */
-export function ddlVersionToRecord(sourcesIdentityFailed: boolean, addressIndexFailed = false): number {
+/** The DDL version to record after a run: a failed v28 ALTER (ulp.sources identity columns), a failed v29 ADD INDEX or a failed v30 ADD COLUMN is not recorded as done, so the next start tries it again. */
+export function ddlVersionToRecord(sourcesIdentityFailed: boolean, addressIndexFailed = false, normKeyFailed = false): number {
   if (sourcesIdentityFailed) return DDL_BEFORE_SOURCES_IDENTITY
-  return addressIndexFailed ? DDL_BEFORE_ADDRESS_INDEX : DDL_VERSION
+  if (addressIndexFailed) return DDL_BEFORE_ADDRESS_INDEX
+  return normKeyFailed ? DDL_BEFORE_NORM_KEY : DDL_VERSION
 }
 
 /** v26: swap country_tier's MATERIALIZED expression (metadata only; see the DDL_VERSION comment above). */
@@ -1135,14 +1141,27 @@ export async function runClickHouseMigrations(opts: { wait?: WaitOptions } = {})
     }
   }
 
+  // v30 — norm_key_hash (see DDL_VERSION comment above). ADD COLUMN IF NOT EXISTS is metadata only and idempotent. The existing parts get the value from scripts/materialize-norm-key.sh,
+  // never from here; until they have it the importer keeps the exact key (lib/norm-key-ready.ts), so a failure costs nothing but the feature and is tried again at the next start.
+  let normKeyFailed = false
+  if (lastDdl < 30) {
+    try {
+      await client.exec({ query: `ALTER TABLE ulp.credentials ADD COLUMN IF NOT EXISTS norm_key_hash UInt64 MATERIALIZED ${NORM_CONTENT_KEY}` })
+      console.warn('[ClickHouse migration] DDL v30 applied (norm_key_hash column -- existing parts need scripts/materialize-norm-key.sh)')
+    } catch (err) {
+      normKeyFailed = true
+      console.error('[ClickHouse migration] v30: ADD COLUMN norm_key_hash -- FAILED (tried again at the next start):', err instanceof Error ? err.message : String(err))
+    }
+  }
+
   // A connection that was lost at any point means statements may not have reached the server: record nothing (every block is idempotent) and fire no repair mutation.
   if (connectionLost) {
     tryAgainLater('the connection to ClickHouse was lost during the run: the DDL version was not recorded and the data-repair mutations were not fired')
     return
   }
 
-  // A failed v28 or v29 keeps the recorded version below it, so the next start runs the ALTER again: an import from the archive needs the v28 columns, the lookups the v29 index.
-  const ddlReached = ddlVersionToRecord(sourcesIdentityFailed, addressIndexFailed)
+  // A failed v28, v29 or v30 keeps the recorded version below it, so the next start runs the ALTER again: an import from the archive needs the v28 columns, the lookups the v29 index, the intake the v30 column.
+  const ddlReached = ddlVersionToRecord(sourcesIdentityFailed, addressIndexFailed, normKeyFailed)
   if (lastDdl < DDL_VERSION) {
     setSetting('ch_ddl_version', String(ddlReached))
     console.warn(`[ClickHouse migration] DDL now at v${ddlReached}`)

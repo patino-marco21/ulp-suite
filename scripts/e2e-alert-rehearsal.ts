@@ -162,7 +162,7 @@ async function main(): Promise<number> {
     check('the app came up on its own, without a restart', !!appUp)
     if (!appUp) return 1
     const ddlRecorded = () => appNode(`const D=require('better-sqlite3');const db=new D('/app/data/ulp.db',{readonly:true});const r=db.prepare("SELECT value FROM app_settings WHERE key_name='ch_ddl_version'").get();console.log(r?r.value:'')`)
-    const migrated = await waitFor('the DDL version recorded', () => ddlRecorded() === '29', 180_000, 3000)
+    const migrated = await waitFor('the DDL version recorded', () => ddlRecorded() === '30', 180_000, 3000)
     check('the app ran its DDL migrations on the empty database', !!migrated)
     if (!migrated) return 1
 
@@ -170,7 +170,9 @@ async function main(): Promise<number> {
     const expr = chQuery("SELECT default_expression FROM system.columns WHERE database='ulp' AND table='credentials' AND name='country_tier'")
     check('country_tier reads email_domain (DDL v26 / the init SQL)', expr.includes('email_domain') && !expr.includes("splitByChar('@', lower(email))"))
     const ddl = appNode(`const D=require('better-sqlite3');const db=new D('/app/data/ulp.db',{readonly:true});console.log(db.prepare("SELECT value FROM app_settings WHERE key_name='ch_ddl_version'").get().value)`)
-    check('the DDL version recorded in SQLite is 29 (v29: the lower(email) index)', ddl === '29', `got ${ddl}`)
+    check('the DDL version recorded in SQLite is 30 (v30: the norm_key_hash column)', ddl === '30', `got ${ddl}`)
+    const normKeyKind = chQuery("SELECT default_kind FROM system.columns WHERE database='ulp' AND table='credentials' AND name='norm_key_hash'")
+    check('norm_key_hash exists on a fresh install as a MATERIALIZED column (the init SQL; DDL v30 found it there)', normKeyKind === 'MATERIALIZED', `got ${normKeyKind}`)
     const addressIndex = chQuery("SELECT expr FROM system.data_skipping_indices WHERE database='ulp' AND table='credentials' AND name='idx_bf_email_lc'")
     check('idx_bf_email_lc exists on a fresh install and indexes lower(email)', addressIndex === 'lower(email)', `got ${addressIndex}`)
     const owned = MIGRATION_INDEXES.map((i) => i.name).sort()
@@ -188,7 +190,7 @@ async function main(): Promise<number> {
     check('proj_imported_desc carries is_noise and content_key_hash (DDL v27 / the init SQL)', projCurrent === '1', `count ${projCurrent}`)
 
     // 1b. The start-up safeguards against a REAL server: ClickHouse is down when the app starts (the app has to wait for it, not record anything), and an
-    // index the migrations own has been lost (the schema check has to add it back). Both happen on the next start of the same app, with its DDL version already at 29.
+    // index the migrations own has been lost (the schema check has to add it back). Both happen on the next start of the same app, with its DDL version already at 30.
     console.log('1b. Start-up with ClickHouse down and an index lost')
     chQuery('ALTER TABLE ulp.credentials DROP INDEX idx_inv_url')
     check('the index is gone before the restart (the drift is real)', chQuery("SELECT count() FROM system.data_skipping_indices WHERE database='ulp' AND table='credentials' AND name='idx_inv_url'") === '0')
@@ -197,14 +199,14 @@ async function main(): Promise<number> {
     sh('docker', ['restart', APP], env)
     const waitSeen = await waitFor('the app waiting for ClickHouse', () => sh('sh', ['-c', `docker logs --since ${restartedAt} ${APP} 2>&1 | grep -c 'not accepting connections yet' || true`], env) !== '0', 90_000, 2000)
     check('the app started with ClickHouse down and says it is waiting for it, instead of running its DDL', !!waitSeen)
-    const ddlWhileDown = sh('sh', ['-c', `docker logs --since ${restartedAt} ${APP} 2>&1 | grep -c 'DDL v29 already applied' || true`], env)
+    const ddlWhileDown = sh('sh', ['-c', `docker logs --since ${restartedAt} ${APP} 2>&1 | grep -c 'DDL v30 already applied' || true`], env)
     check('no DDL step ran while ClickHouse was down', ddlWhileDown === '0')
     sh('docker', ['start', CH], env)
     const schemaChecked = await waitFor('the schema check after the start', () => sh('sh', ['-c', `docker logs --since ${restartedAt} ${APP} 2>&1 | grep -c 'was missing 1 skip index' || true`], env) !== '0', 240_000, 3000)
     check('once ClickHouse answered, the app ran on and the schema check named the missing index', !!schemaChecked)
     const indexBack = chQueryOrEmpty("SELECT count() FROM system.data_skipping_indices WHERE database='ulp' AND table='credentials' AND name='idx_inv_url'")
     check('idx_inv_url was added back by the schema check', indexBack === '1', `got ${indexBack}`)
-    check('the recorded DDL version is still 29', ddlRecorded() === '29')
+    check('the recorded DDL version is still 30', ddlRecorded() === '30')
     const appHealthy1b = await waitFor('app healthy again', () => sh('docker', ['inspect', '-f', '{{.State.Health.Status}}', APP]) === 'healthy', 300_000)
     check('the app is healthy again after the restart', !!appHealthy1b)
     if (!appHealthy1b) return 1

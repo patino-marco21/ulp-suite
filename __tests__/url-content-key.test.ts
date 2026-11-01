@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, test, expect } from 'vitest'
 import {
   NORM_CONTENT_KEY,
@@ -49,5 +50,20 @@ describe('the normalised key', () => {
     expect(key).toContain('lower(unhex(e)), unhex(p))')
     expect(key).not.toContain('lower(unhex(p))')
     expect(key).not.toMatch(/\burl\b/)
+  })
+})
+
+const squash = (s: string) => s.replace(/\s+/g, '')
+const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
+
+describe('the normalised key is defined once and copied to the places plain SQL cannot import it', () => {
+  test('the init SQL defines norm_key_hash with exactly the TypeScript text', () => {
+    expect(squash(read('docker/clickhouse/init/01-ulp-tables.sql'))).toContain(`norm_key_hashUInt64MATERIALIZED${squash(NORM_CONTENT_KEY)}`)
+  })
+
+  test('DDL v30 adds the column from the same constant and does not fire the backfill', () => {
+    const migrations = read('lib/clickhouse-migrations.ts')
+    expect(squash(migrations)).toContain(squash('ADD COLUMN IF NOT EXISTS norm_key_hash UInt64 MATERIALIZED ${NORM_CONTENT_KEY}'))
+    expect(migrations).not.toMatch(/MATERIALIZE COLUMN norm_key_hash/)
   })
 })

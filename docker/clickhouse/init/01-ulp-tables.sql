@@ -339,6 +339,15 @@ CREATE TABLE IF NOT EXISTS ulp.credentials
         email, password
     ),
 
+    -- norm_key_hash: the same credential as an import sees it once a leading www., capitals in the host or the login and extra trailing
+    -- slashes are ignored (path, query, port and password as typed). Definition: lib/url-content-key.ts (a test locks this copy to it);
+    -- DDL v30 in lib/clickhouse-migrations.ts adds it to an existing table; docs/superpowers/specs/2026-11-01-near-duplicates-design.md.
+    norm_key_hash UInt64 MATERIALIZED cityHash64(
+        concat(lower(extract(replaceRegexpOne(url, '^(?i:https?://)', ''), '^(?i:www\\.)?([^/?#]*)')),
+               extract(replaceRegexpOne(url, '^(?i:https?://)', ''), '^[^/?#]*(.*?)/*$')),
+        lower(email), password
+    ),
+
     -- ── Skip indexes ──────────────────────────────────────────────────────────
     -- text() inverted indexes on url/email/password are added by DDL v6 in
     -- lib/clickhouse-migrations.ts (requires ClickHouse 26.2+; not defined here
