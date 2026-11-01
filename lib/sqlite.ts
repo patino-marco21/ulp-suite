@@ -312,6 +312,9 @@ function initSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN repeats INTEGER`) } catch {}
   try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN note TEXT`) } catch {}
 
+  // Which key an import matched on (lib/norm-key-ready.ts): 'norm' or 'exact'. Additive and nullable: a job from before the normalised key reads NULL, which means the exact key.
+  try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN match_key TEXT`) } catch {}
+
   // One-shot releases of held files (lib/ingest-gate-store.ts): an admin pressed Release; the next claim of that file name consumes the row.
   db.exec(`
     CREATE TABLE IF NOT EXISTS gate_overrides (

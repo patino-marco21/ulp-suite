@@ -6,6 +6,7 @@
  */
 
 import type { PhaseTimings } from '@/lib/phase-timings'
+import type { MatchKey } from '@/lib/norm-key-ready'
 import { dbRun } from '@/lib/sqlite'
 
 export interface JobLogEntry extends Partial<PhaseTimings> {
@@ -26,6 +27,8 @@ export interface JobLogEntry extends Partial<PhaseTimings> {
   repeats?:       number
   /** Why a finished job added nothing, when it is not an import problem: 'already-imported' (lib/import-summary.ts). */
   note?:          string
+  /** The key the import matched on (lib/norm-key-ready.ts). Absent on the direct path and on a job from before the normalised key; a recount reads absent as 'exact'. */
+  match_key?:     MatchKey
 }
 
 /**
@@ -41,8 +44,8 @@ export function logJob(entry: JobLogEntry): void {
   try {
     dbRun(
       `INSERT INTO processing_jobs
-         (source, filename, status, imported, skipped, duration_ms, error_message, breach_name, known, gate_report, parse_ms, check_ms, insert_ms, repeats, note)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (source, filename, status, imported, skipped, duration_ms, error_message, breach_name, known, gate_report, parse_ms, check_ms, insert_ms, repeats, note, match_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         entry.source,
         entry.filename,
@@ -59,6 +62,7 @@ export function logJob(entry: JobLogEntry): void {
         ms(entry.insert_ms),
         countOrNull(entry.repeats),
         entry.note ?? null,
+        entry.match_key ?? null,
       ],
     )
   } catch {

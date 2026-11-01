@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   registerStage: vi.fn(),
   unregisterStage: vi.fn(),
   commitStage: vi.fn(),
+  resolveMatchKey: vi.fn(),
   updateJob: vi.fn(),
 }))
 const dm = vi.hoisted(() => ({
@@ -20,6 +21,10 @@ vi.mock('@/lib/clickhouse', () => ({ getClient: () => ({ insert: h.insert, query
 vi.mock('@/lib/domain-monitor', () => dm)
 vi.mock('@/lib/upload-jobs', () => ({ updateJob: h.updateJob }))
 vi.mock('@/lib/ingest-novelty', () => ({ commitStage: h.commitStage }))
+vi.mock('@/lib/norm-key-ready', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/norm-key-ready')>('@/lib/norm-key-ready')
+  return { ...actual, resolveMatchKey: h.resolveMatchKey }
+})
 vi.mock('@/lib/ingest-stage', async () => {
   const actual = await vi.importActual<typeof import('@/lib/ingest-stage')>('@/lib/ingest-stage')
   return {
@@ -57,6 +62,7 @@ beforeEach(() => {
   h.createStage.mockResolvedValue(undefined)
   h.dropStage.mockResolvedValue(undefined)
   h.commitStage.mockResolvedValue(commitResult())
+  h.resolveMatchKey.mockResolvedValue('exact')
   dm.getActiveMonitors.mockReset()
   dm.getActiveMonitors.mockResolvedValue([])
   dm.fireMonitorAlertsFromMatches.mockReset()
@@ -266,5 +272,28 @@ describe('processTextFile gives the quality gate the file to sample', () => {
     expect(h.registerStage).not.toHaveBeenCalled()
     expect(h.createStage).not.toHaveBeenCalled()
     expect(h.commitStage).not.toHaveBeenCalled()
+  })
+})
+
+describe('processTextStream: which key the import matches on', () => {
+  it('commits on the normalised key when the readiness check says the column is complete, and returns the rule', async () => {
+    h.resolveMatchKey.mockResolvedValue('norm')
+    const out = await processTextStream(stream(), 'novelty-norm.txt')
+    expect(h.commitStage.mock.calls[0][0].keyColumn).toBe('norm_key_hash')
+    expect(out.matchKey).toBe('norm')
+  })
+
+  it('commits on the exact key otherwise', async () => {
+    const out = await processTextStream(stream(), 'novelty-exact.txt')
+    expect(h.commitStage.mock.calls[0][0].keyColumn).toBe('content_key_hash')
+    expect(out.matchKey).toBe('exact')
+  })
+
+  it('chooses once, after the file is staged and before the first slab', async () => {
+    await processTextStream(stream(), 'novelty-once.txt')
+    expect(h.resolveMatchKey).toHaveBeenCalledTimes(1)
+    const order = (fn: { mock: { invocationCallOrder: number[] } }) => fn.mock.invocationCallOrder[0]
+    expect(order(h.insert)).toBeLessThan(order(h.resolveMatchKey))
+    expect(order(h.resolveMatchKey)).toBeLessThan(order(h.commitStage))
   })
 })

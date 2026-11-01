@@ -49,7 +49,7 @@ describe('newKnownLabel', () => {
   })
 })
 
-const entry = (over: Partial<{ inFileDuplicates: number; alreadyImported: boolean; errors: number }> = {}) => ({ inFileDuplicates: 0, alreadyImported: false, errors: 0, ...over })
+const entry = (over: Partial<{ inFileDuplicates: number; alreadyImported: boolean; errors: number; matchKey: 'norm' | 'exact' }> = {}) => ({ inFileDuplicates: 0, alreadyImported: false, errors: 0, ...over })
 
 describe('the job tally (what processing_jobs records besides the counts)', () => {
   it('adds up the rows repeated inside the file over every entry', () => {
@@ -120,5 +120,36 @@ describe('tallyOf', () => {
   it('is the tally of one file imported on its own', () => {
     expect(jobAccounting(tallyOf({ inFileDuplicates: 3, alreadyImported: false, errors: 0 }))).toEqual({ repeats: 3 })
     expect(jobAccounting(tallyOf({ inFileDuplicates: 0, alreadyImported: true, errors: 0 })).note).toBe(ALREADY_IMPORTED_NOTE)
+  })
+})
+
+describe('the job tally records the rule the entries were matched on', () => {
+  it('is norm only while every matched entry used it, and exact as soon as one did not', () => {
+    const t = newJobTally()
+    addToTally(t, entry({ matchKey: 'norm' }))
+    addToTally(t, entry({ matchKey: 'norm' }))
+    expect(jobAccounting(t)).toEqual({ repeats: 0, match_key: 'norm' })
+    addToTally(t, entry({ matchKey: 'exact' }))
+    expect(jobAccounting(t).match_key).toBe('exact')
+    addToTally(t, entry({ matchKey: 'norm' }))
+    expect(jobAccounting(t).match_key).toBe('exact')
+  })
+
+  it('records nothing for entries that were never matched (the direct path, a file the same-name check skipped)', () => {
+    const t = newJobTally()
+    addToTally(t, entry({ alreadyImported: true }))
+    expect(jobAccounting(t)).toEqual({ repeats: 0, note: ALREADY_IMPORTED_NOTE })
+    expect(jobAccounting(newJobTally())).toEqual({ repeats: 0 })
+  })
+
+  it('ignores a failed entry, as the rest of the tally does', () => {
+    const t = newJobTally()
+    addToTally(t, entry({ errors: 1, matchKey: 'exact' }))
+    addToTally(t, entry({ matchKey: 'norm' }))
+    expect(jobAccounting(t).match_key).toBe('norm')
+  })
+
+  it('tallyOf carries the key of a single file', () => {
+    expect(jobAccounting(tallyOf({ inFileDuplicates: 3, alreadyImported: false, errors: 0, matchKey: 'norm' }))).toEqual({ repeats: 3, match_key: 'norm' })
   })
 })

@@ -3,6 +3,7 @@
  * 2026-10-02-novelty-aware-ingest-design.md). Pure, so the pages stay thin and this is tested.
  */
 import type { ImportPhase } from '@/lib/import-runner'
+import type { MatchKey } from '@/lib/norm-key-ready'
 
 const count = (n: number | undefined) => (n ?? 0).toLocaleString('en-US')
 
@@ -49,16 +50,20 @@ export interface JobTally {
   entries: number
   alreadyImported: number
   repeats: number
+  /** The rule the entries were matched on (lib/norm-key-ready.ts); null until one was. 'norm' only while every matched entry used it. */
+  matchKey: MatchKey | null
 }
 
-export const newJobTally = (): JobTally => ({ entries: 0, alreadyImported: 0, repeats: 0 })
+export const newJobTally = (): JobTally => ({ entries: 0, alreadyImported: 0, repeats: 0, matchKey: null })
 
 /** Adds one imported file or one entry of a ZIP. An entry that failed counts for nothing: the same-name check did not skip it. */
-export function addToTally(t: JobTally, r: { inFileDuplicates: number; alreadyImported: boolean; errors: number }): void {
+export function addToTally(t: JobTally, r: { inFileDuplicates: number; alreadyImported: boolean; errors: number; matchKey?: MatchKey }): void {
   if (r.errors > 0) return
   t.entries++
   if (r.alreadyImported) t.alreadyImported++
   t.repeats += r.inFileDuplicates
+  // One entry matched on the exact key makes the job 'exact': the weaker claim, and the one a recount checks correctly for it.
+  if (r.matchKey) t.matchKey = t.matchKey === null ? r.matchKey : t.matchKey === 'norm' && r.matchKey === 'norm' ? 'norm' : 'exact'
 }
 
 /** What a finished job shows in place of its counts: a skipped file says so ("0 rows" reads like an import that found nothing). */
@@ -67,15 +72,16 @@ export function jobLabel(j: { imported: number; known?: number; note?: string | 
 }
 
 /** The tally of one file that was imported on its own, a text file. */
-export function tallyOf(r: { inFileDuplicates: number; alreadyImported: boolean; errors: number }): JobTally {
+export function tallyOf(r: { inFileDuplicates: number; alreadyImported: boolean; errors: number; matchKey?: MatchKey }): JobTally {
   const t = newJobTally()
   addToTally(t, r)
   return t
 }
 
-/** The two job-row fields the tally decides. The note is set only when there was at least one entry and the check skipped every one. */
-export function jobAccounting(t: JobTally): { repeats: number; note?: string } {
-  return t.entries > 0 && t.alreadyImported === t.entries ? { repeats: t.repeats, note: ALREADY_IMPORTED_NOTE } : { repeats: t.repeats }
+/** The job-row fields the tally decides. The note is set only when there was at least one entry and the check skipped every one; match_key only when an entry was matched. */
+export function jobAccounting(t: JobTally): { repeats: number; note?: string; match_key?: MatchKey } {
+  const base = { repeats: t.repeats, ...(t.matchKey ? { match_key: t.matchKey } : {}) }
+  return t.entries > 0 && t.alreadyImported === t.entries ? { ...base, note: ALREADY_IMPORTED_NOTE } : base
 }
 
 /**

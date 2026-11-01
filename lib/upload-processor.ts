@@ -36,6 +36,7 @@ import type { ImportHooks, ImportProgressEvent } from '@/lib/import-runner'
 import { noveltyConfig } from '@/lib/ingest-novelty-config'
 import { commitStage } from '@/lib/ingest-novelty'
 import { createStage, dropStage, newStageId, registerStage, stageTables, unregisterStage } from '@/lib/ingest-stage'
+import { keyColumnOf, resolveMatchKey, type MatchKey } from '@/lib/norm-key-ready'
 import {
   IngestHeldError, describeVerdict, evaluateGate, newGateCounters, parseGateConfig, recordGateBatch,
   type GateCounters, type GateReport, type GateVerdict,
@@ -69,6 +70,8 @@ export interface ProcessResult {
   gate?:               GateReport
   /** Where the time went (lib/phase-timings.ts). Set by the staged path only; the direct path and a skipped file have none. */
   timings?:            PhaseTimings
+  /** The key the import matched on (lib/norm-key-ready.ts). Set by the staged path when it committed; the direct path and a skipped file have none. */
+  matchKey?:           MatchKey
 }
 
 export const UPLOAD_BATCH_SIZE = 100_000
@@ -523,10 +526,15 @@ async function importThroughStage(a: StagedImport): Promise<ProcessResult> {
     await hooks.beforeCommit?.()
     const gateVerdict = gateCheck('final')
 
+    // Once per file, after the parse and before the first slab: a file never mixes keys (lib/norm-key-ready.ts). It does not throw.
+    const matchKey = await resolveMatchKey()
+    hooks.beat?.()
+
     const commit = await commitStage({
       tables,
       target:         'ulp.credentials',
       noveltyAgainst: 'ulp.credentials',
+      keyColumn:      keyColumnOf(matchKey),
       parsedRows:     streamed.imported,
       slabRows:       a.slabRows,
       signal:         hooks.signal ?? new AbortController().signal,
@@ -562,6 +570,7 @@ async function importThroughStage(a: StagedImport): Promise<ProcessResult> {
       alreadyImported:     false,
       tierDropped:         streamed.tierDropped,
       gate:                gateVerdict && gateVerdict.level !== 'pass' ? gateVerdict.report : undefined,
+      matchKey,
       timings: {
         parse_ms:  streamTimings.parseMs,
         check_ms:  commit.checkMs,
