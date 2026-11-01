@@ -1,7 +1,7 @@
 # Site marks: a status and a note that stay with a site — Design
 
 Date: 2026-10-29
-Status: **designed and approved in chat on 2026-10-29; not built.** First release: three marks, a note, a filter and a sort by mark, on the Site Counts page. The sites in this file are made up (`corp.example`): the owner's lists stay on the owner's machine.
+Status: **implemented and deployed locally on 2026-10-29** (main `6c10e06`, CI green; image `ulp-suite-app:latest` = `2ca4ce8ad568`; rollback tag `ulp-suite-app:rollback-20261029-1652z` = `47655cc245ca`). "As deployed" at the end. First release: three marks, a note, a filter and a sort by mark, on the Site Counts page. The sites in this file are made up (`corp.example`): the owner's lists stay on the owner's machine.
 
 ## Why
 
@@ -118,6 +118,13 @@ The rehearsal, on the built candidate image and the isolated stack, as a new ste
 
 The labels (Done, Skip, To look at); the sort order of the `Mark` header; Export CSV following the filter; a row leaving the table when a change takes it out of the filter; the 500-character cap; a mark button closing the menu; Esc saving the note; the marks of the whole list asked for once per count; a failed load disabling the cells.
 
-## Rollout (planned)
+## Rollout (the plan)
 
 Local only, on the owner's machine, as the earlier releases. Check first that no import is running and `inbox/processing` is empty. Tag the running image (`docker tag ulp-suite-app:latest ulp-suite-app:rollback-<UTC time>`) before building anything; build the candidate under its own tag from `git archive <commit>`; rehearse it with `REHEARSAL_APP_IMAGE`; then move `latest` and run `docker compose up -d --no-deps --no-build app` from the primary checkout. No ClickHouse change and no new setting, so `docker-compose.yml` and `.env.example` stay as they are; the README's Site counts bullet gets a sentence. Rollback: move the rollback tag back and run the same `compose up`; the `site_marks` table stays in `ulp.db` and the image that ran before ignores it.
+
+## As deployed (checked on the running system on 2026-10-31)
+
+- The app container started 2026-10-29 16:52Z and was healthy two days later. Its image is `ulp-suite-app:latest` = `2ca4ce8ad568` (also tagged `marks-candidate`), built 16:03Z, three minutes after the last commit (`6c10e06`, on which CI passed).
+- The rollback tag `rollback-20261029-1652z` points at `47655cc245ca`, the next-page image that ran before.
+- `ulp.db` has the `site_marks` table (host, status, note, updated_by, updated_at) with 38 rows two days after the deploy, so the page is in use. Nothing was changed in ClickHouse and no setting was added.
+- This section does not record the rehearsal's results; the marks check is step 8 of `scripts/e2e-batch-lookup.ts`.
