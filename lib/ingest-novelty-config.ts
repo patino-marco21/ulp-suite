@@ -23,6 +23,14 @@ export const COMMIT_MAX_EXECUTION_S = 3300
 /** The sort of a normalised-key commit spills to disk above this many bytes (max_bytes_before_external_sort) instead of growing ClickHouse's memory. */
 export const COMMIT_EXTERNAL_SORT_BYTES = 1_073_741_824
 
+/**
+ * The most rows one slab holds on the normalised key, whatever INGEST_NOVELTY_SLAB_ROWS says (a smaller setting is kept). That statement sorts its slab,
+ * and the spill bound above does not keep its memory flat: measured on ClickHouse 26.3 against the live DDL, one commit statement peaks at 10.6 GiB for
+ * 20,000,000 rows and 7.1 GiB for 10,000,000, where the exact-key statement it replaces peaks at 8.0 GiB (20,000,000) and 7.5 GiB (10,000,000). The memory guard
+ * starts a commit while the server is under 75% of its 14 GiB ceiling, so 10.6 GiB can be killed by the over-commit tracker and 7.1 GiB cannot.
+ */
+export const NORM_KEY_MAX_SLAB_ROWS = 10_000_000
+
 export interface NoveltyConfig {
   enabled: boolean
   slabRows: number

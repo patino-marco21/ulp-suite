@@ -1252,7 +1252,7 @@ async function lookAlikes(): Promise<void> {
       const m = await importLines(M, [
         `https://${BRAND2}/login:pick${RUN}@${BRAND2}:Pw-pick-Xy!`, // the lower-case login comes first in the file...
         `https://${BRAND2}/login:Pick${RUN}@${BRAND2}:Pw-pick-Xy!`, // ...and the capital P sorts before the lower-case p
-        ...lines('LK', 0, 20),
+        ...lines('LMON', 0, 20), // its own tag: the link scenario stores lines('LK', 0, 2000) earlier in a full run, which would make these known
       ])
       check('the pair is one stored row and one repeat; the 20 other rows are new', m.imported === 21 && m.inFileDuplicates === 1, brief(m))
       const stored = chQuery(`SELECT email FROM ulp.credentials WHERE source_file = '${M}' AND lower(email) = 'pick${RUN}@${BRAND2}'`)

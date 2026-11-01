@@ -5,6 +5,7 @@ import {
   DEFAULT_COMMIT_INSERT_THREADS,
   DEFAULT_NOVELTY_SLAB_ROWS,
   MIN_NOVELTY_SLAB_ROWS,
+  NORM_KEY_MAX_SLAB_ROWS,
   commitInsertThreads,
   normKeyEnabled,
   noveltyConfig,
@@ -85,5 +86,10 @@ describe('normKeyEnabled', () => {
 
   it('bounds the memory of the commit sort at 1 GiB before it spills to disk', () => {
     expect(COMMIT_EXTERNAL_SORT_BYTES).toBe(1_073_741_824)
+  })
+
+  it('cuts a slab on the normalised key at 10,000,000 rows (7.1 GiB measured; 10.6 GiB at 20,000,000 is more than the exact-key statement it replaces)', () => {
+    expect(NORM_KEY_MAX_SLAB_ROWS).toBe(10_000_000)
+    expect(NORM_KEY_MAX_SLAB_ROWS).toBeLessThan(DEFAULT_NOVELTY_SLAB_ROWS)
   })
 })

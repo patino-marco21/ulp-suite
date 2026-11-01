@@ -433,3 +433,29 @@ describe('commitStage with the normalised key', () => {
     expect(db.calls.find(c => c.sql.startsWith('INSERT INTO ulp.credentials'))!.sql).not.toContain('ORDER BY')
   })
 })
+
+describe('commitStage: the slab size on each key', () => {
+  const STAGE_ROWS = 25_000_000
+  const commitOn = async (slabs: number, extra: Partial<CommitOptions>) => {
+    const db = makeDb({ stageRows: STAGE_ROWS, distinct: Array(slabs).fill(1000), known: Array(slabs).fill(0) })
+    const out = await commitStage(options(db, { parsedRows: STAGE_ROWS, ...extra }))
+    return { db, out }
+  }
+
+  it('cuts a stage of 25,000,000 rows into 3 slabs on the normalised key, although the setting allows 20,000,000 a slab', async () => {
+    const { db, out } = await commitOn(3, { slabRows: 20_000_000, keyColumn: 'norm_key_hash' })
+    expect(out.slabs).toBe(3)
+    expect(db.calls.find(c => c.sql.startsWith('INSERT INTO ulp.credentials'))!.sql).toContain('norm_key_hash % 3 = 0')
+  })
+
+  it('keeps a setting that is smaller than the cap on the normalised key', async () => {
+    expect((await commitOn(5, { slabRows: 5_000_000, keyColumn: 'norm_key_hash' })).out.slabs).toBe(5)
+  })
+
+  it('leaves the exact key at the configured size: 2 slabs of up to 20,000,000, as before', async () => {
+    const { db, out } = await commitOn(2, { slabRows: 20_000_000 })
+    expect(out.slabs).toBe(2)
+    expect(db.calls.find(c => c.sql.startsWith('INSERT INTO ulp.credentials'))!.sql).toContain('content_key_hash % 2 = 0')
+    expect((await commitOn(2, { slabRows: 20_000_000, keyColumn: 'content_key_hash' })).out.slabs).toBe(2)
+  })
+})

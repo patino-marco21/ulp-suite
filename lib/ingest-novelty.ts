@@ -25,7 +25,7 @@ import { getClient } from '@/lib/clickhouse'
 import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 import { buildNormalizedDomainSetMatch, type MatchedCredential, type MatchMode } from '@/lib/domain-match'
 import { waitForDiskSpace } from '@/lib/ingest-disk-gate'
-import { COMMIT_EXTERNAL_SORT_BYTES, COMMIT_MAX_EXECUTION_S, commitInsertThreads, slabCount } from '@/lib/ingest-novelty-config'
+import { COMMIT_EXTERNAL_SORT_BYTES, COMMIT_MAX_EXECUTION_S, NORM_KEY_MAX_SLAB_ROWS, commitInsertThreads, slabCount } from '@/lib/ingest-novelty-config'
 import type { StageTables } from '@/lib/ingest-stage'
 import type { KeyColumn } from '@/lib/norm-key-ready'
 
@@ -342,7 +342,9 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
 
   const stageRows = await countRows(db, stageCountSql(t), { queryId: queryId(), signal })
   beat()
-  const slabs = slabCount(stageRows, opts.slabRows)
+  // The normalised key sorts its slab, which costs memory the exact key's statement does not (NORM_KEY_MAX_SLAB_ROWS): a smaller setting is kept, a larger one is cut down.
+  const slabRows = key === 'norm_key_hash' ? Math.min(opts.slabRows, NORM_KEY_MAX_SLAB_ROWS) : opts.slabRows
+  const slabs = slabCount(stageRows, slabRows)
   let distinct = 0
   let known = 0
   let inserted = 0

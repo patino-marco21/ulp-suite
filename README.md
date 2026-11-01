@@ -216,7 +216,9 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   rows). A fully new file takes about 50% longer than the direct path; a file the database already
   holds costs the parse and one scan of one column. `off` imports straight into `ulp.credentials` as before.
 - `INGEST_NOVELTY_SLAB_ROWS` — rows per commit step (default `20000000`, at least `1000`). Files below
-  this are committed in one step; larger ones in hash slabs, one slab at a time across all imports.
+  this are committed in one step; larger ones in hash slabs, one slab at a time across all imports. On the
+  normalised key (`INGEST_NORM_KEY`) a step holds at most `10000000` rows whatever this says, because that statement
+  sorts its slab and peaks at 10.6 GiB for 20 million rows against 7.1 GiB for 10 million.
 - `INGEST_NORM_KEY` — near-duplicates, on by default (`lib/norm-key-ready.ts`,
   `docs/superpowers/specs/2026-11-01-near-duplicates-design.md`). An import matches a credential on `norm_key_hash`
   (a leading `www.`, capitals in the host or the login and extra trailing slashes ignored; path, port, query and
