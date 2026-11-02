@@ -1,7 +1,7 @@
 # Near-duplicates: one credential, several spellings — Design
 
 Date: 2026-11-01
-Status: **Stage 1 implemented and deployed locally on 2026-11-01** (main `867c296`, CI green, image `b784aa285d4b`, rollback tag `rollback-20261101-1952z`); the backfill finished the same evening and the exact look-alike share is 6.94%; the first import on the normalised key has not run yet (see "As deployed"). **Stage 2** (remove the look-alikes already stored) is designed here, needs its own explicit go from the owner and is not started.
+Status: **Stage 1 implemented and deployed locally on 2026-11-01** (main `867c296`, CI green, image `b784aa285d4b`, rollback tag `rollback-20261101-1952z`); the backfill finished the same evening and the exact look-alike share is 6.94%; the first two imports on the normalised key ran on 2026-11-02 and checked out (see "As deployed"). **Stage 2** (remove the look-alikes already stored) is designed here, needs its own explicit go from the owner and is not started.
 Related: `2026-06-28-credential-url-content-key-design.md` (the exact key), `2026-07-07-content-dedup-rewrite-swap-design.md` (the rewrite engine), `2026-10-02-novelty-aware-ingest-design.md` (the intake this changes).
 Measured read-only on 2026-11-01 on the live server (ClickHouse 26.3.17.4). `ulp.credentials` held 2,585M rows when the measurements were taken and 2,606M rows (241.65 GiB, 16 active parts) when this was written; the root disk has 247 GiB free. File names, search terms and credential values are deliberately absent (the repository is public); the examples use invented `.example` hosts.
 
@@ -221,7 +221,7 @@ Recommended: A, if the owner will drop `credentials_predup_auto`; B only after i
 
 ## As deployed (Stage 1, checked on the running system on 2026-11-01)
 
-Numbers only. Items 1, 2 and 4 of "Done when" are met; item 3 (the first import on the normalised key) is still to be seen.
+Numbers only. All four items of "Done when" are met.
 
 **Release.** Main `867c296`; CI on it passed in 3 min 1 s. Image `b784aa285d4b`, rollback tag `rollback-20261101-1952z` (`2ca4ce8ad568`). DDL v30 applied at the app's start-up as a metadata change; free disk did not move (246 GiB). No import ran between the deploy and the end of the backfill, so none could have used the exact key by mistake or the normalised key too early.
 
@@ -246,4 +246,18 @@ In all 2,606,332,363 rows in 2,781 s (46.4 minutes), then under 2 minutes of fin
 
 **The existence check at full size.** The import's per-slab pass, measured read-only on the live table (the distinct keys of the table that are in a 10,000,000-key set matching nothing): 25.4 s on `norm_key_hash`, 25.4 s on `content_key_hash`, 25.5 s on a repeat of `norm_key_hash`. The normalised key costs the same per pass as the exact one. The slab cap adds one such pass for every extra 10,000,000 staged rows: a 48,000,000-row file goes from 3 passes to 5, about 51 s more.
 
-**Still to see.** The first import on the normalised key: its recorded `match_key`, that `imported + known + repeats + skipped` adds up, its `known` and `repeats` against a file of its kind before, and the bucket check that no group of look-alikes holds a row imported after it.
+**The first imports on the normalised key (2026-11-02).** Two copies of one dump (28,062,797 lines each, equal size and equal first and last 8 MB; a duplicate download) were imported at the same time as jobs 3015 and 3016. The app logged the key choice at 02:02:04Z and both jobs recorded `match_key = norm`.
+
+| | Job 3015 | Job 3016 (the copy) |
+|---|---|---|
+| imported | 119 | 0 |
+| known | 18,569,224 | 18,569,343 |
+| repeats in the file | 3,379,699 | 3,379,699 |
+| skipped lines | 6,111,462 | 6,111,462 |
+| parse / check / insert | 309.8 s / 64.6 s / 107.6 s | 322.4 s / 66.1 s / 101.9 s |
+| total | 572.5 s | 595.3 s |
+
+- **The copy found the original's rows as known**, as the per-slab commit lock requires: `imported + known` is 18,569,343 for both, the file's distinct normalised keys. `imported + known + repeats` is 21,949,042 for both, the rows the stage held. With the skipped lines that is 28,060,504 of the file's 28,062,797 lines; the other 2,293 (0.008%) are lines the parser neither stores nor counts (10 blank lines and 883 with a NUL byte are among them). An older job shows the same kind of gap (247 of 8,030,795 lines), so it is not new.
+- **Cost.** Each import committed in 3 slabs: 21.5 s and 22.0 s of check per slab, against 28 s to 42 s per 20,000,000-row slab in the ten imports before (a pass that outputs fewer known keys is cheaper). The known-fill statements took 20.6 s to 22.8 s at 2.6B rows and peaked at 683.7 MiB. Both imports together ran at about 48,000 lines a second each, in line with the earlier ones (25,000 to 59,000).
+- **The table.** 119 rows were added (2,606,332,363 to 2,606,332,482, `imported_at` 02:02:26Z to 02:03:55Z). None shares a normalised key or an exact key with another row. The two bucket checks: the exact-duplicate check gives 40,722,208 rows and 40,722,208 distinct keys, and groups with a row after the flip give 0. The query log holds no exception for the window, and neither the app nor ClickHouse logged a warning or an error. Free disk was 213.0 GiB at the staging peak and 223.3 GiB after the stage tables were dropped.
+- **Not yet exercised live.** Only 119 rows were new, so the sorted commit insert read about 40 rows per slab. Its memory at millions of rows (7.09 GiB at 10,000,000 rows) is proven on the rehearsal stack, and the first live import with that many new rows is its first live test. The memory and disk gates never had to wait.
