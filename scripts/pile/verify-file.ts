@@ -26,7 +26,7 @@
  *   known        hashes present under OTHER source_files        == job.known (the rest already existed)
  *   rows         rows of this source_file in the table          == job.new   (no duplicates written)
  *   source       ulp.sources.line_count                         == job.new
- * A job the same-name check skipped (processing_jobs.note = 'already-imported') imported nothing, so it is reported and not recounted.
+ * A job the same-name check skipped (processing_jobs.note = 'already-imported') or that found a file of 0 bytes ('empty-file') imported nothing, so it is reported and not recounted.
  */
 import { fork, spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
@@ -159,6 +159,7 @@ async function main(): Promise<void> {
     if (!job) { failures++; console.log('FAIL no job row since', since); continue }
     if (job.status !== 'done') { failures++; console.log('FAIL job status is', job.status); continue }
     if (job.note === 'already-imported') { console.log('info: the same-name check skipped this file (nothing was imported); nothing to recount'); continue }
+    if (job.note === 'empty-file') { console.log('info: the file had no byte in it (nothing was read or imported); nothing to recount'); continue }
     const column: KeyColumn = job.match_key === 'norm' ? 'norm_key_hash' : 'content_key_hash'
     console.log(`info: recounted on the ${column === 'norm_key_hash' ? 'normalised' : 'exact'} key (the job recorded ${job.match_key ?? 'nothing, which means the exact key'})`)
 
