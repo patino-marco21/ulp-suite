@@ -81,8 +81,8 @@ Two kinds of signed line existed: one the split refused (dropped), and one with 
 |---|---|---|---|
 | ` | <link to a channel>` at the end of the password, one file | 1,518,833 | August | no |
 | a date, a time and `AM::` at the end, after extra colon-separated fields, one file | 3,670,424 | August | no |
-| an advertisement in place of the password (a doubled emoji, then a bracket and words) | 478,096 | October | yes |
-| white space, a handle and a dash with words at the end, seven files | 209,214 | July and August | no |
+| emoji in the password, mostly an advertisement in place of it (a doubled emoji, then a bracket and words; the shapes of three files were looked at) | 476,833 | October | yes |
+| white space, a handle and a dash with words at the end, seven files (one looked at by shape) | 209,214 | July and August | no |
 
 - The inflow has stopped. By the month of import, hits of the three indicators (a channel link, a handle, emoji in the password): July 204,000, August 1.9 million, October 500,000, and 3,500 in the November partition (118 million rows). The last batch brought almost none.
 - The 1,518,833 rows with the link at the end have 1,518,345 distinct keys once the ending is cut, and only 420,485 of those keys (27.7%) are already in the table. Deleting them, which was right for the three files above (almost all of their clean credentials were already stored), would here lose about 1.1 million credentials that exist only in this form; they can only be corrected in place.
