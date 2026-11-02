@@ -280,6 +280,6 @@ In all 2,606,332,363 rows in 2,781 s (46.4 minutes), then under 2 minutes of fin
 - On a 1,000,000-line sample of the worst file, removing the signature first makes 86% of the signed lines parse as credentials (422,663 of 491,739; another 67,029 fall to the tier policy), against 3.5% today.
 - The other eight files hold the remaining 1,857,284 lines: URL-to-URL lines with no credential in any layout. Harmless, but also uncounted.
 
-This is not fixed. A parser rule and a count for the dropped state are the owner's decision, and need the fuzz and the rehearsal. The three files are still in `done/`.
+Fixed the next day (parser v6.3, deployed 2026-11-02) and the three files repaired: the 6,224,227 polluted rows were removed and the files re-fed, which added 90,747 rows, because the cleaned credentials were almost all in the table already. Design, real-data check and repair: `2026-11-02-promo-signature-and-uncounted-lines-design.md`.
 
 **Three smaller findings.** Five zero-byte files were recorded as `done` with 0 rows and no note: their contents were never imported. The same-name check uses name and size, so a re-copied file is not skipped. One file of a dated series was held at its first million lines (8.08% unsplit, limit 5%); the offline preflight over about 97% of it gives 2.01% (warn limit 2%), so the hold came from the head of the file. Free disk fell from 223.3 to 169.1 GiB: 45.5 GiB of new files in `done/` and 11.3 GiB of table. The disk watcher has been at WARNING since 02:53Z, and the critical floor (140.5 GiB) is 28.6 GiB away.

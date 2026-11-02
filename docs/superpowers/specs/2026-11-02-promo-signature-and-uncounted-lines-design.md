@@ -1,7 +1,7 @@
 # Parser v6.3: a promotional signature at the end of a line, and records that were opened and never finished — design and results (2026-11-02)
 
 Date: 2026-11-02
-Status: **Implemented and tested; real-data check, rehearsal and deploy are recorded under "Results" as they happen.**
+Status: **Deployed on 2026-11-02 (main `c2f7183`) and the three affected files repaired the same day; see "Results".**
 Related: `2026-11-01-near-duplicates-design.md` ("As deployed": the line count that found this), `2026-10-24-parser-v6-2-and-gate-noise-design.md` (the gate and the parser rules J to M this follows).
 File names, channel names, search terms and credential values are deliberately absent (the repository is public); every fixture is invented.
 
@@ -52,3 +52,25 @@ Two kinds of signed line existed: one the split refused (dropped), and one with 
 - The quality gate's verdict, from the same slices: identical for all 121 files (115 pass, 5 warn, 1 hold before and after). The unsplit share of five files of the family rose by 0.5 to 1.3 points (the highest is 1.33%); none crossed the 2% warn limit. In a 2,000,000-line sample of one of them, 69,159 of the 80,259 newly counted lines cannot hold a credential (a URL followed by a URL) and 11,100 are credential-shaped lines that the split cannot read (a port where a login should be); the gate could not see those before.
 
 **Rehearsal (isolated stack, candidate image built from the commit that holds the code).** The alert rehearsal passed 50 of 50 checks and the full end-to-end suite 249 of 249 (every scenario but the one that fills the disk, which this change does not touch), including the new `v63` scenario: the CRLF file with three signed records, one plain record and two bare URLs gave 4 new rows with clean passwords, the 8 other lines in the skipped count (so every line of the file is in a counter), and the 0-byte file dropped in the inbox was recorded as `done` with the note `empty-file`, with nothing staged or remembered for it. `npm run typecheck`, lint on the changed files and the whole unit suite (287 files, 4,799 tests) pass.
+
+**Deploy (2026-11-02 07:00Z).** Main `c2f7183`, image `66bf5035a6b8` (the rehearsed candidate, tagged `latest`), rollback tag `rollback-20261102-0642z`. Nothing was importing; only the app container was recreated, ClickHouse kept running; healthy, 0 restarts, no migration to run.
+
+**Repair of the three files (same day).**
+
+1. The rows to remove were copied to a scratch table (6,224,227 rows, 257 MiB): the rows of the three files with the tail in the password, all in partition 202611. One mutation limited to that partition removed them: the table went from 2,692,240,818 to 2,686,016,591 rows, and the three files kept their 283,323 clean rows. The scratch table was dropped after the checks below.
+2. The three `ulp.sources` entries were deleted, so that the same-name check did not skip the files, and the three files were moved from `done/` back into the inbox. Jobs 3105 to 3107 ran in 361 s on the normalised key:
+
+| | file (12) | file (11) | file (13) |
+|---|---|---|---|
+| lines in the file | 21,728,874 | 34,444,781 | 22,461,910 |
+| new | 41,361 | 8,925 | 40,461 |
+| known | 8,687,478 | 13,696,568 | 8,839,899 |
+| repeats inside the file | 66,850 | 109,054 | 150,243 |
+| skipped (blank lines included) | 12,933,185 | 20,630,230 | 13,431,306 |
+| counted in total | 21,728,874 | 34,444,777 | 22,461,909 |
+| lines in no counter (before: 7,167,670, 771,915, 5,516,189) | 0 | 4 | 1 |
+
+3. **The estimate was a ceiling.** The design above spoke of about 11.8M credentials missing "before the known check". The check cut that to 90,747 new rows: the cleaned credentials were almost all in the table already, held from other sources (of the 8,728,839 distinct credentials of file (12), 41,676 are stored under its own name). The polluted rows had only looked new because the tail made their keys unique. The net effect on the table is 6,224,227 rows removed and 90,747 added: 2,686,107,338 rows.
+4. Checks. The 90,747 new rows have as many distinct normalised keys and as many distinct exact keys, and none of their keys appears twice in the table; no row of the three files holds the tail; no query failed; the peak of a query was 1.17 GiB and the server's 6.5 GiB (during the mutation). `scripts/pile/verify-file.ts` (an independent offline recount, `REIMPORT=1`, partition 202611) passed every check for all three files: the importable rows equal the ClickHouse hashing, skipped lines, repeats and the new-plus-known split equal the job, every distinct credential of the file is in the table, none is stored twice, and the source entry holds the delta.
+
+**Left alone.** 63 older rows (two October files) carry a similar tail; they are 63 rows of 2.7 billion and their clean versions would need those two files re-fed. The five empty files need to be copied again by whoever holds them.
