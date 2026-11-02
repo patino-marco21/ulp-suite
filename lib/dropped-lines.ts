@@ -12,6 +12,7 @@ import { once } from 'node:events'
 import { pipeline } from 'node:stream/promises'
 import { constants as zlibConstants, createZstdCompress } from 'node:zlib'
 import { parseInlineLine } from '@/lib/ulp-parser'
+import { stripPromoSignature } from '@/lib/ulp-promo-signature'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
 import { openSource } from '@/lib/source-archive'
 
@@ -46,7 +47,7 @@ export async function extractDroppedLines(
     if (!zstd.write(buf)) await once(zstd, 'drain')
   }
   const handle = (raw: Buffer) => {
-    const text = repairUtf8Line(raw.toString('latin1'))
+    const text = stripPromoSignature(repairUtf8Line(raw.toString('latin1')))   // as the stream parser reads a line (parser v6.3, rule N)
     if (!text.trim()) return
     stats.lines++
     const r = parseInlineLine(text, 'side-copy', shouldHardDrop)

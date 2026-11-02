@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ALREADY_IMPORTED_NOTE, addToTally, importRatePct, jobAccounting, jobAccountingTitle, jobLabel, keptRows, newJobTally, newKnownLabel, phaseLine, tallyOf } from '@/lib/import-summary'
+import { ALREADY_IMPORTED_NOTE, EMPTY_FILE_NOTE, addToTally, importRatePct, jobAccounting, jobAccountingTitle, jobLabel, keptRows, newJobTally, newKnownLabel, phaseLine, tallyOf } from '@/lib/import-summary'
 
 describe('keptRows / importRatePct', () => {
   it('counts the new, the already-known and the repeated rows as accepted', () => {
@@ -49,7 +49,7 @@ describe('newKnownLabel', () => {
   })
 })
 
-const entry = (over: Partial<{ inFileDuplicates: number; alreadyImported: boolean; errors: number; matchKey: 'norm' | 'exact' }> = {}) => ({ inFileDuplicates: 0, alreadyImported: false, errors: 0, ...over })
+const entry = (over: Partial<{ inFileDuplicates: number; alreadyImported: boolean; emptyFile: boolean; errors: number; matchKey: 'norm' | 'exact' }> = {}) => ({ inFileDuplicates: 0, alreadyImported: false, errors: 0, ...over })
 
 describe('the job tally (what processing_jobs records besides the counts)', () => {
   it('adds up the rows repeated inside the file over every entry', () => {
@@ -151,5 +151,32 @@ describe('the job tally records the rule the entries were matched on', () => {
 
   it('tallyOf carries the key of a single file', () => {
     expect(jobAccounting(tallyOf({ inFileDuplicates: 3, alreadyImported: false, errors: 0, matchKey: 'norm' }))).toEqual({ repeats: 3, match_key: 'norm' })
+  })
+})
+
+describe('a file of 0 bytes (processing_jobs.note = empty-file)', () => {
+  it('is named by the job note when every entry was empty, and by nothing when only some were', () => {
+    const one = newJobTally()
+    addToTally(one, entry({ emptyFile: true }))
+    expect(jobAccounting(one)).toEqual({ repeats: 0, note: 'empty-file' })
+    expect(EMPTY_FILE_NOTE).toBe('empty-file')
+    const mixed = newJobTally()
+    addToTally(mixed, entry({ emptyFile: true }))
+    addToTally(mixed, entry())
+    expect(jobAccounting(mixed).note).toBeUndefined()
+    expect(jobAccounting(tallyOf({ inFileDuplicates: 0, alreadyImported: false, emptyFile: true, errors: 0 })).note).toBe(EMPTY_FILE_NOTE)
+  })
+
+  it('does not take the place of the already-imported note: that file was read before', () => {
+    const t = newJobTally()
+    addToTally(t, entry({ alreadyImported: true }))
+    expect(jobAccounting(t).note).toBe(ALREADY_IMPORTED_NOTE)
+  })
+
+  it('says so in the jobs list and in the tooltip, and tells the owner what to do', () => {
+    const fmt = (n: number) => `<${n}>`
+    expect(jobLabel({ imported: 0, known: 0, note: EMPTY_FILE_NOTE }, fmt)).toBe('empty file · nothing imported')
+    expect(jobAccountingTitle({ imported: 0, known: 0, repeats: 0, skipped: 0, note: EMPTY_FILE_NOTE }))
+      .toBe('The file is empty (0 bytes), so nothing was imported. If it was still being copied, copy it again')
   })
 })

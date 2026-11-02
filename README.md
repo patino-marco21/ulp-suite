@@ -245,7 +245,10 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   field behind it; `cannotHoldCredential` in `lib/ulp-recover.ts`), and a file over 8 MiB is also sampled before its import starts (five
   slices of 2 MiB spread over the file, as the preflight reads them): it is held at once when the sample is past a hold limit by half
   again, so a file that goes bad in the middle stops in seconds. Both are described in
-  `docs/superpowers/specs/2026-10-24-parser-v6-2-and-gate-noise-design.md`.
+  `docs/superpowers/specs/2026-10-24-parser-v6-2-and-gate-noise-design.md`. Parser v6.3
+  (`docs/superpowers/specs/2026-11-02-promo-signature-and-uncounted-lines-design.md`) cuts a promotional signature (` ┃ @channel words`)
+  from the end of a line and counts a record that was opened and never finished (a link line that waits for a login and a password
+  line, closed by a blank line or the end of the file), so those lines reach the gate and the job totals instead of vanishing.
 - `ULP_ARCHIVE_HOST_DIR` — the host directory of the source archive (`scripts/archive-sources.ts`, default `~/ulp-archive`,
   which must exist), mounted read-only at `/archive`. A file named `<name>.archiveref` dropped into `inbox/` (the feeder writes
   them with `SOURCE=archive`) is imported from the archive instead of from the inbox: the plaintext is decoded on the way to the

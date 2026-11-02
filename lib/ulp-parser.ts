@@ -1,5 +1,5 @@
 /**
- * ULP credential line parser — v6.2
+ * ULP credential line parser — v6.3
  *
  * v6 (2026-10-12, docs/superpowers/specs/2026-10-12-parser-v6-and-redo-design.md): UTF-8 lines are read as UTF-8 (lib/ulp-utf8.ts), and
  * layouts that used to be rejected are read by lib/ulp-recover.ts (space-padded colons, a slash in the password, a numeric login, protocol-relative
@@ -12,6 +12,11 @@
  * v6.2 (2026-10-24, docs/superpowers/specs/2026-10-24-parser-v6-2-and-gate-noise-design.md): four layouts the ingest quality gate caught, each stored as a wrong split
  * before. J: a colon in front of the scheme is dropped (":https://host/path:login:pass"). K: "login;password:https://host/path" has its url last. L: a labelled pair
  * behind a pipe ("host/|Username:login:Password:pass"). M: a "://" inside the url is not a field separator ("https://host/a?next=https://other/b:login:pass").
+ *
+ * v6.3 (2026-11-02, docs/superpowers/specs/2026-11-02-promo-signature-and-uncounted-lines-design.md): two defects a line count of a real batch found. N: a promotional signature at the
+ * end of a line ("<url>:<login>:<password> ┃ @channel words / more", lib/ulp-promo-signature.ts) is cut before the line is read; before, such a line was refused by the field split or
+ * stored with the tail inside the password. And a record that was opened and never finished (a rejected line that starts with "http" waits for a login and a password line, and a blank
+ * line, a labeled line or the end of the file closes the wait) is now counted as a rejected line; it used to be dropped without a count, so the quality gate never saw it.
  *
  * Design: one algorithm, no regex in the hot path, RFC 3986-correct
  * colon disambiguation. ~150 lines for a format that is field:field:field.
@@ -28,6 +33,7 @@
  */
 
 import { hasGarbageIdentity, hasMojibakeSignature, hasEdgeWhitespace } from '@/lib/ulp-garbage'
+import { stripPromoSignature } from '@/lib/ulp-promo-signature'
 import { hasTelegramLink, stripTelegramTag } from '@/lib/ulp-telegram-tag'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
 import {
@@ -960,6 +966,15 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
     return true
   }
 
+  // A record that was opened and that a blank line, a labeled line or the end of the file closes before it is finished (see the same function in parseULPStream).
+  function dropParked() {
+    if (!positionalUrl) return
+    skipped++
+    if (positionalLogin) breakdown.no_password++
+    else                 breakdown.no_fields++
+    positionalUrl = positionalLogin = ''
+  }
+
   function tryFlushBlock() {
     const cred = flushBlockState(blockState, sourceFile)
     if (cred) {
@@ -976,23 +991,25 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
     blockState = makeBlockState()
   }
 
-  for (const line of lines) {
+  for (const rawLine of lines) {
+    // Rule N (v6.3): a promotional signature at the end of the line is not part of it (lib/ulp-promo-signature.ts).
+    const line = stripPromoSignature(rawLine)
     const trimmed = line.trim()
 
     // Block labeled field — intercept before inline parseLine to prevent false positives.
-    // Entering labeled mode discards any in-progress positional state.
+    // Entering labeled mode ends a record that was waiting for its login line (counted).
     const labeled = classifyBlockLabel(trimmed)
     if (labeled) {
-      positionalUrl = positionalLogin = ''
+      dropParked()
       if (labeled.field === 'url')      blockState.url      = labeled.value
       if (labeled.field === 'login')    blockState.login    = labeled.value
       if (labeled.field === 'password') blockState.password = labeled.value
       continue
     }
 
-    // Block separator — flush labeled block state if present; always reset positional state.
+    // Block separator — a record that was waiting for its login line is over (counted); flush labeled block state if present.
     if (isBlockSeparator(trimmed)) {
-      positionalUrl = positionalLogin = ''
+      dropParked()
       if (blockState.url || blockState.login || blockState.password) {
         tryFlushBlock()
       } else {
@@ -1041,7 +1058,7 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
       else { addSeen(fp, sourceFile); credentials.push(credential) }
     } else if (reason === 'no_fields' && trimmed.startsWith('http') && !hasTelegramLink(trimmed)) {
       // Bare URL line → enter positional mode; next line is login, line after is password.
-      // Not counted as skipped — will be consumed by positional collection or discarded at separator/EOF.
+      // Not counted yet: the next lines complete the record, or whatever closes the wait counts it (dropParked).
       positionalUrl   = trimmed
       positionalLogin = ''
     } else {
@@ -1050,8 +1067,8 @@ export function parseULPContent(content: string, sourceFile: string): ParseResul
     }
   }
 
-  // Discard any trailing incomplete positional block at EOF
-  positionalUrl = positionalLogin = ''
+  // A trailing record that never got its login and password is a rejected line
+  dropParked()
   tryFlushBlock()  // flush any trailing incomplete labeled block at EOF
 
   return { credentials, skipped, errors: 0, rejection_breakdown: breakdown }
@@ -1139,6 +1156,21 @@ export async function* parseULPStream(
     return false
   }
 
+  // A record that was opened and that a blank line, a labeled line or the end of the file closes before it is finished: a rejected line that starts with "http" waits for a login line
+  // and a password line (positional record). It used to be dropped here without a count (2026-11-02: 13.5M lines of three files in no counter, invisible to the quality gate).
+  // A url alone is a no_fields line, like the one a line that is not a login counts below; a url with its login is a record that lacks its password.
+  function dropParked() {
+    if (!positionalUrl) return
+    batchRejected++
+    if (positionalLogin) {
+      batchBreakdown.no_password++
+    } else {
+      batchBreakdown.no_fields++
+      if (cannotHoldCredential(positionalUrl)) batchNoCredential++
+    }
+    positionalUrl = positionalLogin = ''
+  }
+
   function tryFlushBlock() {
     const cred = flushBlockState(blockState, filename)
     if (cred) {
@@ -1161,22 +1193,23 @@ export async function* parseULPStream(
 
   function processLine(rawLine: string) {
     // The file's bytes were read as Latin-1: a line that is valid UTF-8 is read as UTF-8 (lib/ulp-utf8.ts), any other line stays as it was.
-    const line = repairUtf8Line(rawLine)
+    // Rule N (v6.3): a promotional signature at the end of the line is not part of it (lib/ulp-promo-signature.ts).
+    const line = stripPromoSignature(repairUtf8Line(rawLine))
     const trimmed = line.trim()
 
-    // Labeled field — discard any in-progress positional state, enter labeled mode
+    // Labeled field — a record that was waiting for its login line is over (counted); enter labeled mode
     const labeled = classifyBlockLabel(trimmed)
     if (labeled) {
-      positionalUrl = positionalLogin = ''
+      dropParked()
       if (labeled.field === 'url')      blockState.url      = labeled.value
       if (labeled.field === 'login')    blockState.login    = labeled.value
       if (labeled.field === 'password') blockState.password = labeled.value
       return
     }
 
-    // Separator — flush labeled block if present; always reset positional state
+    // Separator — a record that was waiting for its login line is over (counted); flush labeled block if present
     if (isBlockSeparator(trimmed)) {
-      positionalUrl = positionalLogin = ''
+      dropParked()
       if (blockState.url || blockState.login || blockState.password) {
         tryFlushBlock()
       } else {
@@ -1273,7 +1306,7 @@ export async function* parseULPStream(
       }
     }
     if (buffer) processLine(buffer)
-    positionalUrl = positionalLogin = ''  // discard trailing incomplete positional block
+    dropParked()  // a trailing record that never got its login and password is a rejected line
     tryFlushBlock()  // flush trailing labeled block at EOF
     if (batch.length > 0 || batchRejected > 0) yield flushBatch()
   } finally {

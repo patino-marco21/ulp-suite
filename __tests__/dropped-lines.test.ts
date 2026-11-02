@@ -50,6 +50,14 @@ describe('extractDroppedLines', () => {
     expect(stats.outBytes).toBe(readFileSync(out).length)
   })
 
+  test('a line that ends with a promotional signature is stored, as the stream parser stores it (parser v6.3, rule N)', async () => {
+    const src = join(dir, 'signed.txt'); const out = join(dir, 'signed.drop.zst')
+    writeFileSync(src, 'https://shop.example.test:alice@mail.test:Secret1 ┃ @some_channel promo words / more\r\n\r\njust a banner line\n')
+    const stats = await extractDroppedLines(src, out, hardDrop)
+    expect(stats).toMatchObject({ lines: 2, stored: 1, dropped: 1 })
+    expect(zstdDecompressSync(readFileSync(out)).toString()).toBe('just a banner line\n')
+  })
+
   test('a file with nothing to drop leaves an empty (but valid) archive', async () => {
     const src = join(dir, 'clean.txt'); const out = join(dir, 'clean.drop.zst')
     writeFileSync(src, 'https://shop.example.test/login:alice@mail.test:Secret1\n')

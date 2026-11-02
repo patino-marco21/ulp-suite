@@ -8,6 +8,7 @@
 import { parseInlineLine, parseULPStream } from '@/lib/ulp-parser'
 import { cannotHoldCredential } from '@/lib/ulp-recover'
 import { DEFAULT_HARD_KEEP_COUNTRIES, makeHardDropPredicate, parseIngestPolicy } from '@/lib/ingest-filter'
+import { stripPromoSignature } from '@/lib/ulp-promo-signature'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
 import {
   SHAPE_CAP, evaluateGate, maskText, newGateCounters, recordGateBatch, type GateConfig, type GateCounters, type GateReport, type GateVerdict,
@@ -102,7 +103,7 @@ export async function preflightSource(source: Source, opts: PreflightOptions): P
     if (opts.unsplitShapes === false) continue
     for (const line of buf.toString('latin1').split('\n')) {
       if (line.trim() === '') continue
-      const fixed = repairUtf8Line(line)
+      const fixed = stripPromoSignature(repairUtf8Line(line))   // as the stream parser reads a line (parser v6.3, rule N)
       const r = parseInlineLine(fixed, source.name, hard)
       if (r.credential || r.reason !== 'no_fields' || cannotHoldCredential(fixed.trim())) continue
       const shape = maskText(line.trim(), 70)

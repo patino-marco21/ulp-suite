@@ -256,6 +256,32 @@ describe('the same-name check of a file on disk knows its size', () => {
   })
 })
 
+describe('a file of 0 bytes', () => {
+  let dir = ''
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'empty-file-')) })
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+  const file = (name: string, body: string) => { const p = join(dir, name); writeFileSync(p, body); return p }
+
+  it('is reported as empty, and nothing is asked, staged or written for it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const out = await processTextFile(file('empty.txt', ''), 'empty.txt')
+    expect(out).toMatchObject({ emptyFile: true, alreadyImported: false, imported: 0, known: 0, inFileDuplicates: 0, skipped: 0, errors: 0, filename: 'empty.txt' })
+    expect(h.query).not.toHaveBeenCalled()
+    expect(h.registerStage).not.toHaveBeenCalled()
+    expect(h.createStage).not.toHaveBeenCalled()
+    expect(h.resolveMatchKey).not.toHaveBeenCalled()
+    expect(h.insert).not.toHaveBeenCalled()
+    expect(warn.mock.calls.flat().join(' ')).toContain('empty.txt is empty (0 bytes)')
+  })
+
+  it('is not a file with one blank line: that is read like any other and finds nothing', async () => {
+    h.commitStage.mockResolvedValue(commitResult({ rows: 0, distinct: 0, known: 0, inserted: 0 }))
+    const out = await processTextFile(file('one-blank.txt', '\n'), 'one-blank.txt')
+    expect(out.emptyFile).toBeFalsy()
+    expect(out.skipped).toBe(1)
+  })
+})
+
 describe('processTextFile gives the quality gate the file to sample', () => {
   let dir = ''
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'sample-check-')) })

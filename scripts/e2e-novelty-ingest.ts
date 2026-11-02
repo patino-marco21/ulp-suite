@@ -19,6 +19,8 @@
  *               a ';' in the password of a colon-separated line, a ";name=value" path parameter in a url without a scheme, and the layouts that must not move
  *   v62         parser v6.2: a colon in front of the scheme, "login;password:url" (the url last, with a ':' or a ';' before it), a labelled pair behind a pipe ("host/|Username:login:Password:pass"),
  *               a url inside a url, lines that carry no credential (a banner, a divider, a bare url with one field) and the layouts that must not move
+ *   v63         parser v6.3: a CRLF file with a blank line after every record, three of the records signed with a promotional tail (stored with the real password, the tail cut), two bare urls
+ *               that a blank line closes (counted as skipped: every line of the file is in a counter), and a file of 0 bytes dropped in the inbox (recorded with the note "empty-file")
  *   monitor     a monitor alerts for rows that are new to the database, not for a row the database already held
  *   big         2.5M distinct lines + 100k repeats of early lines (past the old 2M in-file cap): exact, in 5 slabs, phases visible
  *   kill        the app is killed in the middle of the commit; after the restart the orphan stage tables are gone and a retry
@@ -574,6 +576,38 @@ async function parserV62(): Promise<void> {
     && one(`url = '' AND email = 'v62z3${RUN}@probe-mail.test' AND password = '${pw('Z3')}'`) === 1)
   check('no row has a url that starts with a colon, a login that holds a slash or a scheme, or a label as its login',
     one(`(startsWith(url, ':') OR position(email, '/') > 0 OR position(email, '://') > 0 OR email IN ('Username', 'Login'))`) === 0)
+}
+
+async function parserV63(): Promise<void> {
+  console.log('\n1g. Parser v6.3: a promotional signature at the end of a line, a record that was opened and never finished, a file of 0 bytes')
+  const P = `e2e-nov-v63-${RUN}.txt`
+  const pw = (k: string) => `Pw-${RUN}-${k}`
+  const SIG = ' ┃ @probe_channel promo words / more'
+  // The shape of the files that showed the defect: CRLF line ends and a blank line after every record.
+  const records = [
+    `https://shopa1.example-store.test:v63a1${RUN}@probe-mail.test:${pw('A1')}${SIG}`,       // signed, no path: the field split refused such a line
+    `https://shopa2.example-store.test/login:v63a2${RUN}@probe-mail.test:${pw('A2')}${SIG}`, // signed, a path: it parsed, with the tail inside the password
+    `https://shopa3.example-store.test:8443:v63a3${RUN}:${pw('A3')}${SIG}`,                  // signed, a port and a login that is not an e-mail
+    `https://shopb1.example-store.test:v63b1${RUN}@probe-mail.test:${pw('B1')}`,             // not signed: as before
+    'https://shopc1.example-store.test/login',                                               // a bare url that the blank line after it closes: counted now
+    'https://shopc2.example-store.test/login',
+  ]
+  const path = join(work, P)
+  writeFileSync(path, records.join('\r\n\r\n') + '\r\n\r\n')
+  const v = await importPath(P, path)
+  check('a CRLF file with a blank line after each of 6 records (3 signed, 1 plain, 2 bare urls): 4 rows are new, none known', v.status === 'done' && v.imported === 4 && v.known === 0, brief(v))
+  check('...every line is in a counter: 4 new + 8 skipped (2 bare urls, 6 blank lines) = the 12 lines of the file', v.skipped === 8 && rowsFor(P) === 4, `skipped ${v.skipped}, rows ${rowsFor(P)}`)
+  const one = (where: string) => Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND ${where}`))
+  check('...the passwords are the real ones, with no tail, on all four rows',
+    one(`password = '${pw('A1')}'`) === 1 && one(`password = '${pw('A2')}'`) === 1 && one(`password = '${pw('A3')}'`) === 1 && one(`password = '${pw('B1')}'`) === 1)
+  check('...and no stored row holds the bar or the handle', one(`(position(password, '┃') > 0 OR position(password, '@probe_channel') > 0)`) === 0)
+
+  // A file of 0 bytes dropped in the inbox, as a failed copy leaves one.
+  const E = `e2e-nov-empty-${RUN}.txt`
+  sh('docker', ['exec', APP, 'sh', '-c', `: > /app/inbox/${E}`])
+  const empty = await waitFor(async () => (await inboxJobs(E))[0], 120_000, 1000)
+  check('a file of 0 bytes dropped in the inbox is recorded as done with the note "empty-file", not as an import that found nothing', !!empty && empty.status === 'done' && empty.imported === 0 && empty.note === 'empty-file', JSON.stringify(empty))
+  check('...nothing is stored or remembered for it, and no stage table is left', rowsFor(E) === 0 && sourceLine(E) === '' && stageTableCount() === 0, `rows ${rowsFor(E)}, source [${sourceLine(E)}]`)
 }
 
 async function monitorScenario(): Promise<void> {
@@ -1337,6 +1371,7 @@ async function run(): Promise<number> {
   if (want('v6')) await parserV6()
   if (want('pipes')) await parserV61()
   if (want('v62')) await parserV62()
+  if (want('v63')) await parserV63()
   if (want('monitor')) await monitorScenario()
   if (want('big')) await bigFile()
   if (want('kill')) await killMidCommit()

@@ -62,6 +62,8 @@ export interface ProcessResult {
   rejection_breakdown: Record<RejectionReason, number>
   /** True when the file was skipped because its filename is already in ulp.sources. */
   alreadyImported:     boolean
+  /** True when the file had no byte in it: nothing was read, staged or asked of ClickHouse, and the job row says so (EMPTY_FILE_NOTE in lib/import-summary.ts). */
+  emptyFile?:          boolean
   /** Rows dropped pre-insert by the ingest tier filter (lib/ingest-filter.ts). */
   tierDropped:         number
   /** Set when errors > 0 from a skipped zip entry — why it was skipped (oversized, bad ratio, corrupted, encrypted, ...). */
@@ -744,14 +746,24 @@ export async function processTextFile(
   onBatch?: (imported: number) => void,
   hooks: ImportHooks = {},
 ): Promise<ProcessResult> {
-  const nodeStream = fs.createReadStream(filePath)
-  const webStream = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>
-  hooks.onSourceBytes?.(() => nodeStream.bytesRead)
   // The size tells the same-name check a file of the same name and another size from the file it already has (see querySourceAlreadyImported).
   let fileSize = hooks.fileSize
   if (fileSize === undefined) {
     try { fileSize = fs.statSync(filePath).size } catch { /* the read below reports a file that is gone; the check then goes by name */ }
   }
+  // A file with no byte in it (a copy that failed leaves one) has nothing to read, stage or ask the database about. It is reported as empty and not as an import that found
+  // nothing: five of them were recorded as "done, 0 rows" on 2026-11-02 and nobody could tell that the data they stood for was missing.
+  if (fileSize === 0) {
+    console.warn(`[upload-processor] ${filename} is empty (0 bytes) — nothing imported`)
+    hooks.onSourceBytes?.(() => 0)
+    return {
+      imported: 0, known: 0, inFileDuplicates: 0, skipped: 0, errors: 0, filename, breach_name: matchBreach(filename),
+      rejection_breakdown: makeRejectionMap(), alreadyImported: false, tierDropped: 0, emptyFile: true,
+    }
+  }
+  const nodeStream = fs.createReadStream(filePath)
+  const webStream = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>
+  hooks.onSourceBytes?.(() => nodeStream.bytesRead)
   // The quality gate reads slices of the file before the import starts (sampleHold). A file that cannot be opened here is reported by the stream.
   let sampleSource = hooks.sampleSource
   if (!sampleSource) {
