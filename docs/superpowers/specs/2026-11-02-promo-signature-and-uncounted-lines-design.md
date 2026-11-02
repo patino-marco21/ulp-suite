@@ -74,3 +74,17 @@ Two kinds of signed line existed: one the split refused (dropped), and one with 
 4. Checks. The 90,747 new rows have as many distinct normalised keys and as many distinct exact keys, and none of their keys appears twice in the table; no row of the three files holds the tail; no query failed; the peak of a query was 1.17 GiB and the server's 6.5 GiB (during the mutation). `scripts/pile/verify-file.ts` (an independent offline recount, `REIMPORT=1`, partition 202611) passed every check for all three files: the importable rows equal the ClickHouse hashing, skipped lines, repeats and the new-plus-known split equal the job, every distinct credential of the file is in the table, none is stored twice, and the source entry holds the delta.
 
 **Left alone.** 63 older rows (two October files) carry a similar tail; they are 63 rows of 2.7 billion and their clean versions would need those two files re-fed. The five empty files need to be copied again by whoever holds them.
+
+**Wider audit of the stored passwords (read-only, the same day, after the deploy).** The question was whether the same defect hides elsewhere in the table. Two full passes over the password column (about 3 minutes each, with a per-file count of signature-shaped endings: a handle, a link to a channel, a bar with spaces around it, symbols and emoji, a date and time) found, by indicator and not by hand-checked row, about 5.9 million rows (0.22% of the table) with a promotional or metadata ending or with an advertisement where the password should be, and about 1 million more whose password is a decryption-error text. Nothing was changed.
+
+| shape | rows | imported | original still held |
+|---|---|---|---|
+| ` | <link to a channel>` at the end of the password, one file | 1,518,833 | August | no |
+| a date, a time and `AM::` at the end, after extra colon-separated fields, one file | 3,670,424 | August | no |
+| an advertisement in place of the password (a doubled emoji, then a bracket and words) | 478,096 | October | yes |
+| white space, a handle and a dash with words at the end, seven files | 209,214 | July and August | no |
+
+- The inflow has stopped. By the month of import, hits of the three indicators (a channel link, a handle, emoji in the password): July 204,000, August 1.9 million, October 500,000, and 3,500 in the November partition (118 million rows). The last batch brought almost none.
+- The 1,518,833 rows with the link at the end have 1,518,345 distinct keys once the ending is cut, and only 420,485 of those keys (27.7%) are already in the table. Deleting them, which was right for the three files above (almost all of their clean credentials were already stored), would here lose about 1.1 million credentials that exist only in this form; they can only be corrected in place.
+- Of the 231 files imported in July and August, 204 have no archived original and cannot be fed again; every October and November file is archived.
+- The password-derived columns (`password_length`, `password_mask`, `password_entropy_band`, `content_key_hash`, `norm_key_hash`) are MATERIALIZED and `proj_imported_desc` holds the password, so a correcting `ALTER ... UPDATE` would recompute them and rebuild that projection. It has not been tried on this table; a scratch copy comes first.
