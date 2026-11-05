@@ -149,6 +149,8 @@ cp /path/to/dumps/*.txt ~/ulp-suite/inbox/
 docker compose logs -f app | grep inbox-watcher
 ```
 
+The log follows a file through its life: `queued`, `processing`, then `done` with the rows that were new, already known and skipped, or `held` / `failed` with the reason. The production build strips `console.log`, so every line the watcher must show is a `console.warn` or `console.error` (pinned by `__tests__/inbox-watcher-log-visibility.test.ts`).
+
 Files move to `./inbox/done/` on success, `./inbox/failed/` on failure.
 `done/` is cleaned at every app start: a file leaves it only when the job log says it was imported more than 7 days ago **and** the [source archive](docs/superpowers/specs/2026-10-12-source-archive-and-ingest-gate-design.md) holds that exact file (the same name and size in its manifest, or, for an `.archiveref`, the archive file it points to). A file nobody archived is never deleted, however old; the start-up log (`docker compose logs app | grep cleanup`) says how many files and GiB are waiting for `scripts/archive-sources.ts`. The age counts from the import, not from the date of the file, and a manifest the app cannot read deletes nothing.
 Existing failed files must be retried from the Inbox Monitor after deployment:

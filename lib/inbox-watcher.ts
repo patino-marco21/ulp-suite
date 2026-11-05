@@ -175,7 +175,7 @@ export function clearStaleInFlight(): number {
     inFlight.delete(name)
     cleared++
   }
-  console.log(`[inbox-watcher] clearStaleInFlight: cleared ${cleared} true orphan(s)`)
+  console.warn(`[inbox-watcher] clearStaleInFlight: cleared ${cleared} true orphan(s)`)
   return cleared
 }
 
@@ -196,7 +196,7 @@ export function forceReconcile(): number {
       }
     }
   } catch { /* inbox/ might not exist yet */ }
-  console.log(`[inbox-watcher] forceReconcile: queued ${queued} file(s)`)
+  console.warn(`[inbox-watcher] forceReconcile: queued ${queued} file(s)`)
   return queued
 }
 
@@ -293,7 +293,7 @@ async function enqueueFile(filePath: string): Promise<void> {
 
   inFlight.add(filename)
   pendingTasks.add(filename)   // mark as having a live pLimit task
-  console.log(`[inbox-watcher] queued: ${filename} (queue: ${queueSize()})`)
+  console.warn(`[inbox-watcher] queued: ${filename} (queue: ${queueSize()})`)
 
   uploadQueue(async () => {
     const startAt = Date.now()
@@ -328,7 +328,7 @@ async function enqueueFile(filePath: string): Promise<void> {
       const gateOverride = consumeGateOverride(filename)
       if (gateOverride) console.warn(`[inbox-watcher] ${filename} was released by an admin: the quality gate reports on it but does not hold it`)
 
-      console.log(`[inbox-watcher] processing: ${filename}`)
+      console.warn(`[inbox-watcher] processing: ${filename}`)
       // Capture file size (from the claimed path) for the progress card. A reference to an archived file is a few hundred bytes long; what it stands for is
       // the plaintext size it records.
       const claimedPath: string = procPath
@@ -381,7 +381,7 @@ async function enqueueFile(filePath: string): Promise<void> {
         timings  = result.timings
         addToTally(tally, result)
         gateReport = result.gate ? JSON.stringify(result.gate) : undefined
-        console.log(
+        console.warn(
           `[inbox-watcher] done: ${filename} (from the archive) ` +
           `imported=${result.imported} known=${result.known} skipped=${result.skipped}`
         )
@@ -399,7 +399,7 @@ async function enqueueFile(filePath: string): Promise<void> {
         timings  = result.timings
         addToTally(tally, result)
         gateReport = result.gate ? JSON.stringify(result.gate) : undefined
-        console.log(
+        console.warn(
           `[inbox-watcher] done: ${filename} ` +
           `imported=${result.imported} known=${result.known} skipped=${result.skipped}`
         )
@@ -497,7 +497,7 @@ function reconcile(): void {
       }
     }
     if (queued > 0) {
-      console.log(`[inbox-watcher] reconcile: queued ${queued} missed file(s)`)
+      console.warn(`[inbox-watcher] reconcile: queued ${queued} missed file(s)`)
     }
   } catch { /* inbox/ doesn't exist yet — harmless */ }
 }
