@@ -306,6 +306,8 @@ function initSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN parse_ms INTEGER NOT NULL DEFAULT 0`) } catch {}
   try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN check_ms INTEGER NOT NULL DEFAULT 0`) } catch {}
   try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN insert_ms INTEGER NOT NULL DEFAULT 0`) } catch {}
+  // The wait for the process-wide commit lock, which is in none of the three above (2026-11-06). Additive; older rows read 0.
+  try { db.exec(`ALTER TABLE processing_jobs ADD COLUMN lock_wait_ms INTEGER NOT NULL DEFAULT 0`) } catch {}
 
   // What an import did with the lines of its file (lib/import-summary.ts): the rows that repeat inside the file, and a note when the same-name check skipped the whole
   // file. Additive and nullable: an older row reads NULL, "not recorded", where 0 would claim a measurement.

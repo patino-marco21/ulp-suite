@@ -2,11 +2,13 @@ import { describe, it, expect } from 'vitest'
 import {
   COMMIT_EXTERNAL_SORT_BYTES,
   COMMIT_MAX_EXECUTION_S,
+  DEFAULT_CHECK_GROUP_SLABS,
   DEFAULT_COMMIT_BLOCK_ROWS,
   DEFAULT_COMMIT_INSERT_THREADS,
   DEFAULT_NOVELTY_SLAB_ROWS,
   MIN_NOVELTY_SLAB_ROWS,
   NORM_KEY_MAX_SLAB_ROWS,
+  checkGroupSlabs,
   commitBlockRows,
   commitInsertThreads,
   normKeyEnabled,
@@ -108,5 +110,20 @@ describe('commitBlockRows', () => {
 
   it.each(['', '  ', 'abc', '0', '-1', '8191', '1048577', '5000000', 'NaN'])('falls back to 131,072 for INGEST_COMMIT_BLOCK_ROWS=%j (the range is 8,192 to 1,048,576)', raw => {
     expect(commitBlockRows(env({ INGEST_COMMIT_BLOCK_ROWS: raw }))).toBe(131_072)
+  })
+})
+
+describe('checkGroupSlabs', () => {
+  it('is 4 by default (a scan probing 40M keys took 24.2 s against 21.4 s for 10M: one scan serves four slabs)', () => {
+    expect(DEFAULT_CHECK_GROUP_SLABS).toBe(4)
+    expect(checkGroupSlabs(env())).toBe(4)
+  })
+
+  it.each([['1', 1], ['2', 2], ['16', 16], [' 3 ', 3], ['2.9', 2]])('INGEST_NOVELTY_CHECK_GROUP=%j gives %i', (raw, want) => {
+    expect(checkGroupSlabs(env({ INGEST_NOVELTY_CHECK_GROUP: raw }))).toBe(want)
+  })
+
+  it.each(['', '  ', 'abc', '0', '-1', '0.5', '17', '100', 'NaN'])('falls back to 4 for INGEST_NOVELTY_CHECK_GROUP=%j (the range is 1 to 16)', raw => {
+    expect(checkGroupSlabs(env({ INGEST_NOVELTY_CHECK_GROUP: raw }))).toBe(4)
   })
 })

@@ -43,7 +43,7 @@ function makeDb(cfg: FakeConfig) {
       if (cfg.execDelayMs) await sleep(cfg.execDelayMs)
       if (sql.startsWith('SELECT count() AS c FROM ulp.zz_import_stage_')) return typed([{ c: String(cfg.stageRows) }])
       if (sql.startsWith('SELECT uniqExact')) return typed([{ c: String(cfg.distinct[slabOf(sql)]) }])
-      if (sql.startsWith('SELECT count() AS c FROM ulp.zz_import_known_')) return typed([{ c: String(cfg.known[slab]) }])
+      if (sql.startsWith('SELECT count() AS c FROM ulp.zz_import_known_')) return typed([{ c: String(cfg.known[/% \d+ = \d+/.test(sql) ? slabOf(sql) : slab]) }])
       if (sql.startsWith('SELECT url, email, password, domain FROM (')) {
         if (cfg.monitorError) throw cfg.monitorError
         return typed(cfg.monitorRows ?? [])
@@ -58,9 +58,9 @@ function makeDb(cfg: FakeConfig) {
       }
       if (sql.startsWith('TRUNCATE TABLE')) return { writtenRows: null }
       if (sql.startsWith('INSERT INTO ulp.zz_import_known_')) {
-        slab = slabOf(sql)
+        slab = /% \d+ IN \(/.test(sql) ? -1 : slabOf(sql)
         cfg.onSlabStart?.()
-        return { writtenRows: cfg.known[slab] }
+        return { writtenRows: slab >= 0 ? cfg.known[slab] : null }
       }
       if (sql.startsWith('INSERT INTO ulp.')) {
         const k = slabOf(sql)
@@ -159,6 +159,7 @@ describe('commitStage', () => {
     const out = await commitStage(options(db, {
       parsedRows: 2600,
       slabRows: 1000,
+      checkGroupSlabs: 1, // the check slab by slab; the grouped check has its own tests below
       onSlab: e => slabs.push(e),
       onPhase: e => phases.push(`${e.slab}/${e.slabs} ${e.phase}`),
     }))
@@ -188,7 +189,7 @@ describe('commitStage', () => {
   it('waits for the disk gate and the memory guard before every slab, and before taking the lock', async () => {
     const events: string[] = []
     const db = makeDb({ stageRows: 2000, distinct: [1000, 1000], known: [0, 0], onSlabStart: () => events.push('slab-sql') })
-    await commitStage(options(db, { parsedRows: 2000, slabRows: 1000, gates: gates(events) }))
+    await commitStage(options(db, { parsedRows: 2000, slabRows: 1000, checkGroupSlabs: 1, gates: gates(events) }))
     expect(events).toEqual(['disk', 'memory', 'slab-sql', 'disk', 'memory', 'slab-sql'])
   })
 
@@ -404,7 +405,12 @@ describe('commitStage: how long the check and the insert took', () => {
 
   it('adds up the slabs, and an entirely known slab costs a check but no insert', async () => {
     const { db, now } = timed({ stageRows: 1700, distinct: [800, 850], known: [0, 850] })
-    expect(await commitStage(options(db, { parsedRows: 1700, slabRows: 1000, now }))).toMatchObject({ slabs: 2, checkMs: 90, commitMs: 300 })
+    expect(await commitStage(options(db, { parsedRows: 1700, slabRows: 1000, checkGroupSlabs: 1, now }))).toMatchObject({ slabs: 2, checkMs: 90, commitMs: 300 })
+  })
+
+  it('a group pays for one clear and one fill, and a count per slab', async () => {
+    const { db, now } = timed({ stageRows: 1700, distinct: [800, 850], known: [0, 850] })
+    expect(await commitStage(options(db, { parsedRows: 1700, slabRows: 1000, checkGroupSlabs: 2, now }))).toMatchObject({ slabs: 2, checkMs: 2 + 40 + 3 + 3, commitMs: 300 })
   })
 
   it('is zero for an empty stage', async () => {
@@ -417,7 +423,7 @@ describe('commitStage: how long the check and the insert took', () => {
 describe('commitStage with the normalised key', () => {
   it('cuts the slabs, probes the table and inserts on norm_key_hash, and sorts the new rows by (url, email)', async () => {
     const db = makeDb({ stageRows: 2000, distinct: [900, 800], known: [100, 0] })
-    await commitStage(options(db, { parsedRows: 2000, slabRows: 1000, keyColumn: 'norm_key_hash' }))
+    await commitStage(options(db, { parsedRows: 2000, slabRows: 1000, keyColumn: 'norm_key_hash', checkGroupSlabs: 1 }))
     for (const c of db.calls) expect(c.sql).not.toContain('content_key_hash')
     expect(db.calls.find(c => c.sql.startsWith('SELECT uniqExact'))!.sql).toContain('uniqExact(norm_key_hash)')
     const inserts = db.calls.filter(c => c.sql.startsWith('INSERT INTO ulp.credentials'))
@@ -428,6 +434,18 @@ describe('commitStage with the normalised key', () => {
       expect(i.sql).toContain('NOT IN (SELECT key_hash FROM ulp.zz_import_known_0123456789ab)')
       expect(i.sql).toContain('ORDER BY url, email\nLIMIT 1 BY norm_key_hash')
     }
+  })
+
+  it('a group reads its own slab of the known table on the normalised key too, in the insert and in the monitor question', async () => {
+    const db = makeDb({ stageRows: 2000, distinct: [900, 800], known: [100, 0], monitorRows: [] })
+    await commitStage(options(db, {
+      parsedRows: 2000, slabRows: 1000, keyColumn: 'norm_key_hash', checkGroupSlabs: 2, monitors: [{ id: 1, domains: ['example.test'], match_mode: 'both' }], matchCap: 5,
+    }))
+    const inserts = db.calls.filter(c => c.sql.startsWith('INSERT INTO ulp.credentials'))
+    inserts.forEach((c, k) => expect(c.sql).toContain(`norm_key_hash NOT IN (SELECT key_hash FROM ulp.zz_import_known_0123456789ab WHERE key_hash % 2 = ${k})`))
+    const matches = db.calls.filter(c => c.sql.startsWith('SELECT url, email, password, domain FROM ('))
+    matches.forEach((c, k) => expect(c.sql).toContain(`norm_key_hash NOT IN (SELECT key_hash FROM ulp.zz_import_known_0123456789ab WHERE key_hash % 2 = ${k})`))
+    expect(db.calls.find(c => c.sql.startsWith('INSERT INTO ulp.zz_import_known_'))!.sql).toContain('norm_key_hash % 2 IN (0, 1)')
   })
 
   it('asks the monitor question on the same key, sorted the same way', async () => {
@@ -471,5 +489,149 @@ describe('commitStage: the slab size on each key', () => {
     expect(out.slabs).toBe(2)
     expect(db.calls.find(c => c.sql.startsWith('INSERT INTO ulp.credentials'))!.sql).toContain('content_key_hash % 2 = 0')
     expect((await commitOn(2, { slabRows: 20_000_000, keyColumn: 'content_key_hash' })).out.slabs).toBe(2)
+  })
+})
+
+describe('commitStage: slabs of one file share one existence check', () => {
+  const six = { stageRows: 6000, distinct: [900, 800, 0, 700, 600, 500], known: [100, 200, 0, 300, 100, 500] }
+  const run = async (cfg: FakeConfig, extra: Partial<CommitOptions> = {}) => {
+    const db = makeDb(cfg)
+    const result = await commitStage(options(db, { parsedRows: cfg.stageRows, slabRows: 1000, ...extra }))
+    return { db, result }
+  }
+  const labels = (db: { calls: Call[] }) => db.calls.map(label)
+  const count = (db: { calls: Call[] }, what: string) => labels(db).filter(l => l === what).length
+
+  it('with a group of 3, 6 slabs take two fills instead of six, and the totals are the same as slab by slab', async () => {
+    const one = await run(six, { checkGroupSlabs: 1 })
+    const grouped = await run(six, { checkGroupSlabs: 3 })
+    expect(count(one.db, 'fill known')).toBe(6 - 1) // the slab with no distinct credential has nothing to check
+    expect(count(grouped.db, 'fill known')).toBe(2)
+    expect(count(grouped.db, 'truncate known')).toBe(2)
+    expect(count(grouped.db, 'insert new rows')).toBe(4) // the empty slab and the entirely known one write nothing
+    expect(grouped.result).toEqual({ ...one.result, checkMs: expect.any(Number), commitMs: expect.any(Number), lockWaitMs: expect.any(Number) })
+    expect(grouped.result).toMatchObject({ distinct: 3500, known: 1200, inserted: 2300, slabs: 6 })
+  })
+
+  it('the totals do not depend on the group size', async () => {
+    const baseline = (await run(six, { checkGroupSlabs: 1 })).result
+    for (const checkGroupSlabs of [2, 3, 4, 6, 50]) {
+      expect((await run(six, { checkGroupSlabs })).result).toMatchObject({ distinct: baseline.distinct, known: baseline.known, inserted: baseline.inserted, slabs: 6 })
+    }
+  })
+
+  it('the groups are balanced: 5 slabs with a limit of 4 are 3 and 2, not 4 and 1', async () => {
+    const five = { stageRows: 5000, distinct: [10, 10, 10, 10, 10], known: [1, 1, 1, 1, 1] }
+    const { db } = await run(five, { checkGroupSlabs: 4 })
+    const fills = db.calls.filter(c => label(c) === 'fill known')
+    expect(fills).toHaveLength(2)
+    expect(fills[0].sql).toMatch(/% 5 IN \(0, 1, 2\)/)
+    expect(fills[1].sql).toMatch(/% 5 IN \(3, 4\)/)
+  })
+
+  it('in one group: the distinct counts, one clear, one fill, the known counts per slab, then the inserts', async () => {
+    const three = { stageRows: 3000, distinct: [10, 10, 10], known: [1, 2, 3] }
+    const { db } = await run(three, { checkGroupSlabs: 3 })
+    expect(labels(db)).toEqual([
+      'select stage count',
+      'select slab distinct', 'select slab distinct', 'select slab distinct',
+      'truncate known', 'fill known',
+      'select known count', 'select known count', 'select known count',
+      'insert new rows', 'insert new rows', 'insert new rows',
+    ])
+  })
+
+  it('each insert reads only its own slab of the known table, and a single-slab group keeps the statements it always had', async () => {
+    const three = { stageRows: 3000, distinct: [10, 10, 10], known: [1, 2, 3] }
+    const grouped = (await run(three, { checkGroupSlabs: 3 })).db.calls.filter(c => label(c) === 'insert new rows')
+    expect(grouped).toHaveLength(3)
+    grouped.forEach((c, k) => expect(c.sql).toContain(`NOT IN (SELECT key_hash FROM ulp.zz_import_known_0123456789ab WHERE key_hash % 3 = ${k})`))
+    const single = (await run(three, { checkGroupSlabs: 1 })).db.calls.filter(c => label(c) === 'insert new rows')
+    single.forEach(c => expect(c.sql).toContain('NOT IN (SELECT key_hash FROM ulp.zz_import_known_0123456789ab)\n'))
+  })
+
+  it('the accounting check stays per slab: a known count above the distinct count of the second slab names slab 2 of 3', async () => {
+    const bad = { stageRows: 3000, distinct: [10, 10, 10], known: [1, 11, 3] }
+    await expect(run(bad, { checkGroupSlabs: 3 })).rejects.toThrow(/slab 2\/3: 11 known hashes for 10 distinct/)
+  })
+
+  it('rows written that differ from the expected count fail the slab that wrote them', async () => {
+    const cfg = { stageRows: 3000, distinct: [10, 10, 10], known: [1, 2, 3], written: (k: number, expected: number) => (k === 1 ? expected + 1 : expected) }
+    await expect(run(cfg, { checkGroupSlabs: 3 })).rejects.toThrow(NoveltyAccountingError)
+  })
+
+  it('a group takes the lock once: another import waits until its last insert, and then runs', async () => {
+    const order: string[] = []
+    const a = makeDb({ stageRows: 3000, distinct: [10, 10, 10], known: [1, 2, 3], execDelayMs: 2, onSlabEnd: () => order.push('a-insert') })
+    const b = makeDb({ stageRows: 1000, distinct: [10], known: [1], execDelayMs: 2, onSlabEnd: () => order.push('b-insert') })
+    const first = commitStage(options(a, { parsedRows: 3000, slabRows: 1000, checkGroupSlabs: 3 }))
+    await sleep(1)
+    const second = commitStage(options(b, { parsedRows: 1000, slabRows: 1000 }))
+    await Promise.all([first, second])
+    expect(order).toEqual(['a-insert', 'a-insert', 'a-insert', 'b-insert'])
+  })
+
+  it('the room gates run before each group and before every later insert of it', async () => {
+    const events: string[] = []
+    const three = { stageRows: 3000, distinct: [10, 10, 10], known: [1, 2, 3] }
+    await run(three, { checkGroupSlabs: 3, gates: gates(events) })
+    expect(events.filter(e => e === 'disk')).toHaveLength(3)
+    expect(events.filter(e => e === 'memory')).toHaveLength(3)
+  })
+
+  it('an abort in the middle of a group kills the running statement, frees the lock and lets the next import in', async () => {
+    const ac = new AbortController()
+    const a = makeDb({ stageRows: 3000, distinct: [10, 10, 10], known: [1, 2, 3], hang: /^INSERT INTO ulp\.credentials[\s\S]*% 3 = 1/ })
+    const first = commitStage(options(a, { parsedRows: 3000, slabRows: 1000, checkGroupSlabs: 3, signal: ac.signal }))
+    first.catch(() => {})
+    await sleep(20)
+    ac.abort(new Error('stop'))
+    await expect(first).rejects.toThrow('stop')
+    expect(a.calls.some(c => c.kind === 'kill')).toBe(true)
+    const b = makeDb({ stageRows: 1000, distinct: [10], known: [1] })
+    await expect(commitStage(options(b, { parsedRows: 1000, slabRows: 1000 }))).resolves.toMatchObject({ inserted: 9 })
+  })
+
+  it('the progress events say which slab is being checked (the first of its group) and which is inserting', async () => {
+    const phases: string[] = []
+    const three = { stageRows: 3000, distinct: [10, 10, 10], known: [1, 2, 3] }
+    await run(three, { checkGroupSlabs: 3, onPhase: e => phases.push(`${e.phase}${e.slab}`) })
+    expect(phases).toEqual(['checking1', 'inserting1', 'inserting2', 'inserting3'])
+  })
+
+  it('a group where no slab has a credential asks the table nothing', async () => {
+    const empty = { stageRows: 2000, distinct: [0, 0], known: [0, 0] }
+    const { db, result } = await run(empty, { checkGroupSlabs: 2 })
+    expect(count(db, 'fill known')).toBe(0)
+    expect(result).toMatchObject({ distinct: 0, known: 0, inserted: 0 })
+  })
+})
+
+describe('commitStage: how long the import waited for the commit lock', () => {
+  it('is 0 when the lock is free', async () => {
+    const db = makeDb({ stageRows: 10, distinct: [10], known: [0] })
+    expect(await commitStage(options(db, { parsedRows: 10 }))).toMatchObject({ lockWaitMs: 0 })
+  })
+
+  it('counts the time between asking for the lock and holding it, and is in neither the check nor the insert', async () => {
+    const holder = await acquireCommitLock(new AbortController().signal)
+    const db = makeDb({ stageRows: 10, distinct: [10], known: [0] })
+    const run = commitStage(options(db, { parsedRows: 10 }))
+    await sleep(60)
+    holder()
+    const out = await run
+    expect(out.lockWaitMs).toBeGreaterThanOrEqual(50)
+    expect(out.lockWaitMs).toBeLessThan(5000)
+    expect(out.checkMs).toBeLessThan(50)
+    expect(out.commitMs).toBeLessThan(50)
+  })
+
+  it('adds up over the groups of one file', async () => {
+    let t = 0
+    const db = makeDb({ stageRows: 4000, distinct: [10, 10, 10, 10], known: [0, 0, 0, 0] })
+    // the clock moves 7 ms every time the module reads it, so each wait for a free lock measures a multiple of 7
+    const out = await commitStage(options(db, { parsedRows: 4000, slabRows: 1000, checkGroupSlabs: 2, now: () => (t += 7) }))
+    expect(out.lockWaitMs).toBeGreaterThan(0)
+    expect(out.lockWaitMs % 7).toBe(0)
   })
 })

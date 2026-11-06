@@ -440,6 +440,7 @@ async function importThroughStage(a: StagedImport): Promise<ProcessResult> {
         parse_ms:  streamTimings.parseMs,
         check_ms:  commit.checkMs,
         insert_ms: streamTimings.insertMs + commit.commitMs,
+        lock_wait_ms: commit.lockWaitMs,
       },
     }
   } finally {

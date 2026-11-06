@@ -8,6 +8,8 @@
  *                                 (docs/superpowers/specs/2026-10-12-fast-ingest-design.md, step A2).
  *   INGEST_COMMIT_BLOCK_ROWS  default 131,072, 8,192 to 1,048,576. The commit INSERT ... SELECT builds blocks of this many rows (max_insert_block_size, min_insert_block_size_rows
  *                             and max_block_size); 1,048,576 is the server's own size, the behaviour before 2026-11-06.
+ *   INGEST_NOVELTY_CHECK_GROUP  default 4, 1 to 16. At most this many slabs of one file share ONE existence check (one scan of the table's key column instead of one per slab); 1 is
+ *                             the check slab by slab, the behaviour before 2026-11-06.
  *   INGEST_NORM_KEY           default on. off | 0 | false matches imports on the exact key (content_key_hash) everywhere. When on, the normalised key
  *                             (norm_key_hash) is used once every part of ulp.credentials holds it (lib/norm-key-ready.ts).
  */
@@ -18,6 +20,9 @@ export const MIN_NOVELTY_SLAB_ROWS = 1_000
 export const DEFAULT_COMMIT_INSERT_THREADS = 4
 const MIN_COMMIT_INSERT_THREADS = 1
 const MAX_COMMIT_INSERT_THREADS = 16
+
+export const DEFAULT_CHECK_GROUP_SLABS = 4
+const MAX_CHECK_GROUP_SLABS = 16
 
 export const DEFAULT_COMMIT_BLOCK_ROWS = 131_072
 const MIN_COMMIT_BLOCK_ROWS = 8_192
@@ -65,6 +70,17 @@ export function commitInsertThreads(env: NodeJS.Dict<string> = process.env): num
   const raw = env.INGEST_COMMIT_INSERT_THREADS
   const parsed = raw === undefined || raw.trim() === '' ? Number.NaN : Math.floor(Number(raw))
   return Number.isFinite(parsed) && parsed >= MIN_COMMIT_INSERT_THREADS && parsed <= MAX_COMMIT_INSERT_THREADS ? parsed : DEFAULT_COMMIT_INSERT_THREADS
+}
+
+/**
+ * How many slabs of one file share one existence check. The check reads the whole key column of the table (2.8 billion rows, 21 GiB) whatever the slab holds, so a four-file batch
+ * of 22 slabs read 61.8 billion rows and spent 618 s of its 1,116 s under the commit lock on it. Measured on the live table: a scan probing 10M keys took 21.4 s, probing 40M keys
+ * 24.2 s (+13%, 457 MiB -> 1.75 GiB). A group of 4 slabs of at most 10M rows is therefore one scan of about 24 s instead of four of 21-28 s. A value outside 1 to 16 means the default.
+ */
+export function checkGroupSlabs(env: NodeJS.Dict<string> = process.env): number {
+  const raw = env.INGEST_NOVELTY_CHECK_GROUP
+  const parsed = raw === undefined || raw.trim() === '' ? Number.NaN : Math.floor(Number(raw))
+  return Number.isFinite(parsed) && parsed >= 1 && parsed <= MAX_CHECK_GROUP_SLABS ? parsed : DEFAULT_CHECK_GROUP_SLABS
 }
 
 /**

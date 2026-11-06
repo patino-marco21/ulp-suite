@@ -25,7 +25,7 @@ import { getClient } from '@/lib/clickhouse'
 import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 import { buildNormalizedDomainSetMatch, type MatchedCredential, type MatchMode } from '@/lib/domain-match'
 import { waitForDiskSpace } from '@/lib/ingest-disk-gate'
-import { COMMIT_EXTERNAL_SORT_BYTES, COMMIT_MAX_EXECUTION_S, NORM_KEY_MAX_SLAB_ROWS, commitBlockRows, commitInsertThreads, slabCount } from '@/lib/ingest-novelty-config'
+import { COMMIT_EXTERNAL_SORT_BYTES, COMMIT_MAX_EXECUTION_S, NORM_KEY_MAX_SLAB_ROWS, checkGroupSlabs, commitBlockRows, commitInsertThreads, slabCount } from '@/lib/ingest-novelty-config'
 import type { StageTables } from '@/lib/ingest-stage'
 import type { KeyColumn } from '@/lib/norm-key-ready'
 
@@ -41,10 +41,14 @@ function qualified(name: string): string {
 /** The key a statement is built on when none is given: the exact one, so a caller that does not choose gets the statements it always had. */
 export const DEFAULT_KEY: KeyColumn = 'content_key_hash'
 
-/** The stage rows of slab `k` of `K`: the key decides, so a credential (and, on the normalised key, every look-alike of it) always lands in the same slab. */
-export function slabPredicate(K: number, k: number, key: KeyColumn = DEFAULT_KEY): string {
-  if (!Number.isInteger(K) || !Number.isInteger(k) || K < 1 || k < 0 || k >= K) throw new Error(`bad slab ${k} of ${K}`)
-  return `${key} % ${K} = ${k}`
+/**
+ * The stage rows of slab `k` of `K` (or of several slabs, for the one existence check a group shares): the key decides, so a credential (and, on the normalised key, every
+ * look-alike of it) always lands in the same slab. One slab keeps the equality the statements always had.
+ */
+export function slabPredicate(K: number, k: number | number[], key: KeyColumn = DEFAULT_KEY): string {
+  const ks = Array.isArray(k) ? k : [k]
+  if (!Number.isInteger(K) || K < 1 || ks.length === 0 || ks.some(x => !Number.isInteger(x) || x < 0 || x >= K)) throw new Error(`bad slab ${ks.join(',')} of ${K}`)
+  return ks.length === 1 ? `${key} % ${K} = ${ks[0]}` : `${key} % ${K} IN (${ks.join(', ')})`
 }
 
 export const stageCountSql = (t: StageTables) => `SELECT count() AS c FROM ${t.stage}`
@@ -54,22 +58,28 @@ export const slabDistinctSql = (t: StageTables, K: number, k: number, key: KeyCo
 
 export const knownResetSql = (t: StageTables) => `TRUNCATE TABLE ${t.known}`
 
-export const knownFillSql = (t: StageTables, against: string, K: number, k: number, key: KeyColumn = DEFAULT_KEY) =>
+export const knownFillSql = (t: StageTables, against: string, K: number, k: number | number[], key: KeyColumn = DEFAULT_KEY) =>
   `INSERT INTO ${t.known}\n` +
   `SELECT DISTINCT ${key} FROM ${qualified(against)}\n` +
   `WHERE ${key} IN (SELECT ${key} FROM ${t.stage} WHERE ${slabPredicate(K, k, key)})`
 
-export const knownCountSql = (t: StageTables) => `SELECT count() AS c FROM ${t.known}`
+/** The known hashes of one slab when the table holds several (a group), all of them otherwise. */
+export const knownCountSql = (t: StageTables, slab?: { K: number; k: number }) =>
+  `SELECT count() AS c FROM ${t.known}` + (slab ? ` WHERE key_hash % ${slab.K} = ${slab.k}` : '')
+
+/** What the insert and the monitor query subtract: the whole known table, or, when it holds a group, only the hashes of the slab being committed. */
+const knownOf = (t: StageTables, K: number, k: number, scoped: boolean) =>
+  `SELECT key_hash FROM ${t.known}` + (scoped ? ` WHERE key_hash % ${K} = ${k}` : '')
 
 /**
  * One row per key. On the normalised key the row kept is the first by (url, email), so that the monitor query below reports the row that was stored
  * (look-alikes can differ in the login's case, and a monitor fingerprint uses the login as stored). On the exact key the statement is the one it
  * always was: exact twins differ only in the scheme or one slash, so any of them will do.
  */
-export const commitInsertSql = (t: StageTables, target: string, K: number, k: number, key: KeyColumn = DEFAULT_KEY) =>
+export const commitInsertSql = (t: StageTables, target: string, K: number, k: number, key: KeyColumn = DEFAULT_KEY, scopedKnown = false) =>
   `INSERT INTO ${qualified(target)} (url, email, password, domain, source_file, breach_name)\n` +
   `SELECT url, email, password, domain, source_file, breach_name FROM ${t.stage}\n` +
-  `WHERE ${slabPredicate(K, k, key)} AND ${key} NOT IN (SELECT key_hash FROM ${t.known})\n` +
+  `WHERE ${slabPredicate(K, k, key)} AND ${key} NOT IN (${knownOf(t, K, k, scopedKnown)})\n` +
   (key === 'norm_key_hash' ? `ORDER BY url, email\n` : '') +
   `LIMIT 1 BY ${key}`
 
@@ -86,6 +96,7 @@ export function monitorStageSql(
   monitor: { domains: string[]; match_mode: MatchMode },
   limit: number,
   key: KeyColumn = DEFAULT_KEY,
+  scopedKnown = false,
 ): { sql: string; params: Record<string, unknown> } | null {
   const domains = monitor.domains.map(d => d.trim()).filter(d => d !== '')
   const cap = Math.floor(limit)
@@ -95,7 +106,7 @@ export function monitorStageSql(
     `SELECT url, email, password, domain FROM (\n` +
     `  SELECT url, email, password, domain, ${key}, ${match.normalizedColumns}\n` +
     `  FROM ${t.stage}\n` +
-    `  WHERE ${slabPredicate(K, k, key)} AND ${key} NOT IN (SELECT key_hash FROM ${t.known})\n` +
+    `  WHERE ${slabPredicate(K, k, key)} AND ${key} NOT IN (${knownOf(t, K, k, scopedKnown)})\n` +
     `) WHERE ${match.clause}\n` +
     (key === 'norm_key_hash' ? `ORDER BY url, email\n` : '') +
     `LIMIT 1 BY ${key}\n` +
@@ -281,6 +292,8 @@ export interface CommitOptions {
   insertThreads?: number
   /** Rows per block of the commit insert; absent = INGEST_COMMIT_BLOCK_ROWS (lib/ingest-novelty-config.ts). */
   blockRows?: number
+  /** Most slabs of the file that share one existence check; absent = INGEST_NOVELTY_CHECK_GROUP (lib/ingest-novelty-config.ts). */
+  checkGroupSlabs?: number
   /** Test seams. */
   db?: NoveltyDb
   /** Milliseconds clock for the phase timings; default Date.now. */
@@ -306,6 +319,8 @@ export interface CommitResult {
   checkMs: number
   /** Milliseconds spent on the commit INSERT ... SELECT, added up over the slabs. */
   commitMs: number
+  /** Milliseconds spent waiting for the process-wide commit lock, added up over the groups: in neither of the two above. */
+  lockWaitMs: number
 }
 
 interface MonitorRow {
@@ -337,10 +352,12 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
   const matchCap = Math.max(0, Math.floor(opts.matchCap ?? 0))
   const insertThreads = opts.insertThreads ?? commitInsertThreads()
   const blockRows = opts.blockRows ?? commitBlockRows()
+  const groupLimit = Math.max(1, Math.floor(opts.checkGroupSlabs ?? checkGroupSlabs()))
   const key = opts.keyColumn ?? DEFAULT_KEY
   const now = opts.now ?? Date.now
   let checkMs = 0
   let commitMs = 0
+  let lockWaitMs = 0
   const matches: MatchedCredential[] = []
 
   const stageRows = await countRows(db, stageCountSql(t), { queryId: queryId(), signal })
@@ -352,12 +369,20 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
   let known = 0
   let inserted = 0
 
-  for (let k = 0; stageRows > 0 && k < slabs; k++) {
+  // Slabs are checked in groups: ONE scan of the table's key column serves every slab of a group, and the lock is held from that scan to the last insert of the group, so the
+  // snapshot stays true (no other import writes in between). Balanced: 5 slabs with a limit of 4 are 3 and 2.
+  const groups = Math.ceil(slabs / Math.min(groupLimit, slabs))
+  const groupSize = Math.ceil(slabs / groups)
+
+  for (let g0 = 0; stageRows > 0 && g0 < slabs; g0 += groupSize) {
+    const ks = Array.from({ length: Math.min(groupSize, slabs - g0) }, (_, i) => g0 + i)
     signal.throwIfAborted()
     // Room first, THEN the lock: an import that is paused for disk or memory must not hold up another file's commit.
     await gates.disk(signal, { onPoll: beat })
     await gates.memory(signal, { onPoll: beat })
+    const lockAskedAt = now()
     const release = await acquireCommitLock(signal)
+    lockWaitMs += now() - lockAskedAt
 
     let running: string | null = null
     // `running` is cleared only on success, so the catch below still knows which statement to kill.
@@ -372,33 +397,57 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
 
     try {
       signal.throwIfAborted()
-      const slabDistinct = await step(id => countRows(db, slabDistinctSql(t, slabs, k, key), { queryId: id, signal }))
-      if (slabDistinct > 0) {
-        opts.onPhase?.({ phase: 'checking', slab: k + 1, slabs })
+      const slabDistinct: number[] = []
+      for (const k of ks) slabDistinct.push(await step(id => countRows(db, slabDistinctSql(t, slabs, k, key), { queryId: id, signal })))
+      const live = ks.filter((_, i) => slabDistinct[i] > 0)
+      // With one slab in the table its whole content is that slab's; with several, each statement reads only its own slab of it.
+      const scoped = live.length > 1
+      const slabKnown: number[] = ks.map(() => 0)
+      if (live.length > 0) {
+        opts.onPhase?.({ phase: 'checking', slab: live[0] + 1, slabs })
         const checkStart = now()
         await step(id => db.exec(knownResetSql(t), { queryId: id, signal }))
-        await step(id => db.exec(knownFillSql(t, opts.noveltyAgainst, slabs, k, key), { queryId: id, signal }))
-        const slabKnown = await step(id => countRows(db, knownCountSql(t), { queryId: id, signal }))
-        checkMs += now() - checkStart
-        if (slabKnown > slabDistinct) {
-          throw new NoveltyAccountingError(
-            `slab ${k + 1}/${slabs}: ${slabKnown} known hashes for ${slabDistinct} distinct ones; the stage and the table disagree`,
-          )
+        await step(id => db.exec(knownFillSql(t, opts.noveltyAgainst, slabs, live, key), { queryId: id, signal }))
+        for (const k of live) {
+          slabKnown[k - g0] = await step(id => countRows(db, knownCountSql(t, scoped ? { K: slabs, k } : undefined), { queryId: id, signal }))
         }
-        const expected = slabDistinct - slabKnown
+        checkMs += now() - checkStart
+        for (const k of live) {
+          if (slabKnown[k - g0] > slabDistinct[k - g0]) {
+            throw new NoveltyAccountingError(
+              `slab ${k + 1}/${slabs}: ${slabKnown[k - g0]} known hashes for ${slabDistinct[k - g0]} distinct ones; the stage and the table disagree`,
+            )
+          }
+        }
+      }
+
+      let inserts = 0
+      for (const k of ks) {
+        const slabD = slabDistinct[k - g0]
+        const slabK = slabKnown[k - g0]
+        const expected = slabD - slabK
 
         if (expected > 0) {
+          // The first insert of a group is covered by the gates above; a later one checks the room again, as a slab of its own would.
+          if (inserts > 0) {
+            await gates.disk(signal, { onPoll: beat })
+            await gates.memory(signal, { onPoll: beat })
+          }
+          inserts++
           opts.onPhase?.({ phase: 'inserting', slab: k + 1, slabs })
           const insertStart = now()
           const { writtenRows } = await step(id =>
-            db.exec(commitInsertSql(t, opts.target, slabs, k, key), { queryId: id, signal, settings: { max_insert_threads: insertThreads, max_insert_block_size: blockRows, min_insert_block_size_rows: blockRows, max_block_size: blockRows } }))
+            db.exec(commitInsertSql(t, opts.target, slabs, k, key, scoped), {
+              queryId: id, signal,
+              settings: { max_insert_threads: insertThreads, max_insert_block_size: blockRows, min_insert_block_size_rows: blockRows, max_block_size: blockRows },
+            }))
           commitMs += now() - insertStart
           if (writtenRows === null) {
             console.warn(`[ingest-novelty] slab ${k + 1}/${slabs}: the server sent no written-rows count; the accounting check was skipped`)
           } else if (writtenRows !== expected) {
             throw new NoveltyAccountingError(
               `slab ${k + 1}/${slabs}: ClickHouse reported ${writtenRows} rows written but ${expected} were expected ` +
-              `(${slabDistinct} distinct - ${slabKnown} known). Rows already written are kept; Retry is safe, they will count as already known.`,
+              `(${slabD} distinct - ${slabK} known). Rows already written are kept; Retry is safe, they will count as already known.`,
             )
           }
 
@@ -407,7 +456,7 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
           for (const monitor of monitors) {
             const room = matchCap - matches.length
             if (room <= 0) break
-            const q = monitorStageSql(t, slabs, k, monitor, room, key)
+            const q = monitorStageSql(t, slabs, k, monitor, room, key, scoped)
             if (!q) continue
             try {
               const rows = await step(id => db.select<MonitorRow>(q.sql, { queryId: id, signal, params: q.params }))
@@ -420,11 +469,11 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
           }
         }
 
-        distinct += slabDistinct
-        known += slabKnown
+        distinct += slabD
+        known += slabK
         inserted += expected
+        opts.onSlab?.({ slab: k + 1, slabs, known, inserted })
       }
-      opts.onSlab?.({ slab: k + 1, slabs, known, inserted })
     } catch (err) {
       if (running !== null) await db.kill(running).catch(() => {})
       throw err
@@ -443,5 +492,6 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
     matches,
     checkMs,
     commitMs,
+    lockWaitMs,
   }
 }

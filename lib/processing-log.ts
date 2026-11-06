@@ -44,8 +44,8 @@ export function logJob(entry: JobLogEntry): void {
   try {
     dbRun(
       `INSERT INTO processing_jobs
-         (source, filename, status, imported, skipped, duration_ms, error_message, breach_name, known, gate_report, parse_ms, check_ms, insert_ms, repeats, note, match_key)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (source, filename, status, imported, skipped, duration_ms, error_message, breach_name, known, gate_report, parse_ms, check_ms, insert_ms, lock_wait_ms, repeats, note, match_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         entry.source,
         entry.filename,
@@ -60,6 +60,7 @@ export function logJob(entry: JobLogEntry): void {
         ms(entry.parse_ms),
         ms(entry.check_ms),
         ms(entry.insert_ms),
+        ms(entry.lock_wait_ms),
         countOrNull(entry.repeats),
         entry.note ?? null,
         entry.match_key ?? null,

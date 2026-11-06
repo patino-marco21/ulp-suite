@@ -95,10 +95,11 @@ describe('processTextStream with novelty-aware ingest', () => {
     h.insert.mockImplementation(async (arg: { table: string }) => {
       if (/^ulp\.zz_import_stage_/.test(arg.table)) await new Promise(resolve => setTimeout(resolve, 200))
     })
-    h.commitStage.mockResolvedValue(commitResult({ checkMs: 700, commitMs: 300 }))
+    h.commitStage.mockResolvedValue(commitResult({ checkMs: 700, commitMs: 300, lockWaitMs: 1234 }))
     const out = await processTextStream(stream(), 'novelty-timings.txt')
     expect(out.timings).toBeDefined()
     expect(out.timings!.check_ms).toBe(700)
+    expect(out.timings!.lock_wait_ms).toBe(1234)
     expect(out.timings!.insert_ms).toBeGreaterThanOrEqual(300 + 190)
     expect(out.timings!.parse_ms).toBeLessThan(150)
   })
