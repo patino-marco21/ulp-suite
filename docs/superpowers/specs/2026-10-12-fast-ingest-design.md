@@ -1,6 +1,8 @@
 # Fast ingest: design (2026-10-12)
 
-Status: design, written for the owner's review. Nothing in this document is built. The repository is public: this file holds numbers only, never file names,
+Status: step A is built and deployed (2026-10-18); step C (parse workers) is built and deployed OFF on 2026-11-06 (`INGEST_PARSE_WORKERS`, empty by default; the rehearsal
+scenario `workers` proves the same rows and counts as the importer's own thread, and a big file held by the worker's early check); step B (group commit) is not built. The speed-up of
+step C is not measured on a real batch yet: it waits for the owner to switch the flag on. The repository is public: this file holds numbers only, never file names,
 search terms or credential values.
 
 ## Why
