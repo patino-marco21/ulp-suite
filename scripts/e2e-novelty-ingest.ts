@@ -52,6 +52,10 @@
  *   workers       INGEST_PARSE_WORKERS=2: a small file is staged on the importer's thread and a big one (over 16 MiB) by a worker thread, with the counts the construction gives
  *                 (new, known, repeats inside the file, skipped); a big file whose first 52,000 lines break a rule is held by the worker's early check (nothing stored, no stage table);
  *                 and with the workers off, the same content under another name finds every row already known and counts the same repeats and skipped lines
+ *   retry         a file the run lost goes back to the inbox once, on its own (lib/inbox-auto-retry.ts): ClickHouse frozen past the stall timeout in the middle of an inbox file's commit,
+ *                 the job is logged as failed with the retry note, the file waits in failed/ and returns after about 2 minutes, and the retry adds exactly the missing rows; a
+ *                 second loss of the same file stays in failed/ (waited out for longer than the delay) until the owner retries it; an app killed in the middle of an inbox
+ *                 file's commit finds the file in processing/ at start-up and sends it back once
  *
  *   docker compose build app
  *   npx tsx scripts/e2e-alert-rehearsal.ts --keep    # brings the rehearsal stack up (about 4 minutes) and leaves it running
@@ -1006,9 +1010,9 @@ async function sameName(): Promise<void> {
 }
 
 /** The rows of the Inbox job list for a file, newest first. */
-async function inboxJobs(name: string): Promise<Array<{ status: string; imported: number; known: number; repeats: number | null; note: string | null }>> {
-  return (((await api('GET', '/api/inbox/status')).json?.done_recent ?? []) as Array<{ filename: string; status: string; imported: number; known: number; repeats: number | null; note: string | null }>)
-    .filter(r => r.filename === name)
+type InboxJob = { filename: string; status: string; imported: number; known: number; repeats: number | null; note: string | null; error_message: string | null }
+async function inboxJobs(name: string): Promise<InboxJob[]> {
+  return (((await api('GET', '/api/inbox/status')).json?.done_recent ?? []) as InboxJob[]).filter(r => r.filename === name)
 }
 
 async function hardLinkedNames(): Promise<void> {
@@ -1406,6 +1410,89 @@ async function normNotReady(): Promise<void> {
   check('...and the job says so', (await jobMatchKey(N('c'))) === 'norm')
 }
 
+/** Drops a file in the rehearsal inbox the way an owner copies one in, and says whether a file of that name is in one of the inbox folders ('' is the inbox itself). */
+const dropInInbox = (name: string, body: string) => sh('docker', ['exec', '-i', APP, 'sh', '-c', `cat > /app/inbox/${name}`], process.env, body)
+const inboxFolderHas = (folder: string, name: string) => sh('docker', ['exec', APP, 'sh', '-c', `ls /app/inbox/${folder} 2>/dev/null | grep -c -x "${name}" || true`]) === '1'
+
+async function autoRetry(): Promise<void> {
+  console.log('\n10. A file the run lost goes back to the inbox once, on its own')
+  scanLog('before the retry scenario')
+  if (!check('the rehearsal app restarted with 1000-row slabs', await recreateApp({ slab: '1000' }))) return
+  const TOTAL = 120_000
+
+  /** ClickHouse frozen for 48 s once `name` has between `low` and `high` rows stored: longer than the 30 s stall timeout, plus the kill's bounded wait. */
+  const freezeWhileImporting = async (name: string, low: number, high: number, label: string): Promise<number> => {
+    const midway = await waitFor(() => { const n = rowsFor(name); return n >= low && n < high ? n : 0 }, 300_000, 300)
+    check(`${label}: the commit was under way: some rows written, not all`, !!midway, `rows ${rowsFor(name)}`)
+    sh('docker', ['pause', CH])
+    try { await sleep(48_000) } finally { sh('docker', ['unpause', CH]) }
+    await waitFor(() => chQuery('SELECT 1') === '1', 60_000, 1000)
+    await waitFor(() => chQuery("SELECT count() FROM system.processes WHERE query_id LIKE 'novelty-%'") === '0' && stageTableCount() === 0, 120_000, 1000)
+    return rowsFor(name)
+  }
+  const failedRows = async (name: string) => (await inboxJobs(name)).filter(r => r.status === 'failed')
+
+  // A. a stall: the file comes back by itself and the totals are those of an uninterrupted run
+  const A = `e2e-nov-retry-a-${RUN}.txt`
+  dropInInbox(A, text(lines('RA', 0, TOTAL)))
+  const beforeA = await freezeWhileImporting(A, 2_000, 80_000, 'a stall')
+  info('rows written before the stall settled', beforeA)
+  const failedA = await waitFor(async () => (await failedRows(A))[0], 90_000, 1000)
+  const failedAt = Date.now()
+  check('the job is logged as failed, with the stall reason and the retry note', !!failedA && failedA.note === 'auto-retry' && /stalled/.test(failedA.error_message ?? '')
+    && /retrying automatically/.test(failedA.error_message ?? ''), JSON.stringify(failedA))
+  check('...and the file waits in failed/', inboxFolderHas('failed', A))
+  await expectIdleQueue('after the stall')
+  const doneA = await waitFor(async () => (await inboxJobs(A)).find(r => r.status === 'done'), 420_000, 2000)
+  const backAfter = Math.round((Date.now() - failedAt) / 1000)
+  info('seconds from the failure to the finished retry', backAfter)
+  check('the file came back on its own and finished: the rows already written count as known, the rest are new', !!doneA && doneA.imported === TOTAL - beforeA && doneA.known === beforeA, JSON.stringify(doneA))
+  // measured from when this script saw the failure, which is up to 20 s after the failure itself (the freeze is still running 18 s after the watchdog fired)
+  check('...not at once: it waited for the delay (2 minutes from the failure)', backAfter >= 60, `${backAfter} s`)
+  check('the totals are those of an uninterrupted run: every row once, one ulp.sources row', rowsFor(A) === TOTAL && distinctFor(A) === TOTAL
+    && Number(chQuery(`SELECT count() FROM ulp.sources WHERE filename = '${A}'`)) === 1, `rows ${rowsFor(A)}, distinct ${distinctFor(A)}`)
+  check('...and the file ends in done/ only', inboxFolderHas('done', A) && !inboxFolderHas('failed', A) && !inboxFolderHas('', A) && !inboxFolderHas('processing', A))
+  check('the log says it went back automatically', appLog().includes(`retrying automatically after an interruption: ${A}`))
+
+  // B. the second loss of the same file: no second retry
+  const B = `e2e-nov-retry-b-${RUN}.txt`
+  dropInInbox(B, text(lines('RB', 0, TOTAL)))
+  const afterFirst = await freezeWhileImporting(B, 2_000, 80_000, 'the first loss')
+  const first = await waitFor(async () => (await failedRows(B))[0], 90_000, 1000)
+  check('the first loss is logged with the retry note', !!first && first.note === 'auto-retry', JSON.stringify(first))
+  const backInProcessing = await waitFor(() => inboxFolderHas('processing', B), 300_000, 1000)
+  check('the file went back into the import by itself', !!backInProcessing)
+  await freezeWhileImporting(B, afterFirst + 1_000, TOTAL - 5_000, 'the second loss')
+  const both = await waitFor(async () => ((await failedRows(B)).length >= 2 ? await failedRows(B) : null), 90_000, 1000)
+  check('the second loss is logged as failed, with the stall reason and without the retry note', !!both && both[0].note === null && /stalled/.test(both[0].error_message ?? '') && !/retrying automatically/.test(both[0].error_message ?? ''), JSON.stringify(both?.[0]))
+  info('waiting longer than the retry delay to see that nothing comes back', '150 s')
+  await sleep(150_000)
+  check('the file stays in failed/: not in the inbox, not in processing/, not in done/', inboxFolderHas('failed', B) && !inboxFolderHas('', B) && !inboxFolderHas('processing', B) && !inboxFolderHas('done', B))
+  check('...there was one automatic retry in the log and no more job rows than the two losses', (appLog().match(new RegExp(`retrying automatically after an interruption: ${B}`, 'g')) ?? []).length === 1 && (await inboxJobs(B)).length === 2,
+    `${(await inboxJobs(B)).length} rows`)
+  const manual = await api('POST', '/api/inbox/retry', { filename: B })
+  check('the owner\'s Retry puts it back', manual.status === 200 && (manual.json?.moved ?? []).includes(B), JSON.stringify(manual.json))
+  const doneB = await waitFor(async () => (await inboxJobs(B)).find(r => r.status === 'done'), 420_000, 2000)
+  check('...and it finishes: every row once', !!doneB && rowsFor(B) === TOTAL && distinctFor(B) === TOTAL, `${JSON.stringify(doneB)} rows ${rowsFor(B)}`)
+
+  // C. the app is killed in the middle of an inbox file: the start-up sweep sends the file back once
+  const C = `e2e-nov-retry-c-${RUN}.txt`
+  dropInInbox(C, text(lines('RC', 0, TOTAL)))
+  const midC = await waitFor(() => { const n = rowsFor(C); return n >= 3_000 && n < 100_000 ? n : 0 }, 300_000, 300)
+  check('a kill: the commit was under way', !!midC, `rows ${rowsFor(C)}`)
+  sh('docker', ['kill', APP])
+  await sleep(10_000)
+  const beforeC = rowsFor(C)
+  info('rows written when the app was killed', beforeC)
+  if (!check('the app started again', await recreateApp({ slab: '1000' }))) return
+  const doneC = await waitFor(async () => (await inboxJobs(C)).find(r => r.status === 'done'), 420_000, 2000)
+  const failedC = (await failedRows(C))[0]
+  check('the start-up sweep logged the interruption with the retry note', !!failedC && failedC.note === 'auto-retry' && /Retrying automatically once/.test(failedC.error_message ?? ''), JSON.stringify(failedC))
+  check('...the file went back and finished: written rows known, the rest new', !!doneC && doneC.known === beforeC && doneC.imported === TOTAL - beforeC, JSON.stringify(doneC))
+  check('...every row once, and the file ends in done/ only', rowsFor(C) === TOTAL && distinctFor(C) === TOTAL && inboxFolderHas('done', C) && !inboxFolderHas('failed', C) && !inboxFolderHas('processing', C))
+  check('no stage table is left', stageTableCount() === 0)
+}
+
 async function run(): Promise<number> {
   // The receiver runs the app image's node with its own entrypoint, so the image's health check (port 3000) always calls it
   // unhealthy: for it, running is what matters.
@@ -1460,6 +1547,7 @@ async function run(): Promise<number> {
   if (want('lookalikes')) await lookAlikes()
   if (want('norm-not-ready')) await normNotReady()
   if (want('workers')) await parseWorkers()
+  if (want('retry')) await autoRetry()
 
   scanLog('at the end')
   await recreateApp() // leave the stack on the production defaults
