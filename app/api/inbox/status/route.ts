@@ -6,6 +6,8 @@ import { getWaiting, getFailed, getHeld, getDoneCount } from '@/lib/inbox-helper
 import { latestHeldReport } from '@/lib/ingest-gate-store'
 import { getInboxJobsProgress, getInFlightCount, type InboxJobProgress } from '@/lib/inbox-watcher'
 import { computeProgress } from '@/lib/inbox-progress'
+import { appArchiveDir } from '@/lib/archive-ref'
+import { archiveNote, readStatus } from '@/lib/archive-auto'
 
 export const dynamic = 'force-dynamic'
 
@@ -94,6 +96,12 @@ export async function GET(request: NextRequest) {
   // OR files IN inFlight but NOT the current job AND not moving → stale entries
   const stale_in_flight = Math.max(0, in_flight_count - (current ? 1 : 0))
 
+  // The account the host's automatic archive run left in the archive directory (mounted read-only); null when there is none.
+  const archiveStatus = readStatus(appArchiveDir())
+  const archive = archiveStatus
+    ? { at: archiveStatus.at, note: archiveNote(archiveStatus), problem: archiveStatus.failed > 0 || (archiveStatus.verify?.failed ?? 0) > 0 }
+    : null
+
   return NextResponse.json({
     watcher_active:   depth > 0 || current !== null,
     current_file:     current,
@@ -108,5 +116,6 @@ export async function GET(request: NextRequest) {
     held,
     done_count,
     done_recent,
+    archive,
   })
 }

@@ -96,6 +96,8 @@ interface InboxStatus {
   done_recent:      DoneEntry[]
   in_flight_count?: number
   stale_in_flight?: number
+  /** The account of the host's automatic archive run (scripts/archive-when-idle.ts); null when no run has left one. */
+  archive?:         { at: string; note: string; problem: boolean } | null
 }
 
 // ─── Formatting helpers ───────────────────────────────────────────────────────
@@ -585,6 +587,11 @@ export default function InboxPage() {
           </CardTitle>
         </CardHeader>
         <CardContent className="pt-0 pb-4">
+          {data?.archive && (
+            <p data-testid="archive-note" className={`text-xs mb-2 ${data.archive.problem ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'}`}>
+              {data.archive.note} <span className="whitespace-nowrap">({fmtRelTime(data.archive.at)})</span>
+            </p>
+          )}
           {!data || data.done_recent.length === 0 ? (
             <p className="text-sm text-muted-foreground">No files processed yet.</p>
           ) : (

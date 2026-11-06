@@ -1,5 +1,8 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { NextRequest } from 'next/server'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const h = vi.hoisted(() => ({ progress: null as null | Record<string, unknown>, jobs: null as null | Array<Record<string, unknown>>, dbQuery: vi.fn(), held: [] as Array<Record<string, unknown>>, latestHeldReport: vi.fn() }))
 vi.mock('@/lib/auth', () => ({
@@ -130,5 +133,34 @@ describe('GET /api/inbox/status with novelty-aware ingest', () => {
     expect(sql).toMatch(/AS gate_level/)
     expect(sql).toMatch(/AS gate_note/)
     expect(json.done_recent[0]).toMatchObject({ status: 'held', gate_level: 'hold', gate_note: '7% break a rule' })
+  })
+})
+
+describe('GET /api/inbox/status: the account of the automatic archive', () => {
+  let arc = ''
+  beforeEach(() => { arc = mkdtempSync(join(tmpdir(), 'inbox-status-arc-')); vi.stubEnv('ULP_ARCHIVE_DIR', arc) })
+  afterEach(() => { vi.unstubAllEnvs(); rmSync(arc, { recursive: true, force: true }) })
+  const status = (over: Record<string, unknown> = {}) => JSON.stringify({
+    v: 1, at: '2026-11-05T22:00:00.000Z', ran: true, archived: 3, failed: 0, plain_bytes: 5 * 1024 ** 3, verify: { checked: 3, failed: 0 },
+    ready_files: 3, ready_bytes: 5 * 1024 ** 3, unarchived_files: 0, unarchived_bytes: 0, other_files: 0, other_bytes: 0, empty_files: 0, free_bytes: 200 * 1024 ** 3, ...over,
+  })
+
+  it('carries the one-line account and when it was made', async () => {
+    writeFileSync(join(arc, 'auto-archive-status.json'), status())
+    const json = await get()
+    expect(json.archive.at).toBe('2026-11-05T22:00:00.000Z')
+    expect(json.archive.note).toMatch(/^Archive: 3 files archived \(5\.0 GiB\).*3 files are ready to replace.*would free about 5\.0 GiB.*Nothing is removed without you\.$/)
+    expect(json.archive.problem).toBe(false)
+  })
+
+  it('flags a run that failed', async () => {
+    writeFileSync(join(arc, 'auto-archive-status.json'), status({ failed: 1 }))
+    expect((await get()).archive.problem).toBe(true)
+  })
+
+  it('is null when there is no status (no archive mounted, or no run yet) or the file is not one this version reads', async () => {
+    expect((await get()).archive).toBeNull()
+    writeFileSync(join(arc, 'auto-archive-status.json'), '{ broken')
+    expect((await get()).archive).toBeNull()
   })
 })

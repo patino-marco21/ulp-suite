@@ -1,0 +1,10 @@
+[Unit]
+Description=Look every 30 minutes for an idle ULP inbox with files to archive
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=30min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

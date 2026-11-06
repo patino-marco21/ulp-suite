@@ -1,0 +1,16 @@
+[Unit]
+Description=Archive inbox/done when the ULP inbox is idle (never removes plaintext)
+Documentation=file://%h/Desktop/ulp-suite/scripts/archive-when-idle.ts
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Desktop/ulp-suite
+# node comes from nvm on this machine; a user service does not read the shell profile, so name it. Edit the version after a node upgrade.
+Environment=PATH=%h/.nvm/versions/node/v24.16.0/bin:/usr/local/bin:/usr/bin:/bin
+Environment=ULP_REPO=%h/Desktop/ulp-suite
+Environment=ULP_ARCHIVE_DIR=%h/Desktop/ulp-archive
+ExecStart=%h/Desktop/ulp-suite/node_modules/.bin/tsx scripts/archive-when-idle.ts
+Nice=19
+IOSchedulingClass=idle
+# one run at a time even if a run outlasts the timer's interval: systemd does not start a oneshot unit that is still active
+TimeoutStartSec=6h
