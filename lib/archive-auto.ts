@@ -86,6 +86,7 @@ export function readyToReplace(doneDir: string, archiveDir: string, latest: Map<
     try { st = lstatSync(join(doneDir, name)) } catch { continue }
     if (!st.isFile()) continue
     if (st.size === 0) { r.empty_files++; continue }
+    if (name.toLowerCase().endsWith('.archiveref')) continue   // a pointer into the archive (lib/archive-ref.ts): it holds no data of its own, so there is nothing to archive or replace
     const inode = `${st.dev}:${st.ino}`
     const firstName = !seen.has(inode)
     seen.add(inode)

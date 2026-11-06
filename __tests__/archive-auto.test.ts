@@ -74,6 +74,7 @@ describe('on disk', () => {
     writeFileSync(join(done, 'new.txt'), 'c'.repeat(30))                           // never archived
     writeFileSync(join(done, 'note.csv'), 'd'.repeat(20))                          // the tool reads *.txt names only
     writeFileSync(join(done, 'empty.txt'), '')                                     // a failed copy
+    writeFileSync(join(done, 'from-archive.txt.archiveref'), '{"id":"x"}')         // a pointer into the archive: no data of its own, not counted at all
     writeFileSync(join(archive, 'id-archived.txt.zst'), 'z'); writeFileSync(join(archive, 'id-archived second name.txt.zst'), 'z'); writeFileSync(join(archive, 'id-changed.txt.zst'), 'z')
     const latest = new Map<string, ManifestEntry>([
       ['archived.txt', entry('archived.txt', 100)],
