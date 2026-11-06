@@ -242,7 +242,10 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   Thresholds: `INGEST_QUALITY_GATE_JUNK_PCT` (2), `INGEST_QUALITY_GATE_UNSPLIT_PCT` (5), `INGEST_QUALITY_GATE_GARBAGE_PCT` (25),
   `INGEST_QUALITY_GATE_WARN_JUNK_PCT` (1), `INGEST_QUALITY_GATE_WARN_UNSPLIT_PCT` (2), `INGEST_QUALITY_GATE_MIN_LINES` (20000) and
   `INGEST_QUALITY_GATE_EARLY_LINES` (1000000: a big file is checked once after that many lines, so a bad 4 GB file costs a
-  million lines, not the whole file). `npx tsx scripts/preflight.ts <file>...` gives the verdict from a sample before a file is imported.
+  million lines, not the whole file). `npx tsx scripts/preflight.ts <file>...` gives the verdict from a sample before a file is imported;
+  with `--known` it also says how much of the file is expected to be new to the database (a sample of 5 MiB counted against
+  `ulp.credentials` on the normalised key, one scan for all files of the call), and marks a file under 5% new as `LOW YIELD`. It is
+  advice for the owner: nothing is skipped, parked or reordered (`docs/superpowers/specs/2026-11-05-known-share-preflight-design.md`).
   The unsplit share leaves out the lines that cannot hold a credential in any layout (a banner, a divider, a bare link, a link with one
   field behind it; `cannotHoldCredential` in `lib/ulp-recover.ts`), and a file over 8 MiB is also sampled before its import starts (five
   slices of 2 MiB spread over the file, as the preflight reads them): it is held at once when the sample is past a hold limit by half

@@ -48,6 +48,21 @@ describe('scripts/preflight.ts', () => {
     expect(JSON.parse(json.stdout.trim().split('\n')[0])).toMatchObject({ level: 'pass', whole: true })
   })
 
+  it('--known with a ClickHouse that does not answer: the verdict is still printed, the failure is reported, the exit code is 2', () => {
+    const r = spawnSync(TSX, ['scripts/preflight.ts', '--known', join(root, 'clean.txt')],
+      { cwd: REPO, encoding: 'utf8', env: { ...process.env, CH_CONTAINER: 'ulp-no-such-container', INGEST_QUALITY_GATE_MIN_LINES: '100' } })
+    expect(r.status, r.stdout + r.stderr).toBe(2)
+    expect(r.stdout).toMatch(/PASS/)
+    expect(r.stderr).toMatch(/cannot compute the expected new share/)
+  })
+
+  it('without --known ClickHouse is never asked: an unreachable container changes nothing', () => {
+    const r = spawnSync(TSX, ['scripts/preflight.ts', join(root, 'clean.txt')],
+      { cwd: REPO, encoding: 'utf8', env: { ...process.env, CH_CONTAINER: 'ulp-no-such-container', INGEST_QUALITY_GATE_MIN_LINES: '100' } })
+    expect(r.status, r.stdout + r.stderr).toBe(0)
+    expect(r.stdout).not.toMatch(/expected new share/)
+  })
+
   it('exits 2 without a file, and for a file that is neither readable nor archived', () => {
     expect(run([]).status).toBe(2)
     expect(run([join(root, 'does-not-exist.txt')]).status).toBe(2)
