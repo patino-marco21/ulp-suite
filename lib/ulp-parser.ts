@@ -36,8 +36,9 @@ import { hasGarbageIdentity, hasMojibakeSignature, hasEdgeWhitespace } from '@/l
 import { stripPromoSignature } from '@/lib/ulp-promo-signature'
 import { hasTelegramLink, stripTelegramTag } from '@/lib/ulp-telegram-tag'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
+import { maskText } from '@/lib/ingest-quality-gate'
 import {
-  cannotHoldCredential, holdsCredential, isUrlPathParameter, joinPipedUrl, looksLikeUrlFragment, protocolRelativeToPlain, recoverAndroidAppLine, splitCredentialUrlPair, splitNumericLogin,
+  cannotHoldCredential, holdsCredential, isUrlPathParameter, joinPipedUrl, looksLikeUrlFragment, protocolRelativeToPlain, recoverAndroidAppLine, splitCredentialUrlPair, splitNumericLogin, splitSiteAnnotation,
   splitPipedLabelledPair, splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme, stripTrailingSemicolons,
 } from '@/lib/ulp-recover'
 
@@ -817,6 +818,10 @@ export function parseLine(
     ;[url, login, password] = split
   }
 
+  // Rule P (parser v6.5): "host/path:(host/path):login:password" -- a parenthesised copy of the site between the url and the credential is an annotation, not the login
+  const annotated = splitSiteAnnotation(url, login, password)
+  if (annotated) [login, password] = annotated
+
   // Country-code URL prefix: some source files prepend an ISO country code +
   // space to the URL field ("DZ https://site/..."), which is not part of the
   // URL. Strip it so the stored `url` (and the url_host materialized from it)
@@ -1084,7 +1089,16 @@ export interface StreamBatch {
    * They are still counted in `breakdown.no_fields`; the quality gate subtracts them from its "unsplit" share. Absent when there were none.
    */
   noCredential?: number
+  /**
+   * Of the `no_fields` rejects that COULD hold a credential (the rest of them, the ones the gate counts as unsplit), the masked shape of each with its count: every run of letters
+   * and digits becomes "w", the punctuation stays (maskText in lib/ingest-quality-gate.ts). No value is in a shape. At most UNSPLIT_SHAPES_PER_BATCH distinct shapes per batch, the
+   * rest together as "(other shapes)". Absent when there were none.
+   */
+  unsplitShapes?: Array<[string, number]>
 }
+
+/** Distinct unsplit-line shapes one batch keeps; the quality gate keeps SHAPE_CAP over the whole file. */
+const UNSPLIT_SHAPES_PER_BATCH = 200
 
 export interface ParseStreamOptions {
   /**
@@ -1118,6 +1132,7 @@ export async function* parseULPStream(
   let   batchRejected = 0
   let   batchBreakdown: Record<RejectionReason, number> = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0, tier_dropped: 0 }
   let   batchNoCredential = 0
+  let   batchUnsplit = new Map<string, number>()
   let   blockState = makeBlockState()
   // Positional (label-free) state — mirrors the same logic in parseULPContent
   let   positionalUrl   = ''
@@ -1134,8 +1149,12 @@ export async function* parseULPStream(
   const androidSeen = new Set<string>()
 
   function flushBatch(): StreamBatch {
-    const out: StreamBatch = { credentials: batch, rejected: batchRejected, breakdown: batchBreakdown, ...(batchNoCredential > 0 ? { noCredential: batchNoCredential } : {}) }
-    batch = []; batchRejected = 0; batchNoCredential = 0
+    const out: StreamBatch = {
+      credentials: batch, rejected: batchRejected, breakdown: batchBreakdown,
+      ...(batchNoCredential > 0 ? { noCredential: batchNoCredential } : {}),
+      ...(batchUnsplit.size > 0 ? { unsplitShapes: [...batchUnsplit] } : {}),
+    }
+    batch = []; batchRejected = 0; batchNoCredential = 0; batchUnsplit = new Map()
     batchBreakdown = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0, tier_dropped: 0 }
     return out
   }
@@ -1273,7 +1292,14 @@ export async function* parseULPStream(
       batchRejected++
       if (reason) {
         batchBreakdown[reason]++
-        if (reason === 'no_fields' && cannotHoldCredential(trimmed)) batchNoCredential++
+        if (reason === 'no_fields') {
+          if (cannotHoldCredential(trimmed)) batchNoCredential++
+          else {
+            const shape = maskText(trimmed)
+            const key = batchUnsplit.has(shape) || batchUnsplit.size < UNSPLIT_SHAPES_PER_BATCH ? shape : '(other shapes)'
+            batchUnsplit.set(key, (batchUnsplit.get(key) ?? 0) + 1)
+          }
+        }
       }
     }
   }

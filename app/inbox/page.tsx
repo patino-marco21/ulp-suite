@@ -75,6 +75,8 @@ interface GateReportView {
   garbagePct: number
   kinds:      Record<string, number>
   shapes:     Array<{ shape: string; count: number }>
+  /** What the lines that could not be split look like (masked, no values). Absent from a report written before they were collected. */
+  unsplitShapes?: Array<{ shape: string; count: number }>
 }
 
 interface HeldEntry extends InboxFileEntry {
@@ -505,6 +507,14 @@ export default function InboxPage() {
                       )}
                       {Object.keys(f.report.kinds).length > 0 && (
                         <p>{Object.entries(f.report.kinds).map(([k, n]) => `${k}: ${fmtRows(n)}`).join(', ')}</p>
+                      )}
+                      {(f.report.unsplitShapes?.length ?? 0) > 0 && (
+                        <details open>
+                          <summary className="cursor-pointer">Most common shapes of the lines that could not be split (letters and digits shown as w)</summary>
+                          <ul className="font-mono">
+                            {f.report.unsplitShapes?.slice(0, 10).map(s => <li key={s.shape}>{fmtRows(s.count)} × {s.shape}</li>)}
+                          </ul>
+                        </details>
                       )}
                       {f.report.shapes.length > 0 && (
                         <details>

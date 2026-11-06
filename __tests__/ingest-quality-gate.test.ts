@@ -70,6 +70,7 @@ describe('maskShape', () => {
 })
 
 describe('recordGateBatch', () => {
+  const CFG = parseGateConfig({})
   const batch = (credentials: Row[], rejected = 0, breakdown = {}, noCredential?: number) => ({
     credentials: credentials.map(([url, email, password]) => ({ url, email, password })), rejected, breakdown,
     ...(noCredential === undefined ? {} : { noCredential }),
@@ -81,6 +82,30 @@ describe('recordGateBatch', () => {
     recordGateBatch(c, batch([CLEAN], 2, { no_fields: 2 })) // a batch from a caller that does not know the count (the field is optional)
     expect(c).toMatchObject({ lines: 1 + 5 + 1 + 2, noFields: 7, noCredential: 3 })
     expect(newGateCounters().noCredential).toBe(0)
+  })
+
+  it('merges the shapes of the unsplit lines of every batch, and keeps the report to the most frequent ones', () => {
+    const c = newGateCounters()
+    recordGateBatch(c, { ...batch([CLEAN], 4, { no_fields: 4 }), unsplitShapes: [['w w w', 3], ['w:w w://w', 1]] })
+    recordGateBatch(c, { ...batch([CLEAN], 2, { no_fields: 2 }), unsplitShapes: [['w w w', 1], ['w;w', 1]] })
+    expect(c.unsplitShapes.get('w w w')).toBe(4)
+    const report = evaluateGate(c, CFG, 'early').report
+    expect(report.unsplitShapes).toEqual([{ shape: 'w w w', count: 4 }, { shape: 'w:w w://w', count: 1 }, { shape: 'w;w', count: 1 }])
+  })
+
+  it('a report has no unsplit shapes when no line was unsplit, and a batch that does not tell adds none', () => {
+    const c = newGateCounters()
+    recordGateBatch(c, batch([CLEAN]))
+    expect(c.unsplitShapes.size).toBe(0)
+    expect(evaluateGate(c, CFG, 'final').report.unsplitShapes).toBeUndefined()
+  })
+
+  it('keeps at most SHAPE_CAP distinct unsplit shapes and counts the rest as "(other shapes)"', () => {
+    const c = newGateCounters()
+    const many: Array<[string, number]> = Array.from({ length: SHAPE_CAP + 50 }, (_, i) => [`w${'.'.repeat(i + 1)}`, 1])
+    recordGateBatch(c, { ...batch([CLEAN], many.length, { no_fields: many.length }), unsplitShapes: many })
+    expect(c.unsplitShapes.size).toBe(SHAPE_CAP + 1)
+    expect(c.unsplitShapes.get('(other shapes)')).toBe(50)
   })
 
   it('counts the non-blank lines, the stored rows, the rejects by reason and the rows that break a rule', () => {
@@ -147,9 +172,9 @@ describe('parseGateConfig', () => {
 
 describe('evaluateGate', () => {
   const cfg = (over: Partial<GateConfig> = {}): GateConfig => ({ ...parseGateConfig({}), ...over })
-  const counters = (c: Partial<Omit<GateCounters, 'kinds' | 'shapes'>>): GateCounters => ({ ...newGateCounters(), ...c })
+  const counters = (c: Partial<Omit<GateCounters, 'kinds' | 'shapes' | 'unsplitShapes'>>): GateCounters => ({ ...newGateCounters(), ...c })
   const BIG = { lines: 100_000, stored: 90_000 }
-  const level = (c: Partial<Omit<GateCounters, 'kinds' | 'shapes'>>, over: Partial<GateConfig> = {}) => evaluateGate(counters(c), cfg(over), 'final').level
+  const level = (c: Partial<Omit<GateCounters, 'kinds' | 'shapes' | 'unsplitShapes'>>, over: Partial<GateConfig> = {}) => evaluateGate(counters(c), cfg(over), 'final').level
 
   it('passes a clean file', () => {
     expect(level({ ...BIG, junk: 100, noFields: 500, garbage: 1_000 })).toBe('pass')

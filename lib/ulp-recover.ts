@@ -97,6 +97,37 @@ export function splitCredentialUrlPair(line: string): [string, string, string] |
   return m && !hasTelegramLink(m[3]) ? [m[3], m[1], m[2]] : null
 }
 
+/** The host of a url as typed ("https://www.Shop.example.test:8443/x" and "shop.example.test/x" both give "shop.example.test"); '' when it is not a dotted host. */
+function plainHost(url: string): string {
+  const scheme = url.indexOf('://')
+  const i = scheme >= 0 && scheme <= 32 && url.indexOf('/') === scheme + 1 ? scheme + 3 : 0
+  let end = i
+  while (end < url.length && end - i <= 253) {
+    const c = url[end]
+    if (c === '/' || c === '?' || c === '#' || c === ':' || c === '@') break
+    end++
+  }
+  if (end - i > 253) return ''
+  let host = url.slice(i, end).toLowerCase()
+  if (host.startsWith('www.')) host = host.slice(4)
+  return host.length >= 3 && host.includes('.') ? host : ''
+}
+
+/**
+ * "shop.example.test/login:(shop.example.test/login):alice:Secret1" (parser v6.5): a url, a parenthesised copy of the site, then login:password. The colon chain reads the copy as
+ * the login and "alice:Secret1" as the password. It is an annotation when the text in the parentheses repeats the url's host (an id or a country prefix in parentheses, "(123)" or
+ * "(+7)", is left alone: it could be the login) and the password holds a colon with something on both sides; the first colon then ends the login, as in a plain line.
+ * Returns [login, password], or null when the fields are not that shape. Linear: an indexOf of a host of at most 253 characters in a copy of at most 2,048.
+ */
+export function splitSiteAnnotation(url: string, login: string, password: string): [string, string] | null {
+  if (login.length < 5 || login.length > 2048 || login[0] !== '(' || login[login.length - 1] !== ')') return null
+  const colon = password.indexOf(':')
+  if (colon <= 0 || colon === password.length - 1) return null
+  const host = plainHost(url)
+  if (!host || !login.toLowerCase().includes(host)) return null
+  return [password.slice(0, colon), password.slice(colon + 1)]
+}
+
 const PROTOCOL_RELATIVE = /^[^\s:@]+(?::\d{1,5}\/?[^\s:]*)?:[^\s:/]+:[^\s:]+$/
 
 /**

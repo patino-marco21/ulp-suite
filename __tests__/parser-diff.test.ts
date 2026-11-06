@@ -300,3 +300,33 @@ describe('login:password then the url (parser v6.4)', () => {
     expect(classifyChange(line, none('no_fields'), stored, none('no_fields'))).toBe('unexplained')
   })
 })
+
+describe('a parenthesised copy of the site before the login (parser v6.5)', () => {
+  const line = 'shop.example.test/login:(shop.example.test/login):alice:pa:ss1'
+  const before = row('shop.example.test/login', '(shop.example.test/login)', 'alice:pa:ss1')
+  const after = row('shop.example.test/login', 'alice', 'pa:ss1')
+
+  test('a stored row whose login and password change is the site-annotation class', () => {
+    expect(classifyChange(line, before, after, before)).toBe('site-annotation')
+  })
+
+  test('a stored row that is now dropped by a policy after the split (a hard-dropped tier) is the site-annotation class', () => {
+    expect(classifyChange(line, before, none('tier_dropped'), before)).toBe('site-annotation')
+  })
+
+  test('a change that is not what the rule gives stays unexplained', () => {
+    expect(classifyChange(line, before, row('shop.example.test/login', 'alice', 'other'), before)).toBe('unexplained')
+  })
+
+  test('a row that does not repeat the host is not attributed to the rule', () => {
+    expect(classifyChange('shop.example.test/login:(123):alice:Secret1', row('shop.example.test/login', '(123)', 'alice:Secret1'), after, row('x', 'y', 'z'))).toBe('unexplained')
+  })
+
+  test('a row only the baseline stores (stream mode) is the site-annotation class', () => {
+    expect(classifyOldOnlyRow({ url: 'shop.example.test/login', email: '(shop.example.test/login)', password: 'alice:pa:ss1' })).toBe('site-annotation')
+  })
+
+  test('a parenthesised number is not', () => {
+    expect(classifyOldOnlyRow({ url: 'shop.example.test/login', email: '(123)', password: 'alice:pa:ss1' })).toBe('unexplained')
+  })
+})

@@ -1,7 +1,7 @@
 /** Names the reason the result for one line differs between a baseline parser and parser v6 (scripts/parser-diff.ts). "unexplained" must stay at 0. */
 import {
   hasInnerScheme, holdsCredential, isUrlPathParameter, pipeJoinAll, protocolRelativeToPlain, recoverAndroidAppLine, splitCredentialUrlPair, splitNumericLogin,
-  splitPipedLabelledPair, splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme,
+  splitPipedLabelledPair, splitSiteAnnotation, splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme,
 } from '@/lib/ulp-recover'
 import { stripTelegramTag } from '@/lib/ulp-telegram-tag'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
@@ -11,12 +11,12 @@ export interface Outcome { credential: { url: string; email: string; password: s
 export type ChangeClass =
   | 'same' | 'padded-colons' | 'android-no-scheme' | 'slash-in-password' | 'numeric-login' | 'protocol-relative'
   | 'utf8-recovered' | 'utf8-value' | 'utf8-lost' | 'login-equals-password' | 't3-kept' | 'pipe-scheme' | 'pipe-label' | 'pipe-url' | 'semicolon-password' | 'semicolon-parameter'
-  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'credential-url' | 'unexplained'
+  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'credential-url' | 'site-annotation' | 'unexplained'
 
 export const CHANGE_CLASSES: ChangeClass[] = [
   'padded-colons', 'android-no-scheme', 'slash-in-password', 'numeric-login', 'protocol-relative',
   'utf8-recovered', 'utf8-value', 'utf8-lost', 'login-equals-password', 't3-kept', 'pipe-scheme', 'pipe-label', 'pipe-url', 'semicolon-password', 'semicolon-parameter',
-  'leading-colon', 'semicolon-url-last', 'labelled-pair', 'nested-url', 'credential-url', 'unexplained',
+  'leading-colon', 'semicolon-url-last', 'labelled-pair', 'nested-url', 'credential-url', 'site-annotation', 'unexplained',
 ]
 
 const INERT = '\uE000'   // a private-use character: no parser rule knows it, so a line that holds it is read like one without a semicolon
@@ -63,6 +63,15 @@ function v62Rule(rawLine: string): 'semicolon-url-last' | 'labelled-pair' | 'nes
 }
 
 /**
+ * Parser v6.5: the baseline stored the parenthesised copy of the site as the login and "login:password" as the password. Explained when the rule applied to the baseline's
+ * fields gives the new result, or, with `after` null, when the new parser stores nothing because a policy after the split (the tier, a short password) dropped the line.
+ */
+function siteAnnotationOf(before: Cred, after: Cred | null): boolean {
+  const split = splitSiteAnnotation(before.url, before.email, before.password)
+  return !!split && (after === null || (split[0] === after.email && split[1] === after.password))
+}
+
+/**
  * `oldOnRepaired` is the baseline parser run on the UTF-8-repaired line: when it already gives the new result, the repair alone explains the change.
  * `oldOnJoined` is the baseline parser run on the line with the pipe that joins a url and a credential replaced (pipeJoinAll): the new result must be exactly that.
  * `oldOnSemi` is the baseline parser run on the line with its semicolons made inert (inertSemicolons, results mapped back with restoreSemicolons).
@@ -88,11 +97,13 @@ export function classifyChange(
   if (oldOnLead && !sameOutcome(oldO, newO) && sameOutcome(oldOnLead, newO)) return 'leading-colon'
   if (oldO.credential && newO.credential) {
     if (sameCred(oldO.credential, newO.credential)) return 'same'
+    if (siteAnnotationOf(oldO.credential, newO.credential)) return 'site-annotation'
     return oldOnRepaired.credential && sameCred(oldOnRepaired.credential, newO.credential) ? 'utf8-value' : v62Rule(rawLine) ?? 'unexplained'
   }
   if (!oldO.credential && !newO.credential) return 'same'
   // The old parser stored the line and v6 does not: explained when the UTF-8 repair alone makes the old parser reject it too (a password that is
   // two characters long once decoded, the double-encoded replacement character, ...).
+  if (oldO.credential && siteAnnotationOf(oldO.credential, null)) return 'site-annotation'
   if (oldO.credential) return repairUtf8Line(rawLine) !== rawLine && !oldOnRepaired.credential ? 'utf8-lost' : v62Rule(rawLine) ?? 'unexplained'
   const stored = newO.credential as Cred
   if (oldO.reason === 'tier_dropped') return 't3-kept'
@@ -116,7 +127,7 @@ export function classifyChange(
 /** A stored row that only the baseline parser produces (stream mode): the reason it is gone. */
 export type OldOnlyClass =
   | 'double-encoded' | 'android-mangled' | 'pipe-join' | 'semicolon-junk' | 'split-junk' | 'positional-merge' | 'utf8-text'
-  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'unexplained'
+  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'site-annotation' | 'unexplained'
 
 export function classifyOldOnlyRow(row: { url: string; email: string; password: string }): OldOnlyClass {
   const fields = [row.url, row.email, row.password]
@@ -131,6 +142,8 @@ export function classifyOldOnlyRow(row: { url: string; email: string; password: 
   // ... rule L: the labels of a "host/|Username:login:Password:pass" line stayed in the fields (the host as the login, or the label as the login)
   if (/^(?:login|username|user|e-?mail|mail):.*:(?:password|pass|pwd):/i.test(row.password)) return 'labelled-pair'
   if (/^(?:login|username|user|e-?mail|mail)$/i.test(row.email) && /:(?:password|pass|pwd):/i.test(row.password)) return 'labelled-pair'
+  // Parser v6.5: a parenthesised copy of the site between the url and the credential was stored as the login, and "login:password" as the password
+  if (splitSiteAnnotation(row.url, row.email, row.password)) return 'site-annotation'
   // ... rule M: the "://" of a url inside the url ended the url: the scheme name stayed at the end of it and the rest of the inner url became the login
   if (row.email.startsWith('//') && /:\/\//.test(row.url) && !row.url.endsWith('/')) return 'nested-url'
   // Parser v6.1, rule I: a ';' in the password of a colon-separated line cut the credential in two: no url, the complete credential as the login

@@ -97,6 +97,8 @@ export interface GateCounters {
   kinds: Record<GateKind, number>
   /** Masked shapes of the junk rows, at most SHAPE_CAP distinct ones. */
   shapes: Map<string, number>
+  /** Masked shapes of the unsplit lines that could hold a credential (the ones `unsplitPct` counts), at most SHAPE_CAP distinct ones: what a held file's unsplit lines look like. */
+  unsplitShapes: Map<string, number>
 }
 
 export function newGateCounters(): GateCounters {
@@ -104,6 +106,7 @@ export function newGateCounters(): GateCounters {
     lines: 0, stored: 0, junk: 0, noFields: 0, noPassword: 0, garbage: 0, tierDropped: 0, dedup: 0, noCredential: 0, gateErrors: 0,
     kinds: Object.fromEntries(GATE_KINDS.map(k => [k, 0])) as Record<GateKind, number>,
     shapes: new Map(),
+    unsplitShapes: new Map(),
   }
 }
 
@@ -114,6 +117,8 @@ export interface GateBatch {
   breakdown: Partial<Record<RejectionReason, number>>
   /** Of the `no_fields` rejects, how many cannot hold a credential. Absent from a batch that does not tell. */
   noCredential?: number
+  /** The masked shapes of the unsplit lines that could hold a credential, with their counts (maskText: no value in them). Absent from a batch that has none or does not tell. */
+  unsplitShapes?: ReadonlyArray<readonly [string, number]>
 }
 
 /** Every run of letters, digits, '_', '.', '~' and '-' (any script) becomes w, white space collapses, only the punctuation stays. Looks at no more than `max` characters. */
@@ -143,6 +148,10 @@ export function recordGateBatch(c: GateCounters, batch: GateBatch): void {
   c.garbage += b.garbage ?? 0
   c.tierDropped += b.tier_dropped ?? 0
   c.dedup += b.dedup ?? 0
+  for (const [shape, n] of batch.unsplitShapes ?? []) {
+    const key = c.unsplitShapes.has(shape) || c.unsplitShapes.size < SHAPE_CAP ? shape : OTHER_SHAPES
+    c.unsplitShapes.set(key, (c.unsplitShapes.get(key) ?? 0) + n)
+  }
   for (const cred of batch.credentials) {
     try {
       const kind = classifyStoredRow(cred.url, cred.email, cred.password)
@@ -228,6 +237,8 @@ export interface GateReport {
   kinds: Partial<Record<GateKind, number>>
   /** The most frequent masked shapes of the junk rows. */
   shapes: Array<{ shape: string; count: number }>
+  /** The most frequent masked shapes of the lines that could not be split. Absent when there were none, and from a report written before they were collected. */
+  unsplitShapes?: Array<{ shape: string; count: number }>
   thresholds: {
     minLines: number
     holdJunkPct: number
@@ -290,11 +301,16 @@ export function evaluateGate(c: GateCounters, cfg: GateConfig, phase: GatePhase)
     .slice(0, REPORT_SHAPES)
     .map(([shape, count]) => ({ shape, count }))
 
+  const unsplitShapes = [...c.unsplitShapes.entries()]
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .slice(0, REPORT_SHAPES)
+    .map(([shape, count]) => ({ shape, count }))
+
   const report: GateReport = {
     v: 1, phase, level, reasons,
     lines: c.lines, stored: c.stored, junk: c.junk, noFields: c.noFields, noCredential: c.noCredential, noPassword: c.noPassword, garbage: c.garbage,
     tierDropped: c.tierDropped, gateErrors: c.gateErrors,
-    junkPct, unsplitPct, garbagePct, kinds, shapes,
+    junkPct, unsplitPct, garbagePct, kinds, shapes, ...(unsplitShapes.length > 0 ? { unsplitShapes } : {}),
     thresholds: {
       minLines: cfg.minLines, holdJunkPct: cfg.holdJunkPct, holdUnsplitPct: cfg.holdUnsplitPct, holdGarbagePct: cfg.holdGarbagePct,
       warnJunkPct: cfg.warnJunkPct, warnUnsplitPct: cfg.warnUnsplitPct,
