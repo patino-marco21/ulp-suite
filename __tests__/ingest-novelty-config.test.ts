@@ -2,10 +2,12 @@ import { describe, it, expect } from 'vitest'
 import {
   COMMIT_EXTERNAL_SORT_BYTES,
   COMMIT_MAX_EXECUTION_S,
+  DEFAULT_COMMIT_BLOCK_ROWS,
   DEFAULT_COMMIT_INSERT_THREADS,
   DEFAULT_NOVELTY_SLAB_ROWS,
   MIN_NOVELTY_SLAB_ROWS,
   NORM_KEY_MAX_SLAB_ROWS,
+  commitBlockRows,
   commitInsertThreads,
   normKeyEnabled,
   noveltyConfig,
@@ -91,5 +93,20 @@ describe('normKeyEnabled', () => {
   it('cuts a slab on the normalised key at 10,000,000 rows (7.1 GiB measured; 10.6 GiB at 20,000,000 is more than the exact-key statement it replaces)', () => {
     expect(NORM_KEY_MAX_SLAB_ROWS).toBe(10_000_000)
     expect(NORM_KEY_MAX_SLAB_ROWS).toBeLessThan(DEFAULT_NOVELTY_SLAB_ROWS)
+  })
+})
+
+describe('commitBlockRows', () => {
+  it('is 131,072 by default (measured: a slab of new rows is about two default blocks, so one thread did the work)', () => {
+    expect(DEFAULT_COMMIT_BLOCK_ROWS).toBe(131_072)
+    expect(commitBlockRows(env())).toBe(131_072)
+  })
+
+  it.each([['8192', 8_192], ['65536', 65_536], ['262144', 262_144], ['1048576', 1_048_576], [' 100000 ', 100_000], ['99999.9', 99_999]])('INGEST_COMMIT_BLOCK_ROWS=%j gives %i', (raw, want) => {
+    expect(commitBlockRows(env({ INGEST_COMMIT_BLOCK_ROWS: raw }))).toBe(want)
+  })
+
+  it.each(['', '  ', 'abc', '0', '-1', '8191', '1048577', '5000000', 'NaN'])('falls back to 131,072 for INGEST_COMMIT_BLOCK_ROWS=%j (the range is 8,192 to 1,048,576)', raw => {
+    expect(commitBlockRows(env({ INGEST_COMMIT_BLOCK_ROWS: raw }))).toBe(131_072)
   })
 })

@@ -336,9 +336,11 @@ describe('commitStage: the commit insert runs on several insert threads', () => 
   }
   const commitInsert = (db: { calls: Call[] }) => db.calls.find(c => c.sql.startsWith('INSERT INTO ulp.credentials'))!
 
-  it('asks for 4 insert threads by default, and only the commit insert asks', async () => {
+  const blocks = (rows: number) => ({ max_insert_block_size: rows, min_insert_block_size_rows: rows, max_block_size: rows })
+
+  it('asks for 4 insert threads and 131,072-row blocks by default, and only the commit insert asks', async () => {
     const db = await run()
-    expect(commitInsert(db).settings).toEqual({ max_insert_threads: 4 })
+    expect(commitInsert(db).settings).toEqual({ max_insert_threads: 4, ...blocks(131_072) })
     const others = db.calls.filter(c => c.kind === 'exec' && c !== commitInsert(db))
     expect(others.map(label)).toEqual(['truncate known', 'fill known']) // the existence scan keeps the server's own plan
     expect(others.every(c => c.settings === undefined)).toBe(true)
@@ -346,18 +348,30 @@ describe('commitStage: the commit insert runs on several insert threads', () => 
 
   it('takes the count from INGEST_COMMIT_INSERT_THREADS', async () => {
     vi.stubEnv('INGEST_COMMIT_INSERT_THREADS', '8')
-    expect(commitInsert(await run()).settings).toEqual({ max_insert_threads: 8 })
+    expect(commitInsert(await run()).settings).toEqual({ max_insert_threads: 8, ...blocks(131_072) })
   })
 
   it('an explicit count wins over the environment', async () => {
     vi.stubEnv('INGEST_COMMIT_INSERT_THREADS', '8')
-    expect(commitInsert(await run({ insertThreads: 2 })).settings).toEqual({ max_insert_threads: 2 })
+    expect(commitInsert(await run({ insertThreads: 2 })).settings).toEqual({ max_insert_threads: 2, ...blocks(131_072) })
   })
 
-  it('rows written and the accounting check do not depend on the thread count', async () => {
+  it('takes the block size from INGEST_COMMIT_BLOCK_ROWS, and an explicit size wins over the environment', async () => {
+    vi.stubEnv('INGEST_COMMIT_BLOCK_ROWS', '262144')
+    expect(commitInsert(await run()).settings).toEqual({ max_insert_threads: 4, ...blocks(262_144) })
+    expect(commitInsert(await run({ blockRows: 65_536 })).settings).toEqual({ max_insert_threads: 4, ...blocks(65_536) })
+  })
+
+  it('1,048,576 rows is the server\'s own block size: the old behaviour', async () => {
+    expect(commitInsert(await run({ blockRows: 1_048_576 })).settings).toEqual({ max_insert_threads: 4, ...blocks(1_048_576) })
+  })
+
+  it('rows written and the accounting check do not depend on the thread count or the block size', async () => {
     for (const insertThreads of [1, 4, 16]) {
-      expect(await commitStage(options(makeDb({ stageRows: 1000, distinct: [900], known: [100] }), { parsedRows: 1000, insertThreads })))
-        .toMatchObject({ inserted: 800, known: 100, distinct: 900 })
+      for (const blockRows of [8_192, 131_072, 1_048_576]) {
+        expect(await commitStage(options(makeDb({ stageRows: 1000, distinct: [900], known: [100] }), { parsedRows: 1000, insertThreads, blockRows })))
+          .toMatchObject({ inserted: 800, known: 100, distinct: 900 })
+      }
     }
   })
 })

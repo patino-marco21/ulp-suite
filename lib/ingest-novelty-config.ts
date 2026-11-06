@@ -6,6 +6,8 @@
  *   INGEST_NOVELTY_SLAB_ROWS  default 20,000,000, at least 1,000. A file is committed in slabs of about this many staged rows.
  *   INGEST_COMMIT_INSERT_THREADS  default 4, 1 to 16. The commit INSERT ... SELECT runs with this many insert threads
  *                                 (docs/superpowers/specs/2026-10-12-fast-ingest-design.md, step A2).
+ *   INGEST_COMMIT_BLOCK_ROWS  default 131,072, 8,192 to 1,048,576. The commit INSERT ... SELECT builds blocks of this many rows (max_insert_block_size, min_insert_block_size_rows
+ *                             and max_block_size); 1,048,576 is the server's own size, the behaviour before 2026-11-06.
  *   INGEST_NORM_KEY           default on. off | 0 | false matches imports on the exact key (content_key_hash) everywhere. When on, the normalised key
  *                             (norm_key_hash) is used once every part of ulp.credentials holds it (lib/norm-key-ready.ts).
  */
@@ -16,6 +18,10 @@ export const MIN_NOVELTY_SLAB_ROWS = 1_000
 export const DEFAULT_COMMIT_INSERT_THREADS = 4
 const MIN_COMMIT_INSERT_THREADS = 1
 const MAX_COMMIT_INSERT_THREADS = 16
+
+export const DEFAULT_COMMIT_BLOCK_ROWS = 131_072
+const MIN_COMMIT_BLOCK_ROWS = 8_192
+const MAX_COMMIT_BLOCK_ROWS = 1_048_576
 
 /** Every commit statement may run this long, in seconds. The client's own default is 60, far too short for a slab. */
 export const COMMIT_MAX_EXECUTION_S = 3300
@@ -59,6 +65,18 @@ export function commitInsertThreads(env: NodeJS.Dict<string> = process.env): num
   const raw = env.INGEST_COMMIT_INSERT_THREADS
   const parsed = raw === undefined || raw.trim() === '' ? Number.NaN : Math.floor(Number(raw))
   return Number.isFinite(parsed) && parsed >= MIN_COMMIT_INSERT_THREADS && parsed <= MAX_COMMIT_INSERT_THREADS ? parsed : DEFAULT_COMMIT_INSERT_THREADS
+}
+
+/**
+ * The block size of the commit insert. A slab holds only the rows that are NEW (about 15% of a file), 1.1-1.2M rows, which is two blocks of the server's default 1,048,576 rows,
+ * and a block is processed by one thread: the 22 commits of a four-file batch used 2.5 cores of 16 and took 16.6 s each. Measured on a scratch clone of the live DDL (20 skip
+ * indexes, 3 projections) for a 1.09M-row slab: default blocks 12.4 s at 4 threads and 12.8 s at 8 (no gain), 131,072-row blocks 5.3 s at 4 threads (6.3 cores), 65,536 rows with
+ * 16 threads 4.3 s. The cost is parts: 5 per commit at 131,072 against 1. A value outside 8,192 to 1,048,576 means the default.
+ */
+export function commitBlockRows(env: NodeJS.Dict<string> = process.env): number {
+  const raw = env.INGEST_COMMIT_BLOCK_ROWS
+  const parsed = raw === undefined || raw.trim() === '' ? Number.NaN : Math.floor(Number(raw))
+  return Number.isFinite(parsed) && parsed >= MIN_COMMIT_BLOCK_ROWS && parsed <= MAX_COMMIT_BLOCK_ROWS ? parsed : DEFAULT_COMMIT_BLOCK_ROWS
 }
 
 /** How many slabs a stage of `stageRows` rows is committed in (always at least one). */

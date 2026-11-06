@@ -25,7 +25,7 @@ import { getClient } from '@/lib/clickhouse'
 import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 import { buildNormalizedDomainSetMatch, type MatchedCredential, type MatchMode } from '@/lib/domain-match'
 import { waitForDiskSpace } from '@/lib/ingest-disk-gate'
-import { COMMIT_EXTERNAL_SORT_BYTES, COMMIT_MAX_EXECUTION_S, NORM_KEY_MAX_SLAB_ROWS, commitInsertThreads, slabCount } from '@/lib/ingest-novelty-config'
+import { COMMIT_EXTERNAL_SORT_BYTES, COMMIT_MAX_EXECUTION_S, NORM_KEY_MAX_SLAB_ROWS, commitBlockRows, commitInsertThreads, slabCount } from '@/lib/ingest-novelty-config'
 import type { StageTables } from '@/lib/ingest-stage'
 import type { KeyColumn } from '@/lib/norm-key-ready'
 
@@ -279,6 +279,8 @@ export interface CommitOptions {
   matchCap?: number
   /** `max_insert_threads` for the commit insert; absent = INGEST_COMMIT_INSERT_THREADS (lib/ingest-novelty-config.ts). */
   insertThreads?: number
+  /** Rows per block of the commit insert; absent = INGEST_COMMIT_BLOCK_ROWS (lib/ingest-novelty-config.ts). */
+  blockRows?: number
   /** Test seams. */
   db?: NoveltyDb
   /** Milliseconds clock for the phase timings; default Date.now. */
@@ -334,6 +336,7 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
   const monitors = (opts.monitors ?? []).filter(m => m.domains.some(d => d.trim() !== ''))
   const matchCap = Math.max(0, Math.floor(opts.matchCap ?? 0))
   const insertThreads = opts.insertThreads ?? commitInsertThreads()
+  const blockRows = opts.blockRows ?? commitBlockRows()
   const key = opts.keyColumn ?? DEFAULT_KEY
   const now = opts.now ?? Date.now
   let checkMs = 0
@@ -388,7 +391,7 @@ export async function commitStage(opts: CommitOptions): Promise<CommitResult> {
           opts.onPhase?.({ phase: 'inserting', slab: k + 1, slabs })
           const insertStart = now()
           const { writtenRows } = await step(id =>
-            db.exec(commitInsertSql(t, opts.target, slabs, k, key), { queryId: id, signal, settings: { max_insert_threads: insertThreads } }))
+            db.exec(commitInsertSql(t, opts.target, slabs, k, key), { queryId: id, signal, settings: { max_insert_threads: insertThreads, max_insert_block_size: blockRows, min_insert_block_size_rows: blockRows, max_block_size: blockRows } }))
           commitMs += now() - insertStart
           if (writtenRows === null) {
             console.warn(`[ingest-novelty] slab ${k + 1}/${slabs}: the server sent no written-rows count; the accounting check was skipped`)

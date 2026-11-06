@@ -170,6 +170,8 @@ services:
       # INGEST_COMMIT_INSERT_THREADS (empty = 4, 1 to 16) is max_insert_threads for the commit insert. CLICKHOUSE_COMPRESS_REQUESTS=1 gzips
       # INSERT bodies again (off by default: the app reaches ClickHouse over the Docker network, where gzip only costs CPU).
       INGEST_COMMIT_INSERT_THREADS: ${INGEST_COMMIT_INSERT_THREADS:-}
+      # INGEST_COMMIT_BLOCK_ROWS (empty = 131072, 8192 to 1048576) is the block size of that insert; 1048576 is the server's own size (the old behaviour).
+      INGEST_COMMIT_BLOCK_ROWS: ${INGEST_COMMIT_BLOCK_ROWS:-}
       CLICKHOUSE_COMPRESS_REQUESTS: ${CLICKHOUSE_COMPRESS_REQUESTS:-}
       # Ingest quality gate (lib/ingest-quality-gate.ts) -- optional; forwarded explicitly (see above). A file whose rows break too many rules is held in
       # inbox/held/ before one row is stored. INGEST_QUALITY_GATE=warn only reports, =off switches it off. The thresholds are percentages; empty = the
