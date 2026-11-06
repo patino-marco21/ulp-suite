@@ -85,6 +85,8 @@ services:
       UPLOAD_CONCURRENCY: ${REHEARSAL_UPLOAD_CONCURRENCY:-}
       INGEST_NOVELTY_CHECK: ${REHEARSAL_INGEST_NOVELTY_CHECK:-}
       INGEST_NOVELTY_SLAB_ROWS: ${REHEARSAL_INGEST_NOVELTY_SLAB_ROWS:-}
+      # scripts/e2e-novelty-ingest.ts (scenario groups) compares the grouped existence check (empty = the production default, 4) with the check slab by slab (1).
+      INGEST_NOVELTY_CHECK_GROUP: ${REHEARSAL_INGEST_NOVELTY_CHECK_GROUP:-}
       # scripts/e2e-novelty-ingest.ts (scenario lookalikes) switches the normalised key off with this (empty = the production default: on).
       INGEST_NORM_KEY: ${REHEARSAL_INGEST_NORM_KEY:-}
       # scripts/e2e-novelty-ingest.ts (scenario workers) starts parse workers and lowers the gate's early check to 50,000 lines (empty = off, and the production 1,000,000).

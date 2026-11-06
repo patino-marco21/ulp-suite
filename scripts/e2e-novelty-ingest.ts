@@ -24,6 +24,10 @@
  *   v64         parser v6.4: "login:password url" (the credential first, one or more spaces, the url last), with an e-mail login, no path, a port and a url inside a url; the url-first mirror
  *               that the parser already read, the lines that stay rejected (a login with a slash, a label before a Telegram link, an empty password, a password with a space, a scheme
  *               other than http and https) and the layouts that must not move
+ *   groups      INGEST_NOVELTY_CHECK_GROUP: two files at once, 14 slabs each (3,000-row slabs), share 30,000 rows; the grouped check (4) and the check slab by slab (1) write the same rows
+ *               (the shared ones once), and ClickHouse's query log shows the grouped check sent 4 fills per file instead of 14
+ *   v65         parser v6.5: "url:(copy of the site):login:password" (a parenthesised copy of the url's host between the url and the credential), with a scheme and www., an e-mail login and a
+ *               colon in the password; the shapes that stay as they were (a number in parentheses, a label that is not the host, no copy)
  *   monitor     a monitor alerts for rows that are new to the database, not for a row the database already held
  *   big         2.5M distinct lines + 100k repeats of early lines (past the old 2M in-file cap): exact, in 5 slabs, phases visible
  *   kill        the app is killed in the middle of the commit; after the restart the orphan stage tables are gone and a retry
@@ -199,7 +203,7 @@ async function api(method: string, path: string, body?: unknown): Promise<{ stat
   return { status: res.status, json }
 }
 
-interface AppSettings { concurrency?: string; novelty?: string; slab?: string; normKey?: string; floorBytes?: number; workers?: string; earlyLines?: string }
+interface AppSettings { concurrency?: string; novelty?: string; slab?: string; group?: string; normKey?: string; floorBytes?: number; workers?: string; earlyLines?: string }
 
 /** Looks for an accounting failure in the log of the container that is about to be replaced (its log goes with it). */
 function scanLog(label: string): void {
@@ -224,6 +228,7 @@ async function recreateApp(s: AppSettings = {}): Promise<boolean> {
     REHEARSAL_UPLOAD_CONCURRENCY: s.concurrency ?? '',
     REHEARSAL_INGEST_NOVELTY_CHECK: s.novelty ?? '',
     REHEARSAL_INGEST_NOVELTY_SLAB_ROWS: s.slab ?? '',
+    REHEARSAL_INGEST_NOVELTY_CHECK_GROUP: s.group ?? '',
     REHEARSAL_INGEST_NORM_KEY: s.normKey ?? '',
     REHEARSAL_INGEST_PARSE_WORKERS: s.workers ?? '',
     REHEARSAL_INGEST_QUALITY_GATE_EARLY_LINES: s.earlyLines ?? '',
@@ -660,6 +665,73 @@ async function parserV64(): Promise<void> {
     && one(`url = '' AND email = 'v64z2${RUN}@probe-mail.test' AND password = '${pw('Z2')}'`) === 1)
   check('no row has a login that holds a slash, a Telegram link as its url, or a space in any field',
     one(`(position(email, '/') > 0 OR position(url, 't.me') > 0 OR position(email, ' ') > 0 OR position(password, ' ') > 0)`) === 0)
+}
+
+async function checkGroups(): Promise<void> {
+  console.log('\n6b. Grouped existence check: slabs of one file share one scan of the table (INGEST_NOVELTY_CHECK_GROUP)')
+  scanLog('before the groups scenario')
+  const fills = (since: string) => {
+    chQuery('SYSTEM FLUSH LOGS')
+    return Number(chQuery(`SELECT count() FROM system.query_log WHERE type = 'QueryFinish' AND event_time >= toDateTime('${since}') AND query LIKE 'INSERT INTO ulp.zz_import_known_%'`))
+  }
+  const run = async (label: string, tag: string, group: string | undefined): Promise<{ since: string; names: [string, string] } | null> => {
+    if (!check(`the rehearsal app restarted with 3,000-row slabs, concurrency 2 and ${label}`, await recreateApp({ concurrency: '2', slab: '3000', ...(group ? { group } : {}) }))) return null
+    const since = chQuery('SELECT toString(now())')
+    const shared = lines(`${tag}S`, 0, 30_000)
+    const a = `e2e-nov-${tag}a-${RUN}.txt`
+    const b = `e2e-nov-${tag}b-${RUN}.txt`
+    const upA = upload(a, fixture(a, [...shared, ...lines(`${tag}A`, 0, 10_000)]))
+    const upB = upload(b, fixture(b, [...shared, ...lines(`${tag}B`, 0, 10_000)]))
+    const [evA, evB] = await Promise.all([waitJob(upA.jobId ?? '', 300_000), waitJob(upB.jobId ?? '', 300_000)])
+    check(`${label}: both imports finished`, evA.status === 'done' && evB.status === 'done', `${brief(evA)} ${brief(evB)}`)
+    check(`${label}: together they wrote 50,000 new rows, the shared 30,000 once`, (evA.imported ?? 0) + (evB.imported ?? 0) === 50_000, `${evA.imported} + ${evB.imported}`)
+    check(`${label}: ...and one of them counted the shared rows as known`, (evA.known ?? 0) + (evB.known ?? 0) === 30_000, `${evA.known} + ${evB.known}`)
+    check(`${label}: ClickHouse holds 50,000 rows, all distinct`, rowsFor(a, b) === 50_000 && distinctFor(a, b) === 50_000, `rows ${rowsFor(a, b)}, distinct ${distinctFor(a, b)}`)
+    return { since, names: [a, b] }
+  }
+  const grouped = await run('the default group of 4', 'gr', undefined)
+  if (!grouped) return
+  const groupedFills = fills(grouped.since)
+  const slabbed = await run('a group of 1 (slab by slab)', 'sl', '1')
+  if (!slabbed) return
+  const slabFills = fills(slabbed.since)
+  info('existence-check fills', `grouped ${groupedFills}, slab by slab ${slabFills}`)
+  check('the grouped check sent far fewer fills than slab by slab (14 slabs per file: 4 groups against 14)', groupedFills > 0 && groupedFills <= 12 && slabFills >= 24 && slabFills > 2 * groupedFills, `grouped ${groupedFills}, slab by slab ${slabFills}`)
+  // The same content under new names finds every row known in every slab of every group: the per-slab counts of a group must add up to the file's distinct rows.
+  if (!check('the rehearsal app restarted with the default group again', await recreateApp({ concurrency: '2', slab: '3000' }))) return
+  const c = `e2e-nov-grc-${RUN}.txt`
+  const again = upload(c, fixture(c, [...lines('grS', 0, 30_000), ...lines('grA', 0, 10_000)]))
+  const evC = await waitJob(again.jobId ?? '', 300_000)
+  check('the same 40,000 credentials under a new name are all known: nothing new, 40,000 known', evC.status === 'done' && evC.imported === 0 && evC.known === 40_000, brief(evC))
+  check('...and nothing was stored for it', rowsFor(c) === 0, `rows ${rowsFor(c)}`)
+}
+
+async function parserV65(): Promise<void> {
+  console.log('\n1i. Parser v6.5: a parenthesised copy of the site between the url and the credential')
+  const P = `e2e-nov-v65-${RUN}.txt`
+  const pw = (k: string) => `Pw-${RUN}-${k}`
+  const host = (k: string) => `shop${k}.example-store.test`
+  const ls = [
+    `${host('a1')}/login:(${host('a1')}/login):v65a1${RUN}:${pw('A1')}`,                            // no scheme
+    `https://www.${host('a2')}/login:(${host('a2')}/login):v65a2${RUN}@probe-mail.test:${pw('A2')}`, // a scheme, www. only in the url, an e-mail login
+    `${host('a3')}/login:(${host('a3')}/login):v65a3${RUN}:pa:ss-${RUN}`,                           // a colon in the password: the first colon ends the login
+    // as before
+    `${host('b1')}/login:(123):v65b1${RUN}:${pw('B1')}`,                                             // a number in parentheses
+    `${host('b2')}/login:(ShopApp):v65b2${RUN}:${pw('B2')}`,                                         // a label that is not the host
+    `${host('b3')}/login:v65b3${RUN}:${pw('B3')}`,                                                   // no copy at all
+  ]
+  const v = await importLines(P, ls)
+  check('a file with three lines that carry a copy of the site and three that do not: 6 rows are new, none known, none skipped', v.status === 'done' && v.imported === 6 && v.known === 0 && v.skipped === 0 && rowsFor(P) === 6, brief(v))
+  const one = (where: string) => Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND ${where}`))
+  check('the url is kept, the login and the password are the fields after the copy',
+    one(`url = '${host('a1')}/login' AND email = 'v65a1${RUN}' AND password = '${pw('A1')}'`) === 1
+    && one(`url = 'https://www.${host('a2')}/login' AND email = 'v65a2${RUN}@probe-mail.test' AND password = '${pw('A2')}'`) === 1
+    && one(`url = '${host('a3')}/login' AND email = 'v65a3${RUN}' AND password = 'pa:ss-${RUN}'`) === 1)
+  check('the shapes that are not a copy of the host are stored as they were',
+    one(`email = '(123)' AND password = 'v65b1${RUN}:${pw('B1')}'`) === 1
+    && one(`email = '(ShopApp)' AND password = 'v65b2${RUN}:${pw('B2')}'`) === 1
+    && one(`email = 'v65b3${RUN}' AND password = '${pw('B3')}'`) === 1)
+  check('no row has a parenthesised copy of a host as its login', one(`startsWith(email, '(') AND position(email, 'example-store') > 0`) === 0)
 }
 
 async function monitorScenario(): Promise<void> {
@@ -1573,11 +1645,13 @@ async function run(): Promise<number> {
   if (want('v62')) await parserV62()
   if (want('v63')) await parserV63()
   if (want('v64')) await parserV64()
+  if (want('v65')) await parserV65()
   if (want('monitor')) await monitorScenario()
   if (want('big')) await bigFile()
   if (want('kill')) await killMidCommit()
   if (want('freeze')) await freezeDuringCommit()
   if (want('concurrent')) await concurrentFiles()
+  if (want('groups')) await checkGroups()
   if (want('gate') && !skipGate && !(await gateScenario())) return 2
   if (want('off')) await directPath()
   if (want('quality-gate')) await qualityGate()
