@@ -4,7 +4,7 @@
  * file after checking that it is still the file that was archived, and then only the names that share its inode.
  */
 import { lstatSync, readdirSync, statSync, unlinkSync, type Dirent } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 /** A file modified more recently than this may still be downloading. */
 export const MIN_AGE_MS = 10 * 60_000
@@ -79,7 +79,7 @@ export function sameInodeNames(original: string, dirs: string[]): string[] {
 }
 
 /**
- * Unlinks the hardlinks of `original` under `linkDirs`, then `original`. Throws, removing nothing, when the original no longer has the size and modification time it
+ * Unlinks the other hardlinks of `original` under `linkDirs`, then `original`. Throws, removing nothing, when the original no longer has the size and modification time it
  * had when it was archived. Returns the paths removed.
  */
 export function replaceOriginal(original: string, linkDirs: string[], expected: { size: number; mtimeMs: number }): string[] {
@@ -87,7 +87,9 @@ export function replaceOriginal(original: string, linkDirs: string[], expected: 
   if (st.size !== expected.size || st.mtimeMs !== expected.mtimeMs) {
     throw new Error('the original changed while it was archived; nothing was removed')
   }
-  const links = sameInodeNames(original, linkDirs)
+  // The original may itself sit in a link directory (a file that exists only in inbox/done): it is removed once, last, not as a link of itself.
+  const self = resolve(original)
+  const links = sameInodeNames(original, linkDirs).filter(p => resolve(p) !== self)
   for (const p of links) unlinkSync(p)
   unlinkSync(original)
   return [...links, original]

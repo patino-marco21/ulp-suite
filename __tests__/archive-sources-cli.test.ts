@@ -81,6 +81,15 @@ describe('archive, status, verify, restore', () => {
     expect(manifest(box)).toHaveLength(2)
   })
 
+  test('a file of 0 bytes (a copy that failed) is neither archived nor a failure: it is reported on its own line', () => {
+    box = makeBox({ 'a.txt': 'x\n', 'empty.txt': '' })
+    const r = run(box, ['archive', '--src', box.src, '--no-sources'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/skipped 1 empty file \(0 bytes\)/)
+    expect(r.stdout).toMatch(/archived 1, already archived 0, too young 0, replaced 0, kept 0, failed 0/)
+    expect(manifest(box).map(e => e.name)).toEqual(['a.txt'])
+  })
+
   test('a file modified a minute ago is skipped', () => {
     box = makeBox({ 'young.txt': 'x\n' }, 60_000)
     const r = run(box, ['archive', '--src', box.src, '--no-sources'])
@@ -137,6 +146,22 @@ describe('--replace', () => {
     expect(readFileSync(box.dockerLog, 'utf8')).toMatch(/ALTER TABLE ulp\.sources UPDATE size = transform\(filename, \['r\.txt'\]/)
     const to = join(box.root, 'back.txt')
     expect(run(box, ['restore', 'r.txt', '--to', to]).status).toBe(0)
+    expect(readFileSync(to, 'utf8')).toBe(body)
+  })
+
+  test('a file that exists only in inbox/done is replaced straight from there: removed once, with its second name, no error', () => {
+    box = makeBox({})
+    const done = join(box.inbox, 'done')
+    const when = new Date(Date.now() - 3_600_000)
+    writeFileSync(join(done, 'only.txt'), body); utimesSync(join(done, 'only.txt'), when, when)
+    linkSync(join(done, 'only.txt'), join(done, 'only second name.txt'))
+    writeFileSync(box.sources, [{ filename: 'only.txt' }, { filename: 'only second name.txt' }].map(r => JSON.stringify(r)).join('\n') + '\n')
+    const r = run(box, ['archive', '--src', done, '--replace', '--workers', '1', '--no-sources'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/replaced 2, kept 0, failed 0/)
+    expect(readdirSync(done)).toEqual([])
+    const to = join(box.root, 'back.txt')
+    expect(run(box, ['restore', 'only.txt', '--to', to]).status).toBe(0)
     expect(readFileSync(to, 'utf8')).toBe(body)
   })
 

@@ -89,6 +89,25 @@ describe('inboxIsBusy and replaceOriginal', () => {
     expect(readFileSync(join(inbox, 'failed', 'o.txt'), 'utf8')).toBe('same bytes\n')
   })
 
+  test('an original that lives in one of the link directories is removed once, not listed as a link of itself', () => {
+    const orig = join(inbox, 'done', 'only-here.txt')
+    writeFileSync(orig, 'kept nowhere else\n')
+    const st = statSync(orig)
+    const second = join(inbox, 'done', 'second-name.txt')
+    linkSync(orig, second)
+    const removed = replaceOriginal(orig, [join(inbox, 'done')], { size: st.size, mtimeMs: st.mtimeMs })
+    expect(removed.sort()).toEqual([orig, second].sort())
+    expect(existsSync(orig)).toBe(false)
+    expect(existsSync(second)).toBe(false)
+  })
+  test('a lone original in done/ (no other name) is removed without an error', () => {
+    const orig = join(inbox, 'done', 'lone.txt')
+    writeFileSync(orig, 'x\n')
+    const st = statSync(orig)
+    expect(replaceOriginal(orig, [join(inbox, 'done')], { size: st.size, mtimeMs: st.mtimeMs })).toEqual([orig])
+    expect(existsSync(orig)).toBe(false)
+  })
+
   test('removes nothing when the original changed since it was archived (size or modification time)', () => {
     const orig = join(pile, 'c.txt')
     writeFileSync(orig, 'abcdef')

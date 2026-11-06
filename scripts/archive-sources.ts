@@ -135,10 +135,15 @@ async function cmdArchive(): Promise<void> {
   const jobs: Job[] = []
   const young: string[] = []
   let already = 0
+  let empty = 0
+  const inodeOf = new Map<string, string>()   // name -> device:inode, to tell two names of one file apart
   const names = readdirSync(src).filter(n => n.toLowerCase().endsWith('.txt') && (!only || only.includes(n))).sort()
   for (const name of names) {
     const path = join(src, name)
     const st = statSync(path)
+    // A file of 0 bytes is a copy that failed: nothing to archive, and not a failure of the archive.
+    if (st.size === 0) { empty++; continue }
+    inodeOf.set(name, `${st.dev}:${st.ino}`)
     if (now - st.mtimeMs < MIN_AGE_MS) { young.push(name); continue }
     const prev = latest.get(name)
     const archivedBefore = !!prev && prev.size === st.size && existsSync(join(ARCHIVE, `${prev.id}.zst`))
@@ -154,27 +159,42 @@ async function cmdArchive(): Promise<void> {
   if (dry) {
     const busy = inboxIsBusy(INBOX)
     const wouldKeep = replace ? jobs.filter(j => replaceRefusals({ nowMs: now, mtimeMs: j.mtimeMs, inboxBusy: busy, inSources: inSources.has(j.name), includeUnimported }).length > 0).length : 0
-    console.log(`dry run: ${jobs.length} to archive or confirm, ${already} already archived, ${young.length} too young${replace ? `, ${wouldKeep} would be kept` : ''}; nothing was written`)
+    console.log(`dry run: ${jobs.length} to archive or confirm, ${already} already archived, ${young.length} too young${empty > 0 ? `, ${empty} empty` : ''}${replace ? `, ${wouldKeep} would be kept` : ''}; nothing was written`)
     return
   }
 
   const stats = { archived: 0, replaced: 0, kept: 0, failed: 0, plain: 0 }
   const keep = (name: string, why: string) => { stats.kept++; console.log(`kept ${name}: ${why}`) }
   let halted = ''
+  const doneByInode = new Map<string, ManifestEntry>()   // device:inode -> the entry of the first name of that file that finished
   await runPool(jobs, Math.max(1, Number(flag('workers') ?? '8')), () => {
     const p = spaceRefusal(free(), 0, MARGIN)
     if (p) halted = p
     return !p
   }, (job, done) => {
-    if (!done.ok || !done.entry) { stats.failed++; console.log(`FAILED ${job.name}: ${done.error ?? done.problems.join('; ')}`); return }
+    if (!done.ok || !done.entry) {
+      // Two names of one file (hardlinks): replacing the first removed the second with it, and this job found nothing to read. The bytes are in the archive under the
+      // first name's id (content addressed), so this name gets the same entry; it is not a failure.
+      const sibling = !existsSync(job.src) ? doneByInode.get(inodeOf.get(job.name) ?? '') : undefined
+      if (sibling?.replaced_at) {
+        appendManifest(ARCHIVE, { ...sibling, name: job.name })
+        stats.archived++; stats.replaced++; stats.plain += sibling.size
+        console.log(`${job.name} was removed with another name of the same file, which is archived: its entry points at the same archive`)
+        return
+      }
+      stats.failed++; console.log(`FAILED ${job.name}: ${done.error ?? done.problems.join('; ')}`); return
+    }
     if (done.fresh) { appendManifest(ARCHIVE, done.entry); stats.archived++ }
     stats.plain += done.entry.size
-    if (!replace) return
+    const remember = (entry: ManifestEntry) => { const key = inodeOf.get(job.name); if (key && !doneByInode.has(key)) doneByInode.set(key, entry) }
+    if (!replace) { remember(done.entry); return }
     const why = replaceRefusals({ nowMs: Date.now(), mtimeMs: job.mtimeMs, inboxBusy: inboxIsBusy(INBOX), inSources: inSources.has(job.name), includeUnimported })
     if (why.length > 0) { keep(job.name, why.join('; ')); return }
     try {
       replaceOriginal(job.src, [join(INBOX, 'done')], { size: job.size, mtimeMs: job.mtimeMs })
-      appendManifest(ARCHIVE, { ...done.entry, replaced_at: new Date().toISOString() })
+      const replacedEntry = { ...done.entry, replaced_at: new Date().toISOString() }
+      appendManifest(ARCHIVE, replacedEntry)
+      remember(replacedEntry)
       stats.replaced++
     } catch (e) {
       keep(job.name, (e as Error).message)
@@ -182,6 +202,7 @@ async function cmdArchive(): Promise<void> {
   })
 
   if (halted) console.log(`stopped early: ${halted}`)
+  if (empty > 0) console.log(`skipped ${empty} empty file${empty === 1 ? '' : 's'} (0 bytes): a copy that failed leaves one, and there is nothing to archive`)
   console.log(`archived ${stats.archived}, already archived ${already}, too young ${young.length}, replaced ${stats.replaced}, kept ${stats.kept}, failed ${stats.failed}; plaintext ${(stats.plain / GiB).toFixed(2)} GiB`)
   if (!has('no-sources')) {
     try {
