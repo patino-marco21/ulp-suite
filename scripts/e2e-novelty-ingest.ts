@@ -39,7 +39,8 @@
  *   off         INGEST_NOVELTY_CHECK=off: the direct path, no stage tables, rows stored again as before
  *   quality-gate  a file where 1 line in 20 breaks a rule is HELD (production defaults): zero rows stored, it waits in inbox/held with its report, Release imports it
  *                 once, and the audit row exists; a file where 1 line in 9 is a banner or a divider is NOT held (those lines cannot hold a credential); a file past 8 MiB
- *                 that breaks a rule on 1 line in 10 is held by the sample check before the import starts (report phase "sample"). (The disk gate's scenario is called "gate".)
+ *                 that breaks a rule on 1 line in 10 is held by the sample check before the import starts (report phase "sample"); a file where 1 line in 9 cannot be split is held and its
+ *                 report lists the masked shape of those lines (no value in it). (The disk gate's scenario is called "gate".)
  *   archive-ref   a file imported from the source archive through an .archiveref: same counts as the plain import, identity in ulp.sources, a same-name file with other
  *                 content is a new file, a damaged archive fails before one row is committed, and no plaintext copy of the file appears in the inbox
  *   same-name     the same-name check compares size (and the content hash, once ulp.sources holds one for the name): the same file again is skipped (and the job log says so), another file under that name is imported and gets its
@@ -990,6 +991,16 @@ async function qualityGate(): Promise<void> {
     return (st.json?.done_recent ?? []).find((j: any) => j.filename === SAMPLE && j.status === 'done')
   }, 300_000, 2000)
   check('the released file is imported without the sample check holding it again: 110000 rows', !!sampleDone && sampleDone.imported === 110_000 && rowsFor(SAMPLE) === 110_000, JSON.stringify(sampleDone ?? null))
+  // What the unsplit lines look like: 1 line in 9 of this file has words and no separator, so it cannot be split but could be a credential. The hold report lists their masked shape.
+  const UNSPLIT = `e2e-qg-unsplit-${RUN}.txt`
+  const unsplitBody: string[] = []
+  lines('QU', 0, 24_000).forEach((l, i) => { unsplitBody.push(l); if (i % 8 === 7) unsplitBody.push(`unsplit probe words ${i}${RUN}`) })
+  const unsplit = await importLines(UNSPLIT, unsplitBody)
+  check('a file where 1 line in 9 cannot be split ends in error with the hold message, and none of it was stored', unsplit.status === 'error' && /Held by the quality gate/.test(unsplit.error ?? '') && rowsFor(UNSPLIT) === 0, brief(unsplit))
+  const unsplitEntry = ((await api('GET', '/api/inbox/status')).json?.held ?? []).find((f: any) => f.name === UNSPLIT)
+  const top = unsplitEntry?.report?.unsplitShapes?.[0]
+  check('the report lists the shape of the unsplit lines: one shape, 3000 lines, words only as w', top?.shape === 'w w w w' && top?.count === 3_000 && unsplitEntry.report.unsplitShapes.length === 1, JSON.stringify(unsplitEntry?.report?.unsplitShapes ?? null))
+  check('...and no value of the file is in the report', !/probe|words/i.test(JSON.stringify(unsplitEntry?.report ?? {})) && !JSON.stringify(unsplitEntry?.report ?? {}).includes(RUN), JSON.stringify(unsplitEntry?.report ?? {}).slice(0, 200))
   scanLog('after the quality-gate scenario')
 }
 
