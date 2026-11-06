@@ -24,12 +24,13 @@ import { commitStage } from '@/lib/ingest-novelty'
 import { createStage, dropStage, newStageId, registerStage, stageTables, unregisterStage } from '@/lib/ingest-stage'
 import { keyColumnOf, resolveMatchKey, type MatchKey } from '@/lib/norm-key-ready'
 import {
-  IngestHeldError, describeVerdict, evaluateGate, newGateCounters, parseGateConfig,
+  IngestHeldError, describeVerdict, evaluateGate, isIngestHeldError, newGateCounters, parseGateConfig,
   type GateReport, type GateVerdict,
 } from '@/lib/ingest-quality-gate'
 import type { PhaseTimings } from '@/lib/phase-timings'
 import { fileSource, openSource } from '@/lib/source-archive'
 import { sampleHold } from '@/lib/ingest-preflight'
+import { MIN_WORKER_FILE_BYTES, WorkerUnavailableError, parseWorkers, stageInWorker, type StageOutcome } from '@/lib/ingest-pool'
 import { ArchiveRefError, appArchiveDir, hashingStream, readArchiveRefFile } from '@/lib/archive-ref'
 import {
   UPLOAD_BATCH_SIZE, insertBatch, importPipelineEnabled, makeRetryLogger, streamCredentialsToTable as streamToTable,
@@ -206,6 +207,14 @@ interface StagedImport {
   slabRows:       number
 }
 
+let workerUnavailableWarned = false
+/** The parse worker bundle is missing (dist/ingest-worker.cjs): say so once, then stage on this thread as before. */
+function warnWorkerUnavailable(message: string): void {
+  if (workerUnavailableWarned) return
+  workerUnavailableWarned = true
+  console.warn(`[upload-processor] INGEST_PARSE_WORKERS is on but ${message}; staging on the importer's thread`)
+}
+
 /**
  * Parse the file into its own stage table, then write only the credentials the table does not hold yet
  * (docs/superpowers/specs/2026-10-02-novelty-aware-ingest-design.md). Nothing reaches ulp.credentials until the commit, so a file
@@ -272,27 +281,71 @@ async function importThroughStage(a: StagedImport): Promise<ProcessResult> {
     startIngest(filename)
     let streamed: StreamToTableResult
     try {
-      streamed = await streamCredentialsToTable(a.stream, filename, {
-        table:          tables.stage,
-        batchSize:      UPLOAD_BATCH_SIZE,
-        pipeline:       importPipelineEnabled(),
-        filterOn:       a.filterOn,
-        dropPolicy:     a.softPolicy,
-        breachName:     a.breach_name,
-        shouldHardDrop: a.shouldHardDrop,
-        dedupInFile:    false,
-        signal:         hooks.signal,
-        onBeat:         hooks.beat,
-        onProgress: (n, skp) => {
-          staged = n
-          skipped = skp
-          report({ phase: 'parsing', staged, skipped, known: 0, inserted: 0 })
-        },
-        onBatchMetrics: recordBatch,
-        timings:        streamTimings,
-        gate,
-        gateCheckpoint: gate ? { atLines: gateConfig.earlyLines, check: () => { gateCheck('early') } } : undefined,
-      })
+      // A big plain file on disk is staged by a parse worker when INGEST_PARSE_WORKERS is on (lib/ingest-pool.ts): the same loop on another thread. Anything the
+      // worker cannot take, or a missing bundle, is staged here as before.
+      let outcome: StageOutcome | null = null
+      if (parseWorkers() > 0 && hooks.stageFile && (hooks.fileSize ?? 0) >= MIN_WORKER_FILE_BYTES) {
+        let bytesRead = 0
+        hooks.onSourceBytes?.(() => bytesRead)
+        console.warn(`[upload-processor] ${filename}: staged in a parse worker`)   // console.warn: the production build strips console.log
+        try {
+          outcome = await stageInWorker({
+            path:        hooks.stageFile,
+            filename,
+            table:       tables.stage,
+            breachName:  a.breach_name,
+            filterOn:    a.filterOn,
+            gateOverride: !!hooks.gateOverride,
+            batchSize:   UPLOAD_BATCH_SIZE,
+            pipeline:    importPipelineEnabled(),
+          }, {
+            onBeat: () => hooks.beat?.(),
+            onProgress: (n, skp, bytes) => {
+              staged = n
+              skipped = skp
+              bytesRead = bytes
+              report({ phase: 'parsing', staged, skipped, known: 0, inserted: 0 })
+            },
+            onMetrics: recordBatch,
+          }, { signal: hooks.signal })
+        } catch (err) {
+          if (err instanceof WorkerUnavailableError) {
+            warnWorkerUnavailable(err.message)
+          } else {
+            if (isIngestHeldError(err)) console.warn(`[quality-gate] ${filename}: ${describeVerdict({ level: err.report.level, reasons: err.report.reasons, report: err.report })}`)
+            throw err
+          }
+        }
+      }
+      if (outcome) {
+        // The worker counted the gate's early check itself; its counters join this thread's for the final check below.
+        if (gate && outcome.gate) Object.assign(gate, outcome.gate)
+        streamTimings.parseMs += outcome.timings.parseMs
+        streamTimings.insertMs += outcome.timings.insertMs
+        streamed = outcome.result
+      } else {
+        streamed = await streamCredentialsToTable(a.stream, filename, {
+          table:          tables.stage,
+          batchSize:      UPLOAD_BATCH_SIZE,
+          pipeline:       importPipelineEnabled(),
+          filterOn:       a.filterOn,
+          dropPolicy:     a.softPolicy,
+          breachName:     a.breach_name,
+          shouldHardDrop: a.shouldHardDrop,
+          dedupInFile:    false,
+          signal:         hooks.signal,
+          onBeat:         hooks.beat,
+          onProgress: (n, skp) => {
+            staged = n
+            skipped = skp
+            report({ phase: 'parsing', staged, skipped, known: 0, inserted: 0 })
+          },
+          onBatchMetrics: recordBatch,
+          timings:        streamTimings,
+          gate,
+          gateCheckpoint: gate ? { atLines: gateConfig.earlyLines, check: () => { gateCheck('early') } } : undefined,
+        })
+      }
     } finally {
       finishIngest()
     }
@@ -548,7 +601,7 @@ export async function processTextFile(
     try { sampleSource = fileSource(filePath) } catch { /* the stream reports it */ }
   }
   try {
-    return await processTextStream(webStream, filename, jobId, onBatch, { ...hooks, fileSize, sampleSource })
+    return await processTextStream(webStream, filename, jobId, onBatch, { ...hooks, fileSize, sampleSource, stageFile: filePath })
   } finally {
     nodeStream.destroy()
   }

@@ -87,6 +87,9 @@ services:
       INGEST_NOVELTY_SLAB_ROWS: ${REHEARSAL_INGEST_NOVELTY_SLAB_ROWS:-}
       # scripts/e2e-novelty-ingest.ts (scenario lookalikes) switches the normalised key off with this (empty = the production default: on).
       INGEST_NORM_KEY: ${REHEARSAL_INGEST_NORM_KEY:-}
+      # scripts/e2e-novelty-ingest.ts (scenario workers) starts parse workers and lowers the gate's early check to 50,000 lines (empty = off, and the production 1,000,000).
+      INGEST_PARSE_WORKERS: ${REHEARSAL_INGEST_PARSE_WORKERS:-}
+      INGEST_QUALITY_GATE_EARLY_LINES: ${REHEARSAL_INGEST_QUALITY_GATE_EARLY_LINES:-}
       # lib/archive-ref.ts reads the source archive from here; scripts/e2e-novelty-ingest.ts (scenario archive-ref) copies a scratch archive into the container.
       ULP_ARCHIVE_DIR: /archive
     volumes:

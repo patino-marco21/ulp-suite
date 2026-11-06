@@ -192,6 +192,7 @@ without raising peak memory beyond one extra batch. Two environment knobs:
 
 - `IMPORT_PIPELINE` — `off` disables pipelining and reverts to strictly
   sequential parse→insert (kill-switch / A-B testing). Default: on.
+- `INGEST_PARSE_WORKERS` — parse workers (`lib/ingest-pool.ts`). Empty or `0` (default): every file is parsed on the importer's one thread. A number up to `12`: that many big plain files (16 MiB and up) are parsed and staged at once, each in its own worker thread (about 0.8 GB each at most; `4` fits in the app container's `mem_limit`). Set `UPLOAD_CONCURRENCY` to the same number. The worker (`dist/ingest-worker.cjs`) is built by `npm run build`; a worker that fails fails only its file, and without the bundle the importer says so once and stays on one thread. Design: `docs/superpowers/specs/2026-10-12-fast-ingest-design.md`, step C.
 - `UPLOAD_CONCURRENCY` — number of files processed at once. Default `1`.
   Raising it multiplies peak memory (each concurrent file holds its own
   in-flight batch and its own dedup set). Since `lib/clickhouse-memory-guard.ts`

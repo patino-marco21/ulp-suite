@@ -85,6 +85,11 @@ export type ImportHooks = Partial<ImportContext> & {
    * treats a file of another size as another file, and ulp.sources records the size. Without it, and for a record that has no size, the name alone decides.
    */
   fileSize?: number
+  /**
+   * The plain file on disk the stream was made from (processTextFile sets it). With INGEST_PARSE_WORKERS on, a worker thread opens this path and stages the file
+   * itself (lib/ingest-pool.ts); without it (a ZIP entry, an HTTP stream, an archive reference) the file is staged on the importer's thread.
+   */
+  stageFile?: string
 }
 
 export interface RunImportOptions<T> {

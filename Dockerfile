@@ -44,6 +44,10 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
+# The parse worker (npm run build bundles lib/ingest-worker.ts into dist/ingest-worker.cjs; INGEST_PARSE_WORKERS starts it, lib/ingest-pool.ts). It carries its own
+# dependencies, because this image holds only what Next traced.
+COPY --from=builder --chown=nextjs:nodejs /app/dist ./dist
+
 # Next.js standalone output-tracing omits several internal subdirectories
 # (next/dist/lib/, next/dist/shared/, etc.) that are required at runtime.
 # Copy the entire next/dist from the builder to fill all gaps reliably.

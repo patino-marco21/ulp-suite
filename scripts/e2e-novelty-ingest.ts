@@ -49,6 +49,9 @@
  *                 look-alikes inside one file count as repeats; a path or a password that differs stays a different credential; the monitor alerts with the row that was stored;
  *                 each job records its key; the per-file recount (scripts/pile/verify-file.ts) agrees with the job for both keys
  *   norm-not-ready  the column dropped and added again (existing parts lack it): the import keeps the exact key and says so; after MATERIALIZE COLUMN the next one matches on the normalised key
+ *   workers       INGEST_PARSE_WORKERS=2: a small file is staged on the importer's thread and a big one (over 16 MiB) by a worker thread, with the counts the construction gives
+ *                 (new, known, repeats inside the file, skipped); a big file whose first 52,000 lines break a rule is held by the worker's early check (nothing stored, no stage table);
+ *                 and with the workers off, the same content under another name finds every row already known and counts the same repeats and skipped lines
  *
  *   docker compose build app
  *   npx tsx scripts/e2e-alert-rehearsal.ts --keep    # brings the rehearsal stack up (about 4 minutes) and leaves it running
@@ -187,7 +190,7 @@ async function api(method: string, path: string, body?: unknown): Promise<{ stat
   return { status: res.status, json }
 }
 
-interface AppSettings { concurrency?: string; novelty?: string; slab?: string; normKey?: string; floorBytes?: number }
+interface AppSettings { concurrency?: string; novelty?: string; slab?: string; normKey?: string; floorBytes?: number; workers?: string; earlyLines?: string }
 
 /** Looks for an accounting failure in the log of the container that is about to be replaced (its log goes with it). */
 function scanLog(label: string): void {
@@ -213,6 +216,8 @@ async function recreateApp(s: AppSettings = {}): Promise<boolean> {
     REHEARSAL_INGEST_NOVELTY_CHECK: s.novelty ?? '',
     REHEARSAL_INGEST_NOVELTY_SLAB_ROWS: s.slab ?? '',
     REHEARSAL_INGEST_NORM_KEY: s.normKey ?? '',
+    REHEARSAL_INGEST_PARSE_WORKERS: s.workers ?? '',
+    REHEARSAL_INGEST_QUALITY_GATE_EARLY_LINES: s.earlyLines ?? '',
     REHEARSAL_INGEST_MIN_FREE_BYTES: s.floorBytes === undefined ? '' : String(s.floorBytes),
     REHEARSAL_INGEST_DISK_GATE: '',
   }
@@ -1313,6 +1318,52 @@ async function lookAlikes(): Promise<void> {
   scanLog('after the look-alike scenario')
 }
 
+async function parseWorkers(): Promise<void> {
+  console.log('\n24. Parse workers (INGEST_PARSE_WORKERS=2): a big plain file is staged by a worker, with the rows and counts the importer\'s own thread gives')
+  scanLog('before the workers scenario')
+  if (!check('the rehearsal app restarted with 2 parse workers and an early check at 50,000 lines', await recreateApp({ workers: '2', concurrency: '2', earlyLines: '50000' }))) return
+
+  // A small file first: under 16 MiB it is staged on the importer's thread, and it leaves 50,000 rows for the big file to find known.
+  const SMALL = `e2e-pw-small-${RUN}.txt`
+  const small = await importLines(SMALL, lines('W', 0, 50_000))
+  check('a small file is imported: 50000 new rows', small.status === 'done' && small.imported === 50_000 && small.known === 0, brief(small))
+
+  // The big file: 200,000 distinct lines (50,000 already known), 20,000 repeats of lines inside it, 2,000 lines that are not credentials.
+  const BIG = `e2e-pw-big-${RUN}.txt`
+  const noise = Array.from({ length: 2_000 }, (_, i) => `plain words with no credential in them, number ${i}`)
+  const body = [...lines('W', 0, 200_000), ...lines('W', 100_000, 120_000), ...noise]
+  const big = await importLines(BIG, body, 600_000)
+  check('the big file is imported: 150000 new, 50000 known, 20000 repeats inside the file, 2000 skipped',
+    big.status === 'done' && big.imported === 150_000 && big.known === 50_000 && big.inFileDuplicates === 20_000 && big.skipped === 2_000, brief(big))
+  check('...all 150000 rows are in ClickHouse, all distinct', rowsFor(BIG) === 150_000 && distinctFor(BIG) === 150_000, `rows ${rowsFor(BIG)}, distinct ${distinctFor(BIG)}`)
+  check('...no stage table is left, and the queue slot is free', stageTableCount() === 0)
+  await expectIdleQueue('after the big file')
+  const log = appLog()
+  check('the app log shows a parse worker staged the big file, and not the small one',
+    log.includes(`[upload-processor] ${BIG}: staged in a parse worker`) && !log.includes(`[upload-processor] ${SMALL}: staged in a parse worker`), log.split('\n').filter(l => l.includes('parse worker')).join(' | ').slice(0, 200))
+
+  // The worker's own early check: the first 52,000 lines break a rule on 1 line in 10; a sample of the file (5 slices) stays under the sample check's limit, so it is the worker that holds it.
+  const HELD = `e2e-pw-held-${RUN}.txt`
+  const junk = (i: number) => `https://shop${i % 500}.example-store.test/login:pwj${i}${RUN}@probe-mail.test:Pw://j${i}${RUN}`
+  const heldBody = [...Array.from({ length: 52_000 }, (_, i) => (i % 10 === 9 ? junk(i) : line('WH', i))), ...lines('WH', 52_000, 200_000)]
+  const held = await importLines(HELD, heldBody, 600_000)
+  check('a big file whose first lines break a rule ends in error with the hold message', held.status === 'error' && /Held by the quality gate/.test(held.error ?? ''), brief(held))
+  check('...not one row was stored, no stage table is left, and it waits in inbox/held', rowsFor(HELD) === 0 && stageTableCount() === 0 && inboxLs('held').includes(HELD), `rows ${rowsFor(HELD)}, tables ${stageTableCount()}, held ${inboxLs('held').join(',')}`)
+  const heldEntry = ((await api('GET', '/api/inbox/status')).json?.held ?? []).find((f: any) => f.name === HELD)
+  check('...the report of the hold comes from the early check, with the rule-breaking rows counted', heldEntry?.report?.phase === 'early' && heldEntry?.report?.level === 'hold' && (heldEntry?.report?.kinds?.['password-has-scheme'] ?? 0) > 0, JSON.stringify(heldEntry?.report ?? null).slice(0, 200))
+  check('...and the app log carries the verdict', appLog().includes(`[quality-gate] ${HELD}`))
+  scanLog('after the workers scenario, with workers')
+
+  // The same content as the big file under another name, staged on the importer's thread: it must find every row already known and count the same repeats and skipped lines.
+  if (!check('the rehearsal app restarted with the workers off', await recreateApp({ concurrency: '2' }))) return
+  const REPLAY = `e2e-pw-replay-${RUN}.txt`
+  const replay = await importLines(REPLAY, body, 600_000)
+  check('the same content staged on the importer\'s thread: nothing new, 200000 known, the same 20000 repeats and 2000 skipped',
+    replay.status === 'done' && replay.imported === 0 && replay.known === 200_000 && replay.inFileDuplicates === 20_000 && replay.skipped === 2_000, brief(replay))
+  check('...it wrote no row', rowsFor(REPLAY) === 0, `rows ${rowsFor(REPLAY)}`)
+  scanLog('after the workers scenario')
+}
+
 async function normNotReady(): Promise<void> {
   console.log('\n14. The normalised key is used only when every part holds the column')
   chQuery('ALTER TABLE ulp.credentials DROP COLUMN norm_key_hash')
@@ -1388,6 +1439,7 @@ async function run(): Promise<number> {
   if (want('golden')) await goldenKey()
   if (want('lookalikes')) await lookAlikes()
   if (want('norm-not-ready')) await normNotReady()
+  if (want('workers')) await parseWorkers()
 
   scanLog('at the end')
   await recreateApp() // leave the stack on the production defaults

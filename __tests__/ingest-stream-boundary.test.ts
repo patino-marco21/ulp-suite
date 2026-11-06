@@ -32,14 +32,16 @@ const FORBIDDEN_FILES = [
 ]
 const FORBIDDEN_PACKAGES = ['better-sqlite3', 'yauzl', 'next']
 
-describe('lib/ingest-stream.ts (the code a parse worker runs)', () => {
-  it('reaches no SQLite, no job store and no Next', async () => {
-    const { files, externals } = await inputsOf('lib/ingest-stream.ts')
-    for (const f of FORBIDDEN_FILES) expect(files, `${f} must not be reachable from lib/ingest-stream.ts`).not.toContain(f)
-    for (const p of FORBIDDEN_PACKAGES) {
-      expect(externals.filter(e => e === p || e.startsWith(`${p}/`)), `${p} must not be imported from lib/ingest-stream.ts`).toEqual([])
-    }
-  })
+describe('lib/ingest-stream.ts and lib/ingest-worker.ts (the code a parse worker runs)', () => {
+  for (const entry of ['lib/ingest-stream.ts', 'lib/ingest-worker.ts']) {
+    it(`${entry} reaches no SQLite, no job store and no Next`, async () => {
+      const { files, externals } = await inputsOf(entry)
+      for (const f of FORBIDDEN_FILES) expect(files, `${f} must not be reachable from ${entry}`).not.toContain(f)
+      for (const p of FORBIDDEN_PACKAGES) {
+        expect(externals.filter(e => e === p || e.startsWith(`${p}/`)), `${p} must not be imported from ${entry}`).toEqual([])
+      }
+    })
+  }
 
   it('holds the staging loop and the batch insert', async () => {
     const mod = await import('@/lib/ingest-stream')

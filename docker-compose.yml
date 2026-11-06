@@ -140,6 +140,10 @@ services:
       # docs/superpowers/specs/2026-07-20-ingest-memory-backpressure-design.md
       # and docs/superpowers/specs/2026-07-22-upload-concurrency-design.md.
       UPLOAD_CONCURRENCY: ${UPLOAD_CONCURRENCY:-1}
+      # Parse workers (lib/ingest-pool.ts) -- optional; forwarded explicitly (see above). Empty or 0 = every file is parsed on the importer's one thread. A number
+      # N (at most 12) stages up to N big plain files at once, each in its own worker thread (about 0.8 GB each at most; 4 fit in this container's mem_limit). Set
+      # UPLOAD_CONCURRENCY to the same number, or the extra workers have no file to take. See docs/superpowers/specs/2026-10-12-fast-ingest-design.md (step C).
+      INGEST_PARSE_WORKERS: ${INGEST_PARSE_WORKERS:-}
       # Import watchdog (lib/import-runner.ts) -- optional; forwarded explicitly (see above). An import with no progress for this
       # long (no batch inserted, no retry, no memory-guard poll) is failed and its queue slot freed. Empty = 20 minutes.
       IMPORT_STALL_TIMEOUT_MS: ${IMPORT_STALL_TIMEOUT_MS:-}
