@@ -104,6 +104,45 @@ everything else: it protects against a parser or policy change, not against losi
 `ulp.sources` yet. `scripts/parser-diff.ts`, `scripts/pile/verify-file.ts` and `scripts/extract-dropped-lines.ts` read an archived name exactly like a file, so they keep
 working after `--replace`. For a new batch: archive it first (without `--replace`), import, verify, and replace when you decide.
 
+### Automatic archive (never removes plaintext)
+
+`scripts/archive-when-idle.ts` archives what `inbox/done` holds and the archive does not, verifies a sample (`verify --sample 3`), and writes a one-line account for the Inbox page into the archive
+directory (`auto-archive-status.json`, which the app mounts read-only). It runs only when nothing is waiting or in flight in the inbox (the disk gate holding the ingest leaves files waiting, so that counts) and no
+inbox folder has changed for 20 minutes (`ULP_AUTO_ARCHIVE_IDLE_MIN`); one run at a time (a lock in the archive directory); `Nice=19` and idle I/O class. It never passes `--replace`: the account
+says how many files are ready for it and how much the replace would free, and the replace stays your decision. `*.txt` names only (the tool's rule): other names and files of 0 bytes are counted in the
+account, not archived. After a run that failed, the next waits 6 hours (`--now` overrides, and also skips the wait for quiet; the check that nothing is in flight stays).
+
+Install (a user timer, every 30 minutes; the owner's step, nothing is installed by the repository):
+
+```bash
+mkdir -p ~/.config/systemd/user && cp scripts/systemd/ulp-archive-auto.* ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now ulp-archive-auto.timer
+journalctl --user -u ulp-archive-auto -n 20      # what the last runs said
+```
+
+The service names node by its nvm path (a user service does not read the shell profile): edit `Environment=PATH=` after a node upgrade. Remove it with `systemctl --user disable --now ulp-archive-auto.timer`.
+`archive --src inbox/done --replace` works directly for files that exist only in `done/` (it used to need a hardlink stage directory); two names of one file are replaced together.
+
+## Keeping the laptop awake during a batch
+
+A laptop that suspends in the middle of a batch freezes the connection to ClickHouse; the import stalls, the watchdog fails the file, and it is retried once (see the README, "Inbox").
+`scripts/keep-awake-while-busy.ts` avoids that: while a file waits in `inbox/` or anything is in `inbox/processing/` it holds a systemd inhibitor (`sleep:handle-lid-switch`, block mode,
+taken by your user, no sudo), and it lets go 5 minutes after both are empty. **What changes:** with a batch running, the laptop does not suspend, and shutting the lid does not suspend it either,
+so a laptop in a bag keeps running and warm. Safeguards: the lock is never held for more than 12 hours at a stretch (a file stuck in the inbox cannot keep the laptop on all night), it is
+not held on battery power under 15%, and if this system ever refuses a user service the lid-switch lock it holds `sleep` only and says so in the journal.
+
+Install (a user service; the owner's step, nothing is installed by the repository):
+
+```bash
+mkdir -p ~/.config/systemd/user && cp scripts/systemd/ulp-keep-awake.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now ulp-keep-awake.service
+journalctl --user -u ulp-keep-awake -n 20          # holding / released, with the reason
+systemd-inhibit --list | grep ulp-suite            # the lock, while a batch runs
+```
+
+Uninstall: `systemctl --user disable --now ulp-keep-awake.service && rm ~/.config/systemd/user/ulp-keep-awake.service`. Before leaving it installed, run a small batch with the lid shut once and look at
+the temperature and the battery afterwards. The unit names node by its nvm path (a user service does not read the shell profile): edit `Environment=PATH=` after a node upgrade.
+
 ## The quality gate
 
 The importer counts, while it stages a file, the rows that break a rule a correctly parsed row never breaks and the lines it could not split (`lib/ingest-quality-gate.ts`;

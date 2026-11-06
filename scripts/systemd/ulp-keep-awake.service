@@ -1,0 +1,17 @@
+[Unit]
+Description=Keep the laptop awake while the ULP inbox has work (sleep inhibitor, released when idle)
+Documentation=file://%h/Desktop/ulp-suite/scripts/keep-awake-while-busy.ts
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Desktop/ulp-suite
+# node comes from nvm on this machine; a user service does not read the shell profile, so name it. Edit the version after a node upgrade.
+Environment=PATH=%h/.nvm/versions/node/v24.16.0/bin:/usr/local/bin:/usr/bin:/bin
+Environment=ULP_REPO=%h/Desktop/ulp-suite
+ExecStart=%h/Desktop/ulp-suite/node_modules/.bin/tsx scripts/keep-awake-while-busy.ts
+Restart=on-failure
+RestartSec=30
+Nice=10
+
+[Install]
+WantedBy=default.target
