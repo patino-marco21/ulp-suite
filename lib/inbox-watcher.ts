@@ -26,8 +26,10 @@
  *    inFlight Set cannot guarantee — it dies on restart, leaving a file still
  *    in inbox/ to be re-imported.
  *  - Startup sweep: anything left in processing/ (interrupted mid-import) is
- *    moved to failed/ for review, never silently re-imported (with novelty-aware ingest a Retry is safe: rows already imported
- *    count as known).
+ *    logged as failed and, with novelty-aware ingest (a retry is safe: rows already imported count as known), goes back to the
+ *    inbox ONCE on its own; the second loss of the same file stays in failed/ for review (lib/inbox-auto-retry.ts). A failure
+ *    during the import that is about the run (a stall, an abort, a dropped ClickHouse connection) is retried the same way, after
+ *    about 2 minutes; a failure about the file never is.
  *  - Reconciliation loop (every 30 s) re-queues any files still in inbox/ but
  *    not in inFlight — catches files chokidar missed (large batch drops, host
  *    FS races, watcher startup gaps).
@@ -40,7 +42,8 @@ import { logJob } from '@/lib/processing-log'
 import { processTextFile, processZipFile, processArchiveRef } from '@/lib/upload-processor'
 import { runImportJob } from '@/lib/import-runner'
 import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable, moveFile } from '@/lib/inbox-claim'
-import { sniffFileKind } from '@/lib/inbox-helpers'
+import { retryFiles, sniffFileKind } from '@/lib/inbox-helpers'
+import { AUTO_RETRY_NOTE, isInterruption, latestJobRow, mayAutoRetry, scheduleAutoRetry } from '@/lib/inbox-auto-retry'
 import { isIngestHeldError } from '@/lib/ingest-quality-gate'
 import { consumeGateOverride } from '@/lib/ingest-gate-store'
 import { ARCHIVE_REF_EXT, appArchiveDir, readArchiveRefFile } from '@/lib/archive-ref'
@@ -449,6 +452,10 @@ async function enqueueFile(filePath: string): Promise<void> {
         }
       } else {
         console.error(`[inbox-watcher] failed: ${filename}`, err)
+        // A file the RUN lost (a stall, an abort, a ClickHouse that dropped the connection) goes back once on its own; a failure about the file, or the second loss, waits for the
+        // owner. The novelty-aware import makes the retry safe (the rows of the first attempt count as known); the direct path could double-write, so it never retries.
+        const retry = noveltyConfig().enabled && isInterruption(err) && mayAutoRetry(latestJobRow(filename))
+        const message = err instanceof Error ? err.message : String(err)
         logJob({
           source:        'inbox',
           filename,
@@ -457,8 +464,10 @@ async function enqueueFile(filePath: string): Promise<void> {
           known,
           skipped,
           duration_ms:   Date.now() - startAt,
-          error_message: err instanceof Error ? err.message : String(err),
+          error_message: retry ? `${message} (retrying automatically once, in about 2 minutes)` : message,
+          ...(retry ? { note: AUTO_RETRY_NOTE } : {}),
         })
+        if (retry) scheduleAutoRetry(filename)
         // Move the claimed file (if we claimed it) to failed/ for review.
         if (procPath) {
           try {
@@ -502,21 +511,17 @@ function reconcile(): void {
   } catch { /* inbox/ doesn't exist yet — harmless */ }
 }
 
-export function startInboxWatcher(): void {
-  if (started) return
-  started = true
-
-  // Ensure directories exist before the watcher starts
-  ;[INBOX, DONE, FAIL, PROC, HELD].forEach(d => fs.mkdirSync(d, { recursive: true }))
-
-  // Sweep any files left in processing/ by a previous run that was interrupted
-  // mid-import (crash/OOM/redeploy). They may be partially imported, so move
-  // them to failed/ for review rather than re-importing (which would duplicate
-  // the partial rows). This MUST run before reconcile() so a leftover isn't
-  // somehow re-picked.
+/**
+ * Files left in processing/ by a run that was interrupted (a crash, an out-of-memory kill, a redeploy) are partly imported. They go to failed/ and are logged; with the
+ * novelty-aware import a retry is safe (the rows already imported count as known), so a file that was not already retried automatically goes straight back to the inbox,
+ * once. The second loss of the same file stays in failed/ for the owner. Returns the names found.
+ */
+export function recoverInterruptedFiles(): string[] {
   const interrupted = sweepProcessingToFailed(PROC, FAIL)
   for (const name of interrupted) {
-    console.warn(`[inbox-watcher] interrupted mid-import, moved to failed/: ${name}`)
+    const novelty = noveltyConfig().enabled
+    const retry = novelty && mayAutoRetry(latestJobRow(name))
+    console.warn(`[inbox-watcher] interrupted mid-import, ${retry ? 'back to the inbox for one automatic retry' : 'moved to failed/'}: ${name}`)
     logJob({
       source:        'inbox',
       filename:      name,
@@ -524,11 +529,28 @@ export function startInboxWatcher(): void {
       imported:      0,
       skipped:       0,
       duration_ms:   0,
-      error_message: noveltyConfig().enabled
-        ? 'Interrupted mid-import (app restart). Safe to Retry: rows already imported are skipped.'
-        : 'Interrupted mid-import (app restart) — may be partially imported; review before re-adding.',
+      error_message: !novelty
+        ? 'Interrupted mid-import (app restart) — may be partially imported; review before re-adding.'
+        : retry
+          ? 'Interrupted mid-import (app restart). Retrying automatically once: rows already imported are skipped.'
+          : 'Interrupted mid-import again after an automatic retry. Safe to Retry: rows already imported are skipped.',
+      ...(retry ? { note: AUTO_RETRY_NOTE } : {}),
     })
+    if (retry) retryFiles([name])
   }
+  return interrupted
+}
+
+export function startInboxWatcher(): void {
+  if (started) return
+  started = true
+
+  // Ensure directories exist before the watcher starts
+  ;[INBOX, DONE, FAIL, PROC, HELD].forEach(d => fs.mkdirSync(d, { recursive: true }))
+
+  // Sweep any files left in processing/ by a previous run that was interrupted (see recoverInterruptedFiles). This MUST run before reconcile() so a leftover isn't
+  // somehow re-picked twice.
+  recoverInterruptedFiles()
 
   // Prune done/ on startup: files imported over 7 days ago AND held by the source archive (never an original nobody archived)
   pruneDone()

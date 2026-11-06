@@ -35,7 +35,7 @@
  *                 that breaks a rule on 1 line in 10 is held by the sample check before the import starts (report phase "sample"). (The disk gate's scenario is called "gate".)
  *   archive-ref   a file imported from the source archive through an .archiveref: same counts as the plain import, identity in ulp.sources, a same-name file with other
  *                 content is a new file, a damaged archive fails before one row is committed, and no plaintext copy of the file appears in the inbox
- *   same-name     the same-name check compares size: the same file again is skipped (and the job log says so), another file under that name is imported and gets its
+ *   same-name     the same-name check compares size (and the content hash, once ulp.sources holds one for the name): the same file again is skipped (and the job log says so), another file under that name is imported and gets its
  *                 own ulp.sources row; the job log records the rows repeated inside a file
  *   link          a finished file put back into the inbox as a second hard-linked name of itself: the second pass is skipped and labelled, and nothing is stranded in
  *                 processing/ (rename(2) between two names of one file does nothing), on the real inbox volume
@@ -63,6 +63,7 @@
  * fails, 2 when the stack is not ready or there is not enough room to run.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -982,6 +983,25 @@ async function sameName(): Promise<void> {
   check('the job log labels the two skips of that name "already-imported" and no import', jobsOf(N).filter(r => r.note === 'already-imported').length === 2 && jobsOf(N).filter(r => r.note === null && r.imported > 0).length === 2,
     JSON.stringify(jobsOf(N).map(r => [r.imported, r.note])))
   check('...and records the rows repeated inside a file (100 here), and 0 for a skip', jobsOf(R)[0]?.repeats === 100 && jobsOf(N).every(r => r.repeats === 0), JSON.stringify([jobsOf(R)[0]?.repeats, jobsOf(N).map(r => r.repeats)]))
+
+  // Content as well as size: once ulp.sources holds a hash for the name (scripts/archive-sources.ts fills it for an archived name), a plain file of the same name and
+  // the same size but other content is another file, not a re-drop.
+  const C = `e2e-nov-content-${RUN}.txt`
+  const original = lines('CT', 0, 1_000)
+  const c1 = await importLines(C, original)
+  check('a file whose name will carry a hash: 1000 new', c1.status === 'done' && c1.imported === 1_000, brief(c1))
+  const sha = createHash('sha256').update(text(original)).digest('hex')
+  chQuery(`ALTER TABLE ulp.sources UPDATE sha256 = '${sha}' WHERE filename = '${C}' SETTINGS mutations_sync = 1`)
+  const c2 = await importLines(C, original)
+  check('the identical file again is skipped: its hash is the one on record', c2.status === 'done' && c2.imported === 0 && c2.known === 0, brief(c2))
+  const other = lines('CU', 0, 1_000)   // the same name, the same number of bytes, other content
+  check('(the second file really has the same size)', Buffer.byteLength(text(other)) === Buffer.byteLength(text(original)))
+  const c3 = await importLines(C, other)
+  check('the same name and size with other content is imported: 1000 new, 0 known', c3.status === 'done' && c3.imported === 1_000 && c3.known === 0, brief(c3))
+  check('...it has its own ulp.sources row, with its own hash', Number(chQuery(`SELECT count() FROM ulp.sources WHERE filename = '${C}'`)) === 2
+    && chQuery(`SELECT count() FROM ulp.sources WHERE filename = '${C}' AND sha256 = '${createHash('sha256').update(text(other)).digest('hex')}'`) === '1',
+    chQuery(`SELECT groupArray(substring(sha256, 1, 8)) FROM ulp.sources WHERE filename = '${C}'`))
+  check('...and 2000 rows are stored for the name', rowsFor(C) === 2_000, `rows ${rowsFor(C)}`)
   check('no stage table is left', stageTableCount() === 0)
 }
 

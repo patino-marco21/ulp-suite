@@ -243,7 +243,10 @@ describe('the same-name check of a file on disk knows its size', () => {
 
   it('skips a file when the name AND the size were imported before, and imports one that only has the name', async () => {
     const SEEN = Buffer.byteLength(LINES)
-    h.query.mockImplementation(async (q: { query_params: { s?: number } }) => ({ json: async () => [{ c: q.query_params.s === SEEN ? 1 : 0 }] }))
+    // The table holds no content hash for the name (the `sha256 != ''` count is 0), so the check goes by name and size.
+    h.query.mockImplementation(async (q: { query: string; query_params: { s?: number } }) => ({
+      json: async () => [{ c: /sha256 != ''/.test(q.query) ? 0 : q.query_params.s === SEEN ? 1 : 0 }],
+    }))
 
     const same = await processTextFile(file('shared-name.txt'), 'shared-name.txt')
     expect(same).toMatchObject({ alreadyImported: true, imported: 0 })

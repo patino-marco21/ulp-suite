@@ -90,6 +90,11 @@ export type ImportHooks = Partial<ImportContext> & {
    * itself (lib/ingest-pool.ts); without it (a ZIP entry, an HTTP stream, an archive reference) the file is staged on the importer's thread.
    */
   stageFile?: string
+  /**
+   * The sha256 of the plain file being imported, when the table holds a content hash for a file of its name and size (processTextFile reads the file once to get it). The
+   * same-name check then compares it, so a file that reuses a name and a size with other content is imported, and ulp.sources records the hash of the new one.
+   */
+  contentSha256?: string
 }
 
 export interface RunImportOptions<T> {

@@ -152,6 +152,7 @@ docker compose logs -f app | grep inbox-watcher
 The log follows a file through its life: `queued`, `processing`, then `done` with the rows that were new, already known and skipped, or `held` / `failed` with the reason. The production build strips `console.log`, so every line the watcher must show is a `console.warn` or `console.error` (pinned by `__tests__/inbox-watcher-log-visibility.test.ts`).
 
 Files move to `./inbox/done/` on success, `./inbox/failed/` on failure.
+A file the run lost (the app restarted in the middle of it, the import stalled, ClickHouse dropped the connection) goes back to the inbox **once** on its own (`lib/inbox-auto-retry.ts`: right away after a restart, after about 2 minutes otherwise); the job log shows the failure with the note `auto-retry`. The rows of the first attempt count as known, so nothing is written twice. A failure about the file (a parse or content error), a hold, or the second loss of the same file stays in `failed/` / `held/` for you; with `INGEST_NOVELTY_CHECK=off` nothing is retried.
 `done/` is cleaned at every app start: a file leaves it only when the job log says it was imported more than 7 days ago **and** the [source archive](docs/superpowers/specs/2026-10-12-source-archive-and-ingest-gate-design.md) holds that exact file (the same name and size in its manifest, or, for an `.archiveref`, the archive file it points to). A file nobody archived is never deleted, however old; the start-up log (`docker compose logs app | grep cleanup`) says how many files and GiB are waiting for `scripts/archive-sources.ts`. The age counts from the import, not from the date of the file, and a manifest the app cannot read deletes nothing.
 Existing failed files must be retried from the Inbox Monitor after deployment:
 
@@ -206,7 +207,11 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   job log records, for every finished file, the rows that repeat inside it
   (`repeats`) and a note when the same-name check skipped it
   (`already-imported`), so imported + already-known + repeated + rejected add
-  up to the lines of the file.
+  up to the lines of the file. The same-name check compares the size of a plain
+  file, and its content as well when `ulp.sources` holds a hash for the name
+  (`scripts/archive-sources.ts` fills it): the file is then read once and hashed,
+  so a file that reuses a name and a size with other content is imported, and one
+  that is a byte-identical re-drop is skipped.
 - `IMPORT_STALL_TIMEOUT_MS` — an import that makes no progress for this long (no
   batch inserted, no retry, no memory-guard poll) is failed and its queue slot
   freed. Time is measured while the machine is awake, so a laptop suspend does

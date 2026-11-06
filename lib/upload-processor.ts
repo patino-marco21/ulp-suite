@@ -7,6 +7,7 @@
  */
 
 import fs from 'fs'
+import { createHash } from 'node:crypto'
 import { Readable } from 'stream'
 import yauzl from 'yauzl'
 import { makeRejectionMap, type RejectionReason } from '@/lib/ulp-parser'
@@ -143,7 +144,36 @@ async function querySourceAlreadyImported(filename: string, signal: AbortSignal,
 
 /** The identity a hook set carries: the archive's hash wins over a plain file's size. */
 function identityOf(hooks: ImportHooks): SourceIdentityQuery {
-  return { sha256: hooks.source?.sha256, size: hooks.fileSize !== undefined && hooks.fileSize > 0 ? hooks.fileSize : undefined }
+  return { sha256: hooks.source?.sha256 ?? hooks.contentSha256, size: hooks.fileSize !== undefined && hooks.fileSize > 0 ? hooks.fileSize : undefined }
+}
+
+/** Whether ulp.sources holds a content hash for a file of this name and size (archive-sources fills it). Only then is a plain file worth reading to compare. */
+async function sourceHashStored(filename: string, size: number, hooks: ImportHooks): Promise<boolean> {
+  return withClickHouseRetry(
+    async signal => {
+      const res = await getClient().query({
+        query:        `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} AND (size = 0 OR size = {s:UInt64}) AND sha256 != '' LIMIT 1`,
+        query_params: { f: filename, s: size },
+        format:       'JSONEachRow',
+        abort_signal: signal,
+        clickhouse_settings: { use_query_cache: 0 },
+      })
+      const rows = await res.json() as Array<{ c: string | number }>
+      return Number(rows[0]?.c ?? 0) > 0
+    },
+    { signal: hooks.signal, onRetry: makeRetryLogger('source hash check', filename, () => hooks.beat?.()) },
+  )
+}
+
+/** sha256 of a file on disk, read once in 4 MiB chunks. The beat tells the stall watchdog that the job is alive while a big file is read; an abort stops it. */
+async function fileSha256(filePath: string, hooks: ImportHooks): Promise<string> {
+  const hash = createHash('sha256')
+  for await (const chunk of fs.createReadStream(filePath, { highWaterMark: 4 * 1024 * 1024 })) {
+    hooks.signal?.throwIfAborted()
+    hash.update(chunk as Buffer)
+    hooks.beat?.()
+  }
+  return hash.digest('hex')
 }
 
 export async function sourceAlreadyImported(filename: string, hooks: ImportHooks = {}): Promise<boolean> {
@@ -179,7 +209,9 @@ export async function recordSource(filename: string, lineCount: number, hooks: I
           // scripts/archive-sources.ts fills them later.
           ...(hooks.source
             ? { size: hooks.source.size, sha256: hooks.source.sha256, archive_id: hooks.source.archiveId }
-            : hooks.fileSize !== undefined && hooks.fileSize > 0 ? { size: hooks.fileSize } : {}),
+            : hooks.fileSize !== undefined && hooks.fileSize > 0
+              ? { size: hooks.fileSize, ...(hooks.contentSha256 ? { sha256: hooks.contentSha256 } : {}) }
+              : {}),
         }],
         format: 'JSONEachRow',
         abort_signal: signal,
@@ -592,6 +624,12 @@ export async function processTextFile(
       rejection_breakdown: makeRejectionMap(), alreadyImported: false, tierDropped: 0, emptyFile: true,
     }
   }
+  // A name and a size the table already knows, with a content hash on record: read the file once and let the content decide (a re-drop, or another file under the same name).
+  let contentSha256 = hooks.contentSha256
+  if (!contentSha256 && fileSize !== undefined && fileSize > 0 && await sourceHashStored(filename, fileSize, hooks)) {
+    contentSha256 = await fileSha256(filePath, hooks)
+    hooks.beat?.()
+  }
   const nodeStream = fs.createReadStream(filePath)
   const webStream = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>
   hooks.onSourceBytes?.(() => nodeStream.bytesRead)
@@ -601,7 +639,7 @@ export async function processTextFile(
     try { sampleSource = fileSource(filePath) } catch { /* the stream reports it */ }
   }
   try {
-    return await processTextStream(webStream, filename, jobId, onBatch, { ...hooks, fileSize, sampleSource, stageFile: filePath })
+    return await processTextStream(webStream, filename, jobId, onBatch, { ...hooks, fileSize, sampleSource, stageFile: filePath, contentSha256 })
   } finally {
     nodeStream.destroy()
   }
