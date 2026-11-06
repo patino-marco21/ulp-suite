@@ -238,6 +238,14 @@ without raising peak memory beyond one extra batch. Two environment knobs:
 - `INGEST_COMMIT_INSERT_THREADS` — `max_insert_threads` for the commit insert (default `4`, `1` to `16`). Measured on the exact
   statement against the live table definition: 142k rows/s with the server's default, 452k with 4, nothing more with 8
   (`docs/superpowers/specs/2026-10-12-fast-ingest-design.md`, step A2).
+- `INGEST_COMMIT_BLOCK_ROWS` — rows per block of the commit insert (default `131072`, `8192` to `1048576`; `1048576` is the server's own size, the
+  behaviour before 2026-11-06). A slab holds only the NEW rows, about 1.2M, which is two default blocks, and one thread does a block: the commits of a four-file
+  batch used 2.5 of 16 cores. On a clone of the live table definition a 1.09M-row slab took 12.4 s with the defaults and 5.3 s with 131,072-row blocks; the price is
+  about 5 parts per commit instead of 1 (`docs/superpowers/specs/2026-11-06-ingest-commit-lock-design.md`).
+- `INGEST_NOVELTY_CHECK_GROUP` — how many slabs of one file share one existence check (default `4`, `1` to `16`; `1` checks slab by slab, as before 2026-11-06). The check
+  reads the table's whole key column whatever a slab holds (2.8 billion rows, 21 GiB, 21-28 s), and only one import at a time may check and commit, so a four-file batch
+  spent 618 of its 1,116 locked seconds on it. A scan probing 40M keys took 24.2 s against 21.4 s for 10M: four slabs cost one scan. The lock is held from the scan to the
+  group's last insert (same design note).
 - `CLICKHOUSE_COMPRESS_REQUESTS` — set `1` to gzip INSERT bodies again. Off by default: ClickHouse is on the same machine or
   network, where gzip only cost CPU on the thread that parses the file (step A1).
 - `INGEST_QUALITY_GATE` — the ingest quality gate, on by default (`hold`; `lib/ingest-quality-gate.ts`,
@@ -264,6 +272,8 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   line, closed by a blank line or the end of the file), so those lines reach the gate and the job totals instead of vanishing. Parser v6.4
   (`docs/superpowers/specs/2026-11-06-credential-first-url-design.md`) reads `login:password url` (the credential first, then spaces, then an
   `http(s)` url) as the mirror of the `url login:password` layout it already read; it is a last-resort split, so a line that parsed before parses the same.
+  Parser v6.5 (`docs/superpowers/specs/2026-11-06-site-annotation-design.md`) reads `host/path:(host/path):login:password`, a parenthesised copy of the url's host between the
+  url and the credential, as an annotation: the login and the password are the fields after it (a number or text that is not the host in parentheses stays as it was).
 - `ULP_ARCHIVE_HOST_DIR` — the host directory of the source archive (`scripts/archive-sources.ts`, default `~/ulp-archive`,
   which must exist), mounted read-only at `/archive`. A file named `<name>.archiveref` dropped into `inbox/` (the feeder writes
   them with `SOURCE=archive`) is imported from the archive instead of from the inbox: the plaintext is decoded on the way to the
