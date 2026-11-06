@@ -322,7 +322,7 @@ function portAt(s: string, from: number): boolean {
   return next === 47 || next === 58 || next === 63 || next === 35
 }
 
-/** Field separators of a line: colons that are not part of a "://" or a port, semicolons, pipes and tabs. */
+/** Field separators of a line: colons that are not part of a "://" or a port, semicolons, pipes and tabs. A run of colons ("::") is one separator: the field between is empty, so it adds no field that could hold a login or a password. */
 function fieldSeparators(s: string): number {
   let n = 0
   for (let i = 0; i < s.length; i++) {
@@ -331,6 +331,7 @@ function fieldSeparators(s: string): number {
       if (s.charCodeAt(i + 1) === 47 && s.charCodeAt(i + 2) === 47) { i += 2; continue }   // the "://" of a scheme, or of a url inside a url
       if (portAt(s, i + 1)) continue
       n++
+      while (s.charCodeAt(i + 1) === 58) i++   // the rest of the run of colons
     } else if (c === 59 || c === 124 || c === 9) n++
   }
   return n
@@ -348,6 +349,8 @@ function hasEmailToken(s: string): boolean {
  * (no field separator at all, and an emoji or symbol in it, or nothing but punctuation), a bare url, or a url (or host and path) with at most one field behind it ("https://host:8443:token",
  * "https://host/login?next=https://other/home:token"). It is false for anything that could be a credential the parser failed to split: plain text, a line with an e-mail address, a
  * line with two or more separators behind the url, any line with a separator that does not start with a url. The quality gate does not count the true ones as "unsplit".
+ * A url, an empty field and one field ("https://host/login::word") is the url with one field: "::" is one separator. This changes only the gate's accounting: such a line yields
+ * no row before or after.
  */
 export function cannotHoldCredential(line: string): boolean {
   const t = stripLeadingColonBeforeScheme(line.trim())

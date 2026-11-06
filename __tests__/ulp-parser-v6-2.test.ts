@@ -200,6 +200,12 @@ describe('cannotHoldCredential: a rejected line that carries no credential', () 
     ['a url and one field', 'https://shop.example.test/login:Secret1'],
     ['a url with a nested url and one field', 'https://sso.example.test/login?continue=https://app.example.test/home:Token1234567890'],
     ['a host, a path and one field', 'shop.example.test/login:Secret1'],
+    ['a url and an empty field ("::" is one separator)', 'https://shop.example.test/login::'],
+    ['a url, an empty field and one field', 'https://shop.example.test/login::Secret1'],
+    ['a host, a path, an empty field and one field', 'shop.example.test/login::Secret1'],
+    ['a url with a port, an empty field and one field', 'https://shop.example.test:8443/login::Secret1'],
+    ['a url and two empty fields in a row, then one field', 'https://shop.example.test/login:::Secret1'],
+    ['the same with a leading colon', ':https://shop.example.test/login::Secret1'],
   ])('%s', (_label, line) => {
     expect(cannotHoldCredential(line)).toBe(true)
   })
@@ -216,8 +222,48 @@ describe('cannotHoldCredential: a rejected line that carries no credential', () 
     ['a host, a path and two fields', 'shop.example.test/login:alice:Secret1'],
     ['a banner that has a colon', 'Join us on Telegram: https://t.me/Channel'],
     ['a tab-separated line', 'shop.example.test\talice\tSecret1'],
+    ['a url, an empty field, then two more fields', 'https://shop.example.test/login::alice:Secret1'],
+    ['a url, an empty field and an e-mail address', 'https://shop.example.test/login::alice@mail.test'],
+    ['a url, a field, an empty field, then a field', 'https://shop.example.test/login:alice::Secret1'],
+    ['two empty fields and two more fields', 'https://shop.example.test/login:::alice:Secret1'],
+    ['an empty field in a line that does not start with a url', 'alice::Secret1'],
+    ['an empty field after a plain word', 'word::word'],
+    ['an empty field and a long line over the length cap', 'https://shop.example.test/login::' + 'x'.repeat(5000)],
   ])('%s is still counted', (_label, line) => {
     expect(cannotHoldCredential(line)).toBe(false)
+  })
+})
+
+describe('cannotHoldCredential: a run of colons is one separator (property)', () => {
+  // Seeded, so a failure repeats. Words are letters only (a digit after a colon would be read as a port, and the collapse below would change that).
+  let seed = 20261106
+  const rand = (n: number) => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed % n }
+  const pick = <T,>(xs: T[]) => xs[rand(xs.length)]
+  const PREFIXES = ['https://shop.example.test/login', 'http://shop.example.test:8443/login', 'shop.example.test/login', ':https://shop.example.test/login', 'word', '']
+  const WORDS = ['alice', 'Secret', 'x', 'pass', 'a@mail.test', 'name']
+  const SEPS = [':', '::', ':::', ';', '|', '\t']
+  const collapse = (line: string) => line.replace(/:{2,}/g, ':')
+
+  test('a line reads the same with every run of colons cut to one colon', () => {
+    for (let i = 0; i < 3000; i++) {
+      let line = pick(PREFIXES)
+      for (let k = rand(5); k > 0; k--) line += pick(SEPS) + pick(WORDS)
+      if (rand(4) === 0) line += pick(SEPS)
+      expect(cannotHoldCredential(line), JSON.stringify(line)).toBe(cannotHoldCredential(collapse(line)))
+    }
+  })
+
+  test('the lines the rule newly counts as "cannot hold" always have a url in front, no e-mail, and at most one non-empty field behind it', () => {
+    const FIELD = /[^:;|\t]+/g
+    for (let i = 0; i < 3000; i++) {
+      let line = pick(PREFIXES)
+      for (let k = rand(5); k > 0; k--) line += pick(SEPS) + pick(WORDS)
+      if (!/::/.test(line) || !cannotHoldCredential(line) || cannotHoldCredential(line.replace(/::+/g, ':\u0001:'))) continue
+      // counted only because "::" is one separator: behind the url there may be no e-mail and no more than two fields
+      const behind = line.replace(/^:?(?:[a-z][a-z0-9+.-]*:\/\/)?[^:;|\t/]*(?::\d{1,5})?(?:\/[^:;|\t]*)?/i, '')
+      expect(line).not.toContain('@')
+      expect((behind.match(FIELD) ?? []).length, JSON.stringify(line)).toBeLessThanOrEqual(1)
+    }
   })
 })
 
@@ -254,6 +300,15 @@ describe('in a stream', () => {
     const noCredential = batches.reduce((n, b) => n + (b.noCredential ?? 0), 0)
     expect(noFields).toBe(3)        // the banner, the divider and the url with one field
     expect(noCredential).toBe(3)    // all three cannot hold a credential
+  })
+  test('a url, an empty field and one field is rejected like the url with one field, and counted apart; with two more fields it is not', async () => {
+    const body = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode('https://six.example.test/login::\nhttps://seven.example.test/login::Secret7\nhttps://eight.example.test/login::frank:Secret8\n')); c.close() } })
+    let noFields = 0, noCredential = 0
+    const rows: string[] = []
+    for await (const b of parseULPStream(body, 'v62.txt', 100, undefined, { dedupInFile: false })) { noFields += b.breakdown.no_fields ?? 0; noCredential += b.noCredential ?? 0; rows.push(...b.credentials.map(c => `${c.url} | ${c.email} | ${c.password}`)) }
+    expect(rows).toEqual([])                  // no row before or after the rule: the rule changes only the accounting
+    expect(noFields).toBe(3)
+    expect(noCredential).toBe(2)              // the third line has fields that may hold a credential: it stays in the unsplit share
   })
   test('an unreadable line that does look like a credential is not counted apart', async () => {
     const body = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode('alice@mail.test\nalice Secret1\n')); c.close() } })

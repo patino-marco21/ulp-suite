@@ -255,7 +255,7 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   `ulp.credentials` on the normalised key, one scan for all files of the call), and marks a file under 5% new as `LOW YIELD`. It is
   advice for the owner: nothing is skipped, parked or reordered (`docs/superpowers/specs/2026-11-05-known-share-preflight-design.md`).
   The unsplit share leaves out the lines that cannot hold a credential in any layout (a banner, a divider, a bare link, a link with one
-  field behind it; `cannotHoldCredential` in `lib/ulp-recover.ts`), and a file over 8 MiB is also sampled before its import starts (five
+  field behind it, where `::` (an empty field) counts as one separator; `cannotHoldCredential` in `lib/ulp-recover.ts`), and a file over 8 MiB is also sampled before its import starts (five
   slices of 2 MiB spread over the file, as the preflight reads them): it is held at once when the sample is past a hold limit by half
   again, so a file that goes bad in the middle stops in seconds. Both are described in
   `docs/superpowers/specs/2026-10-24-parser-v6-2-and-gate-noise-design.md`. Parser v6.3

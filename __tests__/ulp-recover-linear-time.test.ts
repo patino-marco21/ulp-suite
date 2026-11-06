@@ -238,6 +238,9 @@ describe('the helpers of parser v6.2: linear time', () => {
     ['a run of ports inside a url', 'https://a.test/?n=https://b.test' + ':8443/x'.repeat(RUN / 7) + ':alice:Secret1'],
     ['a long e-mail-shaped token just under the length cap of cannotHoldCredential', 'a@' + 'b.'.repeat(2040) + '@'],
     ['a long line over the cap', 'https://a.test/' + 'a@b.'.repeat(RUN / 4)],
+    ['a run of colons (empty fields) behind a url', 'https://a.test/x' + colons + 'a'],
+    ['a run of "::" pairs behind a url', 'https://a.test/x' + '::a'.repeat(RUN / 3)],
+    ['a run of colons just under the length cap of cannotHoldCredential', 'https://a.test/x' + ':'.repeat(4070) + 'a'],
   ])('%s', (_label, line) => {
     expect(time(() => stripLeadingColonBeforeScheme(line))).toBeLessThan(limitMs)
     expect(time(() => splitSemicolonPasswordUrl(line))).toBeLessThan(limitMs)

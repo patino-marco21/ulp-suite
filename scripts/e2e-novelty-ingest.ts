@@ -559,14 +559,16 @@ async function parserV62(): Promise<void> {
     '\u{1F4B8} Premium access ➜ $50 \u{1F4B0}',
     '█'.repeat(24),
     `https://shopn.example-store.test/login:${pw('N')}`,
+    `https://shopo1.example-store.test/login::`,                                                               // a url and an empty field
+    `https://shopo2.example-store.test/login::${pw('O2')}`,                                                    // a url, an empty field and one field
     // the layouts that must not move
     `https://shopz1.example-store.test/login:v62z1${RUN}:${pw('Z1')}`,
     `https://shopz2.example-store.test;v62z2${RUN};${pw('Z2')}`,
     `v62z3${RUN}@probe-mail.test:${pw('Z3')}`,
   ]
   const v = await importLines(P, ls)
-  check('a file with one line per v6.2 rule, three lines that carry no credential and the layouts that must not move: 11 rows are new, none known', v.status === 'done' && v.imported === 11 && v.known === 0, brief(v))
-  check('...the 3 lines without a credential are the only ones skipped, and 11 rows are stored', v.skipped === 3 && rowsFor(P) === 11, `skipped ${v.skipped}, rows ${rowsFor(P)}`)
+  check('a file with one line per v6.2 rule, five lines that carry no credential and the layouts that must not move: 11 rows are new, none known', v.status === 'done' && v.imported === 11 && v.known === 0, brief(v))
+  check('...the 5 lines without a credential are the only ones skipped, and 11 rows are stored', v.skipped === 5 && rowsFor(P) === 11, `skipped ${v.skipped}, rows ${rowsFor(P)}`)
   const one = (where: string) => Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND ${where}`))
   check('J: the colon in front of the scheme is gone, and url_scheme and url_host are those of the url',
     one(`url = 'https://shopj1.example-store.test/login' AND email = 'v62j1${RUN}@probe-mail.test' AND password = '${pw('J1')}' AND url_scheme = 'https' AND url_host = 'shopj1.example-store.test'`) === 1
