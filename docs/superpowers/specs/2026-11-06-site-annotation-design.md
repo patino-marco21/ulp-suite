@@ -1,7 +1,7 @@
 # Parser v6.5: a parenthesised copy of the site between the url and the credential — design and results (2026-11-06)
 
 Date: 2026-11-06
-Status: **Built on 2026-11-06; the differential, the rehearsal and the deploy are recorded under "Results" when they are done.**
+Status: **Deployed on 2026-11-06 (main `727e7e6`, image `e22ee1cb9684`); see "Results". The repair of the stored rows is not done (the owner's call).**
 Related: `2026-11-06-credential-first-url-design.md` (the parser v6.4 this follows), `2026-10-24-parser-v6-2-and-gate-noise-design.md`.
 File names, channel names, search terms and credential values are deliberately absent (the repository is public); every fixture is invented.
 
@@ -39,3 +39,7 @@ After the v6.4 batch, the rows that landed in the table were checked against the
 **Real data, the v6.4 parser (from git, commit `205da06`) against the working tree (2026-11-06, before the deploy).** `scripts/parser-diff.ts --whole --lines-with '('` over eight whole files (the five dumps of the batch, the 3.4 GB dump, the 347 MB file and the 81 MB file), 2.2M lines holding a parenthesis: 139,431 lines changed in the class `site-annotation` and 44 in `t3-kept` (the old parser dropped the line by the country of the url's host because the login it saw was the parenthesised copy; with the real e-mail login the line is stored, which is the tier policy applied to the right field); unexplained 0. A first run with the filter `':('` read nearly every line (the option takes a set of characters) and was stopped after 40 minutes.
 
 **Rehearsal (isolated stack, candidate image built from the commits).** The alert rehearsal passed 50 of 50 checks and the novelty-ingest scenarios (every one but the disk filler) 322 of 322, including `v65`: six rows new, the three copies read as annotations with the fields after them, the three other shapes stored as before, no row whose login is a parenthesised host. The quality-gate scenario also proves the hold report's unsplit shapes (31 of 31): a file where 1 line in 9 cannot be split is held and its report lists one shape of 3,000 lines with the words shown as `w` and no value of the file anywhere in it.
+
+**Deploy and first production rows (2026-11-06).** Deployed together with the commit-lock changes (`2026-11-06-ingest-commit-lock-design.md`), rollback tag `rollback-20261106-2005z`. The four files of the 11-06 batch were fed again under new names: 72,088 new rows, none of them with the defective shape (login wrapped in parentheses with a slash and a colon in the password), where the same four files had put 0.18% of their rows (68,465 rows) into the table that way.
+
+**Not done.** The roughly 0.5 million stored rows of the same shape (487,041 repeating the url's host, across 401 files) are still in the table. Removing them and feeding the files again from the archive is a live-table rewrite and the owner's call; the corrected credentials may be new or already known.

@@ -1,7 +1,7 @@
 # Ingest: a shorter commit lock — one existence check per group of slabs, smaller commit blocks, the wait recorded — design and results (2026-11-06)
 
 Date: 2026-11-06
-Status: **Built on 2026-11-06; the rehearsal, the deploy and the measured batch are recorded under "Results" when they are done.**
+Status: **Deployed on 2026-11-06 (main `727e7e6`, image `e22ee1cb9684`); measured on a four-file batch the same day; see "Results".**
 Related: `2026-10-02-novelty-aware-ingest-design.md` (the slabs, the known table and the lock this changes), `2026-10-12-fast-ingest-design.md` (step A2, the insert threads), `2026-11-05-known-share-preflight-design.md`.
 File names, channel names, search terms and credential values are deliberately absent (the repository is public); every fixture is invented.
 
@@ -65,4 +65,21 @@ A four-file batch: fills 618 s -> about 190 s (8 groups of about 24 s), commits 
 
 **Rehearsal (isolated stack, candidate image built from the commits).** The alert rehearsal passed 50 of 50 checks and the novelty-ingest scenarios (every one but the disk filler) 322 of 322, among them `groups` (the grouped check and the check slab by slab write the same 50,000 rows, the shared 30,000 once, in both runs; ClickHouse's query log shows the grouped run sent far fewer fills; the same content under a new name is all 40,000 known), `concurrent`, `big` (2.5M distinct lines in 5 slabs, now in two groups), `kill`, `freeze`, `lookalikes`, `workers`, `quality-gate` and `monitor`. The rehearsal script now stops with exit 2 when the stack runs on another image than the one a recreate would use (a stack brought up on a candidate had come back on the previous `:latest` in an earlier run).
 
-The deploy and the measured batch follow.
+**Deploy (2026-11-06 20:5xZ).** Main `727e7e6` (CI green), image `e22ee1cb9684` (the rehearsed candidate, tagged `latest`), rollback tag `rollback-20261106-2005z` (the previous image, `a2fcde9668b6`). Nothing was importing; only the app container was recreated; healthy, 0 restarts; the additive column `processing_jobs.lock_wait_ms` was added at start-up.
+
+**Measured batch (same day).** The four files of the 11-06 batch again, under new names, all released to the inbox at 20:48:37Z with the same settings (4 parse workers, concurrency 4): finished 21:02:40Z, 14.1 minutes. The table grew by 72,088 rows, exactly the sum of the four `imported` (2,578 + 4,075 + 35,564 + 29,871). Because the same files were fed again, nearly every row was known, so this run is a fair comparison for the existence check and NOT for the commit (the original batch committed 31.4M new rows, this one 72k):
+
+| under the commit lock | original batch (22 slabs, 31.4M new rows) | re-fed batch (22 slabs, 72k new rows) |
+| --- | --- | --- |
+| known fill | 618 s in 22 scans (28 s each) | 269 s in 8 scans (33.6 s each, 22.7 billion rows read) |
+| commit `INSERT ... SELECT` | 426 s (16.6 s per slab) | 43 s (2 s per slab; not comparable) |
+| clear, count, slab distinct | 72 s | 9 s |
+| total | 1,116 s | 321 s |
+| wall, four files at once | 29.2 min | 14.1 min |
+| duration per job | 1,230-1,749 s | 588-840 s |
+| wait for the lock | 380-760 s per job (derived) | 0, 110, 124 and 126 s (`lock_wait_ms`, recorded) |
+
+- The grouped check does what the design says: 22 slabs were checked with 8 scans, and the fill time fell by 56% (618 s -> 269 s). A scan takes longer than the idle 21-24 s (33.6 s on average, 43 s at most) because it probes up to 40M keys while four parse workers run.
+- The commit block size is NOT exercised by this run (22 commits of about 3,300 rows each). Its effect rests on the clone measurement (12.5 s -> 5.3 s for a 1.09M-row slab) until the next batch of genuinely new files; for the original batch the estimate is commits 426 s -> about 180 s, and with the measured fill about 18 minutes instead of 29.
+- The 72,088 new rows were audited: none has the shape of the v6.5 defect (login wrapped in parentheses with a slash and a colon in the password; 0.18% of the rows of the earlier batch), 12 have a parenthesised login of another kind, 36 a slash in the login (0.05%; 1.2% in the earlier batch), 1 a space in a field, 1 a Telegram link.
+- The four copies sit in `inbox/done` next to the originals (16.7 GB of duplicate plaintext); the automatic archive stores identical content once and the replace of the plaintext stays the owner's.
