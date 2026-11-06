@@ -60,7 +60,7 @@
  *                 second loss of the same file stays in failed/ (waited out for longer than the delay) until the owner retries it; an app killed in the middle of an inbox
  *                 file's commit finds the file in processing/ at start-up and sends it back once
  *
- *   docker compose build app
+ *   docker compose build app                   # or REHEARSAL_APP_IMAGE=<tag> for a candidate: export it for the alert rehearsal AND for this script (the script stops with exit 2 when they differ)
  *   npx tsx scripts/e2e-alert-rehearsal.ts --keep    # brings the rehearsal stack up (about 4 minutes) and leaves it running
  *   npx tsx scripts/e2e-novelty-ingest.ts            # about 15 minutes; --only=kill,off runs just those; --skip-gate leaves out the filler
  *   REHEARSAL_JWT_SECRET=x REHEARSAL_ADMIN_EMAIL=x@x.test REHEARSAL_ADMIN_PASSWORD=x REHEARSAL_WEBHOOK_SECRET=x \
@@ -75,6 +75,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { NORM_CONTENT_KEY, exactKeySql, normHostSql, normKeySql, normRestSql } from '../lib/url-content-key'
+import { assertRehearsalImage } from './rehearsal-image'
 
 const APP = 'ulprehearsal_app'
 const CH = 'ulprehearsal_clickhouse'
@@ -1597,6 +1598,11 @@ async function run(): Promise<number> {
 }
 
 async function main(): Promise<number> {
+  const imageProblem = assertRehearsalImage(APP)
+  if (imageProblem) {
+    console.error(imageProblem)
+    return 2
+  }
   process.on('SIGINT', () => {
     try {
       sh('docker', ['exec', CH, 'rm', '-f', FILLER])

@@ -24,6 +24,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { assertRehearsalImage } from './rehearsal-image'
 
 const APP = 'ulprehearsal_app'
 const CH = 'ulprehearsal_clickhouse'
@@ -293,6 +294,11 @@ async function run(): Promise<number> {
 }
 
 async function main(): Promise<number> {
+  const imageProblem = assertRehearsalImage(APP)
+  if (imageProblem) {
+    console.error(imageProblem)
+    return 2
+  }
   process.on('SIGINT', () => {
     removeFiller()
     process.exit(130)
