@@ -37,8 +37,8 @@ import { stripPromoSignature } from '@/lib/ulp-promo-signature'
 import { hasTelegramLink, stripTelegramTag } from '@/lib/ulp-telegram-tag'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
 import {
-  cannotHoldCredential, holdsCredential, isUrlPathParameter, joinPipedUrl, looksLikeUrlFragment, protocolRelativeToPlain, recoverAndroidAppLine, splitNumericLogin, splitPipedLabelledPair,
-  splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme, stripTrailingSemicolons,
+  cannotHoldCredential, holdsCredential, isUrlPathParameter, joinPipedUrl, looksLikeUrlFragment, protocolRelativeToPlain, recoverAndroidAppLine, splitCredentialUrlPair, splitNumericLogin,
+  splitPipedLabelledPair, splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme, stripTrailingSemicolons,
 } from '@/lib/ulp-recover'
 
 export interface ULPCredential {
@@ -647,6 +647,7 @@ function colonSplit(line: string): [string, string, string] | null {
     ?? splitSlashInPassword(line)
     ?? splitNumericLogin(line)
     ?? splitUrlSpacePair(line)
+    ?? splitCredentialUrlPair(line)
 }
 
 // ── Core parse function ───────────────────────────────────────────────────────

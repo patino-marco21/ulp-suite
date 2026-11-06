@@ -1,7 +1,7 @@
 /** Names the reason the result for one line differs between a baseline parser and parser v6 (scripts/parser-diff.ts). "unexplained" must stay at 0. */
 import {
-  hasInnerScheme, holdsCredential, isUrlPathParameter, pipeJoinAll, protocolRelativeToPlain, recoverAndroidAppLine, splitNumericLogin, splitPipedLabelledPair,
-  splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme,
+  hasInnerScheme, holdsCredential, isUrlPathParameter, pipeJoinAll, protocolRelativeToPlain, recoverAndroidAppLine, splitCredentialUrlPair, splitNumericLogin,
+  splitPipedLabelledPair, splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme,
 } from '@/lib/ulp-recover'
 import { stripTelegramTag } from '@/lib/ulp-telegram-tag'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
@@ -11,12 +11,12 @@ export interface Outcome { credential: { url: string; email: string; password: s
 export type ChangeClass =
   | 'same' | 'padded-colons' | 'android-no-scheme' | 'slash-in-password' | 'numeric-login' | 'protocol-relative'
   | 'utf8-recovered' | 'utf8-value' | 'utf8-lost' | 'login-equals-password' | 't3-kept' | 'pipe-scheme' | 'pipe-label' | 'pipe-url' | 'semicolon-password' | 'semicolon-parameter'
-  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'unexplained'
+  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'credential-url' | 'unexplained'
 
 export const CHANGE_CLASSES: ChangeClass[] = [
   'padded-colons', 'android-no-scheme', 'slash-in-password', 'numeric-login', 'protocol-relative',
   'utf8-recovered', 'utf8-value', 'utf8-lost', 'login-equals-password', 't3-kept', 'pipe-scheme', 'pipe-label', 'pipe-url', 'semicolon-password', 'semicolon-parameter',
-  'leading-colon', 'semicolon-url-last', 'labelled-pair', 'nested-url', 'unexplained',
+  'leading-colon', 'semicolon-url-last', 'labelled-pair', 'nested-url', 'credential-url', 'unexplained',
 ]
 
 const INERT = '\uE000'   // a private-use character: no parser rule knows it, so a line that holds it is read like one without a semicolon
@@ -105,6 +105,7 @@ export function classifyChange(
     if (protocolRelativeToPlain(t)) return 'protocol-relative'
     if (splitSlashInPassword(t)) return 'slash-in-password'
     if (splitNumericLogin(t)) return 'numeric-login'
+    if (splitCredentialUrlPair(t)) return 'credential-url'   // parser v6.4: "login:password url"
   }
   const v62 = v62Rule(rawLine)
   if (v62) return v62

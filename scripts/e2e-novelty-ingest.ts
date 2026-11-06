@@ -21,6 +21,9 @@
  *               a url inside a url, lines that carry no credential (a banner, a divider, a bare url with one field) and the layouts that must not move
  *   v63         parser v6.3: a CRLF file with a blank line after every record, three of the records signed with a promotional tail (stored with the real password, the tail cut), two bare urls
  *               that a blank line closes (counted as skipped: every line of the file is in a counter), and a file of 0 bytes dropped in the inbox (recorded with the note "empty-file")
+ *   v64         parser v6.4: "login:password url" (the credential first, one or more spaces, the url last), with an e-mail login, no path, a port and a url inside a url; the url-first mirror
+ *               that the parser already read, the lines that stay rejected (a login with a slash, a label before a Telegram link, an empty password, a password with a space, a scheme
+ *               other than http and https) and the layouts that must not move
  *   monitor     a monitor alerts for rows that are new to the database, not for a row the database already held
  *   big         2.5M distinct lines + 100k repeats of early lines (past the old 2M in-file cap): exact, in 5 slabs, phases visible
  *   kill        the app is killed in the middle of the commit; after the restart the orphan stage tables are gone and a retry
@@ -620,6 +623,42 @@ async function parserV63(): Promise<void> {
   const empty = await waitFor(async () => (await inboxJobs(E))[0], 120_000, 1000)
   check('a file of 0 bytes dropped in the inbox is recorded as done with the note "empty-file", not as an import that found nothing', !!empty && empty.status === 'done' && empty.imported === 0 && empty.note === 'empty-file', JSON.stringify(empty))
   check('...nothing is stored or remembered for it, and no stage table is left', rowsFor(E) === 0 && sourceLine(E) === '' && stageTableCount() === 0, `rows ${rowsFor(E)}, source [${sourceLine(E)}]`)
+}
+
+async function parserV64(): Promise<void> {
+  console.log('\n1h. Parser v6.4: login:password, a space, then the url')
+  const P = `e2e-nov-v64-${RUN}.txt`
+  const pw = (k: string) => `Pw-${RUN}-${k}`
+  const ls = [
+    `v64a1${RUN}:${pw('A1')} https://shopa1.example-store.test/login`,                                              // a path
+    `v64a2${RUN}@probe-mail.test:${pw('A2')}   http://shopa2.example-store.test`,                                   // an e-mail login, several spaces, no path
+    `v64a3${RUN}:${pw('A3')} https://shopa3.example-store.test:8443/login?next=https://other.example-store.test/home`, // a port, a url inside the url
+    // the mirror the parser already read
+    `https://shopb1.example-store.test/login v64b1${RUN}:${pw('B1')}`,
+    // still rejected
+    `v64x1${RUN}/p:${pw('X1')} https://shopx1.example-store.test/login`,                                           // a login that holds a slash
+    `Login: https://t.me/probe_channel`,                                                                            // a label in front of a Telegram link
+    `v64x3${RUN}: https://shopx3.example-store.test/login`,                                                         // an empty password
+    `v64x4${RUN}:${pw('X4')} extra https://shopx4.example-store.test/login`,                                        // a word between the password and the url
+    `v64x5${RUN}:${pw('X5')} ftp://files.example-store.test/`,                                                      // a scheme other than http and https
+    // the layouts that must not move
+    `https://shopz1.example-store.test/login:v64z1${RUN}:${pw('Z1')}`,
+    `v64z2${RUN}@probe-mail.test:${pw('Z2')}`,
+  ]
+  const v = await importLines(P, ls)
+  check('a file with three credential-first lines, the url-first mirror, five lines that stay rejected and two layouts that must not move: 6 rows are new, none known', v.status === 'done' && v.imported === 6 && v.known === 0, brief(v))
+  check('...the 5 rejected lines are the only ones skipped, and 6 rows are stored', v.skipped === 5 && rowsFor(P) === 6, `skipped ${v.skipped}, rows ${rowsFor(P)}`)
+  const one = (where: string) => Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND ${where}`))
+  check('the url that came last is the url, the field in front of the first colon is the login and the rest of the first token the password',
+    one(`url = 'https://shopa1.example-store.test/login' AND email = 'v64a1${RUN}' AND password = '${pw('A1')}' AND url_scheme = 'https' AND url_host = 'shopa1.example-store.test'`) === 1
+    && one(`url = 'http://shopa2.example-store.test' AND email = 'v64a2${RUN}@probe-mail.test' AND password = '${pw('A2')}'`) === 1
+    && one(`url = 'https://shopa3.example-store.test:8443/login?next=https://other.example-store.test/home' AND email = 'v64a3${RUN}' AND password = '${pw('A3')}'`) === 1)
+  check('the url-first mirror and the other layouts are stored as before',
+    one(`url = 'https://shopb1.example-store.test/login' AND email = 'v64b1${RUN}' AND password = '${pw('B1')}'`) === 1
+    && one(`url = 'https://shopz1.example-store.test/login' AND email = 'v64z1${RUN}' AND password = '${pw('Z1')}'`) === 1
+    && one(`url = '' AND email = 'v64z2${RUN}@probe-mail.test' AND password = '${pw('Z2')}'`) === 1)
+  check('no row has a login that holds a slash, a Telegram link as its url, or a space in any field',
+    one(`(position(email, '/') > 0 OR position(url, 't.me') > 0 OR position(email, ' ') > 0 OR position(password, ' ') > 0)`) === 0)
 }
 
 async function monitorScenario(): Promise<void> {
@@ -1532,6 +1571,7 @@ async function run(): Promise<number> {
   if (want('pipes')) await parserV61()
   if (want('v62')) await parserV62()
   if (want('v63')) await parserV63()
+  if (want('v64')) await parserV64()
   if (want('monitor')) await monitorScenario()
   if (want('big')) await bigFile()
   if (want('kill')) await killMidCommit()

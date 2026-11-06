@@ -6,6 +6,8 @@
  * the line means before the separator rules run, and each acts only where the old rule produced junk (see "Parser v6.1" in the same spec).
  */
 
+import { hasTelegramLink } from '@/lib/ulp-telegram-tag'
+
 /** Ports a web server really listens on: a number after the host that is one of these is a port, not a login (rule D). */
 export const COMMON_WEB_PORTS: ReadonlySet<number> = new Set([
   80, 81, 82, 88, 443, 444, 591, 631, 2082, 2083, 2086, 2087, 2095, 2096, 3000, 3001, 3128, 3306, 4443, 5000, 5001, 5432, 5601, 7001, 7443,
@@ -84,6 +86,15 @@ export function splitNumericLogin(line: string): [string, string, string] | null
   const n = Number(m[2])
   if (n > 65535 || COMMON_WEB_PORTS.has(n)) return null
   return [m[1], m[2], m[3]]
+}
+
+/**
+ * "alice:Secret1 http://shop.example.test/login": login:password, one space, then the url (parser v6.4; the mirror of the url-first "url login:password" line the parser
+ * already reads). The login holds no "/" (a path, not a login) and no colon: the first colon ends it, as in a plain "login:password" line. A Telegram link is not a url.
+ */
+export function splitCredentialUrlPair(line: string): [string, string, string] | null {
+  const m = /^([^\s:/]+):(\S+) +(https?:\/\/\S+)$/i.exec(line)
+  return m && !hasTelegramLink(m[3]) ? [m[3], m[1], m[2]] : null
 }
 
 const PROTOCOL_RELATIVE = /^[^\s:@]+(?::\d{1,5}\/?[^\s:]*)?:[^\s:/]+:[^\s:]+$/

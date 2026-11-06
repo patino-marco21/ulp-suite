@@ -261,7 +261,9 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   `docs/superpowers/specs/2026-10-24-parser-v6-2-and-gate-noise-design.md`. Parser v6.3
   (`docs/superpowers/specs/2026-11-02-promo-signature-and-uncounted-lines-design.md`) cuts a promotional signature (` ┃ @channel words`)
   from the end of a line and counts a record that was opened and never finished (a link line that waits for a login and a password
-  line, closed by a blank line or the end of the file), so those lines reach the gate and the job totals instead of vanishing.
+  line, closed by a blank line or the end of the file), so those lines reach the gate and the job totals instead of vanishing. Parser v6.4
+  (`docs/superpowers/specs/2026-11-06-credential-first-url-design.md`) reads `login:password url` (the credential first, then spaces, then an
+  `http(s)` url) as the mirror of the `url login:password` layout it already read; it is a last-resort split, so a line that parsed before parses the same.
 - `ULP_ARCHIVE_HOST_DIR` — the host directory of the source archive (`scripts/archive-sources.ts`, default `~/ulp-archive`,
   which must exist), mounted read-only at `/archive`. A file named `<name>.archiveref` dropped into `inbox/` (the feeder writes
   them with `SOURCE=archive`) is imported from the archive instead of from the inbox: the plaintext is decoded on the way to the

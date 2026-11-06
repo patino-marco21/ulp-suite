@@ -275,3 +275,28 @@ describe('classifyOldOnlyRow: the rows the baseline stored for the layouts of pa
     [{ url: '', email: 'Username', password: 'Secret1' }],
   ])('a row nothing in v6.2 explains stays unexplained: %j', r => expect(classifyOldOnlyRow(r)).toBe('unexplained'))
 })
+
+describe('login:password then the url (parser v6.4)', () => {
+  const stored = row('https://shop.example.test/login', 'alice', 'Secret1')
+
+  test.each([
+    ['alice:Secret1 https://shop.example.test/login'],
+    ['alice@mail.test:Secret1   http://shop.example.test'],
+    ['alice:pa:ss1 https://shop.example.test/login?next=https://other.test/home'],
+  ])('a rejected line now stored is the credential-url class: %s', line => {
+    expect(classifyChange(line, none('no_fields'), stored, none('no_fields'))).toBe('credential-url')
+  })
+
+  test('the same shape is not attributed when the baseline already stored a different result', () => {
+    expect(classifyChange('alice:Secret1 https://shop.example.test/login', row('', 'alice', 'Secret1 https://shop.example.test/login'), stored, none('x'))).toBe('unexplained')
+  })
+
+  test.each([
+    ['plain:line:here'],
+    ['https://shop.example.test/login alice:Secret1'],
+    ['alice:Secret1 ftp://files.example.test/'],
+    ['Login: https://t.me/SomeChannel'],
+  ])('a line that is not of that shape stays unexplained: %s', line => {
+    expect(classifyChange(line, none('no_fields'), stored, none('no_fields'))).toBe('unexplained')
+  })
+})
