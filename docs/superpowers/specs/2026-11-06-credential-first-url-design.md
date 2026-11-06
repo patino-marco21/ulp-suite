@@ -1,7 +1,7 @@
 # Parser v6.4: `login:password url`, the credential first and the url last — design and results (2026-11-06)
 
 Date: 2026-11-06
-Status: **Built and rehearsed on 2026-11-06; the deploy and the re-feed of the held file are recorded under "Results" when they are done.**
+Status: **Deployed on 2026-11-06 (main `69d434a`, image `a2fcde9668b6`); the held file imported on its own the same day; see "Results".**
 Related: `2026-11-02-promo-signature-and-uncounted-lines-design.md` (the parser v6.3 this follows), `2026-10-12-source-archive-and-ingest-gate-design.md` (the quality gate whose early window this changes in effect), `2026-11-05-known-share-preflight-design.md`.
 File names, channel names, search terms and credential values are deliberately absent (the repository is public); every fixture is invented.
 
@@ -35,7 +35,7 @@ The regex has one unbounded run per group and no nesting; the test file times si
 - Only the fallback position: a line that any earlier rule reads is read by that rule, so nothing that is stored today changes.
 - Only `http` and `https`, the same two schemes the url-first rule accepts. A third scheme would be a separate decision with its own measurement.
 - The android-style `...==@host/:` shapes and the `url:(+9) 9...` shapes that also sit in these files are not touched.
-- Not a change to the gate: the early window stays at one million lines. With the rule in place most of what filled the held file's window is read, so it is expected to pass on its own; the measured result is under "Results" once the file has been through. A Release is not needed and is not used.
+- Not a change to the gate: the early window stays at one million lines. With the rule in place most of what filled the held file's window is read, so it passes on its own; the measured result is under "Results". A Release was not needed and was not used.
 
 ## Tests
 
@@ -49,3 +49,7 @@ The regex has one unbounded run per group and no nesting; the test file times si
 **Real data, the v6.3 parser (from git `HEAD`) against the working tree (2026-11-06, before the deploy).** `scripts/parser-diff.ts --whole --lines-with ' '` over three whole files (the held file, an imported file that holds the shape, and a control without it), 10.8M lines with a space: 2,834,488 lines changed, every one in the class `credential-url`; unexplained 0. No line that parsed before parses differently.
 
 **Rehearsal (isolated stack, candidate image built from the working tree).** The alert rehearsal passed 50 of 50 checks and the scenarios `v64`, `basic` and `workers` 45 of 45 (the parse worker's bundle carries the rule too). One earlier run showed 3 failures in `v64`; the cause was the procedure, not the code: the end-to-end script recreates the app through compose, and without `REHEARSAL_APP_IMAGE` exported for that step it fell back to the previous `:latest`. The rerun, with the candidate named for both steps, passed.
+
+**Deploy (2026-11-06 18:38Z).** Main `69d434a` (CI green: typecheck, test, lint, build), image `a2fcde9668b6` (the rehearsed candidate, tagged `latest`), rollback tag `rollback-20261106-1825z`. Nothing was importing; only the app container was recreated, ClickHouse kept running; healthy, 0 restarts, no migration.
+
+**The held file (same day).** Put back into the inbox with no Release at 18:41Z. The early window and the final check both passed (the job stores no gate report: neither warn nor hold), and it finished at 18:52Z, 10.7 minutes for the one 4.18 GB file: 6,006,457 rows new, 38,020,282 known, 11,616,590 skipped. `ulp.credentials` grew from 2,773,307,671 to 2,779,314,128 rows, exactly the 6,006,457 imported. Before the rule the same file had been held with 41.23% of its first 1,326,587 lines unsplit.
