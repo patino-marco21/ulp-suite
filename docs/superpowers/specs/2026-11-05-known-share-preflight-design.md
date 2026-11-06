@@ -1,7 +1,7 @@
 # Known-share preflight: design (2026-11-05)
 
-Status: design, written for the owner's review. Nothing in this document is built. The repository is public: this file holds numbers only, never file names,
-search terms or credential values.
+Status: Step A approved by the owner on 2026-11-05 (the answers are at the end); not built yet. Step B is not approved. The repository is public: this file
+holds numbers only, never file names, search terms or credential values.
 
 ## Why
 
@@ -67,8 +67,8 @@ Unit tests for the pure parts (the TSV escaping of a sampled row, the arithmetic
 isolated rehearsal stack, with files whose new share is known by construction (a file all new, a file all known, a half-overlap file), and the estimate must
 land within the error above. The retrospective test is repeated by hand on the next batch and compared with its job log.
 
-## Open questions for the owner
+## The owner's answers (2026-11-05)
 
-1. Is an advisory line before a batch enough, or should the Inbox page carry it (Step B)?
-2. Which number is "low yield" for the owner: 5% or 10% new?
-3. Should a flagged file ever wait at the end of the queue (an order, not a skip), or stay where it is?
+1. An advisory line before a batch (Step A) is built first. Step B (the Inbox page) is decided only after Step A has been compared with the job log of a real batch.
+2. "Low yield" is under 5% new. In the test that threshold caught 21 of 21 files that really added under 5%, with 3 false flags.
+3. A flagged file stays where it is in the queue. No reorder, skip or park.
