@@ -170,7 +170,9 @@ async function main(): Promise<number> {
     const expr = chQuery("SELECT default_expression FROM system.columns WHERE database='ulp' AND table='credentials' AND name='country_tier'")
     check('country_tier reads email_domain (DDL v26 / the init SQL)', expr.includes('email_domain') && !expr.includes("splitByChar('@', lower(email))"))
     const ddl = appNode(`const D=require('better-sqlite3');const db=new D('/app/data/ulp.db',{readonly:true});console.log(db.prepare("SELECT value FROM app_settings WHERE key_name='ch_ddl_version'").get().value)`)
-    check('the DDL version recorded in SQLite is 30 (v30: the norm_key_hash column)', ddl === '30', `got ${ddl}`)
+    check('the DDL version recorded in SQLite is 31 (v31: the ulp.sources parser_revision column)', ddl === '31', `got ${ddl}`)
+    check('ulp.sources has parser_revision UInt16 DEFAULT 0 on a fresh install (the init SQL; DDL v31 found it there)',
+      chQuery("SELECT type || ' ' || default_expression FROM system.columns WHERE database='ulp' AND table='sources' AND name='parser_revision'") === 'UInt16 0')
     const normKeyKind = chQuery("SELECT default_kind FROM system.columns WHERE database='ulp' AND table='credentials' AND name='norm_key_hash'")
     check('norm_key_hash exists on a fresh install as a MATERIALIZED column (the init SQL; DDL v30 found it there)', normKeyKind === 'MATERIALIZED', `got ${normKeyKind}`)
     const addressIndex = chQuery("SELECT expr FROM system.data_skipping_indices WHERE database='ulp' AND table='credentials' AND name='idx_bf_email_lc'")
