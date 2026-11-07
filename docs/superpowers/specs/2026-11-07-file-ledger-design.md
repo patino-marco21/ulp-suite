@@ -1,7 +1,7 @@
 # File ledger: know every file that was imported, skip the same bytes under another name, and keep the chat app from offering a download again — design (2026-11-07)
 
 Date: 2026-11-07
-Status: **Deployed on 2026-11-07 (code `e70755c` + `cac73a7`, image `7f84f8975bb3`, rollback tag `rollback-20261107-0728z` = the previous image `e22ee1cb9684`). Rehearsed: 352 of 352 ingest checks and 51 of 51 stack checks. The stand-in against the chat app itself is untested (owner's step).**
+Status: **Deployed on 2026-11-07 (code `e70755c` + `cac73a7`, image `7f84f8975bb3`, rollback tag `rollback-20261107-0728z` = the previous image `e22ee1cb9684`). Rehearsed: 352 of 352 ingest checks and 51 of 51 stack checks. The stand-in was verified in the chat app the same day (see "The sweep"); the sweep runs on the host with the archive timer.**
 Related: `2026-10-12-source-archive-and-ingest-gate-design.md` (the archive and the identity columns of `ulp.sources`), `2026-10-02-novelty-aware-ingest-design.md` (why a repeated import costs time and disk, not data), `2026-11-05-known-share-preflight-design.md` (near-duplicates, a different problem).
 File names, channel names, search terms and credential values are deliberately absent (the repository is public); every fixture is invented.
 
@@ -27,6 +27,26 @@ The owner asked how to keep track of every file that was ingested, so the same o
 8. **A plain-text copy of the ledger.** `scripts/ledger-export.ts` writes `~/Desktop/ulp-ledger.tsv` (outside the repository; it holds names): one line per `ulp.sources` row and one per completed job with no row. The archive timer refreshes it on every tick, whatever the inbox is doing. It is what a person greps before downloading and what the two tools below read.
 9. **Check before downloading.** The chat client's JSON export always writes `file_name` and `file_size` for a document, with the file included or not (read from the client's export code), and has a date range. `scripts/ledger-check.ts` reads an export and sorts the files into NEW, DIFFERENT-SIZE (the name is used, with another size), LOCAL (the download folder has it) and HAVE (the ledger has name and size). Only name and size are in the export, so this is a filter; the importer's content check is the safety net. It never uses the owner's chat session or the client's data folder.
 10. **Stand-ins keep the chat app from offering the download again.** The client keeps a message "downloaded" while the file at the recorded path exists with the same size and modification time (`Core::FileLocation::check`), and its Downloads list keeps an entry while the size matches. `scripts/take-to-inbox.ts` moves a download into the inbox (a rename, so the time is kept) and leaves a sparse file of the same name, size and time (no blocks, no disk). For a download whose bytes are already ingested AND held by the source archive's manifest it swaps the download for a stand-in without moving anything; a download that is ingested but not archived stays. `--refeed` moves bytes an older parser imported under a name with "refeed" in it. Dry run by default; every stand-in is listed in a registry next to the ledger copy; a file that is already a stand-in is skipped. **Not tested in the chat app itself** (that needs the owner's session): the owner tries one small file first. The client rejects records over 4000 MiB, and the largest dumps (4,179,307,720 bytes) are 15 MB under that.
+
+## The sweep (2026-11-07)
+
+**Verified in the chat app.** One download (374 MiB) already ingested and archived was swapped for a stand-in. The message kept its "downloaded" glyph right after the swap and after
+a full quit and reopen of the client. The restart is the real test: in the client's source (upstream Telegram Desktop; the fork was not read), a document created at start-up
+re-reads its stored record through `Core::FileLocation::check()` (readable, same size, same modification time) and erases a record that fails; an unchecked glyph can only be
+stale inside a running session. So a file moved without a stand-in loses its record at the next start, and a stand-in keeps it.
+
+**Why a sweep.** Downloads that were ingested and archived still sat in the download folder, and the client does not know it can leave them. Six were back there after
+being ingested (about 6.9 GiB), each downloaded again. `scripts/stand-in-sweep.ts` swaps, in the download folder, a file whose exact bytes the ledger knows as ingested AND the
+source archive holds, for a stand-in; the archive timer runs it on every tick (`ULP_STANDIN_SWEEP=off` skips it, `ULP_DOWNLOAD_DIR` names the folder).
+
+**Rules.** It never moves a file and never starts an ingest. Before it swaps it decodes the archive entry again (`verifyEntry`, the standard of `archive --replace`); it leaves a file
+modified in the last 10 minutes; it re-checks the size and the modification time just before the swap, so a download that resumed meanwhile is left whole. A partial download
+cannot match an archived sha256, so the sweep needs no "download finished" signal; this is why it only swaps and does not also move new files into the inbox (a stalled download
+looks finished by size and time). Hashes are remembered by name, size and modification time: a folder of 27 files (about 8 GiB) took 77 s to read once and 0.4 s to sweep again.
+`--restore <path>` decodes the archive entry back over a stand-in, with the original modification time; on a 374 MiB file the bytes and the time came back exactly.
+
+**Measured on the real folder.** Dry run, then apply: 1 file swapped; 24 new downloads, 2 files the ledger knows by name and size only (no hash to compare), and 5 earlier
+stand-ins left as they were; free space went from about 150 to 157 GiB with the earlier six swaps.
 
 ## What was measured (filesystem and parts)
 
@@ -54,4 +74,4 @@ The owner asked how to keep track of every file that was ingested, so the same o
 
 **The plain-text copy**: 921 ledger lines and 272 lines for files only the job log knows. A dry run of `take-to-inbox` on the real download folder (read-only) found two files of 1 MB or more: one new, one with a name the job log holds from before the ledger.
 
-**Left to the owner**: try one stand-in in the chat app (ticket 05 in `.scratch/file-ledger/`), run one small chat export through `ledger-check`, and name a deliberate re-feed with "refeed" in it.
+**Left to the owner**: run one small chat export through `ledger-check`, and name a deliberate re-feed with "refeed" in it. Not done: the stand-in marks only what the client has a record of; a file whose record was erased (moved before a stand-in existed) needs a client that reads the ledger.

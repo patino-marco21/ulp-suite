@@ -253,8 +253,9 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   only when `ulp.sources` already holds a hash for its name and size). **A parser change that can add rows from a file imported before must bump `PARSER_REVISION` in
   `lib/parser-version.ts`.** Command-line tools: `scripts/ledger-export.ts` writes a plain-text copy of the ledger to `~/Desktop/ulp-ledger.tsv` (outside the repo; the archive timer
   refreshes it), `scripts/ledger-check.ts` checks a Telegram Desktop JSON export against it before anything is downloaded, `scripts/take-to-inbox.ts` moves downloads into the
-  inbox and leaves a same-size, same-time stand-in (a sparse file, no disk) so the chat app keeps the message "downloaded", and `scripts/ledger-backfill.ts` sets the revision of
-  the rows that existed before DDL v31.
+  inbox and leaves a same-size, same-time stand-in (a sparse file, no disk) so the chat app keeps the message "downloaded", `scripts/stand-in-sweep.ts` swaps a download whose
+  bytes are already ingested and archived for such a stand-in (the archive timer runs it on every tick; `ULP_DOWNLOAD_DIR` names the folder, default `~/Downloads/AyuGram Desktop`;
+  `ULP_STANDIN_SWEEP=off` skips it; `--restore <path>` puts the real bytes back), and `scripts/ledger-backfill.ts` sets the revision of the rows that existed before DDL v31.
 - `CLICKHOUSE_COMPRESS_REQUESTS` — set `1` to gzip INSERT bodies again. Off by default: ClickHouse is on the same machine or
   network, where gzip only cost CPU on the thread that parses the file (step A1).
 - `INGEST_QUALITY_GATE` — the ingest quality gate, on by default (`hold`; `lib/ingest-quality-gate.ts`,

@@ -312,9 +312,13 @@ export function moveAndLeaveStandIn(src: string, dest: string): { size: number; 
   return { size, mtimeNs: st.mtimeNs, mode: Number(st.mode & 0o777n) }
 }
 
-/** Replaces a download whose bytes are in the source archive by a stand-in: the same size and time, no blocks. The file is renamed aside first, so a failure leaves it. */
-export function replaceWithStandIn(path: string): { size: number; mtimeNs: bigint } {
+/**
+ * Replaces a download whose bytes are in the source archive by a stand-in: the same size and time, no blocks. The file is renamed aside first, so a failure leaves it.
+ * With `expect` (the size and time the file had when it was hashed) it refuses a file that has changed since: a download that grew meanwhile is not the file that was checked.
+ */
+export function replaceWithStandIn(path: string, expect?: { size: number; mtimeNs: bigint }): { size: number; mtimeNs: bigint } {
   const st = statSync(path, { bigint: true })
+  if (expect && (st.size !== BigInt(expect.size) || st.mtimeNs !== expect.mtimeNs)) throw new Error('the file changed after it was checked; nothing was replaced')
   const aside = `${path}.standin-old-${process.pid}`
   renameSync(path, aside)
   try {
