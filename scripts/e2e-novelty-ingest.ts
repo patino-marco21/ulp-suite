@@ -705,7 +705,7 @@ async function checkGroups(): Promise<void> {
   check('the grouped check sent far fewer fills than slab by slab (14 slabs per file: 4 groups against 14)', groupedFills > 0 && groupedFills <= 12 && slabFills >= 24 && slabFills > 2 * groupedFills, `grouped ${groupedFills}, slab by slab ${slabFills}`)
   // The same content under new names finds every row known in every slab of every group: the per-slab counts of a group must add up to the file's distinct rows.
   if (!check('the rehearsal app restarted with the default group again', await recreateApp({ concurrency: '2', slab: '3000' }))) return
-  const c = `e2e-nov-grc-${RUN}.txt`
+  const c = `e2e-nov-grc-${RUN} (refeed).txt`   // the same bytes as an earlier file of this scenario on purpose: a name without "refeed" would be skipped by the content check
   const again = upload(c, fixture(c, [...lines('grS', 0, 30_000), ...lines('grA', 0, 10_000)]))
   const evC = await waitJob(again.jobId ?? '', 300_000)
   check('the same 40,000 credentials under a new name are all known: nothing new, 40,000 known', evC.status === 'done' && evC.imported === 0 && evC.known === 40_000, brief(evC))
@@ -921,7 +921,7 @@ async function directPath(): Promise<void> {
   scanLog('before the direct-path scenario')
   if (!check('the rehearsal app restarted with the novelty check off', await recreateApp({ novelty: 'off' }))) return
   const X = `e2e-nov-off-x-${RUN}.txt`
-  const Y = `e2e-nov-off-y-${RUN}.txt`
+  const Y = `e2e-nov-off-y-${RUN} (refeed).txt`   // the same bytes as X on purpose (a re-feed name: the content check lets it through)
   const x = await importLines(X, lines('O', 0, 2_000))
   const y = await importLines(Y, lines('O', 0, 2_000))
   check('both copies are imported in full: 2000 rows each, nothing known', x.imported === 2_000 && y.imported === 2_000 && (y.known ?? 0) === 0, `${brief(x)} ${brief(y)}`)
@@ -1162,8 +1162,12 @@ async function fileLedger(): Promise<void> {
   const env = { ...process.env, CH_CONTAINER: CH, APP_CONTAINER: APP, ULP_LEDGER_FILE: ledgerFile }
   const out = sh('npx', ['tsx', 'scripts/ledger-export.ts'], env)
   const copyText = readFileSync(ledgerFile, 'utf8')
-  const oLine = copyText.split('\n').find(l => l.split('\t')[1] === O && l.split('\t')[0] === 'ledger')
-  check('the plain-text ledger lists the rows, with the hash and the revision', !!oLine && oLine.split('\t')[3] === sha && oLine.split('\t')[5] === String(CURRENT), `${out} | ${oLine}`)
+  const lineOf = (name: string) => copyText.split('\n').find(l => l.split('\t')[1] === name && l.split('\t')[0] === 'ledger')
+  const oLine = lineOf(O)
+  const thirdLine = lineOf(third)
+  check('the plain-text ledger lists a row with its size, hash, lines and revision (the original is at the rewound revision 60)',
+    !!oLine && oLine.split('\t')[2] === String(Buffer.byteLength(text(body))) && oLine.split('\t')[3] === sha && oLine.split('\t')[4] === '1000' && oLine.split('\t')[5] === '60', `${out} | ${oLine}`)
+  check('...and the re-import by the "newer" parser at the current revision', !!thirdLine && thirdLine.split('\t')[3] === sha && thirdLine.split('\t')[5] === String(CURRENT), String(thirdLine))
   check('...and not the copies that were skipped', !copyText.includes(`${copy}\t`) && !copyText.includes(`${fourth}\t`))
 
   // the revision backfill
@@ -1600,7 +1604,7 @@ async function parseWorkers(): Promise<void> {
 
   // The same content as the big file under another name, staged on the importer's thread: it must find every row already known and count the same repeats and skipped lines.
   if (!check('the rehearsal app restarted with the workers off', await recreateApp({ concurrency: '2' }))) return
-  const REPLAY = `e2e-pw-replay-${RUN}.txt`
+  const REPLAY = `e2e-pw-replay-${RUN} (refeed).txt`   // the same bytes as BIG on purpose
   const replay = await importLines(REPLAY, body, 600_000)
   check('the same content staged on the importer\'s thread: nothing new, 200000 known, the same 20000 repeats and 2000 skipped',
     replay.status === 'done' && replay.imported === 0 && replay.known === 200_000 && replay.inFileDuplicates === 20_000 && replay.skipped === 2_000, brief(replay))
