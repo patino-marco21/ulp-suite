@@ -9,9 +9,9 @@
  * (minutes of quiet before a run; default 20), ULP_AUTO_ARCHIVE_WORKERS (default 4). --now skips the wait for quiet, not the check that nothing is in flight.
  *
  * A run starts only when nothing is waiting or in flight in the inbox (which also covers the disk gate holding the ingest) and no inbox folder has changed for the wait.
- * Every run, busy inbox or not, first refreshes the plain-text copy of the file ledger (scripts/ledger-export.ts), then sweeps the chat client's download folder
- * (scripts/stand-in-sweep.ts: a download whose bytes are ingested and archived becomes a stand-in; nothing is moved, no ingest starts; ULP_STANDIN_SWEEP=off skips it,
- * ULP_DOWNLOAD_DIR names the folder). One run at a time (a lock in the archive directory). The tool reads `*.txt` names only and skips files of 0 bytes; the account counts both so they are not forgotten.
+ * Every run, busy inbox or not, first refreshes the plain-text copy of the file ledger (scripts/ledger-export.ts), and again after files were archived (the copy says which
+ * files the archive holds). The chat client's download folder is not touched here: scripts/pull-downloads.ts, run by its own minute timer, moves finished downloads into
+ * the inbox and swaps archived ones for stand-ins. One run at a time (a lock in the archive directory). The tool reads `*.txt` names only and skips files of 0 bytes; the account counts both so they are not forgotten.
  * Exit 0 when nothing went wrong or the inbox was not idle, 1 when an archive or a check failed, 2 when the archive directory is missing.
  */
 import { spawnSync } from 'node:child_process'
@@ -24,7 +24,6 @@ import {
   type AutoArchiveStatus,
 } from '@/lib/archive-auto'
 import { defaultArchiveDir, latestByName, readManifest } from '@/lib/source-archive'
-import { sweepEnabled } from '@/lib/stand-in-sweep'
 
 const REPO = process.env.ULP_REPO ?? process.cwd()
 const INBOX = join(REPO, 'inbox')
@@ -81,23 +80,8 @@ function refreshLedgerCopy(): void {
   say(r.status === 0 ? out.split('\n').pop() ?? 'ledger copy written' : `the ledger copy could not be written (exit ${r.status}): ${out.split('\n').pop() ?? ''}`)
 }
 
-/**
- * Swaps the downloads whose bytes are ingested and archived for stand-ins (scripts/stand-in-sweep.ts), whatever the inbox is doing: it reads the ledger copy and the archive, moves
- * nothing and starts no ingest. A failure is logged and changes nothing about this run.
- */
-function sweepDownloads(): void {
-  if (!sweepEnabled()) return
-  const r = spawnSync(TSX, [join(HERE, 'stand-in-sweep.ts'), '--apply', '--no-refresh'], {
-    cwd: join(HERE, '..'), encoding: 'utf8', timeout: 30 * 60_000, env: { ...process.env, ULP_ARCHIVE_DIR: ARCHIVE },
-  })
-  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim()
-  if (r.status !== 0) say(`the download sweep failed (exit ${r.status}): ${out.split('\n').pop() ?? ''}`)
-  else say(out.split('\n').pop() ?? 'download sweep done')
-}
-
 function main(): number {
   refreshLedgerCopy()
-  sweepDownloads()
   if (!existsSync(ARCHIVE)) { say(`the archive directory does not exist: ${ARCHIVE} (create it; this script never does)`); return 2 }
   const refusals = idleRefusals({
     nowMs: now(), inboxBusy: inboxIsBusy(INBOX), idleMs: IDLE_MS,
@@ -126,6 +110,7 @@ function main(): number {
       say('nothing new in done/ to archive')
     }
 
+    if (ran && archived > 0) refreshLedgerCopy()   // the copy now shows these files as archived, which is what lets the mover swap their downloads for stand-ins
     const after = readyToReplace(DONE, ARCHIVE, latestByName(readManifest(ARCHIVE)))
     const fs = statfsSync(REPO)
     const status: AutoArchiveStatus = {

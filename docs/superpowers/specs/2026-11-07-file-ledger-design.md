@@ -37,12 +37,12 @@ stale inside a running session. So a file moved without a stand-in loses its rec
 
 **Why a sweep.** Downloads that were ingested and archived still sat in the download folder, and the client does not know it can leave them. Six were back there after
 being ingested (about 6.9 GiB), each downloaded again. `scripts/stand-in-sweep.ts` swaps, in the download folder, a file whose exact bytes the ledger knows as ingested AND the
-source archive holds, for a stand-in; the archive timer runs it on every tick (`ULP_STANDIN_SWEEP=off` skips it, `ULP_DOWNLOAD_DIR` names the folder).
+source archive holds, for a stand-in; it first ran on every archive tick and now runs inside the mover (`ULP_STANDIN_SWEEP=off` skips it, `ULP_DOWNLOAD_DIR` names the folder).
 
 **Rules.** It never moves a file and never starts an ingest. Before it swaps it decodes the archive entry again (`verifyEntry`, the standard of `archive --replace`); it leaves a file
 modified in the last 10 minutes; it re-checks the size and the modification time just before the swap, so a download that resumed meanwhile is left whole. A partial download
-cannot match an archived sha256, so the sweep needs no "download finished" signal; this is why it only swaps and does not also move new files into the inbox (a stalled download
-looks finished by size and time). Hashes are remembered by name, size and modification time: a folder of 27 files (about 8 GiB) took 77 s to read once and 0.4 s to sweep again.
+cannot match an archived sha256, so the swap needs no "download finished" signal. Moving a NEW file does need one; that came later and is in
+`2026-11-07-download-mover-design.md`, which also took this pass out of the archive timer and into its own minute timer. Hashes are remembered by name, size and modification time: a folder of 27 files (about 8 GiB) took 77 s to read once and 0.4 s to sweep again.
 `--restore <path>` decodes the archive entry back over a stand-in, with the original modification time; on a 374 MiB file the bytes and the time came back exactly.
 
 **Measured on the real folder.** Dry run, then apply: 1 file swapped; 24 new downloads, 2 files the ledger knows by name and size only (no hash to compare), and 5 earlier

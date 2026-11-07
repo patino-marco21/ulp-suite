@@ -8,20 +8,25 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { formatLedger, writeFileAtomic, type LedgerRow } from '@/lib/ledger-tools'
 
 const CH = () => process.env.CH_CONTAINER ?? 'ulpsuite_clickhouse'
 const APP = () => process.env.APP_CONTAINER ?? 'ulpsuite_app'
 
-/** Where the plain-text ledger lives: ULP_LEDGER_FILE, or ulp-ledger.tsv on the desktop. */
+/** The folder that holds everything the download pipeline keeps on this machine for the owner to open: ULP_PIPELINE_DIR, or ulp-pipeline on the desktop. */
+export function pipelineDir(env: NodeJS.Dict<string> = process.env): string {
+  return env.ULP_PIPELINE_DIR && env.ULP_PIPELINE_DIR.trim() !== '' ? env.ULP_PIPELINE_DIR : join(homedir(), 'Desktop', 'ulp-pipeline')
+}
+
+/** Where the plain-text ledger lives: ULP_LEDGER_FILE, or ledger.tsv in the pipeline folder. */
 export function defaultLedgerFile(env: NodeJS.Dict<string> = process.env): string {
-  return env.ULP_LEDGER_FILE && env.ULP_LEDGER_FILE.trim() !== '' ? env.ULP_LEDGER_FILE : join(homedir(), 'Desktop', 'ulp-ledger.tsv')
+  return env.ULP_LEDGER_FILE && env.ULP_LEDGER_FILE.trim() !== '' ? env.ULP_LEDGER_FILE : join(pipelineDir(env), 'ledger.tsv')
 }
 
 /** The stand-in registry sits next to the ledger. */
 export function standInRegistryFile(ledgerFile: string): string {
-  return ledgerFile.replace(/\.tsv$/, '') + '-standins.tsv'
+  return join(dirname(ledgerFile), 'stand-ins.tsv')
 }
 
 function docker(container: string, args: string[], input?: string): string {

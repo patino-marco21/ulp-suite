@@ -251,11 +251,18 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   skipped (job note `same-content`) while the parser that imported them is at least as new as the running one. After a parser change, or when the name contains `refeed`, the file
   is imported again and its new row carries the current revision. A file that yielded no credential is remembered with 0 lines. `off` restores the earlier rule (a file is read
   only when `ulp.sources` already holds a hash for its name and size). **A parser change that can add rows from a file imported before must bump `PARSER_REVISION` in
-  `lib/parser-version.ts`.** Command-line tools: `scripts/ledger-export.ts` writes a plain-text copy of the ledger to `~/Desktop/ulp-ledger.tsv` (outside the repo; the archive timer
-  refreshes it), `scripts/ledger-check.ts` checks a Telegram Desktop JSON export against it before anything is downloaded, `scripts/take-to-inbox.ts` moves downloads into the
-  inbox and leaves a same-size, same-time stand-in (a sparse file, no disk) so the chat app keeps the message "downloaded", `scripts/stand-in-sweep.ts` swaps a download whose
-  bytes are already ingested and archived for such a stand-in (the archive timer runs it on every tick; `ULP_DOWNLOAD_DIR` names the folder, default `~/Downloads/AyuGram Desktop`;
-  `ULP_STANDIN_SWEEP=off` skips it; `--restore <path>` puts the real bytes back), and `scripts/ledger-backfill.ts` sets the revision of the rows that existed before DDL v31.
+  `lib/parser-version.ts`.** Command-line tools: `scripts/ledger-export.ts` writes a plain-text copy of the ledger to `~/Desktop/ulp-pipeline/ledger.tsv` (outside the repo; refreshed
+  by the mover and the archive timer), `scripts/ledger-check.ts` checks a Telegram Desktop JSON export against it before anything is downloaded, `scripts/take-to-inbox.ts` moves
+  downloads into the inbox by hand and leaves a same-size, same-time stand-in (a sparse file, no disk) so the chat app keeps the message "downloaded", and
+  `scripts/ledger-backfill.ts` sets the revision of the rows that existed before DDL v31. **`scripts/pull-downloads.ts` does it all by itself:** a systemd user timer
+  (`scripts/systemd/ulp-pull-downloads.timer`, every minute) moves each FINISHED new download of the chat client's folder into the inbox and leaves the stand-in, and swaps a
+  download whose bytes are already ingested and archived for a stand-in. "Finished" means nobody has the file open (the client holds a download open until its last part is in;
+  `lib/download-ready.ts`), it has not changed for `ULP_MOVER_QUIET_MIN` minutes (default 3) and no part of it is missing; a file moved earlier would keep growing in the inbox and the
+  importer would miss the lines written after it read the file. It looks at `*.txt` of 1 MB or more, one level deep. Settings: `ULP_DOWNLOAD_DIR` (default
+  `~/Downloads/AyuGram Desktop`), `ULP_PIPELINE_DIR` (default `~/Desktop/ulp-pipeline`: the ledger copy, the stand-in registry, the hash cache and the status pages),
+  `ULP_MOVER=off` or `ULP_STANDIN_SWEEP=off` (the run does nothing). Each run rewrites `STATUS.html` / `STATUS.txt` in the pipeline folder (`scripts/pipeline-status.ts` prints
+  the same): one banner (green / amber / red) over the mover, the download folder, the stand-ins, the import, the archive, the ledger copy and the disk.
+  `scripts/stand-in-sweep.ts` is the by-hand swap-only tool (`--restore <path>` puts the real bytes of a stand-in back from the archive).
 - `CLICKHOUSE_COMPRESS_REQUESTS` — set `1` to gzip INSERT bodies again. Off by default: ClickHouse is on the same machine or
   network, where gzip only cost CPU on the thread that parses the file (step A1).
 - `INGEST_QUALITY_GATE` — the ingest quality gate, on by default (`hold`; `lib/ingest-quality-gate.ts`,

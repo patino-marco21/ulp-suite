@@ -1,6 +1,7 @@
 /**
  * Swaps the downloads whose bytes are already ingested and archived for stand-ins (lib/stand-in-sweep.ts; docs/superpowers/specs/2026-11-07-file-ledger-design.md, "The sweep"), so
- * the chat client keeps showing them as downloaded and their disk comes back. It never moves a file and never starts an ingest; run by scripts/archive-when-idle.ts on every tick.
+ * the chat client keeps showing them as downloaded and their disk comes back. This by-hand tool never moves a file and never starts an ingest; scripts/pull-downloads.ts, which
+ * the minute timer runs, does this swap and also moves finished new downloads into the inbox.
  *
  *   tsx scripts/stand-in-sweep.ts [--apply] [--dir <folder>] [--min-age <minutes>] [--ext txt] [--min-size 1000000] [--ledger <file>] [--archive <dir>] [--no-refresh]
  *   tsx scripts/stand-in-sweep.ts --restore <stand-in path> [--ledger <file>] [--archive <dir>]
@@ -61,7 +62,7 @@ async function sweep(): Promise<number> {
   for (const n of r.wouldSwap) say(`would swap for a stand-in: ${n}`)
   for (const f of r.failed) say(`FAILED ${f.name}: ${f.error}`)
   say(`${apply ? 'done' : 'dry run (nothing changed; --apply does it)'}: ${r.swapped.length} swapped, ${r.wouldSwap.length} would be, ${r.notIngested.length} not ingested (left), ${r.notArchivedYet.length} ingested but not archived yet (left), ` +
-    `${r.waiting.length} too young (left), ${r.changed.length} changed while read (left), ${r.standIns} already stand-ins, ${r.failed.length} failed; ${r.hashed} file(s) hashed`)
+    `${r.waiting.length} not finished (left), ${r.changed.length} changed while read (left), ${r.standIns} already stand-ins, ${r.failed.length} failed; ${r.hashed} file(s) hashed`)
   return r.failed.length > 0 ? 1 : 0
 }
 

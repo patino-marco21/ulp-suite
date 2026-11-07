@@ -59,9 +59,9 @@ describe('scripts/stand-in-sweep.ts', () => {
     expect(r.stdout).toMatch(/swapped for a stand-in: b\.txt/)
     const after = statSync(p, { bigint: true })
     expect([after.size, after.mtimeNs, after.blocks]).toEqual([before.size, before.mtimeNs, 0n])
-    expect(readFileSync(join(root, 'ledger-standins.tsv'), 'utf8')).toMatch(/b\.txt/)
+    expect(readFileSync(join(root, 'stand-ins.tsv'), 'utf8')).toMatch(/b\.txt/)
     const again = run(['--apply'])
-    expect(again.stdout).toMatch(/0 swapped, 0 would be, 0 not ingested \(left\), 0 ingested but not archived yet \(left\), 0 too young \(left\), 0 changed while read \(left\), 1 already stand-ins, 0 failed; 0 file\(s\) hashed/)
+    expect(again.stdout).toMatch(/0 swapped, 0 would be, 0 not ingested \(left\), 0 ingested but not archived yet \(left\), 0 not finished \(left\), 0 changed while read \(left\), 1 already stand-ins, 0 failed; 0 file\(s\) hashed/)
   })
 
   test('--restore puts the real bytes and the time back', () => {

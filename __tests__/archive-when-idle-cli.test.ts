@@ -32,7 +32,7 @@ function makeBox(files: Record<string, string>, { ageMs = 60 * 60_000, quietMs =
     ...process.env, PATH: `${bin}:${process.env.PATH}`, ULP_ARCHIVE_DIR: arc, ULP_REPO: repo, CH_CONTAINER: 'fake-clickhouse', ULP_ARCHIVE_FREE_MARGIN_BYTES: '0',
     // the run refreshes the plain-text ledger copy too: into the sandbox, never the owner's Desktop
     ULP_LEDGER_FILE: join(root, 'ledger.tsv'), APP_CONTAINER: 'fake-app',
-    // and sweeps a download folder: a sandbox one that does not exist unless a test makes it, never the owner's
+    // the download folder is not read by this script, but a sandbox one is named anyway, never the owner's
     ULP_DOWNLOAD_DIR: join(root, 'downloads'),
   }
   return { root, inbox, done, arc, env }
@@ -123,28 +123,19 @@ describe('archive-when-idle', () => {
     expect(readStatus(box.arc)).toMatchObject({ archived: 1, failed: 0 })
   })
 
-  test('every run sweeps the download folder first: a file the ledger does not know is left alone, and the account says so', () => {
+  test('the archive run leaves the download folder alone: moving and swapping downloads belongs to scripts/pull-downloads.ts', () => {
     box = makeBox({ 'a.txt': 'x\n' })
     const downloads = join(box.root, 'downloads')
     mkdirSync(downloads)
     const p = join(downloads, 'fresh.txt')
-    const body = `${'a'.repeat(1_000_000)}\n`   // the sweep looks at files of 1 MB or more
+    const body = `${'a'.repeat(1_000_000)}\n`
     writeFileSync(p, body)
     const old = new Date(Date.now() - 60 * 60_000); utimesSync(p, old, old)
-    const r = run(box, ['--now'], { ULP_STANDIN_SWEEP: '' })
+    const r = run(box, ['--now'])
     expect(r.status).toBe(0)
-    expect(r.stdout).toMatch(/\[stand-in-sweep\] done: 0 swapped, 0 would be, 1 not ingested \(left\)/)
+    expect(r.stdout).not.toMatch(/stand-in-sweep|pull-downloads/)
     expect(readFileSync(p, 'utf8')).toBe(body)
-  })
-
-  test('ULP_STANDIN_SWEEP=off skips the sweep, and a missing download folder is not an error', () => {
-    box = makeBox({ 'a.txt': 'x\n' })
-    const off = run(box, ['--now'], { ULP_STANDIN_SWEEP: 'off' })
-    expect(off.status).toBe(0)
-    expect(off.stdout).not.toMatch(/stand-in-sweep/)
-    const missing = run(box, ['--now'], { ULP_STANDIN_SWEEP: '' })
-    expect(missing.status).toBe(0)
-    expect(missing.stdout).toMatch(/\[stand-in-sweep\] no download folder at .*downloads: nothing to sweep/)
+    expect(readdirSync(downloads)).toEqual(['fresh.txt'])
   })
 
   test('the status file is valid JSON the app can read: no partial file is left behind', () => {

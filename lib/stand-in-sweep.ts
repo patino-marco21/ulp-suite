@@ -1,11 +1,14 @@
 /**
- * The stand-in sweep (docs/superpowers/specs/2026-11-07-file-ledger-design.md, "The sweep"): in the chat client's download folder, a file whose exact bytes the ledger knows as
- * ingested AND the source archive holds, and whose archive decodes back to the same sha256 (the standard of `archive --replace`), is swapped for a stand-in: the same name, size and
- * modification time, no disk. The client keeps showing the message as downloaded, and the plaintext's disk comes back.
- *
- * It NEVER moves a file and never starts an ingest. A file the ledger does not know is left alone, and so is one that is ingested but not archived yet (the archive timer will
- * get to it). A file modified in the last 10 minutes is left alone (it may still be downloading), and so is one that changes between being hashed and being swapped. A partial
- * download cannot match an archived sha256, so no "download finished" signal is needed. Hashes are remembered by name, size and modification time (a JSON file next to the ledger
+ * The download-folder pass (docs/superpowers/specs/2026-11-07-file-ledger-design.md, "The sweep", and 2026-11-07-download-mover-design.md). For each finished download in the
+ * chat client's folder it asks the ledger what the file is, and then:
+ *   - exact bytes ingested AND held by the source archive (the archive decodes back to the same sha256, the standard of `archive --replace`): the download becomes a STAND-IN,
+ *     the same name, size and modification time with no disk, so the client keeps showing it as downloaded and the plaintext's disk comes back;
+ *   - new, and an inbox is given: the file MOVES into the inbox (a rename) and a stand-in takes its place, so the importer takes the file and the client still shows it as
+ *     downloaded;
+ *   - anything else (ingested but not archived yet, a name the ledger knows without a hash): left alone.
+ * A file is only looked at once it is FINISHED (lib/download-ready.ts): nobody has it open, it has been quiet for a while, and no part of it was left unwritten. A file moved
+ * while the client was still writing it would keep growing in its new place and the importer would miss the lines that came after. A partial download cannot match an archived
+ * sha256, so the stand-in swap needs no "finished" signal of its own; the move does. Hashes are remembered by name, size and modification time (a JSON file next to the ledger
  * copy), so a folder of files waiting for the owner is read once, not on every tick.
  */
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeSync, type BigIntStats } from 'node:fs'
@@ -14,7 +17,8 @@ import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { MIN_AGE_MS } from '@/lib/archive-replace'
-import { appendStandIn, planTake, replaceWithStandIn, sha256OfFile, writeFileAtomic, type LedgerIndex } from '@/lib/ledger-tools'
+import { openFilesUnder, readiness, type PendingState } from '@/lib/download-ready'
+import { appendStandIn, moveAndLeaveStandIn, planTake, replaceWithStandIn, sha256OfFile, writeFileAtomic, type LedgerIndex } from '@/lib/ledger-tools'
 import { decompressFrame, type ManifestEntry, type VerifyResult } from '@/lib/source-archive'
 
 /** The folder the chat client downloads into: ULP_DOWNLOAD_DIR, else ~/Downloads/AyuGram Desktop. */
@@ -22,14 +26,14 @@ export function defaultDownloadDir(env: NodeJS.Dict<string> = process.env): stri
   return env.ULP_DOWNLOAD_DIR && env.ULP_DOWNLOAD_DIR.trim() !== '' ? env.ULP_DOWNLOAD_DIR : join(homedir(), 'Downloads', 'AyuGram Desktop')
 }
 
-/** The sweep is on unless ULP_STANDIN_SWEEP=off. */
+/** The pass is on unless ULP_STANDIN_SWEEP=off (the name it had when it only swapped; it now also covers the move). */
 export function sweepEnabled(env: NodeJS.Dict<string> = process.env): boolean {
   return (env.ULP_STANDIN_SWEEP ?? '').trim().toLowerCase() !== 'off'
 }
 
 /** The remembered hashes live next to the ledger copy. */
 export function hashCacheFile(ledgerFile: string): string {
-  return join(dirname(ledgerFile), 'ulp-ledger-hashes.json')
+  return join(dirname(ledgerFile), 'hashes.json')
 }
 
 interface CacheEntry { name: string; size: number; mtimeNs: string; sha256: string }
@@ -53,38 +57,71 @@ export interface SweepOptions {
   verify: (entry: ManifestEntry) => VerifyResult
   registry: string
   hashCache: string
+  /** The inbox a NEW finished download moves into. Without it nothing is moved: a new file is left where it is. */
+  inbox?: string
   exts?: string[]
   minSize?: number
+  /** The quiet period a download must have had since its last change (default 10 minutes). */
   minAgeMs?: number
   nowMs?: number
+  /** The files some other process has open in the folder; defaults to a scan of /proc (lib/download-ready.ts). Called again just before a move. */
+  openFiles?: () => Map<string, number[]>
   apply: boolean
 }
+
+export interface PendingFile { name: string; state: PendingState; detail: string }
 
 export interface SweepResult {
   swapped: string[]
   /** A dry run: what would have been swapped. */
   wouldSwap: string[]
-  /** The ledger does not know these bytes: the file is new (or has another size), and the owner takes it to the inbox. */
+  /** Moved into the inbox, a stand-in left behind. */
+  moved: string[]
+  /** A dry run: what would have been moved. */
+  wouldMove: string[]
+  /** The ledger does not know these bytes and no inbox was given: the file is new and stays. */
   notIngested: string[]
-  /** Ingested, but the archive does not hold the bytes yet. */
+  /** Ingested, but the archive does not hold the bytes yet (or the ledger knows the name and size without a hash). */
   notArchivedYet: string[]
-  /** Modified in the last 10 minutes: possibly still downloading. */
+  /** Not finished: still open in another program, changed a moment ago, or left with holes. The names; `pending` says why. */
   waiting: string[]
-  /** Changed while it was being hashed: left alone. */
+  pending: PendingFile[]
+  /** Something is in the way (the name is already in the inbox): the file stays. */
+  refused: Array<{ name: string; reason: string }>
+  /** Changed while it was being hashed or just before the move: left alone. */
   changed: string[]
   standIns: number
   hashed: number
   failed: Array<{ name: string; error: string }>
 }
 
+const sameFile = (path: string, st: BigIntStats): boolean => {
+  try {
+    const now = statSync(path, { bigint: true })
+    return now.size === st.size && now.mtimeNs === st.mtimeNs
+  } catch { return false }
+}
+
 export async function sweepDownloads(o: SweepOptions): Promise<SweepResult> {
   const exts = (o.exts ?? ['txt']).map(e => e.toLowerCase().replace(/^\./, ''))
   const minSize = o.minSize ?? 1_000_000
-  const minAgeMs = o.minAgeMs ?? MIN_AGE_MS
+  const quietMs = o.minAgeMs ?? MIN_AGE_MS
   const nowMs = o.nowMs ?? Date.now()
-  const result: SweepResult = { swapped: [], wouldSwap: [], notIngested: [], notArchivedYet: [], waiting: [], changed: [], standIns: 0, hashed: 0, failed: [] }
+  const openFiles = o.openFiles ?? ((): Map<string, number[]> => openFilesUnder(o.dir, { excludePid: process.pid }))
+  const result: SweepResult = {
+    swapped: [], wouldSwap: [], moved: [], wouldMove: [], notIngested: [], notArchivedYet: [], waiting: [], pending: [], refused: [], changed: [], standIns: 0, hashed: 0, failed: [],
+  }
   const cache = readHashCache(o.hashCache)
   const keep: CacheEntry[] = []
+  const open = openFiles()
+  // Names already in the inbox or one of its folders: a file moved onto one of them would replace it or be skipped by the importer's same-name guard.
+  const inboxNames = new Set<string>()
+  if (o.inbox) {
+    for (const dir of [o.inbox, ...['processing', 'done', 'held', 'failed'].map(d => join(o.inbox!, d))]) {
+      if (!existsSync(dir)) continue
+      for (const n of readdirSync(dir)) inboxNames.add(n)
+    }
+  }
 
   for (const name of readdirSync(o.dir).sort()) {
     const path = join(o.dir, name)
@@ -93,19 +130,37 @@ export async function sweepDownloads(o: SweepOptions): Promise<SweepResult> {
     const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : ''
     if (!st.isFile() || !exts.includes(ext) || Number(st.size) < minSize) continue
     if (st.size > 0n && st.blocks === 0n) { result.standIns++; continue }   // already a stand-in
-    if (nowMs - Number(st.mtimeNs / 1_000_000n) < minAgeMs) { result.waiting.push(name); continue }
+    const ready = readiness(path, st, { nowMs, quietMs, open })
+    if (!ready.ready) { result.waiting.push(name); result.pending.push({ name, state: ready.state!, detail: ready.detail! }); continue }
 
     const key = cacheKey(name, st.size, st.mtimeNs)
     let sha = cache.get(key)
     if (!sha) {
       try { sha = await sha256OfFile(path) } catch (err) { result.failed.push({ name, error: err instanceof Error ? err.message : String(err) }); continue }
       result.hashed++
-      const after = statSync(path, { bigint: true })
-      if (after.size !== st.size || after.mtimeNs !== st.mtimeNs) { result.changed.push(name); continue }
+      if (!sameFile(path, st)) { result.changed.push(name); continue }
     }
     keep.push({ name, size: Number(st.size), mtimeNs: String(st.mtimeNs), sha256: sha })
 
-    const action = planTake(o.index, { name, size: Number(st.size), sha256: sha, archiveHolds: o.holds(sha) !== undefined, inboxNames: new Set(), refeed: false })
+    const action = planTake(o.index, { name, size: Number(st.size), sha256: sha, archiveHolds: o.holds(sha) !== undefined, inboxNames, refeed: false })
+    if (action.kind === 'move' && o.inbox) {
+      if (!o.apply) { result.wouldMove.push(name); continue }
+      // One last look right before the move: the client may have opened the file again, or it changed since it was hashed.
+      const again = openFiles().get(path)
+      if (again && again.length > 0) { result.waiting.push(name); result.pending.push({ name, state: 'downloading', detail: `still open in another program (pid ${again.join(', ')}): the download is not finished` }); continue }
+      if (!sameFile(path, st)) { result.changed.push(name); continue }
+      try {
+        const r = moveAndLeaveStandIn(path, join(o.inbox, action.destName))
+        appendStandIn(o.registry, path, r.size, r.mtimeNs, sha, new Date(nowMs).toISOString())
+        inboxNames.add(action.destName)
+        result.moved.push(name)
+        keep.pop()   // a stand-in is never hashed again
+      } catch (err) {
+        result.failed.push({ name, error: err instanceof Error ? err.message : String(err) })
+      }
+      continue
+    }
+    if (action.kind === 'refuse' && o.inbox) { result.refused.push({ name, reason: action.reason }); continue }
     if (action.kind !== 'standin-only') {
       // 'keep' = ingested but not archived; everything else is a file the ledger does not know (or knows only by name)
       if (action.kind === 'keep') result.notArchivedYet.push(name); else result.notIngested.push(name)

@@ -1,0 +1,15 @@
+[Unit]
+Description=Move finished AyuGram downloads into the ULP inbox and leave a stand-in (never touches a download that is still being written)
+Documentation=file://%h/Desktop/ulp-suite/docs/superpowers/specs/2026-11-07-download-mover-design.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Desktop/ulp-suite
+# node comes from nvm on this machine; a user service does not read the shell profile, so name it. Edit the version after a node upgrade.
+Environment=PATH=%h/.nvm/versions/node/v24.16.0/bin:/usr/local/bin:/usr/bin:/bin
+Environment=ULP_REPO=%h/Desktop/ulp-suite
+Environment=ULP_ARCHIVE_DIR=%h/Desktop/ulp-archive
+ExecStart=%h/Desktop/ulp-suite/node_modules/.bin/tsx scripts/pull-downloads.ts --apply
+Nice=10
+# hashing a 4 GB download takes about 20 s; a long allowance only guards against a hung disk. One run at a time: systemd does not start a oneshot unit that is still active.
+TimeoutStartSec=2h

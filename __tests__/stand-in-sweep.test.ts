@@ -2,8 +2,9 @@
  * The stand-in sweep on real temp files: a download whose bytes the ledger knows as ingested and the archive holds becomes a stand-in; everything else is left alone. Synthetic
  * content only; nothing here reads the owner's folders.
  */
+import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -173,7 +174,7 @@ describe('settings', () => {
   it('the download folder and the hash cache have defaults and can be set', () => {
     expect(defaultDownloadDir({ ULP_DOWNLOAD_DIR: '/x/y' })).toBe('/x/y')
     expect(defaultDownloadDir({})).toMatch(/Downloads\/AyuGram Desktop$/)
-    expect(hashCacheFile('/home/u/Desktop/ulp-ledger.tsv')).toBe('/home/u/Desktop/ulp-ledger-hashes.json')
+    expect(hashCacheFile('/home/u/Desktop/ulp-pipeline/ledger.tsv')).toBe('/home/u/Desktop/ulp-pipeline/hashes.json')
   })
 })
 
@@ -216,5 +217,132 @@ describe('restore', () => {
     expect(() => restoreStandIn(path, { ...entry, sha256: sha('something else') }, arc, mtimeNs)).toThrow(/do not match the manifest/)
     expect(isStandIn(path)).toBe(true)
     expect(readdirSync(dl)).toEqual(['lying.txt'])   // the temp file is gone
+  })
+})
+
+// ── moving a finished new download ───────────────────────────────────────────────────────────────────────
+
+describe('moving a finished new download into the inbox', () => {
+  let inbox: string
+  beforeEach(() => {
+    inbox = join(root, 'inbox')
+    for (const d of ['', 'processing', 'done', 'held', 'failed']) mkdirSync(join(inbox, d), { recursive: true })
+  })
+  const withInbox = (rows: LedgerRow[], held: ManifestEntry[], o: Partial<SweepOptions> = {}): SweepOptions => options(rows, held, { inbox, openFiles: () => new Map(), minAgeMs: 180_000, ...o })
+
+  it('moves it, leaves a stand-in with the same size and time to the nanosecond and no blocks, and registers it', async () => {
+    const body = 'new\nlines\nhere\n'
+    const p = download('fresh.txt', body)
+    const before = statSync(p, { bigint: true })
+    const r = await sweepDownloads(withInbox([], []))
+    expect(r.moved).toEqual(['fresh.txt'])
+    expect(readFileSync(join(inbox, 'fresh.txt'), 'utf8')).toBe(body)   // the whole file arrived
+    const after = statSync(p, { bigint: true })
+    expect(after.size).toBe(before.size)
+    expect(after.mtimeNs).toBe(before.mtimeNs)
+    expect(after.blocks).toBe(0n)
+    expect(registryEntryFor(join(root, 'standins.tsv'), p)).toEqual({ size: Number(before.size), mtimeNs: before.mtimeNs, sha256: sha(body) })
+    // a second pass finds a stand-in and neither hashes nor moves anything
+    const again = await sweepDownloads(withInbox([], []))
+    expect(again).toMatchObject({ moved: [], standIns: 1, hashed: 0 })
+  })
+
+  it('does not move a file another program still has open, however long it has been quiet', async () => {
+    const p = download('growing.txt', 'half a file\n')
+    const r = await sweepDownloads(withInbox([], [], { openFiles: () => new Map([[p, [4242]]]) }))
+    expect(r.moved).toEqual([])
+    expect(r.pending).toEqual([expect.objectContaining({ name: 'growing.txt', state: 'downloading' })])
+    expect(readFileSync(p, 'utf8')).toBe('half a file\n')
+    expect(readdirSync(inbox).filter(n => n.endsWith('.txt'))).toEqual([])
+  })
+
+  it('looks again right before the move: a file opened while it was being hashed stays', async () => {
+    const p = download('reopened.txt', 'data\n')
+    let calls = 0
+    const r = await sweepDownloads(withInbox([], [], { openFiles: () => (++calls === 1 ? new Map() : new Map([[p, [77]]])) }))
+    expect(r.moved).toEqual([])
+    expect(r.pending[0]).toMatchObject({ name: 'reopened.txt', state: 'downloading' })
+    expect(readFileSync(p, 'utf8')).toBe('data\n')
+  })
+
+  it('a file that grew between the hash and the move stays where it is', async () => {
+    const p = download('grew.txt', 'first part\n')
+    let calls = 0
+    const r = await sweepDownloads(withInbox([], [], { openFiles: () => { if (++calls === 2) appendFileSync(p, 'more\n'); return new Map() } }))
+    expect(r.moved).toEqual([])
+    expect(r.changed).toEqual(['grew.txt'])
+    expect(readFileSync(p, 'utf8')).toBe('first part\nmore\n')
+  })
+
+  it('waits for the quiet period, and for the bytes of an interrupted download to be dealt with', async () => {
+    download('just-now.txt', 'x\n', 5_000)
+    const hole = download('cut.txt', 'head\n')
+    truncateSync(hole, 8 * 1024 * 1024)
+    const long = new Date(Date.now() - HOUR); utimesSync(hole, long, long)   // truncating set the time to now; the download stopped an hour ago
+    const r = await sweepDownloads(withInbox([], []))
+    expect(r.moved).toEqual([])
+    expect(r.pending.map(x => [x.name, x.state]).sort()).toEqual([['cut.txt', 'interrupted'], ['just-now.txt', 'settling']])
+  })
+
+  it('a dry run says what it would move and changes nothing', async () => {
+    const p = download('dry.txt', 'content\n')
+    const r = await sweepDownloads(withInbox([], [], { apply: false }))
+    expect(r.wouldMove).toEqual(['dry.txt'])
+    expect(r.moved).toEqual([])
+    expect(readFileSync(p, 'utf8')).toBe('content\n')
+    expect(existsSync(join(inbox, 'dry.txt'))).toBe(false)
+    expect(existsSync(join(root, 'standins.tsv'))).toBe(false)
+  })
+
+  it('refuses a name that is already in the inbox or one of its folders, and leaves the download', async () => {
+    const p = download('taken.txt', 'download\n')
+    writeFileSync(join(inbox, 'done', 'taken.txt'), 'an earlier file\n')
+    const r = await sweepDownloads(withInbox([], []))
+    expect(r.moved).toEqual([])
+    expect(r.refused).toEqual([{ name: 'taken.txt', reason: expect.stringMatching(/already in the inbox/) }])
+    expect(readFileSync(p, 'utf8')).toBe('download\n')
+    expect(readFileSync(join(inbox, 'done', 'taken.txt'), 'utf8')).toBe('an earlier file\n')
+  })
+
+  it('bytes the ledger knows are swapped for a stand-in, not moved again; bytes ingested but not archived yet stay', async () => {
+    const a = 'ingested and archived\n', b = 'ingested, archive not yet\n'
+    const pa = download('a.txt', a), pb = download('b.txt', b)
+    const r = await sweepDownloads(withInbox([ledgerRow('a.txt', a), ledgerRow('b.txt', b, { archived: false })], [entryFor('a.txt', a)]))
+    expect(r.swapped).toEqual(['a.txt'])
+    expect(r.notArchivedYet).toEqual(['b.txt'])
+    expect(r.moved).toEqual([])
+    expect(isStandIn(pa)).toBe(true)
+    expect(readFileSync(pb, 'utf8')).toBe(b)
+    expect(readdirSync(inbox).filter(n => n.endsWith('.txt'))).toEqual([])
+  })
+
+  it('without an inbox nothing is moved: a new file is left and counted as not ingested (the by-hand sweep)', async () => {
+    const p = download('lonely.txt', 'x\n')
+    const r = await sweepDownloads(options([], [], { openFiles: () => new Map() }))
+    expect(r.notIngested).toEqual(['lonely.txt'])
+    expect(readFileSync(p, 'utf8')).toBe('x\n')
+  })
+
+  it('THE CASE THAT MATTERS: a file the client is still writing is not moved; once it closes it, the whole file arrives', async () => {
+    const p = join(dl, 'streaming.txt')
+    writeFileSync(p, 'line 1\n')
+    const t = new Date(Date.now() - HOUR); utimesSync(p, t, t)
+    // a real second process stands in for the client: it holds the file open and keeps writing lines into it
+    const child = spawn(process.execPath, ['-e', `
+      const fs = require('fs'); const fd = fs.openSync(${JSON.stringify(p)}, 'a');
+      process.stdout.write('open\\n');
+      process.stdin.on('data', d => { if (String(d).includes('write')) { fs.writeSync(fd, 'line 2\\nline 3\\n'); process.stdout.write('wrote\\n') } if (String(d).includes('close')) { fs.closeSync(fd); process.exit(0) } })`], { stdio: ['pipe', 'pipe', 'inherit'] })
+    const said = (word: string) => new Promise<void>(resolve => { const on = (d: Buffer) => { if (String(d).includes(word)) { child.stdout.off('data', on); resolve() } }; child.stdout.on('data', on) })
+    await said('open')
+    // the real open-file scan, not a stub
+    const during = await sweepDownloads(options([], [], { inbox, minAgeMs: 0 }))
+    expect(during.moved).toEqual([])
+    expect(during.pending[0]).toMatchObject({ name: 'streaming.txt', state: 'downloading' })
+    child.stdin.write('write\n'); await said('wrote')                 // the client goes on writing
+    child.stdin.write('close\n'); await new Promise<void>(resolve => child.once('exit', () => resolve()))
+    const old = new Date(Date.now() - HOUR); utimesSync(p, old, old)  // the bytes are written; the quiet period is not what this test is about
+    const after = await sweepDownloads(options([], [], { inbox, minAgeMs: 0 }))
+    expect(after.moved).toEqual(['streaming.txt'])
+    expect(readFileSync(join(inbox, 'streaming.txt'), 'utf8')).toBe('line 1\nline 2\nline 3\n')   // nothing written after the first look was lost
   })
 })

@@ -1,0 +1,10 @@
+[Unit]
+Description=Every minute: move finished AyuGram downloads into the ULP inbox and refresh the pipeline status page
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
