@@ -263,6 +263,9 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   `ULP_MOVER=off` or `ULP_STANDIN_SWEEP=off` (the run does nothing). Each run rewrites `STATUS.html` / `STATUS.txt` in the pipeline folder (`scripts/pipeline-status.ts` prints
   the same): one banner (green / amber / red) over the mover, the download folder, the stand-ins, the import, the archive, the ledger copy and the disk.
   `scripts/stand-in-sweep.ts` is the by-hand swap-only tool (`--restore <path>` puts the real bytes of a stand-in back from the archive).
+  After a parser change, `scripts/refeed-from-archive.ts` reads archived files again: for each file the ledger holds with a hash at an older parser revision and whose bytes the
+  archive holds, it writes a `<name> (refeed v6.5).txt.archiveref` into the inbox (no plaintext copy; the importer decodes the archive and checks the sha256 before anything is
+  committed). Dry run by default; `--max-revision`, `--only` and `--limit` narrow it, `--in-flight` and `--floor-gib` pace it, and it stops when a file lands in `inbox/failed`.
 - `CLICKHOUSE_COMPRESS_REQUESTS` — set `1` to gzip INSERT bodies again. Off by default: ClickHouse is on the same machine or
   network, where gzip only cost CPU on the thread that parses the file (step A1).
 - `INGEST_QUALITY_GATE` — the ingest quality gate, on by default (`hold`; `lib/ingest-quality-gate.ts`,

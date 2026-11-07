@@ -75,3 +75,28 @@ stand-ins left as they were; free space went from about 150 to 157 GiB with the 
 **The plain-text copy**: 921 ledger lines and 272 lines for files only the job log knows. A dry run of `take-to-inbox` on the real download folder (read-only) found two files of 1 MB or more: one new, one with a name the job log holds from before the ledger.
 
 **Left to the owner**: run one small chat export through `ledger-check`, and name a deliberate re-feed with "refeed" in it. Not done: the stand-in marks only what the client has a record of; a file whose record was erased (moved before a stand-in existed) needs a client that reads the ledger.
+
+## Re-feeding from the archive (2026-11-07)
+
+**Why.** A parser change can add rows from a file an earlier revision already imported (`PARSER_REVISION`). The ledger lets such a file through when its name carries "refeed", but the plaintext of an archived file may be gone, and restoring it needs as much free disk as the files. The importer already reads an `.archiveref` (the source-archive design): it decodes the file from the archive, checks the sha256 before anything is committed, and records the file with its archive id. `scripts/refeed-from-archive.ts` writes those references for the files that need them; no plaintext copy is made.
+
+**Rules** (`lib/refeed-plan.ts`, pure). One file is one hash; the newest ledger row for the hash decides. A file is fed when that row has a hash, a revision older than the current one (a row at the current revision under any name means done, which is how a finished re-feed drops out of the next plan), and the archive manifest holds the bytes. The reference is named `<name> (refeed v6.5).txt.archiveref`, with the name written by `refeedNameFor` (the same one `take-to-inbox --refeed` uses). A reference already in the inbox, processing, done, held or failed is not written again. Smallest files first. `--max-revision`, `--min-revision`, `--only` and `--limit` narrow the set. Dry run by default.
+
+**Pacing.** At most `--in-flight` (2) references waiting or in processing; a pause under `--floor-gib` (60) free and a resume 5 GiB above; a new file in `inbox/failed` stops the feeding without killing anything (exit 1); a file the quality gate holds is reported, not an error. Unless `--no-wait`, the run ends when the importer has finished what was fed and says where each reference ended up.
+
+**What to feed was measured first** (read-only: 43 of the 706 eligible files, 8 slices of 2 MiB each through the app's parser and ingest policy, the importer's normalised key against `ulp.credentials`, scratch tables in the `default` database that are dropped afterwards). The share of sampled rows stored nowhere:
+
+| Imported by | Files sampled / eligible | Absent share, pooled (per-file range) | Expected new rows | Fed |
+|---|---|---|---|---|
+| before v6 (50) | 6 / 25 | 1.71% (0.002–2.96%) | about 6.3 M (30 GiB) | yes |
+| v6.1 to v6.4 | 36 / 687 | 0.003–0.031% (0.000–0.062%) | about 64 thousand, ceiling 0.56 M (401 GiB) | no |
+
+The five re-feeds of 2026-11-06 agree: 2,578 to 507,871 new rows from tens of millions read, the largest being the one parser change that read a new line layout.
+
+**Run** (the 25 files before v6 that the archive holds, 30.3 GiB, two in flight, 75 minutes wall clock): 23 imported and 2 held, none failed. 6,705,403 new rows from 284.1 M rows read (job time 140 minutes over the two lanes). Free disk went 155, 144.8 at the lowest, 154 GiB; nothing is restored to disk. The sample's total was right (6.3 M expected); per file it was up to three times too high for two of the largest (1.79% and 2.96% expected, 1.14% and 0.98% read), so it ranks files but does not price them.
+
+**Confirmed afterwards** (the same sampling over all 25, once the run was over): 22 of the 23 imported files had 0 sampled rows stored nowhere and one had 4 of 210,602, where the six of them sampled before the run had shown 0.002–2.96%. The two held files still show 1.05% and 0.24% (2,117 of 202,212 and 611 of 252,767), which is the part that stays unread until the owner decides.
+
+**Held.** The quality gate held two (4.36% and 3.30% of the stored rows break a rule, limit 2%; nearly all of it logins with a slash in one and bare host names as logins in the other). These files predate the gate, so the re-feed is the first time it saw them. Nothing from them was stored; the references wait in `inbox/held` for the owner.
+
+**The ledger.** Each imported re-feed adds a row under its re-feed name at revision 65 with the hash and the archive id (the importer records the reference's archive id), so the newest row for the bytes is at the current revision and a later download of the same bytes no longer reads as "imported by an older parser". A re-feed cannot fill a row that has no hash: 205 ledger rows (204 from before v6) have no bytes in the archive, so only a new download of the file, read by the importer, can record their hash.

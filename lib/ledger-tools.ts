@@ -270,14 +270,17 @@ export interface TakeInput {
   refeed: boolean
 }
 
+/** The name a deliberate re-feed of `n` goes by: "x.txt" becomes "x (refeed v6.5).txt". The word "refeed" is what lets the importer read bytes it already holds. */
+export function refeedNameFor(n: string, revision: number = PARSER_REVISION): string {
+  const dot = n.lastIndexOf('.')
+  const marker = ` (refeed v${(revision / 10).toFixed(1)})`
+  return dot > 0 ? `${n.slice(0, dot)}${marker}${n.slice(dot)}` : `${n}${marker}`
+}
+
 /** What to do with one download. Pure: the script hashes the file, reads the folders and the archive manifest, and hands the facts over. */
 export function planTake(index: LedgerIndex, f: TakeInput): TakeAction {
   const known = lookupFile(index, { name: f.name, size: f.size, sha256: f.sha256 })
-  const refeedName = (n: string): string => {
-    const dot = n.lastIndexOf('.')
-    const marker = ` (refeed v${(PARSER_REVISION / 10).toFixed(1)})`
-    return dot > 0 ? `${n.slice(0, dot)}${marker}${n.slice(dot)}` : `${n}${marker}`
-  }
+  const refeedName = refeedNameFor
   if (known.status === 'content') {
     const r = known.row
     const olderParser = r.revision > 0 && r.revision < PARSER_REVISION
