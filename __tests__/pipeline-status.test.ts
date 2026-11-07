@@ -107,6 +107,13 @@ describe('pages', () => {
     expect(renderReadme(f)).toMatch(/\/dl/)
   })
 
+  it('a command to run is shown as code; advice in words is not', () => {
+    const cmd = facts({ mover: { timerActive: false, run: null } })
+    expect(renderHtml(cmd, evaluate(cmd))).toMatch(/<code>systemctl --user enable --now ulp-pull-downloads\.timer<\/code>/)
+    const advice = facts({ inbox: { waiting: 0, processing: 0, held: ['h.txt'], failed: [] } })
+    expect(renderHtml(advice, evaluate(advice))).toMatch(/<b>To do:<\/b> Open the Inbox page/)
+  })
+
   it('a file name cannot inject markup into the page', () => {
     const f = facts({ inbox: { waiting: 0, processing: 0, held: ['<script>alert(1)</script>.txt'], failed: [] } })
     const html = renderHtml(f, evaluate(f))

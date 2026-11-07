@@ -343,7 +343,7 @@ export function renderHtml(f: PipelineFacts, v: Verdict): string {
         <h2>${esc(c.title)}</h2>
         <p>${esc(c.summary)}</p>
         ${c.lines.length ? `<ul>${c.lines.map(l => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}
-        ${c.todo && c.level !== 'ok' ? `<p class="todo"><b>To do:</b> <code>${esc(c.todo)}</code></p>` : ''}
+        ${c.todo && c.level !== 'ok' ? `<p class="todo"><b>To do:</b> ${/^(npx|systemctl|journalctl|docker)\b/.test(c.todo) ? `<code>${esc(c.todo)}</code>` : esc(c.todo)}</p>` : ''}
       </div>
     </section>`).join('')
   return `<!doctype html>
