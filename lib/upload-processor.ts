@@ -33,6 +33,8 @@ import { fileSource, openSource } from '@/lib/source-archive'
 import { sampleHold } from '@/lib/ingest-preflight'
 import { MIN_WORKER_FILE_BYTES, WorkerUnavailableError, parseWorkers, stageInWorker, type StageOutcome } from '@/lib/ingest-pool'
 import { ArchiveRefError, appArchiveDir, hashingStream, readArchiveRefFile } from '@/lib/archive-ref'
+import { contentLedgerEnabled, decideContent, describeDecision, type ContentMatch } from '@/lib/content-ledger'
+import { PARSER_REVISION } from '@/lib/parser-version'
 import {
   UPLOAD_BATCH_SIZE, insertBatch, importPipelineEnabled, makeRetryLogger, streamCredentialsToTable as streamToTable,
   type StreamToTableOptions as StageStreamOptions, type StreamToTableResult,
@@ -69,8 +71,10 @@ export interface ProcessResult {
   filename:            string
   breach_name:         string
   rejection_breakdown: Record<RejectionReason, number>
-  /** True when the file was skipped because its filename is already in ulp.sources. */
+  /** True when the file was skipped because its filename is already in ulp.sources, or (sameContent) because its exact bytes are. */
   alreadyImported:     boolean
+  /** Set with alreadyImported when the file was skipped by the content check: the ledger row of the same bytes under another name (lib/content-ledger.ts). */
+  sameContent?:        ContentMatch
   /** True when the file had no byte in it: nothing was read, staged or asked of ClickHouse, and the job row says so (EMPTY_FILE_NOTE in lib/import-summary.ts). */
   emptyFile?:          boolean
   /** Rows dropped pre-insert by the ingest tier filter (lib/ingest-filter.ts). */
@@ -97,10 +101,41 @@ export const MAX_INPROCESS_MATCHES = 5_000
 
 
 
-/** What the same-name check knows about the file besides its name: the hash of an archived file, or the size of a plain one. */
+/** What the same-name check knows about the file besides its name: the hash of an archived or hashed file, and the size of a plain one. */
 interface SourceIdentityQuery {
   sha256?: string
   size?: number
+}
+
+/**
+ * The SQL of the same-name check for what is known about the file. Pure, so the four shapes are tested as text.
+ *   nothing        the name alone decides
+ *   a hash         a row with an empty hash still blocks by name; a row with another hash is another file
+ *   a size         a row without a size (size 0, an import from before sizes were recorded) still blocks by name; another size is another file
+ *   both           a row with a hash is decided by the hash, a row without one by the size: a plain file now carries both (the file ledger hashes every file), and a row that
+ *                  was recorded with a size and no hash yet (the archive timer fills it later) must not block a file of that name with another size
+ */
+export function sourceGuardQuery(identity: SourceIdentityQuery, filename: string): { query: string; query_params: Record<string, string | number> } {
+  const { sha256, size } = identity
+  if (sha256 && size) {
+    return {
+      query:        `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} AND (sha256 = {h:String} OR (sha256 = '' AND (size = 0 OR size = {s:UInt64}))) LIMIT 1`,
+      query_params: { f: filename, h: sha256, s: size },
+    }
+  }
+  if (sha256) {
+    return {
+      query:        `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} AND (sha256 = '' OR sha256 = {h:String}) LIMIT 1`,
+      query_params: { f: filename, h: sha256 },
+    }
+  }
+  if (size) {
+    return {
+      query:        `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} AND (size = 0 OR size = {s:UInt64}) LIMIT 1`,
+      query_params: { f: filename, s: size },
+    }
+  }
+  return { query: `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1`, query_params: { f: filename } }
 }
 
 /**
@@ -109,19 +144,13 @@ interface SourceIdentityQuery {
  * in ulp.credentials. Used both to skip re-imports (processTextStream) and to keep
  * recordSource idempotent.
  *
- * The name alone decides unless the caller knows more. With a content hash (an import from the source archive) the same name with other content is a different
- * file; a row without a hash still blocks by name. With a size (a plain file on disk, whose content is not read at claim time) the same name with another size
- * is a different file; a row without a size (size 0: an import from before sizes were recorded) still blocks by name.
+ * The name alone decides unless the caller knows more (see sourceGuardQuery). The same bytes under ANOTHER name are the content check's business (findContentMatch).
  */
 async function querySourceAlreadyImported(filename: string, signal: AbortSignal, identity: SourceIdentityQuery = {}): Promise<boolean> {
-  const { sha256, size } = identity
+  const { query, query_params } = sourceGuardQuery(identity, filename)
   const res = await getClient().query({
-    query:        sha256
-      ? `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} AND (sha256 = '' OR sha256 = {h:String}) LIMIT 1`
-      : size
-        ? `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} AND (size = 0 OR size = {s:UInt64}) LIMIT 1`
-        : `SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1`,
-    query_params: sha256 ? { f: filename, h: sha256 } : size ? { f: filename, s: size } : { f: filename },
+    query,
+    query_params,
     format:       'JSONEachRow',
     abort_signal: signal,
     clickhouse_settings: {
@@ -139,6 +168,34 @@ async function querySourceAlreadyImported(filename: string, signal: AbortSignal,
     return Number(rows[0]?.c ?? 0) > 0
   } finally {
     signal.removeEventListener('abort', closeOnAbort)
+  }
+}
+
+/**
+ * The ledger row that holds these exact bytes under a name other than `filename`, the newest revision first; null when there is none. A failure other than an abort is
+ * logged and read as "no match": the ledger is a saving, and a ledger that cannot be read must never keep a file out.
+ */
+export async function findContentMatch(sha256: string, filename: string, hooks: ImportHooks = {}): Promise<ContentMatch | null> {
+  try {
+    return await withClickHouseRetry(
+      async signal => {
+        const res = await getClient().query({
+          query:        `SELECT filename, max(parser_revision) AS revision, toString(max(imported_at)) AS at FROM ulp.sources WHERE sha256 = {h:String} AND filename != {f:String} GROUP BY filename ORDER BY revision DESC, at DESC LIMIT 1`,
+          query_params: { h: sha256, f: filename },
+          format:       'JSONEachRow',
+          abort_signal: signal,
+          clickhouse_settings: { use_query_cache: 0 },
+        })
+        const rows = await res.json() as Array<{ filename?: string; revision?: string | number; at?: string }>
+        const row = rows[0]
+        return row?.filename ? { filename: row.filename, revision: Number(row.revision ?? 0), importedAt: String(row.at ?? '') } : null
+      },
+      { signal: hooks.signal, onRetry: makeRetryLogger('content check', filename, () => hooks.beat?.()) },
+    )
+  } catch (err) {
+    if (hooks.signal?.aborted) throw err
+    console.warn(`[ledger] ${filename}: the content check could not be answered, so the file is imported as before: ${err instanceof Error ? err.message : String(err)}`)
+    return null
   }
 }
 
@@ -205,6 +262,8 @@ export async function recordSource(filename: string, lineCount: number, hooks: I
         values: [{
           filename,
           line_count: lineCount,
+          // The revision of the line parser that read the file (lib/parser-version.ts): the content check skips the same bytes under another name only while it is current.
+          parser_revision: PARSER_REVISION,
           // The identity of the file, when the importer knows it (it read the file from the source archive). A plain file leaves the columns at their defaults;
           // scripts/archive-sources.ts fills them later.
           ...(hooks.source
@@ -415,8 +474,9 @@ async function importThroughStage(a: StagedImport): Promise<ProcessResult> {
       },
     })
 
-    // A file that had importable lines is remembered even when it added nothing, so the same-name guard stops its re-upload.
-    if (streamed.imported > 0) await recordSource(filename, commit.inserted, hooks)
+    // A file that had importable lines is remembered even when it added nothing, so the same-name guard stops its re-upload. With the file ledger a file that yielded nothing
+    // at all (a list of card numbers, a notes file) is remembered too, once its identity is known (the hash and the size): its re-drop is then skipped by name, a copy by content.
+    if (streamed.imported > 0 || (contentLedgerEnabled() && !!hooks.contentSha256 && !!hooks.fileSize)) await recordSource(filename, commit.inserted, hooks)
     if (commit.matches.length > 0) {
       fireMonitorAlertsFromMatches(filename, commit.matches, a.monitorsById).catch(err =>
         console.error('Domain monitor alert error:', err)
@@ -625,11 +685,25 @@ export async function processTextFile(
       rejection_breakdown: makeRejectionMap(), alreadyImported: false, tierDropped: 0, emptyFile: true,
     }
   }
-  // A name and a size the table already knows, with a content hash on record: read the file once and let the content decide (a re-drop, or another file under the same name).
+  // The file ledger (docs/superpowers/specs/2026-11-07-file-ledger-design.md) reads every file once and hashes it: the hash decides a re-drop, a copy under another name and
+  // another file under a used name, and it is recorded with the file. With INGEST_CONTENT_LEDGER=off only a name and a size the table already knows, with a hash on record, are read.
+  const ledger = contentLedgerEnabled()
   let contentSha256 = hooks.contentSha256
-  if (!contentSha256 && fileSize !== undefined && fileSize > 0 && await sourceHashStored(filename, fileSize, hooks)) {
+  if (!contentSha256 && fileSize !== undefined && fileSize > 0 && (ledger || await sourceHashStored(filename, fileSize, hooks))) {
     contentSha256 = await fileSha256(filePath, hooks)
     hooks.beat?.()
+  }
+  if (ledger && contentSha256) {
+    const decision = decideContent(await findContentMatch(contentSha256, filename, hooks), filename)
+    const line = describeDecision(filename, decision)
+    if (line) console.warn(line)
+    if (decision.action === 'skip') {
+      hooks.onSourceBytes?.(() => 0)
+      return {
+        imported: 0, known: 0, inFileDuplicates: 0, skipped: 0, errors: 0, filename, breach_name: matchBreach(filename),
+        rejection_breakdown: makeRejectionMap(), alreadyImported: true, sameContent: decision.match, tierDropped: 0,
+      }
+    }
   }
   const nodeStream = fs.createReadStream(filePath)
   const webStream = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>

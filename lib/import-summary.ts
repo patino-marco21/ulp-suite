@@ -46,6 +46,12 @@ export function newKnownLabel(imported: number, known: number | undefined, fmt: 
 export const ALREADY_IMPORTED_NOTE = 'already-imported'
 
 /**
+ * The note a job row carries when the content check skipped the whole file (processing_jobs.note): the same bytes were imported before under another name, by a parser at
+ * least as new as this one (lib/content-ledger.ts). The earlier name is in the app log.
+ */
+export const SAME_CONTENT_NOTE = 'same-content'
+
+/**
  * The note a job row carries when the file had no byte in it (processing_jobs.note). A copy that failed leaves such a file, and "0 rows" would read like an import that
  * found nothing: five such files were recorded that way on 2026-11-02 and the data they were meant to hold was never imported.
  */
@@ -55,6 +61,8 @@ export const EMPTY_FILE_NOTE = 'empty-file'
 export interface JobTally {
   entries: number
   alreadyImported: number
+  /** Entries the content check skipped (the same bytes under another name); they are not counted in alreadyImported. */
+  sameContent: number
   /** Entries that had no byte in them (a file of 0 bytes). */
   empty: number
   repeats: number
@@ -62,13 +70,14 @@ export interface JobTally {
   matchKey: MatchKey | null
 }
 
-export const newJobTally = (): JobTally => ({ entries: 0, alreadyImported: 0, empty: 0, repeats: 0, matchKey: null })
+export const newJobTally = (): JobTally => ({ entries: 0, alreadyImported: 0, sameContent: 0, empty: 0, repeats: 0, matchKey: null })
 
 /** Adds one imported file or one entry of a ZIP. An entry that failed counts for nothing: the same-name check did not skip it. */
-export function addToTally(t: JobTally, r: { inFileDuplicates: number; alreadyImported: boolean; emptyFile?: boolean; errors: number; matchKey?: MatchKey }): void {
+export function addToTally(t: JobTally, r: { inFileDuplicates: number; alreadyImported: boolean; sameContent?: unknown; emptyFile?: boolean; errors: number; matchKey?: MatchKey }): void {
   if (r.errors > 0) return
   t.entries++
-  if (r.alreadyImported) t.alreadyImported++
+  if (r.alreadyImported && r.sameContent) t.sameContent++
+  else if (r.alreadyImported) t.alreadyImported++
   if (r.emptyFile) t.empty++
   t.repeats += r.inFileDuplicates
   // One entry matched on the exact key makes the job 'exact': the weaker claim, and the one a recount checks correctly for it.
@@ -78,12 +87,13 @@ export function addToTally(t: JobTally, r: { inFileDuplicates: number; alreadyIm
 /** What a finished job shows in place of its counts: a skipped file says so ("0 rows" reads like an import that found nothing). */
 export function jobLabel(j: { imported: number; known?: number; note?: string | null }, fmt: (n: number) => string): string {
   if (j.note === ALREADY_IMPORTED_NOTE) return 'already imported · skipped'
+  if (j.note === SAME_CONTENT_NOTE) return 'same content as an earlier file · skipped'
   if (j.note === EMPTY_FILE_NOTE) return 'empty file · nothing imported'
   return newKnownLabel(j.imported, j.known, fmt)
 }
 
 /** The tally of one file that was imported on its own, a text file. */
-export function tallyOf(r: { inFileDuplicates: number; alreadyImported: boolean; emptyFile?: boolean; errors: number; matchKey?: MatchKey }): JobTally {
+export function tallyOf(r: { inFileDuplicates: number; alreadyImported: boolean; sameContent?: unknown; emptyFile?: boolean; errors: number; matchKey?: MatchKey }): JobTally {
   const t = newJobTally()
   addToTally(t, r)
   return t
@@ -92,7 +102,8 @@ export function tallyOf(r: { inFileDuplicates: number; alreadyImported: boolean;
 /** The job-row fields the tally decides. The note is set only when there was at least one entry and the check skipped every one; match_key only when an entry was matched. */
 export function jobAccounting(t: JobTally): { repeats: number; note?: string; match_key?: MatchKey } {
   const base = { repeats: t.repeats, ...(t.matchKey ? { match_key: t.matchKey } : {}) }
-  if (t.entries > 0 && t.alreadyImported === t.entries) return { ...base, note: ALREADY_IMPORTED_NOTE }
+  if (t.entries > 0 && t.sameContent === t.entries) return { ...base, note: SAME_CONTENT_NOTE }
+  if (t.entries > 0 && t.alreadyImported + t.sameContent === t.entries) return { ...base, note: ALREADY_IMPORTED_NOTE }
   if (t.entries > 0 && t.empty === t.entries) return { ...base, note: EMPTY_FILE_NOTE }
   return base
 }
@@ -103,6 +114,7 @@ export function jobAccounting(t: JobTally): { repeats: number; note?: string; ma
  */
 export function jobAccountingTitle(j: { imported: number; known?: number; repeats?: number | null; skipped: number; note?: string | null }): string {
   if (j.note === ALREADY_IMPORTED_NOTE) return 'A file with this name (and size) was imported before, so it was not read again'
+  if (j.note === SAME_CONTENT_NOTE) return 'The exact bytes of this file were imported before under another name, by the current parser or a newer one, so it was not read again. To import it anyway, name the file "refeed"'
   if (j.note === EMPTY_FILE_NOTE) return 'The file is empty (0 bytes), so nothing was imported. If it was still being copied, copy it again'
   const parts = [`${count(j.imported)} new`, `${count(j.known)} already in the database`]
   if (j.repeats !== null && j.repeats !== undefined) parts.push(`${count(j.repeats)} repeated inside the file`)

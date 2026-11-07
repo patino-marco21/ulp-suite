@@ -387,6 +387,9 @@ export function openSource(ref: string, opts: { archiveDir?: string } = {}): Sou
 export const SOURCES_IDENTITY_ALTER =
   `ALTER TABLE ulp.sources ADD COLUMN IF NOT EXISTS size UInt64 DEFAULT 0, ADD COLUMN IF NOT EXISTS sha256 String DEFAULT '', ADD COLUMN IF NOT EXISTS archive_id String DEFAULT ''`
 
+/** DDL v31 (lib/clickhouse-migrations.ts): the revision of the line parser that imported the file (lib/parser-version.ts). 0 = not recorded (a row from before the column). */
+export const SOURCES_REVISION_ALTER = `ALTER TABLE ulp.sources ADD COLUMN IF NOT EXISTS parser_revision UInt16 DEFAULT 0`
+
 export function sqlQuote(s: string): string {
   return `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
 }

@@ -440,7 +440,9 @@ CREATE TABLE IF NOT EXISTS ulp.sources
     -- import from the source archive; empty for a file imported as plain text.
     size        UInt64   DEFAULT 0,
     sha256      String   DEFAULT '',
-    archive_id  String   DEFAULT ''
+    archive_id  String   DEFAULT '',
+    -- The line parser that imported the file (DDL v31; lib/parser-version.ts). 0 = not recorded.
+    parser_revision UInt16 DEFAULT 0
 )
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/ulp/sources', '{replica}')
 ORDER BY imported_at;

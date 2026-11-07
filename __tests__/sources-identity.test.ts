@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const h = vi.hoisted(() => ({ insert: vi.fn(), query: vi.fn() }))
 vi.mock('@/lib/clickhouse', () => ({ getClient: () => ({ insert: h.insert, query: h.query }) }))
 
-import { recordSource, sourceAlreadyImported } from '@/lib/upload-processor'
+import { recordSource, sourceAlreadyImported, sourceGuardQuery } from '@/lib/upload-processor'
+import { PARSER_REVISION } from '@/lib/parser-version'
 import { SOURCES_IDENTITY_ALTER, sourcesSyncSql } from '@/lib/source-archive'
 
 const read = (rel: string) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
@@ -74,12 +75,21 @@ describe('the duplicate-file guard with a content hash', () => {
     expect(sqlOf(0).query_params).toEqual({ f: 'a.txt', s: 4096 })
   })
 
-  it('prefers the hash to the size when the import has both, and treats a size of 0 as no size', async () => {
+  it('decides a row with a hash by the hash and a row without one by the size when the import has both, and treats a size of 0 as no size', async () => {
     await sourceAlreadyImported('a.txt', { source: SOURCE, fileSize: 4096 })
-    expect(sqlOf(0).query).toContain('sha256 = {h:String}')
-    expect(sqlOf(0).query).not.toContain('size')
+    expect(sqlOf(0).query).toBe(
+      "SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} AND (sha256 = {h:String} OR (sha256 = '' AND (size = 0 OR size = {s:UInt64}))) LIMIT 1",
+    )
+    expect(sqlOf(0).query_params).toEqual({ f: 'a.txt', h: SOURCE.sha256, s: 4096 })
     await sourceAlreadyImported('b.txt', { fileSize: 0 })
     expect(sqlOf(1).query).toBe('SELECT count() AS c FROM ulp.sources WHERE filename = {f:String} LIMIT 1')
+  })
+
+  it('a plain file that carries its hash and its size is not blocked by a row of that name with another size and no hash yet', () => {
+    // The row was recorded with a size and no hash (the archive timer fills the hash later). A file of that name with another size is another file.
+    const q = sourceGuardQuery({ sha256: 'ab'.repeat(32), size: 5000 }, 'a.txt')
+    expect(q.query).toContain("(sha256 = '' AND (size = 0 OR size = {s:UInt64}))")
+    expect(q.query_params.s).toBe(5000)
   })
 
   it('says "already imported" when such a row exists and "new file" when only rows with another hash exist', async () => {
@@ -95,17 +105,22 @@ describe('recordSource', () => {
 
   it('writes only the name and the line count for a plain file', async () => {
     await recordSource('a.txt', 10)
-    expect(sourcesInsert().values).toEqual([{ filename: 'a.txt', line_count: 10 }])
+    expect(sourcesInsert().values).toEqual([{ filename: 'a.txt', line_count: 10, parser_revision: PARSER_REVISION }])
   })
 
   it('writes the size, the sha256 and the archive id when the import came from the archive', async () => {
     await recordSource('a.txt', 10, { source: SOURCE })
-    expect(sourcesInsert().values).toEqual([{ filename: 'a.txt', line_count: 10, size: 1234, sha256: SOURCE.sha256, archive_id: SOURCE.archiveId }])
+    expect(sourcesInsert().values).toEqual([{ filename: 'a.txt', line_count: 10, parser_revision: PARSER_REVISION, size: 1234, sha256: SOURCE.sha256, archive_id: SOURCE.archiveId }])
   })
 
   it('writes the size of a plain file whose size is known, and nothing else', async () => {
     await recordSource('a.txt', 10, { fileSize: 4096 })
-    expect(sourcesInsert().values).toEqual([{ filename: 'a.txt', line_count: 10, size: 4096 }])
+    expect(sourcesInsert().values).toEqual([{ filename: 'a.txt', line_count: 10, parser_revision: PARSER_REVISION, size: 4096 }])
+  })
+
+  it('writes the hash of a plain file that was hashed, with its size and the parser revision', async () => {
+    await recordSource('a.txt', 0, { fileSize: 4096, contentSha256: SOURCE.sha256 })
+    expect(sourcesInsert().values).toEqual([{ filename: 'a.txt', line_count: 0, parser_revision: PARSER_REVISION, size: 4096, sha256: SOURCE.sha256 }])
   })
 
   it('checks for an earlier record with the same name and size, so another file with the name still gets its own row', async () => {

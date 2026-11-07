@@ -27,6 +27,7 @@ vi.mock('@/lib/ingest-stage', async () => {
 import { appendManifest, archiveFile } from '@/lib/source-archive'
 import { serializeArchiveRef } from '@/lib/archive-ref'
 import { processArchiveRef } from '@/lib/upload-processor'
+import { PARSER_REVISION } from '@/lib/parser-version'
 
 const cleanLine = (i: number) => `https://shop${i % 50}.example.test/login:user${i}@mail.test:Pw-${i}-Xy!`
 const junkLine = (i: number) => `https://shop${i % 50}.example.test/login:user${i}@mail.test:Pw://x${i}`
@@ -79,7 +80,7 @@ describe('processArchiveRef', () => {
     const out = await processArchiveRef(refPath)
     expect(out).toMatchObject({ imported: 300, filename: 'arch-a.txt', alreadyImported: false })
     expect(h.commitStage.mock.calls[0][0]).toMatchObject({ parsedRows: 300 })
-    expect(sourcesInsert().values).toEqual([{ filename: 'arch-a.txt', line_count: 300, size: entry.size, sha256: entry.sha256, archive_id: entry.id }])
+    expect(sourcesInsert().values).toEqual([{ filename: 'arch-a.txt', line_count: 300, parser_revision: PARSER_REVISION, size: entry.size, sha256: entry.sha256, archive_id: entry.id }])
   })
 
   it('asks the duplicate guard about the original name AND the content hash', async () => {

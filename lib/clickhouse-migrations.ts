@@ -30,7 +30,7 @@ import {
   buildImportedDescProjectionCurrentSql,
 } from './credentials-projections'
 import { NORM_CONTENT_KEY, URL_CONTENT_KEY } from './url-content-key'
-import { SOURCES_IDENTITY_ALTER } from './source-archive'
+import { SOURCES_IDENTITY_ALTER, SOURCES_REVISION_ALTER } from './source-archive'
 
 // Per-process guard (still useful to avoid redundant calls within one process)
 let migrationsDone = false
@@ -274,16 +274,22 @@ let retryNotBefore = 0
 //      and extra trailing slashes are ignored. ADD COLUMN IF NOT EXISTS is metadata only; parts written from now on carry the value. Existing parts get it with MATERIALIZE COLUMN, NOT fired
 //      here (see v23: start-up must not be coupled to a mutation): scripts/materialize-norm-key.sh, supervised. Until every part has it the importer keeps the exact key
 //      (lib/norm-key-ready.ts), so the image can be deployed first. A failed ADD is not recorded as done and the next start tries again.
-const DDL_VERSION = 30
+// v31: ulp.sources gets parser_revision (lib/parser-version.ts; docs/superpowers/specs/2026-11-07-file-ledger-design.md): the revision of the line parser that imported the file. The importer skips a
+//      file whose exact bytes the table holds under another name only while that revision is the current one or newer. ADD COLUMN IF NOT EXISTS on a table of about a thousand rows, metadata
+//      only; existing rows read 0 until scripts/ledger-backfill.ts sets them by the time they were written. A failed ADD is not recorded as done and the next start tries again (the importer
+//      writes the column, so an import before it exists would fail).
+const DDL_VERSION = 31
 const DDL_BEFORE_SOURCES_IDENTITY = 27
 const DDL_BEFORE_ADDRESS_INDEX = 28
 const DDL_BEFORE_NORM_KEY = 29
+const DDL_BEFORE_PARSER_REVISION = 30
 
-/** The DDL version to record after a run: a failed v28 ALTER (ulp.sources identity columns), a failed v29 ADD INDEX or a failed v30 ADD COLUMN is not recorded as done, so the next start tries it again. */
-export function ddlVersionToRecord(sourcesIdentityFailed: boolean, addressIndexFailed = false, normKeyFailed = false): number {
+/** The DDL version to record after a run: a failed v28 ALTER (ulp.sources identity columns), a failed v29 ADD INDEX, a failed v30 ADD COLUMN or a failed v31 ADD COLUMN is not recorded as done, so the next start tries it again. */
+export function ddlVersionToRecord(sourcesIdentityFailed: boolean, addressIndexFailed = false, normKeyFailed = false, parserRevisionFailed = false): number {
   if (sourcesIdentityFailed) return DDL_BEFORE_SOURCES_IDENTITY
   if (addressIndexFailed) return DDL_BEFORE_ADDRESS_INDEX
-  return normKeyFailed ? DDL_BEFORE_NORM_KEY : DDL_VERSION
+  if (normKeyFailed) return DDL_BEFORE_NORM_KEY
+  return parserRevisionFailed ? DDL_BEFORE_PARSER_REVISION : DDL_VERSION
 }
 
 /** v26: swap country_tier's MATERIALIZED expression (metadata only; see the DDL_VERSION comment above). */
@@ -1154,14 +1160,26 @@ export async function runClickHouseMigrations(opts: { wait?: WaitOptions } = {})
     }
   }
 
+  // v31 — ulp.sources.parser_revision (see DDL_VERSION comment above). ADD COLUMN IF NOT EXISTS is metadata only and idempotent. The rows already there are set by scripts/ledger-backfill.ts, never from here.
+  let parserRevisionFailed = false
+  if (lastDdl < 31) {
+    try {
+      await client.exec({ query: SOURCES_REVISION_ALTER })
+      console.warn('[ClickHouse migration] DDL v31 applied (ulp.sources has parser_revision -- existing rows read 0 until scripts/ledger-backfill.ts)')
+    } catch (err) {
+      parserRevisionFailed = true
+      console.error('[ClickHouse migration] v31: ulp.sources parser_revision -- FAILED (tried again at the next start):', err instanceof Error ? err.message : String(err))
+    }
+  }
+
   // A connection that was lost at any point means statements may not have reached the server: record nothing (every block is idempotent) and fire no repair mutation.
   if (connectionLost) {
     tryAgainLater('the connection to ClickHouse was lost during the run: the DDL version was not recorded and the data-repair mutations were not fired')
     return
   }
 
-  // A failed v28, v29 or v30 keeps the recorded version below it, so the next start runs the ALTER again: an import from the archive needs the v28 columns, the lookups the v29 index, the intake the v30 column.
-  const ddlReached = ddlVersionToRecord(sourcesIdentityFailed, addressIndexFailed, normKeyFailed)
+  // A failed v28, v29, v30 or v31 keeps the recorded version below it, so the next start runs the ALTER again: an import from the archive needs the v28 columns, the lookups the v29 index, the intake the v30 column, the file ledger the v31 column.
+  const ddlReached = ddlVersionToRecord(sourcesIdentityFailed, addressIndexFailed, normKeyFailed, parserRevisionFailed)
   if (lastDdl < DDL_VERSION) {
     setSetting('ch_ddl_version', String(ddlReached))
     console.warn(`[ClickHouse migration] DDL now at v${ddlReached}`)

@@ -79,7 +79,7 @@ describe('runClickHouseMigrations — start-up safeguards', () => {
       'password_length', 'password_mask', 'url_scheme', 'is_corporate_email', 'url_host', 'password_entropy_band', 'is_noise', 'content_key_hash',
       'norm_key_hash', 'was_duplicated',
     ]
-    setSetting('ch_ddl_version', '29') // an upgrade from the last release: only the v30 block has work to do
+    setSetting('ch_ddl_version', '30') // an upgrade from the last release: only the v31 block has work to do
     setSetting('ch_repair_mutations_fired', '1')
   })
 
@@ -93,8 +93,8 @@ describe('runClickHouseMigrations — start-up safeguards', () => {
     await run({ wait: fakeWait() })
     expect(h.state.probes).toBe(4)
     expect(h.state.firstProbeAnswerAtExecs).toBe(0) // not one statement was sent before the first answer
-    expect(h.state.execs.some(sql => sql.includes('norm_key_hash'))).toBe(true)
-    expect(getSetting('ch_ddl_version')).toBe('30')
+    expect(h.state.execs.some(sql => sql.includes('parser_revision'))).toBe(true)
+    expect(getSetting('ch_ddl_version')).toBe('31')
     // once, however many times it had to ask: the log is what tells a person why the start took a few seconds longer
     const waiting = warn.mock.calls.filter((c: unknown[]) => String(c[0]).includes('not accepting connections yet'))
     expect(waiting).toHaveLength(1)
@@ -109,7 +109,7 @@ describe('runClickHouseMigrations — start-up safeguards', () => {
     h.state.probeFailures = Number.POSITIVE_INFINITY
     await run({ wait: fakeWait(5_000) })
     expect(h.state.execs).toEqual([])
-    expect(getSetting('ch_ddl_version')).toBe('29')
+    expect(getSetting('ch_ddl_version')).toBe('30')
     const lines = error.mock.calls.map((c: unknown[]) => String(c[0])).join('\n')
     expect(lines).toContain('no DDL was run')
   })
@@ -125,14 +125,14 @@ describe('runClickHouseMigrations — start-up safeguards', () => {
     h.state.probeFailures = 0
     await run({ wait: fakeWait() })
     expect(h.state.probes).toBeGreaterThan(asked)
-    expect(getSetting('ch_ddl_version')).toBe('30')
+    expect(getSetting('ch_ddl_version')).toBe('31')
   })
 
   test('a connection lost during the run keeps the version, leaves the repair mutations unfired, and the next call runs it all again', async () => {
     clearSetting('ch_repair_mutations_fired')
     h.state.dropExecs = true
     await run({ wait: fakeWait() })
-    expect(getSetting('ch_ddl_version')).toBe('29')
+    expect(getSetting('ch_ddl_version')).toBe('30')
     expect(getSetting('ch_repair_mutations_fired')).toBeNull()
     expect(h.state.queries.some(q => q.includes('system.data_skipping_indices'))).toBe(false) // no schema check against a server that just dropped us
     expect(error.mock.calls.map((c: unknown[]) => String(c[0])).join('\n')).toContain('connection')
@@ -141,31 +141,46 @@ describe('runClickHouseMigrations — start-up safeguards', () => {
     h.state.execs.length = 0
     vi.setSystemTime(new Date('2026-10-17T12:02:00Z'))
     await run({ wait: fakeWait() })
-    expect(h.state.execs.some(sql => sql.includes('norm_key_hash'))).toBe(true)
-    expect(getSetting('ch_ddl_version')).toBe('30')
+    expect(h.state.execs.some(sql => sql.includes('parser_revision'))).toBe(true)
+    expect(getSetting('ch_ddl_version')).toBe('31')
     expect(getSetting('ch_repair_mutations_fired')).toBe('1')
   })
 
   test('a server-side failure of the v29 ADD INDEX still keeps the version at 28, as before', async () => {
-    setSetting('ch_ddl_version', '28') // both the v29 and the v30 block have work to do
+    setSetting('ch_ddl_version', '28') // the v29, v30 and v31 blocks have work to do
     h.state.failExecWith = 'idx_bf_email_lc'
     await run({ wait: fakeWait() })
     expect(getSetting('ch_ddl_version')).toBe('28')
   })
 
   test('v30 adds the column from the shared key text and fires no backfill: that is the supervised script\'s job', async () => {
+    setSetting('ch_ddl_version', '29') // the v30 and the v31 block have work to do
     await run({ wait: fakeWait() })
-    expect(h.state.execs).toHaveLength(1)
+    expect(h.state.execs).toHaveLength(2)
     expect(h.state.execs[0]).toMatch(/^ALTER TABLE ulp\.credentials ADD COLUMN IF NOT EXISTS norm_key_hash UInt64 MATERIALIZED cityHash64\(/)
     expect(h.state.execs.some(sql => /\bMATERIALIZE\b/.test(sql))).toBe(false) // the ADD COLUMN itself says MATERIALIZED; only a MATERIALIZE COLUMN / INDEX statement is a backfill
-    expect(getSetting('ch_ddl_version')).toBe('30')
+    expect(getSetting('ch_ddl_version')).toBe('31')
   })
 
   test('a server-side failure of the v30 ADD COLUMN keeps the version at 29, so the next start tries it again', async () => {
+    setSetting('ch_ddl_version', '29')
     h.state.failExecWith = 'norm_key_hash'
     await run({ wait: fakeWait() })
     expect(getSetting('ch_ddl_version')).toBe('29')
     expect(error.mock.calls.map((c: unknown[]) => String(c[0])).join('\n')).toContain('v30')
+  })
+
+  test('v31 adds ulp.sources.parser_revision from the shared statement and fires no backfill: scripts/ledger-backfill.ts sets the old rows', async () => {
+    await run({ wait: fakeWait() })
+    expect(h.state.execs).toEqual(['ALTER TABLE ulp.sources ADD COLUMN IF NOT EXISTS parser_revision UInt16 DEFAULT 0'])
+    expect(getSetting('ch_ddl_version')).toBe('31')
+  })
+
+  test('a server-side failure of the v31 ADD COLUMN keeps the version at 30, so the next start tries it again', async () => {
+    h.state.failExecWith = 'parser_revision'
+    await run({ wait: fakeWait() })
+    expect(getSetting('ch_ddl_version')).toBe('30')
+    expect(error.mock.calls.map((c: unknown[]) => String(c[0])).join('\n')).toContain('v31')
   })
 
   test('a finished run is done for the process: the second call sends nothing', async () => {
@@ -178,17 +193,17 @@ describe('runClickHouseMigrations — start-up safeguards', () => {
   })
 
   test('the schema check runs after every completed run, even when the version is already current, and adds what is missing', async () => {
-    setSetting('ch_ddl_version', '30')
+    setSetting('ch_ddl_version', '31')
     h.state.indexes = LIVE_INDEXES.filter(n => n !== 'idx_inv_url' && n !== 'idx_ngram_domain')
     await run({ wait: fakeWait() })
     expect(h.state.execs).toHaveLength(2)
     expect(h.state.execs.some(sql => sql.includes('idx_inv_url'))).toBe(true)
     expect(h.state.execs.some(sql => sql.includes('idx_ngram_domain'))).toBe(true)
-    expect(getSetting('ch_ddl_version')).toBe('30')
+    expect(getSetting('ch_ddl_version')).toBe('31')
   })
 
   test('a complete schema on a current install costs the probe and two metadata queries, and no statement', async () => {
-    setSetting('ch_ddl_version', '30')
+    setSetting('ch_ddl_version', '31')
     await run({ wait: fakeWait() })
     expect(h.state.execs).toEqual([])
     expect(h.state.queries).toHaveLength(3)

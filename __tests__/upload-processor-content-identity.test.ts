@@ -48,6 +48,8 @@ function ulpSources(stored: number, same: number) {
 const sameNameCalls = () => h.query.mock.calls.map(c => c[0] as { query: string; query_params: Record<string, unknown> }).filter(q => !/sha256 != ''/.test(q.query))
 
 beforeEach(() => {
+  // This file pins the rule that holds with INGEST_CONTENT_LEDGER=off (a file is read only when the table holds a hash for its name and size); __tests__/file-ledger-importer.test.ts pins the ledger on.
+  vi.stubEnv('INGEST_CONTENT_LEDGER', 'off')
   vi.stubEnv('INGEST_NOVELTY_CHECK', 'on')
   vi.stubEnv('INGEST_QUALITY_GATE_MIN_LINES', '100')
   vi.spyOn(console, 'log').mockImplementation(() => {})

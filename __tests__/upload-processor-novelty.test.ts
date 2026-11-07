@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { Readable } from 'stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -40,6 +41,7 @@ import { mkdtempSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MAX_INPROCESS_MATCHES, processTextFile, processTextStream } from '@/lib/upload-processor'
+import { PARSER_REVISION } from '@/lib/parser-version'
 
 const LINES =
   'https://shop.example.com:alice@example.com:pw-one\n' +
@@ -125,12 +127,12 @@ describe('processTextStream with novelty-aware ingest', () => {
   it('remembers the file in ulp.sources with the rows it added, even when it added none', async () => {
     h.commitStage.mockResolvedValue(commitResult({ known: 3, inserted: 0 }))
     await processTextStream(stream(), 'novelty-known.txt')
-    expect(sourceRows()).toEqual([[{ filename: 'novelty-known.txt', line_count: 0 }]])
+    expect(sourceRows()).toEqual([[{ filename: 'novelty-known.txt', line_count: 0, parser_revision: PARSER_REVISION }]])
   })
 
   it('records the rows added when there are some', async () => {
     await processTextStream(stream(), 'novelty-added.txt')
-    expect(sourceRows()).toEqual([[{ filename: 'novelty-added.txt', line_count: 2 }]])
+    expect(sourceRows()).toEqual([[{ filename: 'novelty-added.txt', line_count: 2, parser_revision: PARSER_REVISION }]])
   })
 
   it('does not remember a file that had no importable line', async () => {
@@ -229,10 +231,12 @@ describe('the same-name check of a file on disk knows its size', () => {
   afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
   const file = (name: string, body = LINES) => { const p = join(dir, name); writeFileSync(p, body); return p }
 
-  it('asks with the size of the file it opens and records that size when it imports it', async () => {
+  it('asks with the size and the hash of the file it opens and records both when it imports it', async () => {
     await processTextFile(file('sized.txt'), 'sized.txt')
-    expect((h.query.mock.calls[0][0] as { query_params: Record<string, unknown> }).query_params).toEqual({ f: 'sized.txt', s: Buffer.byteLength(LINES) })
-    expect(sourceRows()).toEqual([[{ filename: 'sized.txt', line_count: 2, size: Buffer.byteLength(LINES) }]])
+    const sha = createHash('sha256').update(LINES).digest('hex')
+    const guard = h.query.mock.calls.map(c => c[0] as { query: string; query_params: Record<string, unknown> }).find(q => /WHERE filename = \{f:String\}/.test(q.query))!
+    expect(guard.query_params).toEqual({ f: 'sized.txt', h: sha, s: Buffer.byteLength(LINES) })
+    expect(sourceRows()).toEqual([[{ filename: 'sized.txt', line_count: 2, parser_revision: PARSER_REVISION, size: Buffer.byteLength(LINES), sha256: sha }]])
   })
 
   it('hands the caller a counter of the bytes read, which ends at the size of the file', async () => {
