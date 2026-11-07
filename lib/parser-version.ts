@@ -42,11 +42,16 @@ export function revisionAt(at: string): number {
   return PARSER_REVISION_BEFORE_V6
 }
 
+/** The ClickHouse expression that maps a DateTime column (or value) to the revision that was live then. */
+export function revisionExpression(column = 'imported_at'): string {
+  const arms = PARSER_REVISION_TIMELINE.map(s => `${column} >= toDateTime('${s.from}', 'UTC'), ${s.revision}`).join(', ')
+  return `multiIf(${arms}, ${PARSER_REVISION_BEFORE_V6})`
+}
+
 /**
- * The one UPDATE that gives every row still at revision 0 its revision by the time it was written. A multiIf in the statement's own terms, so a single mutation does it
- * and a second run changes nothing (it only touches revision 0).
+ * The one UPDATE that gives every row still at revision 0 its revision by the time it was written. A single mutation, and a second run changes nothing (it only touches
+ * revision 0). Run by scripts/ledger-backfill.ts, never at start-up.
  */
 export function revisionBackfillSql(): string {
-  const arms = PARSER_REVISION_TIMELINE.map(s => `imported_at >= toDateTime('${s.from}', 'UTC'), ${s.revision}`).join(', ')
-  return `ALTER TABLE ulp.sources UPDATE parser_revision = multiIf(${arms}, ${PARSER_REVISION_BEFORE_V6}) WHERE parser_revision = 0 SETTINGS mutations_sync = 2`
+  return `ALTER TABLE ulp.sources UPDATE parser_revision = ${revisionExpression()} WHERE parser_revision = 0 SETTINGS mutations_sync = 2`
 }

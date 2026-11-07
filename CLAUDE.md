@@ -15,6 +15,7 @@ Self-hosted credential-intelligence app: a Next.js app, ClickHouse for the crede
 - The production build strips `console.log`. Use `console.warn` or `console.error` for anything `docker logs` has to show.
 - The app sees only the variables `docker-compose.yml` forwards by name. A new setting goes there, in `.env.example` and in the README.
 - Deploys: tag the running image first (`docker tag ulp-suite-app:latest ulp-suite-app:rollback-<UTC time>`), build a candidate under its own tag and rehearse it with `REHEARSAL_APP_IMAGE`, and run `docker compose` from the primary checkout only (from a worktree it blanks `.env` and serves an empty database).
+- A parser change that can add rows from a file imported before bumps `PARSER_REVISION` (`lib/parser-version.ts`): the file ledger skips the same bytes under another name only while the revision recorded in `ulp.sources` is the current one.
 - Worktrees live in `.claude/worktrees/`; a fresh one needs `npm install`.
 
 ## Agent skills

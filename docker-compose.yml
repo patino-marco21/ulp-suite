@@ -174,6 +174,10 @@ services:
       INGEST_COMMIT_BLOCK_ROWS: ${INGEST_COMMIT_BLOCK_ROWS:-}
       # INGEST_NOVELTY_CHECK_GROUP (empty = 4, 1 to 16) is how many slabs of one file share one existence check (one scan of the table's key column); 1 checks slab by slab.
       INGEST_NOVELTY_CHECK_GROUP: ${INGEST_NOVELTY_CHECK_GROUP:-}
+      # INGEST_CONTENT_LEDGER (empty = on, "off" = the earlier rule): the file ledger (docs/superpowers/specs/2026-11-07-file-ledger-design.md) hashes every plain file, skips the same
+      # bytes under another name while the parser that imported them is current, and remembers a file that yielded nothing. "off" reads a file only when ulp.sources already holds a hash
+      # for its name and size, as before.
+      INGEST_CONTENT_LEDGER: ${INGEST_CONTENT_LEDGER:-}
       CLICKHOUSE_COMPRESS_REQUESTS: ${CLICKHOUSE_COMPRESS_REQUESTS:-}
       # Ingest quality gate (lib/ingest-quality-gate.ts) -- optional; forwarded explicitly (see above). A file whose rows break too many rules is held in
       # inbox/held/ before one row is stored. INGEST_QUALITY_GATE=warn only reports, =off switches it off. The thresholds are percentages; empty = the

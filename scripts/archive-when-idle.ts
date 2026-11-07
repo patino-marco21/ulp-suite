@@ -9,7 +9,7 @@
  * (minutes of quiet before a run; default 20), ULP_AUTO_ARCHIVE_WORKERS (default 4). --now skips the wait for quiet, not the check that nothing is in flight.
  *
  * A run starts only when nothing is waiting or in flight in the inbox (which also covers the disk gate holding the ingest) and no inbox folder has changed for the wait.
- * One run at a time (a lock in the archive directory). The tool reads `*.txt` names only and skips files of 0 bytes; the account counts both so they are not forgotten.
+ * Every run, busy inbox or not, first refreshes the plain-text copy of the file ledger (scripts/ledger-export.ts). One run at a time (a lock in the archive directory). The tool reads `*.txt` names only and skips files of 0 bytes; the account counts both so they are not forgotten.
  * Exit 0 when nothing went wrong or the inbox was not idle, 1 when an archive or a check failed, 2 when the archive directory is missing.
  */
 import { spawnSync } from 'node:child_process'
@@ -68,7 +68,18 @@ function tool(args: string[]): { out: string; status: number } {
   return { out, status: r.status ?? 1 }
 }
 
+/**
+ * Refreshes the plain-text copy of the file ledger (scripts/ledger-export.ts), whatever the inbox is doing: it only reads the stack, and the copy is what a person greps before
+ * downloading a file. A failure is logged and changes nothing about this run.
+ */
+function refreshLedgerCopy(): void {
+  const r = spawnSync(TSX, [join(HERE, 'ledger-export.ts')], { cwd: join(HERE, '..'), encoding: 'utf8', timeout: 120_000 })
+  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim()
+  say(r.status === 0 ? out.split('\n').pop() ?? 'ledger copy written' : `the ledger copy could not be written (exit ${r.status}): ${out.split('\n').pop() ?? ''}`)
+}
+
 function main(): number {
+  refreshLedgerCopy()
   if (!existsSync(ARCHIVE)) { say(`the archive directory does not exist: ${ARCHIVE} (create it; this script never does)`); return 2 }
   const refusals = idleRefusals({
     nowMs: now(), inboxBusy: inboxIsBusy(INBOX), idleMs: IDLE_MS,

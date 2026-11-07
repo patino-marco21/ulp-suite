@@ -30,6 +30,8 @@ function makeBox(files: Record<string, string>, { ageMs = 60 * 60_000, quietMs =
   writeFileSync(join(bin, 'docker'), '#!/bin/bash\ncat > /dev/null\nexit 0\n', { mode: 0o755 })
   const env: NodeJS.ProcessEnv = {
     ...process.env, PATH: `${bin}:${process.env.PATH}`, ULP_ARCHIVE_DIR: arc, ULP_REPO: repo, CH_CONTAINER: 'fake-clickhouse', ULP_ARCHIVE_FREE_MARGIN_BYTES: '0',
+    // the run refreshes the plain-text ledger copy too: into the sandbox, never the owner's Desktop
+    ULP_LEDGER_FILE: join(root, 'ledger.tsv'), APP_CONTAINER: 'fake-app',
   }
   return { root, inbox, done, arc, env }
 }
@@ -49,6 +51,8 @@ describe('archive-when-idle', () => {
     expect(s?.ready_bytes).toBe(Buffer.byteLength('line one\nline two\n') + Buffer.byteLength('other\n'))
     expect(r.stdout).toMatch(/Archive: 2 files archived .*2 files are ready to replace.*Nothing is removed without you\./)
     expect(existsSync(join(box.arc, '.auto-archive.lock'))).toBe(false)
+    expect(readFileSync(join(box.root, 'ledger.tsv'), 'utf8').startsWith('#kind\tfilename')).toBe(true)   // the run refreshed the plain-text ledger copy, in the sandbox
+    expect(r.stdout).toMatch(/\[ledger-export\]/)
   })
 
   test('a second run with nothing new archives nothing and still refreshes the account', () => {

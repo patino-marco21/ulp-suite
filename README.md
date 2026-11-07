@@ -246,6 +246,15 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   reads the table's whole key column whatever a slab holds (2.8 billion rows, 21 GiB, 21-28 s), and only one import at a time may check and commit, so a four-file batch
   spent 618 of its 1,116 locked seconds on it. A scan probing 40M keys took 24.2 s against 21.4 s for 10M: four slabs cost one scan. The lock is held from the scan to the
   group's last insert (same design note).
+- `INGEST_CONTENT_LEDGER` — the file ledger (`docs/superpowers/specs/2026-11-07-file-ledger-design.md`). Empty or `on`: every plain file is read once and hashed (about 10 s per 2 GB,
+  against 8-10 minutes to import 4 GB), the hash is recorded in `ulp.sources` with the file's size and `parser_revision` (DDL v31), and the same bytes under another name are
+  skipped (job note `same-content`) while the parser that imported them is at least as new as the running one. After a parser change, or when the name contains `refeed`, the file
+  is imported again and its new row carries the current revision. A file that yielded no credential is remembered with 0 lines. `off` restores the earlier rule (a file is read
+  only when `ulp.sources` already holds a hash for its name and size). **A parser change that can add rows from a file imported before must bump `PARSER_REVISION` in
+  `lib/parser-version.ts`.** Command-line tools: `scripts/ledger-export.ts` writes a plain-text copy of the ledger to `~/Desktop/ulp-ledger.tsv` (outside the repo; the archive timer
+  refreshes it), `scripts/ledger-check.ts` checks a Telegram Desktop JSON export against it before anything is downloaded, `scripts/take-to-inbox.ts` moves downloads into the
+  inbox and leaves a same-size, same-time stand-in (a sparse file, no disk) so the chat app keeps the message "downloaded", and `scripts/ledger-backfill.ts` sets the revision of
+  the rows that existed before DDL v31.
 - `CLICKHOUSE_COMPRESS_REQUESTS` — set `1` to gzip INSERT bodies again. Off by default: ClickHouse is on the same machine or
   network, where gzip only cost CPU on the thread that parses the file (step A1).
 - `INGEST_QUALITY_GATE` — the ingest quality gate, on by default (`hold`; `lib/ingest-quality-gate.ts`,

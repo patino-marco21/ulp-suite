@@ -43,6 +43,11 @@
  *                 report lists the masked shape of those lines (no value in it). (The disk gate's scenario is called "gate".)
  *   archive-ref   a file imported from the source archive through an .archiveref: same counts as the plain import, identity in ulp.sources, a same-name file with other
  *                 content is a new file, a damaged archive fails before one row is committed, and no plaintext copy of the file appears in the inbox
+ *   ledger        the file ledger (docs/superpowers/specs/2026-11-07-file-ledger-design.md): DDL v31 has parser_revision; a file is hashed and recorded with its hash, size and revision at once; the
+ *                 same bytes under another name are skipped (job note "same-content", no row, no credential) while the parser that imported them is current; a name with "refeed" in it, and
+ *                 bytes an older parser imported, are imported again (known, not skipped) and recorded at the current revision, after which a further copy is skipped; a file that yields no
+ *                 credential is remembered with 0 lines (a re-drop is skipped by name, a copy by content); the inbox watcher labels the skip; the plain-text copy (scripts/ledger-export.ts)
+ *                 lists the rows; scripts/ledger-backfill.ts sets revision 0 rows by the time they were written, in a dry run first
  *   same-name     the same-name check compares size (and the content hash, once ulp.sources holds one for the name): the same file again is skipped (and the job log says so), another file under that name is imported and gets its
  *                 own ulp.sources row; the job log records the rows repeated inside a file
  *   link          a finished file put back into the inbox as a second hard-linked name of itself: the second pass is skipped and labelled, and nothing is stranded in
@@ -330,7 +335,7 @@ async function expectIdleQueue(label: string): Promise<void> {
 async function basic(): Promise<void> {
   console.log('\n1. Files through the HTTP upload and the inbox')
   const A = `e2e-nov-a-${RUN}.txt`
-  const B = `e2e-nov-b-${RUN}.txt`
+  const B = `e2e-nov-b-${RUN} (refeed).txt`   // the same bytes as A on purpose: a name without "refeed" in it would be skipped by the content check (scenario "ledger")
   const C = `e2e-nov-c-${RUN}.txt`
   const D = `e2e-nov-d-${RUN}.txt`
 
@@ -341,7 +346,7 @@ async function basic(): Promise<void> {
   check('...and no stage table is left behind', stageTableCount() === 0, `tables ${stageTableCount()}`)
 
   const b = await importLines(B, lines('A', 0, 20_000))
-  check('the same content under another name: 0 new, 20000 already known', b.status === 'done' && b.imported === 0 && b.known === 20_000, brief(b))
+  check('the same content under a re-feed name: 0 new, 20000 already known', b.status === 'done' && b.imported === 0 && b.known === 20_000, brief(b))
   check('...nothing was stored twice', rowsFor(B) === 0 && distinctFor(A, B) === 20_000, `rows ${rowsFor(B)}, distinct ${distinctFor(A, B)}`)
   check('...the second name is remembered too, with 0 rows', sourceLine(B) === '0', `[${sourceLine(B)}]`)
   const b2 = await importLines(B, lines('A', 0, 20_000))
@@ -1082,6 +1087,96 @@ async function archiveRef(): Promise<void> {
 }
 
 // ── main ────────────────────────────────────────────────────────────────────────────────────────
+const sourceRowOf = (name: string): { size: number; sha256: string; line_count: number; parser_revision: number } | null => {
+  const out = chQuery(`SELECT size, sha256, line_count, parser_revision FROM ulp.sources WHERE filename = '${name}' ORDER BY imported_at DESC LIMIT 1 FORMAT JSONEachRow`)
+  if (!out) return null
+  const r = JSON.parse(out)
+  return { size: Number(r.size), sha256: r.sha256, line_count: Number(r.line_count), parser_revision: Number(r.parser_revision) }
+}
+const sourceRowCount = (name: string) => Number(chQuery(`SELECT count() FROM ulp.sources WHERE filename = '${name}'`))
+const queueJobs = async (name: string) => (((await api('GET', '/api/upload/queue-status')).json?.recent ?? []) as Array<{ filename: string; imported: number; known: number; note: string | null }>).filter(r => r.filename === name)
+
+async function fileLedger(): Promise<void> {
+  console.log('\n11. The file ledger: every file hashed and recorded, the same bytes under another name skipped, re-feeds and a changed parser let through')
+  const CURRENT = 65   // lib/parser-version.ts PARSER_REVISION
+  check('ulp.sources has the parser_revision column (DDL v31)', chQuery("SELECT count() FROM system.columns WHERE database = 'ulp' AND table = 'sources' AND name = 'parser_revision'") === '1')
+
+  const O = `e2e-led-orig-${RUN}.txt`
+  const body = lines('LG', 0, 1_000)
+  const sha = createHash('sha256').update(text(body)).digest('hex')
+  const o = await importLines(O, body)
+  check('a new file: 1000 new', o.status === 'done' && o.imported === 1_000 && o.known === 0, brief(o))
+  const row = sourceRowOf(O)
+  check('...its ulp.sources row has the size, the sha256 and the parser revision at once (the archive timer is not needed)',
+    !!row && row.size === Buffer.byteLength(text(body)) && row.sha256 === sha && row.parser_revision === CURRENT && row.line_count === 1_000, JSON.stringify(row))
+
+  const copy = `e2e-led-orig-${RUN} (2).txt`
+  const c = await importLines(copy, body)
+  check('the same bytes under a new name are skipped: nothing imported, nothing known', c.status === 'done' && c.imported === 0 && c.known === 0, brief(c))
+  check('...no ulp.sources row for the copy, no credential row, and no stage table', sourceRowCount(copy) === 0 && rowsFor(copy) === 0 && stageTableCount() === 0, `rows ${sourceRowCount(copy)}/${rowsFor(copy)}/${stageTableCount()}`)
+  check('...the job log labels it "same-content"', (await queueJobs(copy)).some(j => j.note === 'same-content'), JSON.stringify(await queueJobs(copy)))
+  check('...and the original is untouched: 1000 rows, one ledger row', rowsFor(O) === 1_000 && sourceRowCount(O) === 1)
+
+  const refeed = `e2e-led-orig-${RUN} (refeed v6.5).txt`
+  const r = await importLines(refeed, body)
+  check('a name with "refeed" in it is imported although the bytes are known: 0 new, 1000 known (read, not skipped)', r.status === 'done' && r.imported === 0 && r.known === 1_000, brief(r))
+  check('...and it is recorded, with the hash and 0 lines', sourceRowOf(refeed)?.sha256 === sha && sourceRowOf(refeed)?.line_count === 0 && sourceRowOf(refeed)?.parser_revision === CURRENT, JSON.stringify(sourceRowOf(refeed)))
+
+  // The parser "changes": the rows that hold these bytes are put back to an older revision, as a deploy of revision 66 would leave them.
+  chQuery(`ALTER TABLE ulp.sources UPDATE parser_revision = 60 WHERE sha256 = '${sha}' SETTINGS mutations_sync = 1`)
+  const third = `e2e-led-orig-${RUN} (3).txt`
+  const t = await importLines(third, body)
+  check('bytes an older parser imported are imported again under a new name: 0 new, 1000 known (read, not skipped)', t.status === 'done' && t.imported === 0 && t.known === 1_000, brief(t))
+  check('...and the new row carries the current revision', sourceRowOf(third)?.parser_revision === CURRENT, JSON.stringify(sourceRowOf(third)))
+  const fourth = `e2e-led-orig-${RUN} (4).txt`
+  const f = await importLines(fourth, body)
+  check('...after which a further copy is skipped again', f.status === 'done' && f.imported === 0 && f.known === 0 && sourceRowCount(fourth) === 0, brief(f))
+  check('...with the same label', (await queueJobs(fourth)).some(j => j.note === 'same-content'))
+
+  // a file that yields no credential
+  const Z = `e2e-led-list-${RUN}.txt`
+  const noCredential = Array.from({ length: 300 }, (_, i) => `card list ${RUN} ${i}: 4111 1111 1111 ${1000 + i} | holder ${i}`)
+  const shaZ = createHash('sha256').update(text(noCredential)).digest('hex')
+  const z = await importLines(Z, noCredential)
+  check('a file that yields no credential: done, 0 imported, nothing held', z.status === 'done' && z.imported === 0 && z.known === 0, brief(z))
+  check('...it is remembered with its hash and 0 lines', sourceRowOf(Z)?.sha256 === shaZ && sourceRowOf(Z)?.line_count === 0 && sourceRowOf(Z)?.parser_revision === CURRENT, JSON.stringify(sourceRowOf(Z)))
+  const z2 = await importLines(Z, noCredential)
+  check('...its re-drop is skipped by name', z2.status === 'done' && z2.imported === 0 && z2.known === 0 && sourceRowCount(Z) === 1, brief(z2))
+  check('...and the job log says "already-imported"', (await queueJobs(Z)).filter(j => j.note === 'already-imported').length === 1, JSON.stringify(await queueJobs(Z)))
+  const zCopy = `e2e-led-list-${RUN} copy.txt`
+  const z3 = await importLines(zCopy, noCredential)
+  check('...and a copy under another name is skipped by content', z3.status === 'done' && sourceRowCount(zCopy) === 0 && (await queueJobs(zCopy)).some(j => j.note === 'same-content'), brief(z3))
+
+  // a name reused for another file: not blocked (the hash and the size decide)
+  const other = await importLines(O, [...body, ...lines('LH', 0, 200)])
+  check('the same name with other content is imported: 200 new, 1000 known', other.status === 'done' && other.imported === 200 && other.known === 1_000, brief(other))
+
+  // the inbox watcher
+  const N = `e2e-led-inbox-${RUN}.txt`
+  dropInInbox(N, text(body))
+  const j = await waitFor(async () => (await inboxJobs(N))[0], 120_000, 1000)
+  check('a copy dropped in the inbox is skipped, labelled "same-content", and ends in done/', !!j && j.status === 'done' && j.imported === 0 && j.note === 'same-content' && inboxFolderHas('done', N), JSON.stringify(j))
+
+  // the plain-text copy
+  const ledgerFile = join(work, 'ledger.tsv')
+  const env = { ...process.env, CH_CONTAINER: CH, APP_CONTAINER: APP, ULP_LEDGER_FILE: ledgerFile }
+  const out = sh('npx', ['tsx', 'scripts/ledger-export.ts'], env)
+  const copyText = readFileSync(ledgerFile, 'utf8')
+  const oLine = copyText.split('\n').find(l => l.split('\t')[1] === O && l.split('\t')[0] === 'ledger')
+  check('the plain-text ledger lists the rows, with the hash and the revision', !!oLine && oLine.split('\t')[3] === sha && oLine.split('\t')[5] === String(CURRENT), `${out} | ${oLine}`)
+  check('...and not the copies that were skipped', !copyText.includes(`${copy}\t`) && !copyText.includes(`${fourth}\t`))
+
+  // the revision backfill
+  chQuery(`ALTER TABLE ulp.sources UPDATE parser_revision = 0 WHERE filename = '${Z}' SETTINGS mutations_sync = 1`)
+  const dry = sh('npx', ['tsx', 'scripts/ledger-backfill.ts', 'revisions'], env)
+  check('the backfill dry run lists the rows at 0 and changes nothing', dry.includes('dry run') && sourceRowOf(Z)?.parser_revision === 0, dry.split('\n').slice(-3).join(' | '))
+  sh('npx', ['tsx', 'scripts/ledger-backfill.ts', 'revisions', '--apply'], env)
+  check('...--apply sets the row by the time it was written, and leaves the others', sourceRowOf(Z)?.parser_revision === CURRENT && sourceRowOf(O)?.parser_revision === CURRENT, JSON.stringify([sourceRowOf(Z), sourceRowOf(O)]))
+  const again = sh('npx', ['tsx', 'scripts/ledger-backfill.ts', 'revisions', '--apply'], env)
+  check('...and a second run finds nothing at 0', /\(no rows\)/.test(again), again.split('\n').slice(0, 2).join(' | '))
+  check('no stage table is left', stageTableCount() === 0)
+}
+
 async function sameName(): Promise<void> {
   console.log('\n8. A used name with another size (the same-name check compares size) and the job log')
   const N = `e2e-nov-same-${RUN}.txt`
@@ -1667,6 +1762,7 @@ async function run(): Promise<number> {
   if (want('off')) await directPath()
   if (want('quality-gate')) await qualityGate()
   if (want('archive-ref')) await archiveRef()
+  if (want('ledger')) await fileLedger()
   if (want('same-name')) await sameName()
   if (want('link')) await hardLinkedNames()
   if (want('progress')) await progressCards()
