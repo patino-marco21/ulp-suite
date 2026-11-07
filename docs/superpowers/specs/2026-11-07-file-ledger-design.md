@@ -1,7 +1,7 @@
 # File ledger: know every file that was imported, skip the same bytes under another name, and keep the chat app from offering a download again — design (2026-11-07)
 
 Date: 2026-11-07
-Status: **Built and rehearsed; deployment is recorded under "Results" when it happens.**
+Status: **Deployed on 2026-11-07 (code `e70755c` + `cac73a7`, image `7f84f8975bb3`, rollback tag `rollback-20261107-0728z` = the previous image `e22ee1cb9684`). Rehearsed: 352 of 352 ingest checks and 51 of 51 stack checks. The stand-in against the chat app itself is untested (owner's step).**
 Related: `2026-10-12-source-archive-and-ingest-gate-design.md` (the archive and the identity columns of `ulp.sources`), `2026-10-02-novelty-aware-ingest-design.md` (why a repeated import costs time and disk, not data), `2026-11-05-known-share-preflight-design.md` (near-duplicates, a different problem).
 File names, channel names, search terms and credential values are deliberately absent (the repository is public); every fixture is invented.
 
@@ -42,4 +42,16 @@ The owner asked how to keep track of every file that was ingested, so the same o
 
 ## Results
 
-(filled in when the rehearsal and the deployment have run)
+**Proof before the deploy** (candidate image built from `cac73a7`; the later commits only changed rehearsal scripts, which the image does not carry):
+
+- Unit tests: the whole suite, 5,151 passed (307 files), typecheck of the app, `scripts/` and `__tests__/` and lint clean. New: the pure decision (`content-ledger`), the importer against a mocked database (skip, older parser, re-feed, ledger unreadable, file that yielded nothing, ledger off), the guard's four query shapes, DDL v31 in the migration tests, and 34 tests of the tools on real temp files (a stand-in has the size and the modification time to the nanosecond and no blocks, a move keeps the time, a name in the way is refused).
+- Rehearsal on the isolated stack, real ClickHouse: the first run of the ingest scenarios passed 346 of 351; the five failures were the scenarios that import identical content twice under two names ON PURPOSE (they now use a name with "refeed") and one wrong expectation of the new scenario. The second run: **352 of 352**. The stack's own checks: **51 of 51** (a fresh ClickHouse built the `parser_revision` column from the init SQL, and the app recorded DDL 31).
+- The new `ledger` scenario proves, on a real ClickHouse: the hash, size and revision are recorded at import; the same bytes under a new name are skipped (no row, no credential, job note `same-content`); a "refeed" name is read, not skipped (0 new, all known); bytes whose rows are put back to an older revision are imported again under a new name and the next copy is skipped; a file with no credential is remembered with 0 lines (a re-drop is skipped by name, a copy by content); a reused name with other content imports; the inbox watcher labels the skip; the plain-text copy lists the rows; the backfill dry run changes nothing and `--apply` sets only the rows at 0.
+
+**Deployment** (2026-11-07, the inbox idle, no job in flight): the running image was tagged `rollback-20261107-0728z`, the candidate promoted, only the app container recreated (ClickHouse untouched, up since 2026-11-04). The app came up healthy with no restart; the log shows "DDL v31 applied"; the live `ulp.sources` has `parser_revision UInt16 DEFAULT 0`; the 921 rows are intact; `INGEST_CONTENT_LEDGER` is empty (on).
+
+**Backfill** (`scripts/ledger-backfill.ts revisions --apply`, one mutation): 229 rows before the v6 parser (revision 50), 532 at v6.1, 127 at v6.2, 27 at v6.3, 2 at v6.4 and 4 at v6.5; a second run found no row at 0.
+
+**The plain-text copy**: 921 ledger lines and 272 lines for files only the job log knows. A dry run of `take-to-inbox` on the real download folder (read-only) found two files of 1 MB or more: one new, one with a name the job log holds from before the ledger.
+
+**Left to the owner**: try one stand-in in the chat app (ticket 05 in `.scratch/file-ledger/`), run one small chat export through `ledger-check`, and name a deliberate re-feed with "refeed" in it.
