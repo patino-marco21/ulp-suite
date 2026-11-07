@@ -812,6 +812,8 @@ export function processZipEntries(
   return new Promise<void>((resolve, reject) => {
     let settled = false
     let entriesSeen = 0
+    let readable = 0                                // entries named .txt or .csv
+    const ignoredTypes = new Map<string, number>()  // file type -> entries that are not read because of their name
     const onAbort = () => rejectArchive(hooks.signal?.reason ?? new Error('ZIP import aborted'))
     const rejectArchive = (error: unknown) => {
       if (settled) return
@@ -848,9 +850,13 @@ export function processZipEntries(
 
       const lp = entry.fileName.toLowerCase()
       if (!lp.endsWith('.txt') && !lp.endsWith('.csv')) {
+        const base = lp.slice(lp.lastIndexOf('/') + 1)
+        const type = base.includes('.') ? base.slice(base.lastIndexOf('.')) : '(no extension)'
+        ignoredTypes.set(type, (ignoredTypes.get(type) ?? 0) + 1)
         zipfile.readEntry()
         return
       }
+      readable++
 
       const entryName = entry.fileName.split('/').pop() || entry.fileName
 
@@ -926,6 +932,17 @@ export function processZipEntries(
 
     zipfile.on('end', () => {
       if (settled) return
+      const ignored = [...ignoredTypes.values()].reduce((a, b) => a + b, 0)
+      if (ignored > 0) {
+        const kinds = [...ignoredTypes].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([t, n]) => `${t} x${n}`).join(', ')
+        // console.warn: the production build strips console.log, and the owner reads docker logs
+        console.warn(`[upload-processor] ZIP: ${ignored} entr${ignored === 1 ? 'y was' : 'ies were'} not read, only .txt and .csv entries are (${kinds})`)
+        if (readable === 0) {
+          // Nothing in the archive can be imported: "done" with 0 rows would hide it, so the job fails with the reason
+          rejectArchive(new Error(`ZIP archive holds no .txt or .csv entry; ${ignored} entr${ignored === 1 ? 'y has' : 'ies have'} other names (${kinds}). Only .txt and .csv entries are imported.`))
+          return
+        }
+      }
       settled = true
       hooks.signal?.removeEventListener('abort', onAbort)
       resolve()

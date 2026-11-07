@@ -1,7 +1,7 @@
 /** Names the reason the result for one line differs between a baseline parser and parser v6 (scripts/parser-diff.ts). "unexplained" must stay at 0. */
 import {
   hasInnerScheme, holdsCredential, isUrlPathParameter, pipeJoinAll, protocolRelativeToPlain, recoverAndroidAppLine, splitCredentialUrlPair, splitNumericLogin,
-  splitPipedLabelledPair, splitSiteAnnotation, splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme,
+  splitPipedLabelledPair, splitSiteAnnotation, splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme, stripWebSchemeBeforeAndroid,
 } from '@/lib/ulp-recover'
 import { stripTelegramTag } from '@/lib/ulp-telegram-tag'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
@@ -11,12 +11,12 @@ export interface Outcome { credential: { url: string; email: string; password: s
 export type ChangeClass =
   | 'same' | 'padded-colons' | 'android-no-scheme' | 'slash-in-password' | 'numeric-login' | 'protocol-relative'
   | 'utf8-recovered' | 'utf8-value' | 'utf8-lost' | 'login-equals-password' | 't3-kept' | 'pipe-scheme' | 'pipe-label' | 'pipe-url' | 'semicolon-password' | 'semicolon-parameter'
-  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'credential-url' | 'site-annotation' | 'unexplained'
+  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'credential-url' | 'site-annotation' | 'android-web-prefix' | 'host-trailing-dot' | 'host-underscore' | 'unexplained'
 
 export const CHANGE_CLASSES: ChangeClass[] = [
   'padded-colons', 'android-no-scheme', 'slash-in-password', 'numeric-login', 'protocol-relative',
   'utf8-recovered', 'utf8-value', 'utf8-lost', 'login-equals-password', 't3-kept', 'pipe-scheme', 'pipe-label', 'pipe-url', 'semicolon-password', 'semicolon-parameter',
-  'leading-colon', 'semicolon-url-last', 'labelled-pair', 'nested-url', 'credential-url', 'site-annotation', 'unexplained',
+  'leading-colon', 'semicolon-url-last', 'labelled-pair', 'nested-url', 'credential-url', 'site-annotation', 'android-web-prefix', 'host-trailing-dot', 'host-underscore', 'unexplained',
 ]
 
 const INERT = '\uE000'   // a private-use character: no parser rule knows it, so a line that holds it is read like one without a semicolon
@@ -72,6 +72,21 @@ function siteAnnotationOf(before: Cred, after: Cred | null): boolean {
 }
 
 /**
+ * Parser v6.6, rules Q and R: a stored http(s) url whose host ends with a dot, or has an underscore in a label. The baseline rejected both as a bad host (or, for an e-mail login,
+ * stored the credential without its url), so a stored url of this kind is the new parser's.
+ */
+export function hostRuleOf(url: string): 'host-trailing-dot' | 'host-underscore' | null {
+  const m = /^https?:\/\/([^/?#]*)/i.exec(url)
+  if (!m) return null
+  let host = m[1]
+  const at = host.lastIndexOf('@')
+  if (at !== -1) host = host.slice(at + 1)
+  host = host.replace(/:\d*$/, '')
+  if (host.endsWith('.')) return 'host-trailing-dot'
+  return host.includes('_') ? 'host-underscore' : null
+}
+
+/**
  * `oldOnRepaired` is the baseline parser run on the UTF-8-repaired line: when it already gives the new result, the repair alone explains the change.
  * `oldOnJoined` is the baseline parser run on the line with the pipe that joins a url and a credential replaced (pipeJoinAll): the new result must be exactly that.
  * `oldOnSemi` is the baseline parser run on the line with its semicolons made inert (inertSemicolons, results mapped back with restoreSemicolons).
@@ -82,6 +97,12 @@ export function classifyChange(
 ): ChangeClass {
   // An app id without its scheme: the old parser stored it mangled (the whole id in the login) or not at all; whatever the new result is, rule B explains it.
   if (recoverAndroidAppLine(repairUtf8Line(rawLine).trim()) && !sameOutcome(oldO, newO)) return 'android-no-scheme'
+  // A web scheme in front of an app id (parser v6.6, rule O): the old parser rejected the line as a bad host, or stored an e-mail login without its url.
+  if (stripWebSchemeBeforeAndroid(repairUtf8Line(rawLine).trim()) && !sameOutcome(oldO, newO)) return 'android-web-prefix'
+  // A host with a trailing dot or an underscore (rules Q and R): rejected before, or the e-mail credential stored without its url, which the new row now carries.
+  const hostRule = newO.credential ? hostRuleOf(newO.credential.url) : null
+  if (hostRule && newO.credential && !sameOutcome(oldO, newO)
+      && (!oldO.credential || (oldO.credential.url === '' && oldO.credential.email === newO.credential.email && oldO.credential.password === newO.credential.password))) return hostRule
   // A pipe between a url (or only its scheme, or a label) and a credential (parser v6.1): explained when the new result is what the baseline parser gives for the joined line.
   if (oldOnJoined && !sameOutcome(oldO, newO) && sameOutcome(oldOnJoined, newO)) {
     const join = pipeJoinAll(repairUtf8Line(rawLine).trim())
@@ -127,10 +148,15 @@ export function classifyChange(
 /** A stored row that only the baseline parser produces (stream mode): the reason it is gone. */
 export type OldOnlyClass =
   | 'double-encoded' | 'android-mangled' | 'pipe-join' | 'semicolon-junk' | 'split-junk' | 'positional-merge' | 'utf8-text'
-  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'site-annotation' | 'unexplained'
+  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'site-annotation' | 'site-added' | 'unexplained'
 
-export function classifyOldOnlyRow(row: { url: string; email: string; password: string }): OldOnlyClass {
+/**
+ * `siteTwin`: the new parser stores the same login and password with a site (an app id behind a web scheme, a host with a trailing dot or an underscore). The baseline stored an
+ * e-mail credential of such a line without its url (the salvage of a bad host), and that url-less row is the one that is gone.
+ */
+export function classifyOldOnlyRow(row: { url: string; email: string; password: string }, opts: { siteTwin?: boolean } = {}): OldOnlyClass {
   const fields = [row.url, row.email, row.password]
+  if (row.url === '' && opts.siteTwin) return 'site-added'
   if (fields.some(f => /[\u00c2-\u00ef][\u0080-\u00bf]/.test(f))) return 'double-encoded'
   if (/^[A-Za-z0-9_+-]{16,}==@/.test(row.email) || /^(android:)?\/\/[A-Za-z0-9_+-]{16,}==@/.test(row.url)) return 'android-mangled'
   // Parser v6.2, rule J: the colon in front of the scheme stayed in the url (or, when the line had more fields than url:login:password, in the login, with no url)

@@ -278,6 +278,51 @@ describe('processZipBuffer', () => {
     expect(results[1]).toEqual({ filename: 'good.txt', imported: 1, errors: 0 })
   })
 
+  it('reads the .txt entry of a zip that also holds other files, and says in the log how many it did not read', async () => {
+    const yauzl = (await import('yauzl')).default
+    const { processZipBuffer } = await import('@/lib/upload-processor')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fake = new FakeZipFile([
+      { fileName: 'dir/', contentOrError: '' },
+      { fileName: 'dir/Passwords.log', contentOrError: 'x' },
+      { fileName: 'dir/Cookies', contentOrError: 'x' },
+      { fileName: 'good.txt', contentOrError: 'https://example.com/login:user@example.com:mypassword\n' },
+    ])
+    ;(yauzl.fromBuffer as any).mockImplementation((_b: Buffer, _o: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => { cb(null, fake as unknown as yauzl.ZipFile) })
+    try {
+      const results: Array<{ filename: string; imported: number }> = []
+      await processZipBuffer(Buffer.from('fake zip'), r => { results.push({ filename: r.filename, imported: r.imported }) })
+      expect(results).toEqual([{ filename: 'good.txt', imported: 1 }])
+      const said = warn.mock.calls.flat().join(' ')
+      expect(said).toMatch(/2 entries were not read/)
+      expect(said).toContain('.log x1')
+      expect(said).toContain('(no extension) x1')
+    } finally { warn.mockRestore() }
+  })
+
+  it('fails a zip with no .txt or .csv entry, with the reason, instead of finishing with nothing', async () => {
+    const yauzl = (await import('yauzl')).default
+    const { processZipBuffer } = await import('@/lib/upload-processor')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fake = new FakeZipFile([
+      { fileName: 'a/Passwords.log', contentOrError: 'x' },
+      { fileName: 'a/Passwords.dat', contentOrError: 'x' },
+      { fileName: 'b/Passwords.log', contentOrError: 'x' },
+    ])
+    ;(yauzl.fromBuffer as any).mockImplementation((_b: Buffer, _o: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => { cb(null, fake as unknown as yauzl.ZipFile) })
+    try {
+      await expect(processZipBuffer(Buffer.from('fake zip'), () => {})).rejects.toThrow(/no \.txt or \.csv entry; 3 entries have other names \(\.log x2, \.dat x1\)/)
+    } finally { warn.mockRestore() }
+  })
+
+  it('an empty zip, or one with only folders, finishes as before', async () => {
+    const yauzl = (await import('yauzl')).default
+    const { processZipBuffer } = await import('@/lib/upload-processor')
+    const fake = new FakeZipFile([{ fileName: 'only-a-folder/', contentOrError: '' }])
+    ;(yauzl.fromBuffer as any).mockImplementation((_b: Buffer, _o: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => { cb(null, fake as unknown as yauzl.ZipFile) })
+    await expect(processZipBuffer(Buffer.from('fake zip'), () => {})).resolves.toBeUndefined()
+  })
+
   it('continues processing remaining entries after one entry stream errors mid-read', async () => {
     const yauzl = (await import('yauzl')).default
     const { processZipBuffer } = await import('@/lib/upload-processor')

@@ -19,7 +19,7 @@ import { createInterface } from 'node:readline'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Readable } from 'node:stream'
-import { CHANGE_CLASSES, classifyChange, classifyOldOnlyRow, inertSemicolons, restoreSemicolons, type ChangeClass, type Outcome } from '@/lib/parser-diff'
+import { CHANGE_CLASSES, classifyChange, classifyOldOnlyRow, hostRuleOf, inertSemicolons, restoreSemicolons, type ChangeClass, type Outcome } from '@/lib/parser-diff'
 import { DEFAULT_HARD_KEEP_COUNTRIES, makeHardDropPredicate, parseIngestPolicy } from '@/lib/ingest-filter'
 import { parseInlineLine, parseULPStream } from '@/lib/ulp-parser'
 import { pipeJoinAll, stripLeadingColonBeforeScheme } from '@/lib/ulp-recover'
@@ -138,6 +138,9 @@ async function main(): Promise<void> {
       const body = () => Readable.toWeb(Readable.from(bytes)) as unknown as ReadableStream<Uint8Array>
       const oldRows = await rows(baseline.parseULPStream(body(), 'f.txt', 100000, baselineHard, { dedupInFile: false }))
       const newRows = await rows(parseULPStream(body(), 'f.txt', 100000, newHard, { dedupInFile: false }))
+      // rows of the new parser that carry a site the baseline dropped (an app id behind a web scheme, a host with a trailing dot or an underscore), by login and password
+      const siteTwins = new Set<string>()
+      for (const k of newRows.keys()) { const [url, email, password] = k.split('\u0000'); if (url.startsWith('android://') || hostRuleOf(url)) siteTwins.add(`${email}\u0000${password}`) }
       let onlyOld = 0, onlyNew = 0
       const oldOnly = new Map<string, number>()
       const exUnexplained: string[] = []
@@ -146,7 +149,7 @@ async function main(): Promise<void> {
         if (d <= 0) continue
         onlyOld += d
         const [url, email, password] = k.split('\u0000')
-        const cls = classifyOldOnlyRow({ url, email, password })
+        const cls = classifyOldOnlyRow({ url, email, password }, { siteTwin: siteTwins.has(`${email}\u0000${password}`) })
         oldOnly.set(cls, (oldOnly.get(cls) ?? 0) + d)
         if (cls === 'unexplained' && exUnexplained.length < 6) exUnexplained.push(`${mask(url).slice(0, 40)} | ${mask(email)} | ${mask(password)}`)
       }

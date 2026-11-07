@@ -1,5 +1,5 @@
 /**
- * The revision of the line parser (lib/ulp-parser.ts, lib/ulp-recover.ts) as a whole number: v6.5 is 65.
+ * The revision of the line parser (lib/ulp-parser.ts, lib/ulp-recover.ts) as a whole number: v6.6 is 66.
  *
  * ulp.sources records it for every file the importer records (DDL v31, docs/superpowers/specs/2026-11-07-file-ledger-design.md). The importer then skips a file whose exact
  * bytes the table already holds, under another name, only while the parser that imported it is at least as new as this one: after a parser change the same bytes may yield
@@ -8,10 +8,10 @@
  * BUMP IT in the commit of any parser change that can add rows from a file an earlier revision already imported (a new layout read, a rule that stops rejecting a line).
  * Not for a change that only removes rows, or only moves the report of the quality gate.
  */
-export const PARSER_REVISION = 65
+export const PARSER_REVISION = 66
 
 /**
- * A file whose name carries this word is a deliberate re-feed: the owner renames the plaintext "... (refeed v6.5).txt" to import the same bytes again after a parser
+ * A file whose name carries this word is a deliberate re-feed: the owner renames the plaintext "... (refeed v6.6).txt" to import the same bytes again after a parser
  * change. The content check lets such a file through, as it lets through a file the parser has changed for.
  */
 export const REFEED_MARKER = /refeed/i
@@ -26,6 +26,7 @@ export function isRefeedName(filename: string): boolean {
  * is the first run of the v6 parser. Everything earlier ran an older parser: 50 stands for "before v6". Newest first: the lookup takes the first entry the time has reached.
  */
 export const PARSER_REVISION_TIMELINE: ReadonlyArray<{ from: string; revision: number }> = [
+  { from: '2026-11-07 23:40:00', revision: 66 },
   { from: '2026-11-06 20:05:00', revision: 65 },
   { from: '2026-11-06 18:25:00', revision: 64 },
   { from: '2026-11-02 06:42:00', revision: 63 },

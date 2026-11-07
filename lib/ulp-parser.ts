@@ -18,6 +18,10 @@
  * stored with the tail inside the password. And a record that was opened and never finished (a rejected line that starts with "http" waits for a login and a password line, and a blank
  * line, a labeled line or the end of the file closes the wait) is now counted as a rejected line; it used to be dropped without a count, so the quality gate never saw it.
  *
+ * v6.6 (2026-11-07, docs/superpowers/specs/2026-11-07-parser-v6-6-design.md): three layouts a survey of the archive found rejected as a bad host or stored without their site. O: a web
+ * scheme in front of an Android app id ("https://android://HASH==@com.app/:login:pass") is dropped, and the line is read like any app-id line. Q: a fully qualified host written with
+ * its trailing dot ("portal.example.org.") is the host without the dot. R: an underscore in a label in front of the last one is part of a host (isValidHost).
+ *
  * Design: one algorithm, no regex in the hot path, RFC 3986-correct
  * colon disambiguation. ~150 lines for a format that is field:field:field.
  *
@@ -39,7 +43,7 @@ import { repairUtf8Line } from '@/lib/ulp-utf8'
 import { maskText } from '@/lib/ingest-quality-gate'
 import {
   cannotHoldCredential, holdsCredential, isUrlPathParameter, joinPipedUrl, looksLikeUrlFragment, protocolRelativeToPlain, recoverAndroidAppLine, splitCredentialUrlPair, splitNumericLogin, splitSiteAnnotation,
-  splitPipedLabelledPair, splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme, stripTrailingSemicolons,
+  splitPipedLabelledPair, splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme, stripTrailingSemicolons, stripWebSchemeBeforeAndroid,
 } from '@/lib/ulp-recover'
 
 export interface ULPCredential {
@@ -104,13 +108,13 @@ export function extractDomain(url: string): string {
     // punctuation-first entries at the front of an alphabetical domain sort.
     const atPos = host.lastIndexOf('@')
     if (atPos !== -1) host = host.slice(atPos + 1)
-    return stripPort(host).toLowerCase().replace(/^www\./, '')
+    return stripPort(host).toLowerCase().replace(/^www\./, '').replace(/\.$/, '')
   }
   // No scheme — bare domain like site.com/path
   if (url.includes('.')) {
     const slashPos = url.indexOf('/')
     const host     = slashPos === -1 ? url : url.slice(0, slashPos)
-    return stripPort(host).toLowerCase().replace(/^www\./, '')
+    return stripPort(host).toLowerCase().replace(/^www\./, '').replace(/\.$/, '')
   }
   return ''
 }
@@ -151,8 +155,16 @@ function hasBinaryOrReplacement(s: string): boolean {
  */
 function isValidHost(host: string): boolean {
   const h = host.includes('@') ? host.slice(host.lastIndexOf('@') + 1) : host
-  return /^[\p{L}\p{N}]([\p{L}\p{N}-]*[\p{L}\p{N}])?(\.[\p{L}\p{N}]([\p{L}\p{N}-]*[\p{L}\p{N}])?)+$/u.test(h)
+  if (STRICT_HOST.test(h)) return true
+  // Parser v6.6: an underscore inside a label in front of the last one ("shop_30.example.test"); never at the edge of a label ("_dmarc", "shop_.example"). The last label is letters only and
+  // not the name of a file type, so an Android package name ("com.bank.app_name") or a file name ("main_login.asp") is still not a host.
+  // (A host longer than DNS allows, 253 characters, is not tried: the pattern runs on a bounded string. The first test is unchanged, so a long host it accepts is still accepted.)
+  if (h.length > 253 || !h.includes('_') || !UNDERSCORE_HOST.test(h)) return false
+  return !FILE_TYPE_LABELS.has(h.slice(h.lastIndexOf('.') + 1).toLowerCase())
 }
+const STRICT_HOST = /^[\p{L}\p{N}]([\p{L}\p{N}-]*[\p{L}\p{N}])?(\.[\p{L}\p{N}]([\p{L}\p{N}-]*[\p{L}\p{N}])?)+$/u
+const UNDERSCORE_HOST = /^[\p{L}\p{N}]([\p{L}\p{N}_-]*[\p{L}\p{N}])?(\.[\p{L}\p{N}]([\p{L}\p{N}_-]*[\p{L}\p{N}])?)*\.\p{L}{2,24}$/u
+const FILE_TYPE_LABELS = new Set(['asp', 'aspx', 'htm', 'html', 'php', 'jsp', 'cgi', 'js', 'css', 'txt', 'png', 'jpg', 'jpeg', 'gif', 'pdf', 'xml', 'json', 'do', 'action', 'exe', 'zip', 'dll'])
 
 /**
  * Logins that are export placeholders, never a real identity — Chrome/stealer
@@ -916,6 +928,9 @@ export function parseInlineLine(line: string, filename: string, shouldHardDrop?:
   // A pipe that joins a url, a scheme or a label and a credential is replaced first (v6.1), so that the Android rule sees "HASH==@com.app/:login:pass" behind a label
   const piped = lead.includes('|') && !splitPipedLabelledPair(lead) ? joinPipedUrl(lead) : null
   const text = piped ? piped.line : lead
+  // Parser v6.6: a web scheme in front of an app id ("https://android://HASH==@com.app/:login:pass") is dropped; the line is then an ordinary app-id line, repeats of one account included
+  const webAndroid = stripWebSchemeBeforeAndroid(text.trim())
+  if (webAndroid) return { ...parseLine(webAndroid, filename, shouldHardDrop), androidRecovered: true }
   const android = recoverAndroidAppLine(text.trim())
   if (android) return { ...parseLine(android, filename, shouldHardDrop), androidRecovered: true }
   return { ...parseLine(text, filename, shouldHardDrop), androidRecovered: false }

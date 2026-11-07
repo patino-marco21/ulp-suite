@@ -10,8 +10,12 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import { parseArchiveRef } from '@/lib/archive-ref'
 import { formatLedger, type LedgerRow } from '@/lib/ledger-tools'
+import { PARSER_REVISION } from '@/lib/parser-version'
 import { appendManifest, archiveFile } from '@/lib/source-archive'
 
+/** The version word in a re-feed name follows the parser: "v6.6" now. */
+const V = `v${(PARSER_REVISION / 10).toFixed(1)}`
+const VR = V.replace('.', '\\.')
 const REPO = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
 const TSX = join(REPO, 'node_modules', '.bin', 'tsx')
 const SCRIPT = join(REPO, 'scripts', 'refeed-from-archive.ts')
@@ -46,10 +50,10 @@ const refs = (dir = '') => readdirSync(join(inbox, dir)).filter(n => n.endsWith(
 describe('scripts/refeed-from-archive.ts', () => {
   test('a dry run lists what it would feed and writes nothing', () => {
     archived('old.txt', body('old'), 50)
-    archived('current.txt', body('cur'), 65)
+    archived('current.txt', body('cur'), PARSER_REVISION)
     const r = run(['--max-revision', '64'])
     expect(r.status).toBe(0)
-    expect(r.stdout).toMatch(/would +old \(refeed v6\.5\)\.txt/)
+    expect(r.stdout).toMatch(new RegExp(String.raw`would +old \(refeed ${VR}\)\.txt`))
     expect(r.stdout).not.toMatch(/would +current/)
     expect(r.stdout).toMatch(/1 file\(s\).* to read again from the archive.* 1 already read by the current parser/)
     expect(r.stdout).toMatch(/dry run \(nothing written/)
@@ -60,9 +64,9 @@ describe('scripts/refeed-from-archive.ts', () => {
     const a = archived('old file.txt', body('old'), 61)
     const r = run(['--apply', '--no-wait'])
     expect(r.status).toBe(0)
-    expect(refs()).toEqual(['old file (refeed v6.5).txt.archiveref'])
-    const ref = parseArchiveRef(readFileSync(join(inbox, 'old file (refeed v6.5).txt.archiveref'), 'utf8'))
-    expect(ref).toMatchObject({ v: 1, id: a.id, name: 'old file (refeed v6.5).txt', size: Buffer.byteLength(body('old')), sha256: a.sha })
+    expect(refs()).toEqual([`old file (refeed ${V}).txt.archiveref`])
+    const ref = parseArchiveRef(readFileSync(join(inbox, `old file (refeed ${V}).txt.archiveref`), 'utf8'))
+    expect(ref).toMatchObject({ v: 1, id: a.id, name: `old file (refeed ${V}).txt`, size: Buffer.byteLength(body('old')), sha256: a.sha })
     expect(readdirSync(join(root, '.pile-work'))).toEqual([])   // no half-written reference is left behind
   })
 
@@ -70,7 +74,7 @@ describe('scripts/refeed-from-archive.ts', () => {
     archived('old.txt', body('old'), 50)
     expect(run(['--apply', '--no-wait']).status).toBe(0)
     expect(run(['--apply', '--no-wait']).stdout).toMatch(/0 file\(s\).* 1 already in the inbox/)
-    renameSync(join(inbox, 'old (refeed v6.5).txt.archiveref'), join(inbox, 'done', 'old (refeed v6.5).txt.archiveref'))
+    renameSync(join(inbox, `old (refeed ${V}).txt.archiveref`), join(inbox, 'done', `old (refeed ${V}).txt.archiveref`))
     const again = run(['--apply', '--no-wait'])
     expect(again.stdout).toMatch(/0 file\(s\).* 1 already in the inbox/)
     expect(refs()).toEqual([])
@@ -83,7 +87,7 @@ describe('scripts/refeed-from-archive.ts', () => {
     expect(run(['--only', 'mid']).stdout).toMatch(/1 file\(s\)/)
     const r = run(['--apply', '--no-wait', '--limit', '2'])
     expect(r.status).toBe(0)
-    expect(refs()).toEqual(['mid (refeed v6.5).txt.archiveref', 'small (refeed v6.5).txt.archiveref'])
+    expect(refs()).toEqual([`mid (refeed ${V}).txt.archiveref`, `small (refeed ${V}).txt.archiveref`])
   })
 
   test('at most --in-flight references wait at once: the next one is written only after the importer took one', async () => {
@@ -96,15 +100,15 @@ describe('scripts/refeed-from-archive.ts', () => {
     child.stdout.on('data', d => { out += String(d) })
     const until = async (cond: () => boolean, ms = 20_000) => { const end = Date.now() + ms; while (!cond() && Date.now() < end) await new Promise(r => setTimeout(r, 50)); expect(cond()).toBe(true) }
     await until(() => refs().length === 1)
-    expect(refs()).toEqual(['a (refeed v6.5).txt.archiveref'])
+    expect(refs()).toEqual([`a (refeed ${V}).txt.archiveref`])
     await new Promise(r => setTimeout(r, 600))                 // several polls: the second must still be waiting
-    expect(refs()).toEqual(['a (refeed v6.5).txt.archiveref'])
-    renameSync(join(inbox, 'a (refeed v6.5).txt.archiveref'), join(inbox, 'done', 'a (refeed v6.5).txt.archiveref'))   // the importer is done with it
-    await until(() => refs().length === 1 && existsSync(join(inbox, 'b (refeed v6.5).txt.archiveref')))
+    expect(refs()).toEqual([`a (refeed ${V}).txt.archiveref`])
+    renameSync(join(inbox, `a (refeed ${V}).txt.archiveref`), join(inbox, 'done', `a (refeed ${V}).txt.archiveref`))   // the importer is done with it
+    await until(() => refs().length === 1 && existsSync(join(inbox, `b (refeed ${V}).txt.archiveref`)))
     const code = await closed
     expect(code).toBe(0)
-    expect(out).toMatch(/FEED a \(refeed v6\.5\)\.txt/)
-    expect(out).toMatch(/FEED b \(refeed v6\.5\)\.txt/)
+    expect(out).toMatch(new RegExp(String.raw`FEED a \(refeed ${VR}\)\.txt`))
+    expect(out).toMatch(new RegExp(String.raw`FEED b \(refeed ${VR}\)\.txt`))
   }, 40_000)
 
   test('a new file in inbox/failed stops the feeding, kills nothing, and the exit code says so', async () => {
@@ -117,7 +121,7 @@ describe('scripts/refeed-from-archive.ts', () => {
     child.stdout.on('data', d => { out += String(d) })
     const end = Date.now() + 20_000
     while (refs().length < 1 && Date.now() < end) await new Promise(r => setTimeout(r, 50))
-    renameSync(join(inbox, 'a (refeed v6.5).txt.archiveref'), join(inbox, 'failed', 'a (refeed v6.5).txt.archiveref'))
+    renameSync(join(inbox, `a (refeed ${V}).txt.archiveref`), join(inbox, 'failed', `a (refeed ${V}).txt.archiveref`))
     const code = await closed
     expect(code).toBe(1)
     expect(out).toMatch(/STOP a file landed in inbox\/failed; 1 of 2 fed/)
@@ -131,7 +135,7 @@ describe('scripts/refeed-from-archive.ts', () => {
     try {
       const r = run(['--apply'])
       expect(r.status).toBe(0)
-      expect(r.stdout).toMatch(/HELD a \(refeed v6\.5\)\.txt/)
+      expect(r.stdout).toMatch(new RegExp(String.raw`HELD a \(refeed ${VR}\)\.txt`))
       expect(r.stdout).toMatch(/COMPLETE: 1 of 1 fed; 1 held/)
     } finally { sh.kill() }
   }, 40_000)

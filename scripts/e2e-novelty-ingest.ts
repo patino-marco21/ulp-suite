@@ -28,6 +28,8 @@
  *               (the shared ones once), and ClickHouse's query log shows the grouped check sent 4 fills per file instead of 14
  *   v65         parser v6.5: "url:(copy of the site):login:password" (a parenthesised copy of the url's host between the url and the credential), with a scheme and www., an e-mail login and a
  *               colon in the password; the shapes that stay as they were (a number in parentheses, a label that is not the host, no copy)
+ *   v66         parser v6.6: an Android app id behind a stray "https://" (a username login, an e-mail login, repeats of one account under two app ids), a host written with its trailing
+ *               dot, an underscore in a label in front of the last one; the shapes that stay rejected (an Android package name or a file name as a host, a host without a dot)
  *   monitor     a monitor alerts for rows that are new to the database, not for a row the database already held
  *   big         2.5M distinct lines + 100k repeats of early lines (past the old 2M in-file cap): exact, in 5 slabs, phases visible
  *   kill        the app is killed in the middle of the commit; after the restart the orphan stage tables are gone and a retry
@@ -738,6 +740,40 @@ async function parserV65(): Promise<void> {
     && one(`email = '(ShopApp)' AND password = 'v65b2${RUN}:${pw('B2')}'`) === 1
     && one(`email = 'v65b3${RUN}' AND password = '${pw('B3')}'`) === 1)
   check('no row has a parenthesised copy of a host as its login', one(`startsWith(email, '(') AND position(email, 'example-store') > 0`) === 0)
+}
+
+async function parserV66(): Promise<void> {
+  console.log('\n1j. Parser v6.6: an app id behind a stray https://, a host with a trailing dot, an underscore in a host')
+  const P = `e2e-nov-v66-${RUN}.txt`
+  const pw = (k: string) => `Pw-${RUN}-${k}`
+  const app = (k: string) => `AbCdEfGhIjKlMnOp${k}Qr==@com.example.app${k}`
+  const ls = [
+    `https://android://${app('1')}/:v66a1${RUN}:${pw('A1')}`,                                 // a username login
+    `https://android://${app('2')}/:v66a2${RUN}@probe-mail.test:${pw('A2')}`,                 // an e-mail login (it used to be stored without its url)
+    `https://android://${app('3')}/:v66a3${RUN}:${pw('A3')}`,                                 // the same account under two app ids: one row
+    `https://android://${app('4')}/:v66a3${RUN}:${pw('A3')}`,
+    `https://portal-b1.example-store.test./login:v66b1${RUN}:${pw('B1')}`,                    // a trailing dot
+    `https://shop_c1.example-store.test/login:v66c1${RUN}:${pw('C1')}`,                       // an underscore in a label
+    // still rejected as a bad host
+    `https://com.bank.app_name/:v66x1${RUN}:${pw('X1')}`,                                     // an Android package name
+    `https://main_login.asp:v66x2${RUN}:${pw('X2')}`,                                         // a file name
+    `https://localhost:3000/:v66x3${RUN}:${pw('X3')}`,                                        // no dot
+    // as before
+    `https://shop-d1.example-store.test/login:v66d1${RUN}:${pw('D1')}`,
+  ]
+  const v = await importLines(P, ls)
+  check('a file with 6 lines that v6.6 reads (one a repeat), 3 that stay rejected and 1 ordinary: 6 rows are new, none known', v.status === 'done' && v.imported === 6 && v.known === 0 && rowsFor(P) === 6, brief(v))
+  const one = (where: string) => Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND ${where}`))
+  check('the app ids are stored as app-id lines, the e-mail login with its url, the repeated account once',
+    one(`url = 'android://${app('1')}/' AND email = 'v66a1${RUN}' AND password = '${pw('A1')}' AND domain = 'com.example.app1'`) === 1
+    && one(`url = 'android://${app('2')}/' AND email = 'v66a2${RUN}@probe-mail.test' AND password = '${pw('A2')}'`) === 1
+    && one(`email = 'v66a3${RUN}' AND password = '${pw('A3')}'`) === 1)
+  check('no row keeps the web scheme in front of an app id', one(`startsWith(url, 'https://android://')`) === 0)
+  check('the trailing-dot host is kept in the url and stored without the dot as the domain',
+    one(`url = 'https://portal-b1.example-store.test./login' AND email = 'v66b1${RUN}' AND domain = 'portal-b1.example-store.test'`) === 1)
+  check('the host with an underscore is stored', one(`url = 'https://shop_c1.example-store.test/login' AND email = 'v66c1${RUN}' AND password = '${pw('C1')}'`) === 1)
+  check('a package name, a file name and a host without a dot are not stored', one(`email IN ('v66x1${RUN}', 'v66x2${RUN}', 'v66x3${RUN}')`) === 0)
+  check('an ordinary host is stored as before', one(`url = 'https://shop-d1.example-store.test/login' AND email = 'v66d1${RUN}'`) === 1)
 }
 
 async function monitorScenario(): Promise<void> {
@@ -1756,6 +1792,7 @@ async function run(): Promise<number> {
   if (want('v63')) await parserV63()
   if (want('v64')) await parserV64()
   if (want('v65')) await parserV65()
+  if (want('v66')) await parserV66()
   if (want('monitor')) await monitorScenario()
   if (want('big')) await bigFile()
   if (want('kill')) await killMidCommit()

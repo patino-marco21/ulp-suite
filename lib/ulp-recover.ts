@@ -155,6 +155,17 @@ export function recoverAndroidAppLine(trimmed: string): string | null {
   return m[1] ? `android:${trimmed}` : `android://${trimmed}`
 }
 
+const WEB_SCHEME_BEFORE_ANDROID = /^https?:\/\/(?=android:\/\/)/i
+
+/**
+ * Parser v6.6: "https://android://HASH==@com.example.app/:alice:Secret1", an Android app id with a web scheme put in front of its own. Returns the line without the web
+ * scheme (read as the app-id line it is), or null when the line does not start that way. A web url is never "https://android://": the first host would be "android:".
+ */
+export function stripWebSchemeBeforeAndroid(trimmed: string): string | null {
+  const m = WEB_SCHEME_BEFORE_ANDROID.exec(trimmed)
+  return m ? trimmed.slice(m[0].length) : null
+}
+
 // ─── Parser v6.1: a pipe that joins a url and a credential ───────────────────────────────────────────────────────────────────────────────────────────
 const SCHEME_ONLY = /^[a-z][a-z0-9+.-]*:\/\/$/i
 const ONE_WORD_LABEL = /^[A-Za-z][A-Za-z0-9_-]{0,19}:$/
