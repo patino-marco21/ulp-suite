@@ -492,7 +492,7 @@ The app supports scheduled or manual dedup — **report-only until you opt in**:
 ```bash
 CONTENT_DEDUP_APPLY=true   # allow the background ALTER … DELETE
 DEDUP_CRON_HOURS=24        # 0 disables the scheduled job
-DEDUP_MIN_EXCESS=1000      # skip the (heavy) rewrite below this many excess rows (the 1.87B-row deployment uses 14000000, ~0.75% of the table)
+DEDUP_MIN_EXCESS=1000      # skip the (heavy) rewrite below this many excess rows (the 2.79B-row deployment uses 14000000, ~0.5% of the table)
 DEDUP_STATS_MIN_FREE_BYTES=42949672960   # the daily duplicate count spills to disk (13.8 GiB at 1.84B rows); it skips itself with less free space than this (default 40 GiB)
 ```
 
@@ -609,27 +609,6 @@ the UTC instant shown under each field). It is kept in the page address (`/crede
 bookmarked, and every finished import job on the Inbox and Upload pages has a **View what this added** link that opens it on exactly that job's rows. The Lookup and
 Breaches pages use the same control. Design and measurements: `docs/superpowers/specs/2026-10-05-imported-after-filter-design.md` and
 `docs/superpowers/specs/2026-10-18-imported-window-ux-design.md`.
-
----
-
-## Performance
-
-Reference deployment: one 32 GB laptop. The timings below are cold and were measured on 1.87 billion rows (156 GiB), 2026-09/10, while the table grew from 1.39 to 1.87 billion rows; the table now holds 2.79 billion rows (287 GiB) and they have not been measured again:
-
-| Metric | Value |
-|---|---|
-| Insert throughput | ~1–2M rows/min on laptop SSD (single-process) |
-| Peak heap per 500K-row batch | ~100 MB (array in memory before insert) |
-| Dedup Set cap (direct path only) | 2M entries → ~440 MB max (prevents OOM on huge files); novelty-aware ingest dedups in the stage table, exactly, for any file size |
-| Exact domain / email lookup (an address matches in any letter case) | 0.03–1.3 s cold (bloom filters + primary key); a very popular value such as `admin@gmail.com` takes 7–23 s |
-| Single-word search | totals 13-22 s before; 1-10 s now. Rows: 9-19 s before; 1.2-4.6 s for a rare word (at most 300 candidate domains and 300 rows behind its e-mail domains), otherwise unchanged. The response's `plan` says `words` |
-| Substring search (one text with a special character, such as a path) | 35-42 s before; 0.4-11 s when a whole word of the text matches at most 50,000 rows, otherwise unchanged. The response's `plan` says `substring` |
-| Browse / search, default sort (domain A-Z) | 5-14 s for the rows (read in primary-key order, stops after 200 matches); the total is a separate query (4-17 s) that arrives after the rows |
-| "Newest first" | 0.1-1 s for a plain browse, a popular domain or word, a tier/password filter or a date range inside the newest import (it was 18-76 s); a rare term, a term with no match, or a date range older than the projection is answered by the plain scan, 14-27 s. Run as time windows on `proj_imported_desc`: `lib/newest-first.ts`, `docs/superpowers/specs/2026-10-01-newest-first-windows-design.md`. The response's `plan` says which one answered |
-| Other sorts (email, password length) | 18-45 s: every matching row is read and sorted |
-| Domain-monitor re-scan | ~5 s per tick for 17 domains (reversed-key projections + a single normalising pass over the legacy bucket) |
-| Monitor re-scan tick | 15 minutes, in-process, no external queue |
-| Inbox reconciliation | Every 30 s — catches any missed chokidar events |
 
 ---
 

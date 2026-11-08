@@ -29,9 +29,9 @@ The wrapper backs up the **live tables only** — by default every table in `ulp
 starting `credentials_` or `zz_` (today: `ulp.credentials`, `ulp.sources`, `ulp.domains`).
 Override with `BACKUP_TABLES=db.table,db.table`.
 
-It deliberately does **not** use `ulp.*`. The database also holds the pre-dedup archive
-`ulp.credentials_predup_auto` (~138 GiB since 2026-10-18, see the last section) and any dedup scratch tables. A wildcard would
-snapshot them too — pinning their parts, so dropping the archive afterwards would free
+It deliberately does **not** use `ulp.*`. The database can also hold dedup scratch tables and, after an applying dedup cycle,
+a pre-dedup archive named `ulp.credentials_predup_auto` (the last one was dropped on 2026-11-08, see the last section). A
+wildcard would snapshot such tables too — pinning their parts, so dropping them afterwards would free
 nothing until the snapshot is deleted — and would try to upload over a hundred GiB it does not need.
 
 ## Why local snapshots are guarded
@@ -197,43 +197,46 @@ If the whole box is gone: stand up the stack on new hardware (`docker compose up
 fill `.env` with the same `S3_*`, then `restore <name>` pulls from S3 and rebuilds. Restore
 the SQLite snapshot too (§6) or you will have the data but no accounts.
 
-## The pre-dedup archive
+## The pre-dedup archive (dropped on 2026-11-08)
 
-`ulp.credentials_predup_auto` is what the 2026-09-30 content-dedup cutover left behind: the July and August 2026
-partitions as they were before the duplicates were removed (2,778,102,283 rows). It is a rollback net for logical
-mistakes (a wrong DELETE or mutation on the live table), not a disk-failure backup: it sits on the same disk as
-everything else. Nothing reads it at run time, and no view or dictionary depends on it.
+`ulp.credentials_predup_auto` was what the 2026-09-30 content-dedup cutover left behind: the July and August 2026
+partitions as they were before the duplicates were removed (2,778,102,283 rows, 381.20 GiB; 138.43 GiB after its two
+projections were dropped on 2026-10-18). It was a rollback net for logical mistakes, not a disk-failure backup: it sat
+on the same disk as everything else. **It was dropped on 2026-11-08 at the owner's go**, and free disk went from 196 to 335 GiB (the ClickHouse store from about 437 to 298 GiB) once the 480-second window had passed.
 
-**2026-10-18: its two projections were dropped** (`proj_imported_desc` and `proj_domain_reversed`, 242.8 GiB of
-re-sorted copies; `ALTER TABLE ... DROP PROJECTION`, a hardlink mutation that finished in seconds). It now holds the
-base data only: 138.43 GiB, the same 8 parts and the same 2,778,102,283 rows, nothing lost.
+Why the drop was safe, checked read-only the same day:
 
-What the rest of the table still holds and the live table does not:
+- **No credential went with it.** In two independent slices (`content_key_hash % 64` = 0 and 17), 0 of the 43.55M
+  distinct archive keys were missing from the live table; the cutover itself had been verified lossless (identical
+  distinct-key count and checksum).
+- **Nothing used it.** No view, dictionary or table depended on it, and no query had touched it for weeks. The only
+  code that names it is the apply path of the dedup tick (`CONTENT_DEDUP_APPLY=false`, `DEDUP_CRON_HOURS=0`), which drops it with
+  `DROP TABLE IF EXISTS`.
+- **None of its files were shared.** No file was hardlinked to another table and `shadow/` and `backup/` were empty, so
+  the whole 138 GiB came back.
 
-- **The duplicate rows** (1,384,652,732 at the cutover). In sampled slices about 90% are the same credential seen in
-  other files and 10% are repeated lines inside one file. The live table keeps one row per credential, with a
-  `was_duplicated` flag and the earliest source file and import time, but not the number of copies or the other files.
-- **A second, ClickHouse-side copy of the old rows.** The plaintext of most of them is gone: 96.5% of the old rows
-  come from source files that are not in the source archive. By content, a sample taken on 2026-10-18 (8,032 old rows
-  with e-mail logins) found 73% of the logins and passwords, and 59% with the same site, in the archived files under
-  other names, so roughly a quarter to a third of the old rows exist only in ClickHouse.
+What went with it: the duplicate rows (1,384,652,732 at the cutover) and their file lineage (the live table keeps the
+`was_duplicated` flag and the earliest source file and import time), and the ClickHouse-side second copy of the old
+rows. A sample on 2026-10-18 found that roughly a quarter to a third of the old rows exist only in ClickHouse, so the live
+table is now the only copy of them. There is still no off-disk backup (the owner parked it on 2026-10-13 and again on
+2026-11-08).
 
-Before dropping the rest (`DROP TABLE ulp.credentials_predup_auto SYNC SETTINGS max_table_size_to_drop = 0`; the
-default 50 GB limit still refuses a 138 GiB table, and `SYNC` frees the space at once, with no `UNDROP` window):
+How it was dropped, and how to drop a table over 50 GB the same way:
 
-1. Have a replacement net for the two closed months: an S3 backup (`space` → `full` → `status` → `verify`, above) or,
-   weaker, a local hardlink snapshot, `BACKUP_TABLES=ulp.credentials BACKUP_PARTITIONS=202607,202608
-   BACKUP_FORCE=1 ./scripts/clickhouse-backup.sh local` (about 0 GiB; it protects against mistakes, not against
-   disk failure; not yet run on the real table).
-2. Accept that the duplicate rows and their file lineage go with it.
-3. Do any cleanup of the old partitions first, while the net exists (the leftovers of earlier parser versions are
-   listed in `docs/superpowers/specs/2026-10-12-parser-v6-and-redo-design.md`). With the table's projections the
-   lightweight DELETE is refused (`lightweight_mutation_projection_mode = throw`), so the cleanup is an
-   `ALTER ... DELETE` that rewrites the two old partitions (about 97 GiB plus 12 GiB of projections, estimated 1-2 h)
-   and needs about 110 GiB of free space on top.
+```
+DROP TABLE ulp.credentials_predup_auto SETTINGS max_table_size_to_drop = 0
+```
 
-The content-dedup tick drops the previous archive itself, without asking, in step 2 of an *applying* cycle
-(`CONTENT_DEDUP_APPLY=true` and at least `DEDUP_MIN_EXCESS` excess rows); the default is `false`.
+without `SYNC`. The default 50 GB limit refuses a bigger table with Code 359, and the query-level setting lifts it.
+Without `SYNC` the table stays recoverable for 480 seconds (`database_atomic_delay_before_drop_table_sec`):
+`UNDROP TABLE ulp.credentials_predup_auto` brings it back; after that the drop is permanent and the space returns.
+Both behaviours were rehearsed first on a throwaway ReplicatedMergeTree table on this server (26.3.17): a drop under a
+1-byte limit was refused and left the table intact, the override dropped it, and `UNDROP` returned all 2,000,000 rows,
+writable, with an empty replication queue. `SYNC` skips the window and frees the space at once.
+
+If the apply path of the dedup tick is ever switched on again, it builds a full new copy of the table and renames the live
+one to this name, so it needs the free disk for that copy (the tick checks it first), and it drops the previous archive
+by itself in its next applying cycle.
 
 ---
 

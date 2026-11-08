@@ -239,6 +239,10 @@ or `https`:
    (the default 50 GB limit refuses it otherwise; `SYNC` releases the space at once). It frees ~381 GiB.
    *Update 2026-10-18:* the archive's two projections were dropped (381.20 -> 138.43 GiB, nothing lost); the
    runbook section "The pre-dedup archive" has the current state and the steps before dropping the rest.
+   *Update 2026-11-08:* the rest of the archive was dropped at the owner's go (138.43 GiB), without an off-disk backup, which
+   the owner had parked. Two slices showed no archive key missing from the live table. The runbook section "The pre-dedup
+   archive" has the checks, the command (a plain `DROP` with the size override keeps a 480-second `UNDROP` window) and what
+   went with it.
    **Note:** the content-dedup tick drops the previous archive itself in step 2 of its next *applying* cycle
    (`CONTENT_DEDUP_APPLY=true`, needs >= `DEDUP_MIN_EXCESS` = 14,000,000 excess rows, so not soon) - without asking.
 2. **Enrolling 2FA** (needs the owner's authenticator). The loopback binding is the interim mitigation.
