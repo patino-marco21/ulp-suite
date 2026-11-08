@@ -1,7 +1,7 @@
 # Parser v6.7: a pipe where the colon behind the scheme belongs; four kinds of field that are no credential; a gate rule that mistook usernames for hosts — design and results (2026-11-08)
 
 Date: 2026-11-08
-Status: **Deployed on 2026-11-08 (image `3e27c3c13271`, rollback tag `rollback-20261108-0625z`); the re-read of the files that carry rule S is in "Results".**
+Status: **Deployed on 2026-11-08 (image `3e27c3c13271`, rollback tag `rollback-20261108-0625z`); the re-read of the four files is done, see "Results".**
 Related: `2026-11-07-parser-v6-6-design.md` (the parser this follows), `2026-10-12-source-archive-and-ingest-gate-design.md` (the quality gate), `2026-11-07-file-ledger-design.md` (the re-feed).
 File names, channel names, search terms and credential values are deliberately absent (the repository is public); every fixture is invented.
 
@@ -68,5 +68,8 @@ The parser had a list of sentinel passwords, but it held `decryptionfailed.` and
 - The importer's own sample check (`scripts/preflight.ts`) on the held files, before and after: the 4.36% dump passes at 0.21% junk; the 3.30% dump passes at 0.38% (the gate rule); the file with the colon-less scheme sections stays at 6.10%, the two files of urls with an e-mail and no password and of plain text stay held at 46.99% and 13.65% unsplit.
 
 **Deploy.** Image `3e27c3c13271` replaced `30447d3b320d` at 2026-11-08 07:14:57 UTC (the revision timeline step); the app is healthy and the log is clean.
+
+**Re-read.** The three files that carry rule S and the dump that was held (12.3 GiB, 4 files) were read again from the archive, 07:16 to 07:47 UTC: 4 done, none held or failed, **2,429,338 new rows**
+(1,613,631 and 803,673 from the two dumps, 6,437 and 5,597 from the other two: their corrected rows were nearly all in the table already). The table went from 2,792,234,249 to 2,794,663,587 rows, exactly the new rows.
 
 **Left alone.** The wrong rows already in the table (url `https`, login `//host/…`: about 1.84 million from one dump) and the 1,228,588 decrypt-error and 352,860 quote-login rows: repairing stored rows is the owner's call.
