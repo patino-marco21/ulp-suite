@@ -1,5 +1,5 @@
 /**
- * ULP credential line parser — v6.3
+ * ULP credential line parser — v6.7
  *
  * v6 (2026-10-12, docs/superpowers/specs/2026-10-12-parser-v6-and-redo-design.md): UTF-8 lines are read as UTF-8 (lib/ulp-utf8.ts), and
  * layouts that used to be rejected are read by lib/ulp-recover.ts (space-padded colons, a slash in the password, a numeric login, protocol-relative
@@ -22,6 +22,10 @@
  * scheme in front of an Android app id ("https://android://HASH==@com.app/:login:pass") is dropped, and the line is read like any app-id line. Q: a fully qualified host written with
  * its trailing dot ("portal.example.org.") is the host without the dot. R: an underscore in a label in front of the last one is part of a host (isValidHost).
  *
+ * v6.7 (2026-11-08, docs/superpowers/specs/2026-11-08-parser-v6-7-design.md): S: a list that wrote a pipe where the colon behind the scheme belongs ("https|//host/path|login|password")
+ * has its scheme put back (joinSchemeWordPipe); it used to be stored as the url "https", the login "//host/path" and the password "login|password". And four kinds of field that are no
+ * credential are rejected (lib/ulp-field-junk.ts): decrypt-error text as the password, a login without a letter or digit, a JSON fragment, an emoji advert as the password.
+ *
  * Design: one algorithm, no regex in the hot path, RFC 3986-correct
  * colon disambiguation. ~150 lines for a format that is field:field:field.
  *
@@ -37,12 +41,13 @@
  */
 
 import { hasGarbageIdentity, hasMojibakeSignature, hasEdgeWhitespace } from '@/lib/ulp-garbage'
+import { hasFieldJunk } from '@/lib/ulp-field-junk'
 import { stripPromoSignature } from '@/lib/ulp-promo-signature'
 import { hasTelegramLink, stripTelegramTag } from '@/lib/ulp-telegram-tag'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
 import { maskText } from '@/lib/ingest-quality-gate'
 import {
-  cannotHoldCredential, holdsCredential, isUrlPathParameter, joinPipedUrl, looksLikeUrlFragment, protocolRelativeToPlain, recoverAndroidAppLine, splitCredentialUrlPair, splitNumericLogin, splitSiteAnnotation,
+  cannotHoldCredential, holdsCredential, isUrlPathParameter, joinPipedUrl, joinSchemeWordPipe, looksLikeUrlFragment, protocolRelativeToPlain, recoverAndroidAppLine, splitCredentialUrlPair, splitNumericLogin, splitSiteAnnotation,
   splitPipedLabelledPair, splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme, stripTrailingSemicolons, stripWebSchemeBeforeAndroid,
 } from '@/lib/ulp-recover'
 
@@ -249,6 +254,7 @@ function isJunkCredential(login: string, password: string): boolean {
       || hasBinaryOrReplacement(login) || hasBinaryOrReplacement(password)
       || hasGarbageIdentity(login)     || hasMojibakeSignature(login)
       || hasEdgeWhitespace(login)      || hasEdgeWhitespace(password)
+      || hasFieldJunk(login, password)
 }
 
 // ── Block-format parser (Raccoon / Stealc / Meta / Vidar style) ──────────────
@@ -681,6 +687,10 @@ export function parseLine(
   // Rule J (parser v6.2): ":https://host/path:login:password" -- a colon in front of the scheme is an empty first field, not part of the url
   let trimmed = stripLeadingColonBeforeScheme(line.trim())
 
+  // Rule S (parser v6.7): "https|//host/path|login|password" -- the pipe stands where the colon behind the scheme belongs
+  const schemeJoined = joinSchemeWordPipe(trimmed)
+  if (schemeJoined) trimmed = schemeJoined
+
   // Rule E (parser v6): "//host/path:login:password" is a protocol-relative url, not a comment. Read as a scheme-less line; a password that is a URL
   // fragment (the extra slash belonged to a path) is garbage.
   if (trimmed.startsWith('//')) {
@@ -898,8 +908,9 @@ export function parseLine(
   // a sentinel password ([NOT_SAVED], *none*, Decryptionfailed., ...) means no
   // password was captured; gmail_ps=/gmail=/==@com./[Wrong padding] are token or
   // decryption junk. (Binary/mojibake already handled by Rule 3.5.)
+  // Parser v6.7: decrypt-error text, a login without a letter or digit, a JSON fragment, an emoji advert (lib/ulp-field-junk.ts)
   if (isPlaceholderLogin(login) || isSentinelPassword(password)
-      || hasJunkMarker(login) || hasJunkMarker(password)) {
+      || hasJunkMarker(login) || hasJunkMarker(password) || hasFieldJunk(login, password)) {
     return { credential: null, reason: 'garbage' }
   }
 

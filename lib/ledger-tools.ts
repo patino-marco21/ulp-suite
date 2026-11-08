@@ -270,7 +270,7 @@ export interface TakeInput {
   refeed: boolean
 }
 
-/** The name a deliberate re-feed of `n` goes by: "x.txt" becomes "x (refeed v6.6).txt". The word "refeed" is what lets the importer read bytes it already holds. */
+/** The name a deliberate re-feed of `n` goes by: "x.txt" becomes "x (refeed v6.7).txt". The word "refeed" is what lets the importer read bytes it already holds. */
 export function refeedNameFor(n: string, revision: number = PARSER_REVISION): string {
   const dot = n.lastIndexOf('.')
   const marker = ` (refeed v${(revision / 10).toFixed(1)})`

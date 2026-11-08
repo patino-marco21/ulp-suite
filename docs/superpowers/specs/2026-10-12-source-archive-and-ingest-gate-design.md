@@ -172,7 +172,7 @@ never violates (the same ones as the probe that produced the numbers above):
 | `login-has-scheme` | the login contains `://` |
 | `login-has-slash` | the login contains `/` (not for `android://` urls) |
 | `login-has-colon` | the login contains `:` |
-| `login-is-bare-host` | the login looks like a host name, has no `@`, and the url is empty |
+| `login-is-bare-host` | the login looks like a host name (dotted, ending in a two-letter country code or a common generic domain; since 2026-11-08 a name with a dot or a dotted number is not one), has no `@`, and the url is empty |
 | `url-holds-credential` | the url field holds what `holdsCredential` (lib/ulp-recover.ts) calls a credential |
 | `password-has-scheme` | the password contains `://` |
 | `telegram-link-in-field` | login or password contains `t.me/` |

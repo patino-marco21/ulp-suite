@@ -30,6 +30,8 @@
  *               colon in the password; the shapes that stay as they were (a number in parentheses, a label that is not the host, no copy)
  *   v66         parser v6.6: an Android app id behind a stray "https://" (a username login, an e-mail login, repeats of one account under two app ids), a host written with its trailing
  *               dot, an underscore in a label in front of the last one; the shapes that stay rejected (an Android package name or a file name as a host, a host without a dot)
+ *   v67         parser v6.7: "https|//host/path|login|password" (a pipe where the colon behind the scheme belongs, with an e-mail login and a pipe in the password) stored as url|login|password;
+ *               the fields that are no credential (decrypt-error text as the password, a login of two quote characters, a JSON fragment, an emoji advert) not stored; a passphrase kept
  *   monitor     a monitor alerts for rows that are new to the database, not for a row the database already held
  *   big         2.5M distinct lines + 100k repeats of early lines (past the old 2M in-file cap): exact, in 5 slabs, phases visible
  *   kill        the app is killed in the middle of the commit; after the restart the orphan stage tables are gone and a retry
@@ -774,6 +776,38 @@ async function parserV66(): Promise<void> {
   check('the host with an underscore is stored', one(`url = 'https://shop_c1.example-store.test/login' AND email = 'v66c1${RUN}' AND password = '${pw('C1')}'`) === 1)
   check('a package name, a file name and a host without a dot are not stored', one(`email IN ('v66x1${RUN}', 'v66x2${RUN}', 'v66x3${RUN}')`) === 0)
   check('an ordinary host is stored as before', one(`url = 'https://shop-d1.example-store.test/login' AND email = 'v66d1${RUN}'`) === 1)
+}
+
+async function parserV67(): Promise<void> {
+  console.log('\n1k. Parser v6.7: a pipe where the colon behind the scheme belongs; fields that are no credential')
+  const P = `e2e-nov-v67-${RUN}.txt`
+  const pw = (k: string) => `Pw-${RUN}-${k}`
+  const ls = [
+    `https|//shop-a1.example-store.test/|v67a1${RUN}@probe-mail.test|${pw('A1')}`,             // scheme word, e-mail login
+    `https|//shop-a2.example-store.test/login|v67a2${RUN}|${pw('A2')}|tail`,                   // a path, a pipe in the password
+    `http:|//shop-a3.example-store.test/|v67a3${RUN}|${pw('A3')}`,                              // http with a colon before the pipe
+    // no credential
+    `https://shop-x1.example-store.test/:v67x1${RUN}:Decryption failed.`,                       // decrypt-error text as the password
+    `https://shop-x2.example-store.test/:v67x2${RUN}:[UNKNOWN or V70]`,
+    `https://shop-x3.example-store.test/:"":${pw('X3')}`,                                       // a login of two quote characters
+    `https://shop-x4.example-store.test/:{"v67x4${RUN}":"a","k":"v"}`,                          // a JSON fragment
+    `https://shop-x5.example-store.test/:v67x5${RUN}:\u{1F31F}\u{1F31F}[ Join Our Channel ]`,     // an emoji advert as the password
+    // as before
+    `https://shop-d1.example-store.test/login:v67d1${RUN}:correct horse ${RUN}`,                // a passphrase is a password
+    `https://shop-d2.example-store.test/login:v67d2${RUN}:${pw('D2')}`,
+  ]
+  const v = await importLines(P, ls)
+  check('a file with 3 scheme-pipe lines, 5 lines with a field that is no credential and 2 ordinary: 5 rows are new, none known', v.status === 'done' && v.imported === 5 && v.known === 0 && rowsFor(P) === 5, brief(v))
+  const one = (where: string) => Number(chQuery(`SELECT count() FROM ulp.credentials WHERE source_file = '${P}' AND (${where})`))
+  check('the scheme-pipe lines are stored as url, login and password',
+    one(`url = 'https://shop-a1.example-store.test/' AND email = 'v67a1${RUN}@probe-mail.test' AND password = '${pw('A1')}'`) === 1
+    && one(`url = 'https://shop-a2.example-store.test/login' AND email = 'v67a2${RUN}' AND password = '${pw('A2')}|tail'`) === 1
+    && one(`url = 'http://shop-a3.example-store.test/' AND email = 'v67a3${RUN}' AND password = '${pw('A3')}'`) === 1)
+  check('no row has the scheme word as its url', one(`url IN ('https', 'http') OR startsWith(email, '//')`) === 0)
+  check('the decrypt-error text, the quote login, the JSON fragment and the emoji advert are not stored',
+    one(`password IN ('Decryption failed.', '[UNKNOWN or V70]') OR email IN ('""', '{"v67x4${RUN}"') OR startsWith(password, '\u{1F31F}')`) === 0)
+  check('a passphrase and an ordinary row are stored as before',
+    one(`email = 'v67d1${RUN}' AND password = 'correct horse ${RUN}'`) === 1 && one(`email = 'v67d2${RUN}' AND password = '${pw('D2')}'`) === 1)
 }
 
 async function monitorScenario(): Promise<void> {
@@ -1793,6 +1827,7 @@ async function run(): Promise<number> {
   if (want('v64')) await parserV64()
   if (want('v65')) await parserV65()
   if (want('v66')) await parserV66()
+  if (want('v67')) await parserV67()
   if (want('monitor')) await monitorScenario()
   if (want('big')) await bigFile()
   if (want('kill')) await killMidCommit()

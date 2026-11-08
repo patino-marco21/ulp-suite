@@ -13,7 +13,7 @@ import { formatLedger, type LedgerRow } from '@/lib/ledger-tools'
 import { PARSER_REVISION } from '@/lib/parser-version'
 import { appendManifest, archiveFile } from '@/lib/source-archive'
 
-/** The version word in a re-feed name follows the parser: "v6.6" now. */
+/** The version word in a re-feed name follows the parser: "v6.7" now. */
 const V = `v${(PARSER_REVISION / 10).toFixed(1)}`
 const VR = V.replace('.', '\\.')
 const REPO = new URL('..', import.meta.url).pathname.replace(/\/$/, '')

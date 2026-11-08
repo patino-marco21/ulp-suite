@@ -1,8 +1,9 @@
 /** Names the reason the result for one line differs between a baseline parser and parser v6 (scripts/parser-diff.ts). "unexplained" must stay at 0. */
 import {
   hasInnerScheme, holdsCredential, isUrlPathParameter, pipeJoinAll, protocolRelativeToPlain, recoverAndroidAppLine, splitCredentialUrlPair, splitNumericLogin,
-  splitPipedLabelledPair, splitSiteAnnotation, splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme, stripWebSchemeBeforeAndroid,
+  joinSchemeWordPipe, splitPipedLabelledPair, splitSiteAnnotation, splitSemicolonPasswordUrl, splitSlashInPassword, splitSpacePaddedColons, stripLeadingColonBeforeScheme, stripWebSchemeBeforeAndroid,
 } from '@/lib/ulp-recover'
+import { hasFieldJunk } from '@/lib/ulp-field-junk'
 import { stripTelegramTag } from '@/lib/ulp-telegram-tag'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
 
@@ -11,12 +12,12 @@ export interface Outcome { credential: { url: string; email: string; password: s
 export type ChangeClass =
   | 'same' | 'padded-colons' | 'android-no-scheme' | 'slash-in-password' | 'numeric-login' | 'protocol-relative'
   | 'utf8-recovered' | 'utf8-value' | 'utf8-lost' | 'login-equals-password' | 't3-kept' | 'pipe-scheme' | 'pipe-label' | 'pipe-url' | 'semicolon-password' | 'semicolon-parameter'
-  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'credential-url' | 'site-annotation' | 'android-web-prefix' | 'host-trailing-dot' | 'host-underscore' | 'unexplained'
+  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'credential-url' | 'site-annotation' | 'android-web-prefix' | 'host-trailing-dot' | 'host-underscore' | 'scheme-pipe' | 'field-junk' | 'unexplained'
 
 export const CHANGE_CLASSES: ChangeClass[] = [
   'padded-colons', 'android-no-scheme', 'slash-in-password', 'numeric-login', 'protocol-relative',
   'utf8-recovered', 'utf8-value', 'utf8-lost', 'login-equals-password', 't3-kept', 'pipe-scheme', 'pipe-label', 'pipe-url', 'semicolon-password', 'semicolon-parameter',
-  'leading-colon', 'semicolon-url-last', 'labelled-pair', 'nested-url', 'credential-url', 'site-annotation', 'android-web-prefix', 'host-trailing-dot', 'host-underscore', 'unexplained',
+  'leading-colon', 'semicolon-url-last', 'labelled-pair', 'nested-url', 'credential-url', 'site-annotation', 'android-web-prefix', 'host-trailing-dot', 'host-underscore', 'scheme-pipe', 'field-junk', 'unexplained',
 ]
 
 const INERT = '\uE000'   // a private-use character: no parser rule knows it, so a line that holds it is read like one without a semicolon
@@ -99,6 +100,8 @@ export function classifyChange(
   if (recoverAndroidAppLine(repairUtf8Line(rawLine).trim()) && !sameOutcome(oldO, newO)) return 'android-no-scheme'
   // A web scheme in front of an app id (parser v6.6, rule O): the old parser rejected the line as a bad host, or stored an e-mail login without its url.
   if (stripWebSchemeBeforeAndroid(repairUtf8Line(rawLine).trim()) && !sameOutcome(oldO, newO)) return 'android-web-prefix'
+  // A pipe where the colon behind the scheme belongs (parser v6.7, rule S): the old parser stored the scheme as the url and the host as the login.
+  if (joinSchemeWordPipe(repairUtf8Line(rawLine).trim()) && !sameOutcome(oldO, newO)) return 'scheme-pipe'
   // A host with a trailing dot or an underscore (rules Q and R): rejected before, or the e-mail credential stored without its url, which the new row now carries.
   const hostRule = newO.credential ? hostRuleOf(newO.credential.url) : null
   if (hostRule && newO.credential && !sameOutcome(oldO, newO)
@@ -124,6 +127,8 @@ export function classifyChange(
   if (!oldO.credential && !newO.credential) return 'same'
   // The old parser stored the line and v6 does not: explained when the UTF-8 repair alone makes the old parser reject it too (a password that is
   // two characters long once decoded, the double-encoded replacement character, ...).
+  // Parser v6.7: the old parser stored a row whose password or login is no credential (decrypt-error text, a login without a letter or digit, a JSON fragment, an emoji advert).
+  if (oldO.credential && hasFieldJunk(oldO.credential.email, oldO.credential.password)) return 'field-junk'
   if (oldO.credential && siteAnnotationOf(oldO.credential, null)) return 'site-annotation'
   if (oldO.credential) return repairUtf8Line(rawLine) !== rawLine && !oldOnRepaired.credential ? 'utf8-lost' : v62Rule(rawLine) ?? 'unexplained'
   const stored = newO.credential as Cred
@@ -148,7 +153,7 @@ export function classifyChange(
 /** A stored row that only the baseline parser produces (stream mode): the reason it is gone. */
 export type OldOnlyClass =
   | 'double-encoded' | 'android-mangled' | 'pipe-join' | 'semicolon-junk' | 'split-junk' | 'positional-merge' | 'utf8-text'
-  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'site-annotation' | 'site-added' | 'unexplained'
+  | 'leading-colon' | 'semicolon-url-last' | 'labelled-pair' | 'nested-url' | 'site-annotation' | 'site-added' | 'scheme-pipe' | 'field-junk' | 'unexplained'
 
 /**
  * `siteTwin`: the new parser stores the same login and password with a site (an app id behind a web scheme, a host with a trailing dot or an underscore). The baseline stored an
@@ -157,6 +162,9 @@ export type OldOnlyClass =
 export function classifyOldOnlyRow(row: { url: string; email: string; password: string }, opts: { siteTwin?: boolean } = {}): OldOnlyClass {
   const fields = [row.url, row.email, row.password]
   if (row.url === '' && opts.siteTwin) return 'site-added'
+  // Parser v6.7, rule S: the scheme word stood in the url and the host with its slashes in the login
+  if (/^https?$/i.test(row.url) && row.email.startsWith('//')) return 'scheme-pipe'
+  if (hasFieldJunk(row.email, row.password)) return 'field-junk'
   if (fields.some(f => /[\u00c2-\u00ef][\u0080-\u00bf]/.test(f))) return 'double-encoded'
   if (/^[A-Za-z0-9_+-]{16,}==@/.test(row.email) || /^(android:)?\/\/[A-Za-z0-9_+-]{16,}==@/.test(row.url)) return 'android-mangled'
   // Parser v6.2, rule J: the colon in front of the scheme stayed in the url (or, when the line had more fields than url:login:password, in the login, with no url)

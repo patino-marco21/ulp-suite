@@ -29,6 +29,15 @@ export type GateKind = (typeof GATE_KINDS)[number]
 
 const LOGIN_IS_URL = /^[a-z][a-z0-9+.-]*:\/\/\S*$/i
 const BARE_HOST = /^[\w-]+(?:\.[\w-]+)+$/
+/**
+ * The last label of a host the gate takes for a host: two letters (a country code) or one of the common generic domains. A login that is a name with a dot ("name.surname") or
+ * a dotted number ("1.2.3-4") ends in neither, and a combo list of such logins ("login:password", no url) held 3% of its rows as "host as login" before this (2026-11-08).
+ */
+const HOST_LAST_LABEL = /^(?:[a-z]{2}|com|net|org|info|biz|edu|gov|mil|int|name|pro|mobi|asia|xyz|top|online|site|shop|store|club|app|dev|cloud|tech|live|link|click|world|email|icu|vip|test|local)$/i
+
+function looksLikeBareHost(login: string): boolean {
+  return BARE_HOST.test(login) && HOST_LAST_LABEL.test(login.slice(login.lastIndexOf('.') + 1))
+}
 const TELEGRAM_LINK = /t\.me\//i
 // UTF-8 text that was read as Latin-1 and written out as UTF-8 again: a lead byte (U+00C2..U+00EF) followed by a continuation byte (U+0080..U+00BF).
 const DOUBLE_ENCODED = /[\u00C2-\u00EF][\u0080-\u00BF]/
@@ -59,7 +68,7 @@ export function classifyStoredRow(url: string, login: string, password: string):
   }
   if (login.includes('/') && !url.startsWith('android://')) return 'login-has-slash'
   if (hasColon) return 'login-has-colon'
-  if (url === '' && !login.includes('@') && BARE_HOST.test(login)) return 'login-is-bare-host'
+  if (url === '' && !login.includes('@') && looksLikeBareHost(login)) return 'login-is-bare-host'
   if (urlHoldsCredential(url)) return 'url-holds-credential'
   if (password.includes('://')) return 'password-has-scheme'
   if (hasTelegramLink(password) || hasTelegramLink(login)) return 'telegram-link-in-field'

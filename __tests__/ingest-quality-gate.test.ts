@@ -8,6 +8,15 @@ import {
 type Row = [string, string, string]
 const CLEAN: Row = ['https://shop.example.test/login', 'alice@mail.test', 'Pw-abc!']
 
+describe('classifyStoredRow: a dotted login is a host only when it ends like one', () => {
+  it.each([['shop.example.de'], ['shop.example.com'], ['portal.example.test'], ['x.co.uk']])('%s with no url is a host used as the login', login => {
+    expect(classifyStoredRow('', login, 'Pw-1')).toBe('login-is-bare-host')
+  })
+  it.each([['john.smith'], ['1.2.3-4'], ['anna.maria.keller'], ['user.name9'], ['a.b_c']])('%s with no url is a login', login => {
+    expect(classifyStoredRow('', login, 'Pw-1')).toBeNull()
+  })
+})
+
 describe('classifyStoredRow: one fixture per kind', () => {
   const FIXTURES: Array<[GateKind, Row]> = [
     ['login-is-scheme-or-ends-colon', ['https://shop.example.test', 'https://other.example.test/x', 'Pw-1']],

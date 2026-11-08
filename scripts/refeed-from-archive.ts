@@ -1,6 +1,6 @@
 /**
  * Reads archived files again after a parser change (docs/superpowers/specs/2026-11-07-file-ledger-design.md, "Re-feeding from the archive"). For each file the ledger holds
- * with a hash, at a parser revision older than the current one, whose bytes the source archive holds, it writes one small `<name> (refeed v6.6).txt.archiveref` into the
+ * with a hash, at a parser revision older than the current one, whose bytes the source archive holds, it writes one small `<name> (refeed v6.7).txt.archiveref` into the
  * inbox; the importer decodes the file from the archive, checks its sha256 before anything is committed, and the novelty check stores only the credentials the table does
  * not hold yet. No plaintext copy is made. It never prints a line of a file.
  *

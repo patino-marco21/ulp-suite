@@ -412,3 +412,18 @@ export function cannotHoldCredential(line: string): boolean {
   if (HAS_SEPARATOR.test(t)) return false
   return HAS_SYMBOL.test(t) || !HAS_LETTER_OR_DIGIT.test(t)
 }
+
+// ─── Parser v6.7: a pipe where the colon behind the scheme belongs ───────────────────────────────────────────────────────────────────────────────────
+// (docs/superpowers/specs/2026-11-08-parser-v6-7-design.md.) A NEW function on purpose, like the v6.2 ones above: the differential runs the previous parser against these helpers.
+
+const SCHEME_WORD_PIPE = /^(https?):?\|(?=\/\/)/i
+
+/**
+ * "https|//host/path|login|password": a list that separates its fields with a pipe also wrote the pipe where the colon behind the scheme belongs. parseLine used to take the
+ * scheme for the url, "//host/path" for the login and "login|password" for the password. The web scheme is put back ("https://host/path|login|password"), which the pipe
+ * rules then read as url|login|password. Null when the line does not start with a web scheme word, an optional colon, a pipe and two slashes.
+ */
+export function joinSchemeWordPipe(trimmed: string): string | null {
+  const m = SCHEME_WORD_PIPE.exec(trimmed)
+  return m ? `${m[1]}:${trimmed.slice(m[0].length)}` : null
+}
