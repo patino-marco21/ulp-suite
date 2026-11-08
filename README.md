@@ -8,7 +8,7 @@
 
 ## What it is
 
-ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores them in ClickHouse, and exposes a fast search and monitoring interface. It runs entirely on your own infrastructure, on one machine: the reference deployment holds **1.87 billion rows (~156 GiB on disk)** on a 32 GB laptop.
+ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores them in ClickHouse, and exposes a fast search and monitoring interface. It runs entirely on your own infrastructure, on one machine: the reference deployment holds **2.79 billion rows (~287 GiB on disk)** on a 32 GB laptop.
 
 **Tech stack:** Next.js 15 · React 19 · ClickHouse · SQLite · TypeScript · Docker
 
@@ -64,7 +64,7 @@ Browser / API client
   │                 │
 ClickHouse       SQLite
 (credentials,    (users, sessions,
- 1.87B rows)      monitors, webhooks,
+ 2.79B rows)      monitors, webhooks,
                   API keys, audit log)
 ```
 
@@ -91,7 +91,7 @@ ClickHouse       SQLite
 | App (Node.js 24) | 8 GB | 6 GB heap (`NODE_OPTIONS`) + 2 GB headroom |
 | ClickHouse | 16 GB | `max_server_memory_usage` is 14 GB, 2 GB under the limit on purpose |
 | OS and desktop | ~8 GB | a desktop session with a browser and a few other containers held about 7.5 GB when measured |
-| **Total** | **32 GB** | the sizing the 1.87B-row reference deployment runs on |
+| **Total** | **32 GB** | the sizing the 2.79B-row reference deployment runs on |
 
 **Smaller machines:** lower the two `mem_limit`s in `docker-compose.yml` together with the
 settings they back: `--max-old-space-size` in the app's `NODE_OPTIONS`, and
@@ -614,7 +614,7 @@ Breaches pages use the same control. Design and measurements: `docs/superpowers/
 
 ## Performance
 
-Reference deployment: 1.87 billion rows (156 GiB), one 32 GB laptop (cold timings, measured 2026-09/10 while the table grew from 1.39 to 1.87 billion rows):
+Reference deployment: one 32 GB laptop. The timings below are cold and were measured on 1.87 billion rows (156 GiB), 2026-09/10, while the table grew from 1.39 to 1.87 billion rows; the table now holds 2.79 billion rows (287 GiB) and they have not been measured again:
 
 | Metric | Value |
 |---|---|

@@ -1,6 +1,6 @@
 # Known-share preflight: design (2026-11-05)
 
-Status: Step A approved by the owner on 2026-11-05 (the answers are at the end); not built yet. Step B is not approved. The repository is public: this file
+Status: Step A approved by the owner on 2026-11-05 (the answers are at the end) and built the same day (`26c0321`: `scripts/preflight.ts --known`, 15 unit tests, 2 CLI tests, `scripts/e2e-known-share.ts` 15/15 on the rehearsal ClickHouse); the comparison with the job log of a real batch is still open. Step B is not approved. The repository is public: this file
 holds numbers only, never file names, search terms or credential values.
 
 ## Why

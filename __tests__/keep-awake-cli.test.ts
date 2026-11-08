@@ -14,7 +14,12 @@ const SCRIPT = join(REPO, 'scripts', 'keep-awake-while-busy.ts')
 
 let root = ''
 let svc: ChildProcess | undefined
-afterEach(() => { svc?.kill('SIGKILL'); svc = undefined; if (root) rmSync(root, { recursive: true, force: true }); root = '' })
+// `tsx` is a wrapper that starts node as its child, and killing only the wrapper leaves that child (and the fake systemd-inhibit under it) running for good.
+// The service is started as the leader of its own process group, so one kill on the group ends all three.
+afterEach(() => {
+  if (svc?.pid) { try { process.kill(-svc.pid, 'SIGKILL') } catch { /* the group is already gone */ } }
+  svc = undefined; if (root) rmSync(root, { recursive: true, force: true }); root = ''
+})
 
 /** A fake systemd-inhibit: logs its arguments, then holds until it is terminated (and logs that). SHIM_REFUSE makes it fail at once when asked to block the lid switch. */
 function start(env: NodeJS.Dict<string> = {}) {
@@ -31,7 +36,7 @@ wait
 `, { mode: 0o755 })
   const logOut: string[] = []
   svc = spawn(TSX, [SCRIPT], {
-    cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'], detached: true,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ULP_REPO: join(root, 'repo'), ULP_KEEP_AWAKE_TICK_MS: '150', ULP_KEEP_AWAKE_GRACE_MS: '700', ULP_KEEP_AWAKE_BATTERY_DIR: power, ...env },
   })
   svc.stdout?.on('data', d => logOut.push(String(d)))
