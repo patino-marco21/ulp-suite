@@ -19,7 +19,7 @@ A search box under the heading ("Check a file name before you download it"). Typ
 - the **size** in bytes (when `ulp.sources` recorded it) so it can be compared with the size the chat client shows: two files can share a name and differ in content;
 - the date, shown in the browser's own time zone (the list showed ClickHouse's UTC string as if it were local time; fixed for both modes).
 
-No match: *"No file with 'x' in its name has been ingested or processed."* with one line saying the importer also skips identical bytes under any name, so a re-download of a known file adds nothing.
+No match: *"No file with 'x' in its name has been ingested or processed."* with one line saying a different name does not make a file new: the importer also compares what is inside and adds only credentials it has not seen.
 
 ## Matching
 
