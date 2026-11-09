@@ -1,8 +1,47 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { executeQuery } from "@/lib/clickhouse"
 import { validateRequest, isAdmin } from "@/lib/auth"
+import { dbQuery } from "@/lib/sqlite"
+import { mergeHits, normalizeQuery, type JobRowInput, type SourceRowInput } from "@/lib/sources-search"
 
 export const dynamic = 'force-dynamic'
+
+/** Names a search can return from ulp.sources. The table holds about a thousand; the cap only guards a table that grows far beyond that. */
+const SEARCH_SOURCE_CAP = 5000
+
+/**
+ * ?q=: "has a file with this name been ingested or processed?" (docs/superpowers/specs/2026-11-08-sources-search-design.md). ulp.sources answers for what the ledger
+ * holds; the job log adds files from before the ledger, held files and failed files. Both are about a thousand names, so the merge and the paging happen here.
+ * The per-name credential count is skipped: it scans ulp.credentials (7 s for 50 names) and the question is whether the file was ingested.
+ */
+async function searchSources(q: string, page: number, limit: number) {
+  const offset = (page - 1) * limit
+  const [sourceRows, jobRows] = await Promise.all([
+    // Aliases follow the list query below: 'last_imported', because an alias equal to imported_at turns argMax(x, imported_at) into a nested aggregate.
+    executeQuery(
+      `SELECT filename,
+              argMax(line_count, imported_at) AS line_count,
+              argMax(size, imported_at)       AS size_bytes,
+              max(imported_at)                AS last_imported
+       FROM ulp.sources
+       WHERE positionCaseInsensitiveUTF8(filename, {q:String}) > 0
+       GROUP BY filename
+       ORDER BY last_imported DESC
+       LIMIT {cap:UInt32}`,
+      { q, cap: SEARCH_SOURCE_CAP }
+    ),
+    Promise.resolve(dbQuery('SELECT id, filename, status, imported, created_at FROM processing_jobs')),
+  ])
+  const hits = mergeHits(sourceRows as SourceRowInput[], jobRows as JobRowInput[], q)
+  return {
+    success: true,
+    sources: hits.slice(offset, offset + limit),
+    total: hits.length,
+    page,
+    pages: Math.ceil(hits.length / limit),
+    query: q,
+  }
+}
 
 export async function GET(request: NextRequest) {
   const user = await validateRequest(request)
@@ -14,6 +53,16 @@ export async function GET(request: NextRequest) {
   const page = Math.max(1, parseInt(searchParams.get('page') || '1'))
   const limit = Math.min(100, Math.max(1, parseInt(searchParams.get('limit') || '50')))
   const offset = (page - 1) * limit
+
+  const q = normalizeQuery(searchParams.get('q'))
+  if (q) {
+    try {
+      return NextResponse.json(await searchSources(q, page, limit))
+    } catch (error) {
+      console.error('Sources search error:', error)
+      return NextResponse.json({ success: false, error: 'Failed to search sources' }, { status: 500 })
+    }
+  }
 
   try {
     // Deduplicate sources: ulp.sources is a plain MergeTree with no uniqueness
