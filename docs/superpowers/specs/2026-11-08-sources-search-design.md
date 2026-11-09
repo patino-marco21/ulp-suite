@@ -1,7 +1,7 @@
 # Sources search: type a file name and see whether it was already ingested — design (2026-11-08)
 
 Date: 2026-11-08
-Status: **Approved by the owner 2026-11-08, being built.** Read-only feature: no table, no DDL, no setting.
+Status: **Built and deployed 2026-11-08** (image `44d99d7f0518`, rollback tag `rollback-20261109-0305z` = the previous image `3e27c3c13271`). Read-only feature: no table, no DDL, no setting. Proved: 20 new tests (5,330 in the suite), the exact statement on the live ClickHouse (case-insensitive, `%` matches nothing, `_` is literal, about 0.1-0.2 s including `docker exec`), and the built image on the isolated rehearsal stack (51 of 51 stack checks; the page driven with seeded rows: badges, size, local-time dates, no-match message, one-character hint, clear, and a slow first search that a faster second one replaced without being overwritten).
 Related: `2026-11-07-file-ledger-design.md` (the ledger the answer comes from), `2026-11-07-download-mover-design.md` (the stand-in and the "check before downloading" tools).
 File names, search terms and credential values are deliberately absent (the repository is public); the tests use placeholders.
 
