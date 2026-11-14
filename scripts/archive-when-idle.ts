@@ -1,12 +1,15 @@
 /**
- * Archives the files in inbox/done once the inbox has been quiet for a while, verifies a sample, and leaves a one-line account for the Inbox page. It NEVER removes
- * plaintext: `archive --replace` (scripts/archive-sources.ts) stays the owner's decision, and the account says what is ready for it and how much it would free.
+ * Archives the files in inbox/done once the inbox has been quiet for a while, verifies a sample, and leaves a one-line account for the Inbox page. It removes plaintext
+ * only when ULP_AUTO_ARCHIVE_REPLACE=1 (the owner's switch, set in scripts/systemd/ulp-archive-auto.service): after a clean archive and sample check it runs
+ * `archive --replace` (scripts/archive-sources.ts), which decodes each archive again, compares it with the original and keeps any file that is not in ulp.sources, still new,
+ * or in flight. Without the switch the account says what is ready to replace and how much that would free, and the replace stays a command of the owner.
  *
  *   tsx scripts/archive-when-idle.ts [--now]
  *
  * Run from the repository root by a systemd user timer (scripts/systemd/ulp-archive-auto.timer, installed by the owner). Environment: ULP_ARCHIVE_DIR (the archive,
  * which must exist), ULP_REPO (the checkout whose ./inbox is watched; default the current directory), CH_CONTAINER (ulpsuite_clickhouse), ULP_AUTO_ARCHIVE_IDLE_MIN
- * (minutes of quiet before a run; default 20), ULP_AUTO_ARCHIVE_WORKERS (default 4). --now skips the wait for quiet, not the check that nothing is in flight.
+ * (minutes of quiet before a run; default 20), ULP_AUTO_ARCHIVE_WORKERS (default 4), ULP_AUTO_ARCHIVE_REPLACE (1 = remove the plaintext of archived files; default off).
+ * --now skips the wait for quiet, not the check that nothing is in flight.
  *
  * A run starts only when nothing is waiting or in flight in the inbox (which also covers the disk gate holding the ingest) and no inbox folder has changed for the wait.
  * Every run, busy inbox or not, first refreshes the plain-text copy of the file ledger (scripts/ledger-export.ts), and again after files were archived (the copy says which
@@ -20,8 +23,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { inboxIsBusy } from '@/lib/archive-replace'
 import {
-  DEFAULT_IDLE_MS, archiveNote, failureBackoff, idleRefusals, inboxLastActivityMs, parseArchiveSummary, parseVerifySummary, readStatus, readyToReplace, writeStatus,
-  type AutoArchiveStatus,
+  DEFAULT_IDLE_MS, archiveNote, failureBackoff, idleRefusals, inboxLastActivityMs, parseArchiveSummary, parseVerifySummary, readStatus, readyToReplace, replaceWanted,
+  writeStatus, type AutoArchiveStatus,
 } from '@/lib/archive-auto'
 import { defaultArchiveDir, latestByName, readManifest } from '@/lib/source-archive'
 
@@ -34,6 +37,7 @@ const TOOL = join(HERE, 'archive-sources.ts')
 const TSX = join(HERE, '..', 'node_modules', '.bin', 'tsx')
 const IDLE_MS = process.env.ULP_AUTO_ARCHIVE_IDLE_MIN !== undefined ? Number(process.env.ULP_AUTO_ARCHIVE_IDLE_MIN) * 60_000 : DEFAULT_IDLE_MS
 const WORKERS = process.env.ULP_AUTO_ARCHIVE_WORKERS ?? '4'
+const REPLACE = process.env.ULP_AUTO_ARCHIVE_REPLACE === '1'
 const now = () => Date.now()
 
 function say(message: string): void { console.log(`[archive-when-idle] ${message}`) }
@@ -111,10 +115,21 @@ function main(): number {
     }
 
     if (ran && archived > 0) refreshLedgerCopy()   // the copy now shows these files as archived, which is what lets the mover swap their downloads for stand-ins
+    let replaced = 0
+    const mid = readyToReplace(DONE, ARCHIVE, latestByName(readManifest(ARCHIVE)))
+    if (replaceWanted({ enabled: REPLACE, failed, verifyFailed: verify?.failed ?? 0, readyFiles: mid.ready_files })) {
+      say(`${mid.ready_files} archived file(s) are still in done/: replacing their plaintext (each archive is decoded and compared with its original first)`)
+      // --no-sources: a replace changes none of what ulp.sources keeps (size, sha256, archive id), and the sync is a mutation over every manifest name on each pass
+      const r = tool(['archive', '--src', DONE, '--workers', WORKERS, '--replace', '--no-sources'])
+      const summary = parseArchiveSummary(r.out)
+      if (summary) { replaced = summary.replaced; failed += summary.failed }
+      else say(`the replace did not run to the end (exit ${r.status}); the files stay and the next run tries again`)   // e.g. ClickHouse did not answer for ulp.sources: not a failed file
+    }
     const after = readyToReplace(DONE, ARCHIVE, latestByName(readManifest(ARCHIVE)))
     const fs = statfsSync(REPO)
     const status: AutoArchiveStatus = {
       v: 1, at: new Date().toISOString(), ran, archived, failed, plain_bytes: plain, verify, ...after, free_bytes: Number(fs.bavail) * Number(fs.bsize),
+      ...(REPLACE ? { auto_replace: true, replaced, replaced_bytes: Math.max(0, mid.ready_bytes - after.ready_bytes) } : {}),
     }
     writeStatus(ARCHIVE, status)
     say(archiveNote(status))

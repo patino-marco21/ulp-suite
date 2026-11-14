@@ -25,7 +25,7 @@ afterEach(() => {
 function start(env: NodeJS.Dict<string> = {}) {
   root = mkdtempSync(join(tmpdir(), 'keep-awake-'))
   const inbox = join(root, 'repo', 'inbox'), bin = join(root, 'bin'), power = join(root, 'power'), log = join(root, 'inhibit.log')
-  for (const d of [join(inbox, 'processing'), join(inbox, 'done'), bin, power]) mkdirSync(d, { recursive: true })
+  for (const d of [join(inbox, 'processing'), join(inbox, 'done'), bin, power, join(root, 'arc')]) mkdirSync(d, { recursive: true })
   writeFileSync(log, '')
   writeFileSync(join(bin, 'systemd-inhibit'), `#!/bin/bash
 echo "inhibit $*" >> "${log}"
@@ -37,11 +37,11 @@ wait
   const logOut: string[] = []
   svc = spawn(TSX, [SCRIPT], {
     cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'], detached: true,
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ULP_REPO: join(root, 'repo'), ULP_KEEP_AWAKE_TICK_MS: '150', ULP_KEEP_AWAKE_GRACE_MS: '700', ULP_KEEP_AWAKE_BATTERY_DIR: power, ...env },
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ULP_REPO: join(root, 'repo'), ULP_ARCHIVE_DIR: join(root, 'arc'), ULP_KEEP_AWAKE_TICK_MS: '150', ULP_KEEP_AWAKE_GRACE_MS: '700', ULP_KEEP_AWAKE_BATTERY_DIR: power, ...env },
   })
   svc.stdout?.on('data', d => logOut.push(String(d)))
   svc.stderr?.on('data', d => logOut.push(String(d)))
-  return { inbox, power, inhibitLog: () => readFileSync(log, 'utf8'), serviceLog: () => logOut.join('') }
+  return { inbox, power, arc: join(root, 'arc'), inhibitLog: () => readFileSync(log, 'utf8'), serviceLog: () => logOut.join('') }
 }
 const waitUntil = (fn: () => boolean, ms = 15_000) => vi.waitFor(() => { if (!fn()) throw new Error('not yet') }, { timeout: ms, interval: 100 })
 
@@ -68,6 +68,22 @@ describe('keep-awake-while-busy', () => {
     writeFileSync(join(s.inbox, 'processing', 'q.txt'), 'x')
     await new Promise(r => setTimeout(r, 1_200))
     expect(s.inhibitLog()).not.toContain('released')
+    expect(s.inhibitLog().match(/inhibit /g)).toHaveLength(1)
+  })
+
+  test('an idle inbox whose done/ holds files the archive has not seen keeps the lock until an archive run reports, then releases it', async () => {
+    const s = start()
+    await waitUntil(() => s.serviceLog().includes('watching'))
+    writeFileSync(join(s.inbox, 'done', 'new.txt'), 'x')                             // a batch just finished: done/ and the inbox changed now, the archive has not run
+    await waitUntil(() => s.inhibitLog().includes('inhibit '))
+    expect(s.serviceLog()).toMatch(/holding a sleep inhibitor/)
+    await new Promise(r => setTimeout(r, 1_500))                                     // well past the 700 ms grace: the archive is still to come
+    expect(s.inhibitLog()).not.toContain('released')
+    writeFileSync(join(s.arc, 'auto-archive-status.json'), JSON.stringify({
+      v: 1, at: new Date().toISOString(), ran: true, archived: 0, failed: 1, plain_bytes: 0, verify: null,
+      ready_files: 0, ready_bytes: 0, unarchived_files: 1, unarchived_bytes: 1, other_files: 0, other_bytes: 0, empty_files: 0, free_bytes: 1,
+    }))                                                                              // a run finished (even one that failed): the wait is over
+    await waitUntil(() => s.inhibitLog().includes('released'))
     expect(s.inhibitLog().match(/inhibit /g)).toHaveLength(1)
   })
 

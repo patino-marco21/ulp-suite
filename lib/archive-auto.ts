@@ -1,7 +1,8 @@
 /**
  * The automatic archive run (scripts/archive-when-idle.ts, ticket 04 of .scratch/ingest-yield-and-throughput): when the inbox has been quiet for a while, the files in
- * inbox/done that are not archived yet are archived and a sample is verified. Plaintext is never removed by it: `--replace` stays the owner's decision. This file holds
- * the plain parts (when to run, what is ready to replace, the status file and its one-line note) so each is tested without a ClickHouse, a real archive or a clock.
+ * inbox/done that are not archived yet are archived and a sample is verified. Plaintext is removed only when the owner switched the replace on
+ * (ULP_AUTO_ARCHIVE_REPLACE=1 in the timer's service); otherwise `--replace` stays a decision of the owner. This file holds the plain parts (when to run, what is ready
+ * to replace, whether the laptop must stay awake for a run, the status file and its one-line note) so each is tested without a ClickHouse, a real archive or a clock.
  *
  * The status file lives in the archive directory, which the app container mounts read-only (docker-compose.yml), so the Inbox page can show it.
  */
@@ -45,6 +46,35 @@ export function failureBackoff(prev: Pick<AutoArchiveStatus, 'at' | 'failed' | '
   const ago = nowMs - Date.parse(prev.at)
   if (!(ago >= 0) || ago >= FAILURE_BACKOFF_MS) return null
   return `the last run failed ${Math.round(ago / 60_000)} minutes ago and a run after a failure waits 6 hours (--now overrides)`
+}
+
+export interface ArchivePendingFacts {
+  /** `*.txt` files in done/ the archive does not hold yet (readyToReplace().unarchived_files). */
+  unarchivedFiles: number
+  /** inboxLastActivityMs(). */
+  lastActivityMs: number | null
+  /** When the last run of archive-when-idle finished (the status file's `at`); null when there is none. */
+  lastRunAtMs: number | null
+  /** failureBackoff() says the next run waits for the failure of the last one. */
+  backingOff: boolean
+}
+
+/**
+ * True while a run of archive-when-idle is still to come for what the inbox just did: files wait in done/ and no run has finished since the inbox last changed. The keep-awake
+ * service counts it as work. Without it the laptop sleeps five minutes after a batch (shut lid, nothing busy), while the archive waits for 20 quiet minutes and for its next
+ * tick, and the run only happens when someone wakes the machine. A run ends the wait whatever it found: a file the tool cannot archive must not keep the laptop on, and neither
+ * must a run held back by the failure back-off (6 hours).
+ */
+export function archivePending(f: ArchivePendingFacts): boolean {
+  if (f.unarchivedFiles === 0 || f.backingOff || f.lastActivityMs === null) return false
+  return f.lastRunAtMs === null || f.lastRunAtMs < f.lastActivityMs
+}
+
+export interface ReplaceFacts { enabled: boolean; failed: number; verifyFailed: number; readyFiles: number }
+
+/** Whether this run goes on to remove plaintext: the owner switched it on, the archive and the sample check were clean, and some archived file is still on disk. */
+export function replaceWanted(f: ReplaceFacts): boolean {
+  return f.enabled && f.failed === 0 && f.verifyFailed === 0 && f.readyFiles > 0
 }
 
 /** The newest modification time of the inbox folders. A folder changes when a file is added, removed or renamed in it, which is what finishing a file does. */
@@ -103,12 +133,12 @@ export function readyToReplace(doneDir: string, archiveDir: string, latest: Map<
   return r
 }
 
-export interface ArchiveSummary { archived: number; already: number; young: number; failed: number; plain_bytes: number }
+export interface ArchiveSummary { archived: number; already: number; young: number; replaced: number; kept: number; failed: number; plain_bytes: number }
 
 /** The last line of `archive`: "archived 11, already archived 8, too young 0, replaced 0, kept 0, failed 0; plaintext 19.20 GiB". */
 export function parseArchiveSummary(output: string): ArchiveSummary | null {
-  const m = /archived (\d+), already archived (\d+), too young (\d+), replaced \d+, kept \d+, failed (\d+); plaintext ([\d.]+) GiB/.exec(output)
-  return m ? { archived: Number(m[1]), already: Number(m[2]), young: Number(m[3]), failed: Number(m[4]), plain_bytes: Math.round(Number(m[5]) * GiB) } : null
+  const m = /archived (\d+), already archived (\d+), too young (\d+), replaced (\d+), kept (\d+), failed (\d+); plaintext ([\d.]+) GiB/.exec(output)
+  return m ? { archived: Number(m[1]), already: Number(m[2]), young: Number(m[3]), replaced: Number(m[4]), kept: Number(m[5]), failed: Number(m[6]), plain_bytes: Math.round(Number(m[7]) * GiB) } : null
 }
 
 /** The last line of `verify`: "verified 3, failed 0". */
@@ -128,6 +158,11 @@ export interface AutoArchiveStatus extends ReadyToReplace {
   plain_bytes: number
   verify: { checked: number; failed: number } | null
   free_bytes: number
+  /** True when this run was allowed to remove plaintext (ULP_AUTO_ARCHIVE_REPLACE=1). Absent in a status written before the replace existed, which reads as false. */
+  auto_replace?: boolean
+  /** Files whose plaintext this run removed, and the bytes that freed (auto_replace only). */
+  replaced?: number
+  replaced_bytes?: number
 }
 
 export function writeStatus(archiveDir: string, status: AutoArchiveStatus): void {
@@ -155,12 +190,18 @@ export function archiveNote(s: AutoArchiveStatus): string {
   if (s.failed > 0) parts.push(`${files(s.failed)} FAILED to archive.`)
   if (s.verify && s.verify.checked === 0 && s.verify.failed > 0) parts.push('The sample check FAILED to run.')
   else if (s.verify && s.verify.failed > 0) parts.push(`${s.verify.failed} of ${s.verify.checked} sampled files FAILED the check.`)
-  parts.push(s.ready_files > 0
-    ? `${files(s.ready_files)} ${s.ready_files === 1 ? 'is' : 'are'} ready to replace: removing their plaintext would free about ${gib(s.ready_bytes)} GiB.`
-    : 'Nothing is ready to replace.')
+  if (s.auto_replace) {
+    const n = s.replaced ?? 0
+    if (n > 0) parts.push(`${n === 1 ? '1 file replaced by its archive' : `${n} files replaced by their archive`} (${gib(s.replaced_bytes ?? 0)} GiB of plaintext removed).`)
+    if (s.ready_files > 0) parts.push(`${files(s.ready_files)} (${gib(s.ready_bytes)} GiB) ${s.ready_files === 1 ? 'is' : 'are'} archived but still on disk: a file that is not in ulp.sources, or is still new, is kept.`)
+  } else {
+    parts.push(s.ready_files > 0
+      ? `${files(s.ready_files)} ${s.ready_files === 1 ? 'is' : 'are'} ready to replace: removing their plaintext would free about ${gib(s.ready_bytes)} GiB.`
+      : 'Nothing is ready to replace.')
+  }
   if (s.unarchived_files > 0) parts.push(`${files(s.unarchived_files)} (${gib(s.unarchived_bytes)} GiB) in done/ ${s.unarchived_files === 1 ? 'is' : 'are'} not archived yet.`)
   if (s.other_files > 0) parts.push(`${files(s.other_files)} (${gib(s.other_bytes)} GiB) with another name than *.txt ${s.other_files === 1 ? 'is' : 'are'} not archived by the tool.`)
   if (s.empty_files > 0) parts.push(`${files(s.empty_files)} of 0 bytes (a copy that failed) ${s.empty_files === 1 ? 'is' : 'are'} in done/.`)
-  parts.push(`Free disk: ${gib(s.free_bytes)} GiB. Nothing is removed without you.`)
+  parts.push(`Free disk: ${gib(s.free_bytes)} GiB. ${s.auto_replace ? 'Plaintext is removed by itself once its archive has been checked.' : 'Nothing is removed without you.'}`)
   return parts.join(' ')
 }

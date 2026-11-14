@@ -27,7 +27,12 @@ function makeBox(files: Record<string, string>, { ageMs = 60 * 60_000, quietMs =
   for (const [name, body] of Object.entries(files)) { const p = join(done, name); writeFileSync(p, body); utimesSync(p, when, when) }
   const quiet = new Date(Date.now() - quietMs)
   for (const d of [inbox, done, join(inbox, 'failed'), join(inbox, 'processing'), join(inbox, 'held')]) utimesSync(d, quiet, quiet)
-  writeFileSync(join(bin, 'docker'), '#!/bin/bash\ncat > /dev/null\nexit 0\n', { mode: 0o755 })
+  // the tool's list of imported names (ulp.sources) comes from the file SHIM_SOURCES names; every other call is a script on stdin that is swallowed
+  writeFileSync(join(bin, 'docker'), `#!/bin/bash
+if [ "\${@: -1}" = "SELECT filename FROM ulp.sources FORMAT JSONEachRow" ]; then [ -n "$SHIM_SOURCES" ] && cat "$SHIM_SOURCES"; exit 0; fi
+cat > /dev/null
+exit 0
+`, { mode: 0o755 })
   const env: NodeJS.ProcessEnv = {
     ...process.env, PATH: `${bin}:${process.env.PATH}`, ULP_ARCHIVE_DIR: arc, ULP_REPO: repo, CH_CONTAINER: 'fake-clickhouse', ULP_ARCHIVE_FREE_MARGIN_BYTES: '0',
     // the run refreshes the plain-text ledger copy too: into the sandbox, never the owner's Desktop
@@ -55,6 +60,34 @@ describe('archive-when-idle', () => {
     expect(existsSync(join(box.arc, '.auto-archive.lock'))).toBe(false)
     expect(readFileSync(join(box.root, 'ledger.tsv'), 'utf8').startsWith('#kind\tfilename')).toBe(true)   // the run refreshed the plain-text ledger copy, in the sandbox
     expect(r.stdout).toMatch(/\[ledger-export\]/)
+  })
+
+  test('with ULP_AUTO_ARCHIVE_REPLACE=1 the archived files that are in ulp.sources lose their plaintext, the others stay, and the account says so', () => {
+    box = makeBox({ 'a.txt': 'line one\nline two\n', 'b.txt': 'other\n' })
+    const sources = join(box.root, 'sources.jsonl')
+    writeFileSync(sources, JSON.stringify({ filename: 'a.txt' }) + '\n')
+    const r = run(box, [], { ULP_AUTO_ARCHIVE_REPLACE: '1', SHIM_SOURCES: sources })
+    expect(r.status).toBe(0)
+    expect(readdirSync(box.done).sort()).toEqual(['b.txt'])                                  // b.txt is not in ulp.sources: kept
+    const s = readStatus(box.arc)
+    expect(s).toMatchObject({ archived: 2, failed: 0, auto_replace: true, replaced: 1, replaced_bytes: Buffer.byteLength('line one\nline two\n'), ready_files: 1, ready_bytes: Buffer.byteLength('other\n') })
+    expect(r.stdout).toMatch(/1 file replaced by its archive/)
+    expect(r.stdout).toMatch(/1 file \(.* GiB\) is archived but still on disk/)
+    expect(r.stdout).not.toMatch(/Nothing is removed without you/)
+    // the account of a second run with nothing new: the kept file is tried again without a failure, a repeated pass changes nothing
+    const again = run(box, ['--now'], { ULP_AUTO_ARCHIVE_REPLACE: '1', SHIM_SOURCES: sources })
+    expect(again.status).toBe(0)
+    expect(readdirSync(box.done).sort()).toEqual(['b.txt'])
+    expect(readStatus(box.arc)).toMatchObject({ ran: false, failed: 0, auto_replace: true, replaced: 0, ready_files: 1 })
+  })
+
+  test('without the switch nothing is replaced, even when every file is in ulp.sources', () => {
+    box = makeBox({ 'a.txt': 'x\n' })
+    const sources = join(box.root, 'sources.jsonl')
+    writeFileSync(sources, JSON.stringify({ filename: 'a.txt' }) + '\n')
+    expect(run(box, [], { SHIM_SOURCES: sources }).status).toBe(0)
+    expect(readdirSync(box.done)).toEqual(['a.txt'])
+    expect(readStatus(box.arc)?.auto_replace).toBeFalsy()
   })
 
   test('a second run with nothing new archives nothing and still refreshes the account', () => {

@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import {
-  DEFAULT_IDLE_MS, FAILURE_BACKOFF_MS, archiveNote, failureBackoff, idleRefusals, inboxLastActivityMs, parseArchiveSummary, parseVerifySummary, readStatus, readyToReplace, writeStatus, type AutoArchiveStatus,
+  DEFAULT_IDLE_MS, FAILURE_BACKOFF_MS, archiveNote, archivePending, failureBackoff, idleRefusals, inboxLastActivityMs, parseArchiveSummary, parseVerifySummary, readStatus, readyToReplace,
+  replaceWanted, writeStatus, type AutoArchiveStatus,
 } from '@/lib/archive-auto'
 import type { ManifestEntry } from '@/lib/source-archive'
 
@@ -39,6 +40,35 @@ describe('failureBackoff', () => {
     expect(failureBackoff({ ...failedRun, failed: 0, verify: { checked: 3, failed: 1 } }, 10 * 60 * MIN + MIN)).not.toBeNull()
     expect(failureBackoff({ ...failedRun, failed: 0, verify: { checked: 3, failed: 0 } }, 10 * 60 * MIN + MIN)).toBeNull()
     expect(failureBackoff(null, 0)).toBeNull()
+  })
+})
+
+describe('archivePending', () => {
+  const pending = { unarchivedFiles: 3, lastActivityMs: 100 * MIN, lastRunAtMs: 50 * MIN, backingOff: false }
+  test('files wait in done/ and no run has finished since the inbox last changed: the laptop must stay awake for the run', () => {
+    expect(archivePending(pending)).toBe(true)
+    expect(archivePending({ ...pending, lastRunAtMs: null })).toBe(true)
+  })
+  test('a run that finished after the last change ends the wait, whatever it left behind: a file the tool cannot archive must not keep the laptop on', () => {
+    expect(archivePending({ ...pending, lastRunAtMs: 101 * MIN })).toBe(false)
+  })
+  test('nothing waiting, or an inbox with no folders: nothing is pending', () => {
+    expect(archivePending({ ...pending, unarchivedFiles: 0 })).toBe(false)
+    expect(archivePending({ ...pending, lastActivityMs: null })).toBe(false)
+  })
+  test('a run held back by the 6-hour failure back-off is not waited for', () => {
+    expect(archivePending({ ...pending, backingOff: true })).toBe(false)
+  })
+})
+
+describe('replaceWanted', () => {
+  const ok = { enabled: true, failed: 0, verifyFailed: 0, readyFiles: 4 }
+  test('only when the owner switched it on, the archive and the sample check were clean, and something is ready', () => {
+    expect(replaceWanted(ok)).toBe(true)
+    expect(replaceWanted({ ...ok, enabled: false })).toBe(false)
+    expect(replaceWanted({ ...ok, failed: 1 })).toBe(false)
+    expect(replaceWanted({ ...ok, verifyFailed: 1 })).toBe(false)
+    expect(replaceWanted({ ...ok, readyFiles: 0 })).toBe(false)
   })
 })
 
@@ -111,7 +141,8 @@ describe('on disk', () => {
 
 describe('the tool\'s summary lines', () => {
   test('parseArchiveSummary reads the counts and the plaintext size', () => {
-    expect(parseArchiveSummary('kept x: y\narchived 11, already archived 8, too young 1, replaced 0, kept 0, failed 2; plaintext 19.20 GiB\nulp.sources was not updated')).toEqual({ archived: 11, already: 8, young: 1, failed: 2, plain_bytes: Math.round(19.2 * GiB) })
+    expect(parseArchiveSummary('kept x: y\narchived 11, already archived 8, too young 1, replaced 0, kept 0, failed 2; plaintext 19.20 GiB\nulp.sources was not updated')).toEqual({ archived: 11, already: 8, young: 1, replaced: 0, kept: 0, failed: 2, plain_bytes: Math.round(19.2 * GiB) })
+    expect(parseArchiveSummary('archived 0, already archived 0, too young 0, replaced 17, kept 2, failed 0; plaintext 36.70 GiB')).toMatchObject({ replaced: 17, kept: 2 })
     expect(parseArchiveSummary('nothing here')).toBeNull()
   })
   test('parseVerifySummary reads checked and failed', () => {
@@ -136,6 +167,17 @@ describe('archiveNote', () => {
     const note = archiveNote({ ...base, archived: 0, plain_bytes: 0, failed: 1, verify: { checked: 0, failed: 1 }, ready_files: 0, ready_bytes: 0 })
     expect(note).toMatch(/^Archive: no file was archived\. 1 file FAILED to archive\. The sample check FAILED to run\. Nothing is ready to replace\./)
     expect(note).not.toMatch(/-\d|sampled/)
+  })
+  test('with the replace switched on it says what was replaced, what stayed, and that nothing waits for the owner', () => {
+    const auto: AutoArchiveStatus = { ...base, auto_replace: true, replaced: 19, replaced_bytes: 42.8 * GiB, ready_files: 0, ready_bytes: 0 }
+    expect(archiveNote(auto)).toBe('Archive: 11 files archived (19.2 GiB), 3 of 3 sampled files verified. 19 files replaced by their archive (42.8 GiB of plaintext removed). Free disk: 163.0 GiB. Plaintext is removed by itself once its archive has been checked.')
+    expect(archiveNote({ ...auto, ran: false, archived: 0, verify: null, replaced: 0, replaced_bytes: 0 })).toBe('Archive: nothing new to archive. Free disk: 163.0 GiB. Plaintext is removed by itself once its archive has been checked.')
+    const kept = archiveNote({ ...auto, replaced: 0, replaced_bytes: 0, ready_files: 2, ready_bytes: 3 * GiB })
+    expect(kept).toMatch(/2 files \(3\.0 GiB\) are archived but still on disk: a file that is not in ulp\.sources, or is still new, is kept\./)
+    expect(kept).not.toMatch(/Nothing is removed without you/)
+  })
+  test('a status written before the replace existed reads as before', () => {
+    expect(archiveNote({ ...base, auto_replace: undefined })).toMatch(/Nothing is removed without you\.$/)
   })
   test('mentions the files the tool cannot archive and the files still waiting for their turn', () => {
     const note = archiveNote({ ...base, unarchived_files: 2, unarchived_bytes: 3 * GiB, other_files: 1, other_bytes: 1 * GiB, empty_files: 5 })

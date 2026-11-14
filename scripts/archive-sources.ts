@@ -134,6 +134,8 @@ async function cmdArchive(): Promise<void> {
   const now = Date.now()
   const jobs: Job[] = []
   const young: string[] = []
+  const refusedEarly: { name: string; why: string }[] = []
+  const busyAtStart = replace && inboxIsBusy(INBOX)
   let already = 0
   let empty = 0
   const inodeOf = new Map<string, string>()   // name -> device:inode, to tell two names of one file apart
@@ -148,6 +150,12 @@ async function cmdArchive(): Promise<void> {
     const prev = latest.get(name)
     const archivedBefore = !!prev && prev.size === st.size && existsSync(join(ARCHIVE, `${prev.id}.zst`))
     if (archivedBefore && !replace) { already++; continue }
+    if (archivedBefore) {
+      // Already archived and the rules refuse the replace (not in ulp.sources, still new, a file in flight): kept as it is, without decoding the archive and hashing the
+      // original again. A pass that runs on a timer would otherwise read the same few big files every time. A file that passes is still decoded before it is removed.
+      const why = replaceRefusals({ nowMs: now, mtimeMs: st.mtimeMs, inboxBusy: busyAtStart, inSources: inSources.has(name), includeUnimported })
+      if (why.length > 0) { refusedEarly.push({ name, why: why.join('; ') }); continue }
+    }
     jobs.push({ src: path, name, size: st.size, mtimeMs: st.mtimeMs, replace, entry: archivedBefore ? prev : undefined })
   }
 
@@ -158,13 +166,14 @@ async function cmdArchive(): Promise<void> {
 
   if (dry) {
     const busy = inboxIsBusy(INBOX)
-    const wouldKeep = replace ? jobs.filter(j => replaceRefusals({ nowMs: now, mtimeMs: j.mtimeMs, inboxBusy: busy, inSources: inSources.has(j.name), includeUnimported }).length > 0).length : 0
-    console.log(`dry run: ${jobs.length} to archive or confirm, ${already} already archived, ${young.length} too young${empty > 0 ? `, ${empty} empty` : ''}${replace ? `, ${wouldKeep} would be kept` : ''}; nothing was written`)
+    const wouldKeep = replace ? refusedEarly.length + jobs.filter(j => replaceRefusals({ nowMs: now, mtimeMs: j.mtimeMs, inboxBusy: busy, inSources: inSources.has(j.name), includeUnimported }).length > 0).length : 0
+    console.log(`dry run: ${jobs.length + refusedEarly.length} to archive or confirm, ${already} already archived, ${young.length} too young${empty > 0 ? `, ${empty} empty` : ''}${replace ? `, ${wouldKeep} would be kept` : ''}; nothing was written`)
     return
   }
 
   const stats = { archived: 0, replaced: 0, kept: 0, failed: 0, plain: 0 }
   const keep = (name: string, why: string) => { stats.kept++; console.log(`kept ${name}: ${why}`) }
+  for (const r of refusedEarly) keep(r.name, r.why)
   let halted = ''
   const doneByInode = new Map<string, ManifestEntry>()   // device:inode -> the entry of the first name of that file that finished
   await runPool(jobs, Math.max(1, Number(flag('workers') ?? '8')), () => {

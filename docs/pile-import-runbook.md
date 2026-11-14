@@ -104,15 +104,20 @@ everything else: it protects against a parser or policy change, not against losi
 `ulp.sources` yet. `scripts/parser-diff.ts`, `scripts/pile/verify-file.ts` and `scripts/extract-dropped-lines.ts` read an archived name exactly like a file, so they keep
 working after `--replace`. For a new batch: archive it first (without `--replace`), import, verify, and replace when you decide.
 
-### Automatic archive (never removes plaintext)
+### Automatic archive and replace
 
 `scripts/archive-when-idle.ts` archives what `inbox/done` holds and the archive does not, verifies a sample (`verify --sample 3`), and writes a one-line account for the Inbox page into the archive
 directory (`auto-archive-status.json`, which the app mounts read-only). It runs only when nothing is waiting or in flight in the inbox (the disk gate holding the ingest leaves files waiting, so that counts) and no
-inbox folder has changed for 20 minutes (`ULP_AUTO_ARCHIVE_IDLE_MIN`); one run at a time (a lock in the archive directory); `Nice=19` and idle I/O class. It never passes `--replace`: the account
-says how many files are ready for it and how much the replace would free, and the replace stays your decision. `*.txt` names only (the tool's rule): other names and files of 0 bytes are counted in the
-account, not archived. After a run that failed, the next waits 6 hours (`--now` overrides, and also skips the wait for quiet; the check that nothing is in flight stays).
+inbox folder has changed for 20 minutes (`ULP_AUTO_ARCHIVE_IDLE_MIN`); one run at a time (a lock in the archive directory); `Nice=19` and idle I/O class. `*.txt` names only (the tool's rule): other names and
+files of 0 bytes are counted in the account, not archived. After a run that failed, the next waits 6 hours (`--now` overrides, and also skips the wait for quiet; the check that nothing is in flight stays).
 
-Install (a user timer, every 30 minutes; the owner's step, nothing is installed by the repository):
+**The replace.** With `ULP_AUTO_ARCHIVE_REPLACE=1` (set in `scripts/systemd/ulp-archive-auto.service`; remove the line and the replace is yours again), a run that archived and sampled cleanly goes on to
+`archive --src inbox/done --replace --no-sources`. The tool then decodes each archive again, compares it with the original, and removes the original only if the name is in `ulp.sources`, the file is
+older than 10 minutes and nothing is in flight in the inbox; any other file is kept without being decoded again, so a pass that finds nothing to do costs a directory listing and one query. The account
+says how many files were replaced, how many GiB that removed, and how many archived files stay on disk. Without the switch the run never passes `--replace`: the account says how many files are ready and how
+much the replace would free. Why a timer and not only the 7-day cleanup at app start: the cleanup runs only when the app starts, so on a container that stays up for weeks it removes nothing.
+
+Install (a user timer, every 10 minutes; the owner's step, nothing is installed by the repository):
 
 ```bash
 mkdir -p ~/.config/systemd/user && cp scripts/systemd/ulp-archive-auto.* ~/.config/systemd/user/
@@ -127,7 +132,8 @@ The service names node by its nvm path (a user service does not read the shell p
 
 A laptop that suspends in the middle of a batch freezes the connection to ClickHouse; the import stalls, the watchdog fails the file, and it is retried once (see the README, "Inbox").
 `scripts/keep-awake-while-busy.ts` avoids that: while a file waits in `inbox/` or anything is in `inbox/processing/` it holds a systemd inhibitor (`sleep:handle-lid-switch`, block mode,
-taken by your user, no sudo), and it lets go 5 minutes after both are empty. **What changes:** with a batch running, the laptop does not suspend, and shutting the lid does not suspend it either,
+taken by your user, no sudo), and it lets go 5 minutes after both are empty. It also holds while imported files in `inbox/done` wait for the archive run that follows a batch (the run needs 20
+quiet minutes; without this a laptop with its lid shut sleeps 5 minutes after the last file and the run waits until someone wakes it), and lets go 5 minutes after that run has finished, whatever it found. **What changes:** with a batch running, the laptop does not suspend, and shutting the lid does not suspend it either,
 so a laptop in a bag keeps running and warm. Safeguards: the lock is never held for more than 12 hours at a stretch (a file stuck in the inbox cannot keep the laptop on all night), it is
 not held on battery power under 15%, and if this system ever refuses a user service the lid-switch lock it holds `sleep` only and says so in the journal.
 

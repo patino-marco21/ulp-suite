@@ -1,9 +1,9 @@
 [Unit]
-Description=Look every 30 minutes for an idle ULP inbox with files to archive
+Description=Look every 10 minutes for an idle ULP inbox with files to archive
 
 [Timer]
 OnBootSec=10min
-OnUnitActiveSec=30min
+OnUnitActiveSec=10min
 AccuracySec=1min
 
 [Install]

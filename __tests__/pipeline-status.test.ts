@@ -87,6 +87,18 @@ describe('evaluate', () => {
     const ready = evaluate(facts({ archive: { timerActive: true, status: { ...facts().archive.status!, ready_files: 33, ready_bytes: 48.5 * 1024 ** 3 } } })).checks.find(x => x.id === 'archive')!
     expect(ready.level).toBe('ok')   // replacing the originals is the owner's decision, not a fault
     expect(ready.lines.join()).toMatch(/33 files/)
+    expect(ready.lines.join()).toMatch(/Your decision \(archive --replace\)/)
+  })
+
+  it('with the replace switched on, archived files still on disk are not presented as waiting for the owner', () => {
+    const base = facts().archive.status!
+    const c = evaluate(facts({ archive: { timerActive: true, status: { ...base, auto_replace: true, replaced: 5, replaced_bytes: 6 * 1024 ** 3, ready_files: 2, ready_bytes: 3 * 1024 ** 3 } } })).checks.find(x => x.id === 'archive')!
+    expect(c.level).toBe('ok')
+    const text = c.lines.join('\n')
+    expect(text).toMatch(/2 files in inbox\/done .*3\.0 GiB.* archived but still on disk/)
+    expect(text).not.toMatch(/Your decision/)
+    const none = evaluate(facts({ archive: { timerActive: true, status: { ...base, auto_replace: true, replaced: 5, replaced_bytes: 6 * 1024 ** 3, ready_files: 0 } } })).checks.find(x => x.id === 'archive')!
+    expect(none.lines.join('\n')).not.toMatch(/ready to replace|still on disk/i)
   })
 
   it('red beats amber in the headline', () => {

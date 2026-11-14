@@ -185,6 +185,30 @@ describe('--replace', () => {
     expect(existsSync(join(box.src, 'r.txt'))).toBe(false)
   })
 
+  test('a file the rules refuse to replace is kept without being decoded again: a repeated replace pass must stay cheap', () => {
+    box = makeBox({ 'r.txt': body })
+    expect(run(box, ['archive', '--src', box.src, '--no-sources']).status).toBe(0)         // archived; r.txt is not in ulp.sources
+    const zst = readdirSync(box.arc).find(n => n.endsWith('.zst'))!
+    writeFileSync(join(box.arc, zst), 'not a zstd frame')                                    // a decode of this archive would now fail
+    const r = run(box, ['archive', '--src', box.src, '--replace', '--no-sources'])
+    expect(r.stdout).toMatch(/kept r\.txt: not in ulp\.sources/)
+    expect(r.stdout).toMatch(/replaced 0, kept 1, failed 0/)
+    expect(r.status).toBe(0)
+    expect(existsSync(join(box.src, 'r.txt'))).toBe(true)
+  })
+
+  test('a file that may be replaced is still decoded first: a damaged archive is a failure, never a removal', () => {
+    box = makeBox({ 'r.txt': body })
+    writeFileSync(box.sources, JSON.stringify({ filename: 'r.txt' }) + '\n')
+    expect(run(box, ['archive', '--src', box.src, '--no-sources']).status).toBe(0)
+    const zst = readdirSync(box.arc).find(n => n.endsWith('.zst'))!
+    writeFileSync(join(box.arc, zst), 'not a zstd frame')
+    const r = run(box, ['archive', '--src', box.src, '--replace', '--no-sources'])
+    expect(r.stdout).toMatch(/FAILED r\.txt/)
+    expect(r.stdout).toMatch(/replaced 0, kept 0, failed 1/)
+    expect(existsSync(join(box.src, 'r.txt'))).toBe(true)
+  })
+
   test('without ClickHouse it refuses before touching anything', () => {
     box = makeBox({ 'r.txt': body })
     const r = run(box, ['archive', '--src', box.src, '--replace'], { SHIM_FAIL: '1' })

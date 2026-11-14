@@ -280,7 +280,10 @@ export function evaluate(f: PipelineFacts): Verdict {
       c.summary = `Last check ${ago(age)}: ${a.unarchived_files === 0 ? 'every imported file is archived' : `${plural(a.unarchived_files, 'file')} waiting for the next run (it runs after 20 quiet minutes)`}.`
       if (a.failed > 0 || (a.verify?.failed ?? 0) > 0) { c.level = 'fail'; c.lines.push('An archive or its sample check failed on the last run.'); c.todo = 'journalctl --user -u ulp-archive-auto.service -n 40' }
       else if (age > 3 * 3600_000) { c.level = 'warn'; c.lines.push('The archive has not been checked for over 3 hours.') }
-      if (a.ready_files > 0) c.lines.push(`Ready to replace: ${plural(a.ready_files, 'file')} in inbox/done; removing their plaintext would free about ${gib(a.ready_bytes)} GiB. Your decision (archive --replace).`)
+      if (a.auto_replace) {
+        // the run removes plaintext by itself; what is left is what its rules keep (not in ulp.sources, still new), which is not waiting for a decision
+        if (a.ready_files > 0) c.lines.push(`${plural(a.ready_files, 'file')} in inbox/done (${gib(a.ready_bytes)} GiB) archived but still on disk: a file that is not in ulp.sources, or is still new, is kept.`)
+      } else if (a.ready_files > 0) c.lines.push(`Ready to replace: ${plural(a.ready_files, 'file')} in inbox/done; removing their plaintext would free about ${gib(a.ready_bytes)} GiB. Your decision (archive --replace).`)
     }
     checks.push(c)
   }
@@ -391,7 +394,9 @@ What happens to a download
   4. In the Downloads folder a STAND-IN takes its place: same name, size and modification time, no disk space. That is why AyuGram keeps showing the message as
      downloaded, also after a restart or a reboot. Never delete a stand-in you want AyuGram to remember.
   5. Once the inbox has been quiet for 20 minutes the files in inbox/done are archived (compressed, verified) in   ${f.paths.archive}
-  6. Removing the big originals from inbox/done is still your decision (archive --replace); STATUS says how much it would free.
+  6. ${f.archive.status?.auto_replace
+    ? 'The same run then removes the big originals from inbox/done whose archive was decoded again and matches (archive --replace); a file that is not in ulp.sources or is still new stays, and STATUS says how many.'
+    : 'Removing the big originals from inbox/done is still your decision (archive --replace); STATUS says how much it would free.'}
 
 Files in this folder
   STATUS.html / STATUS.txt   the status pages (rewritten every minute)

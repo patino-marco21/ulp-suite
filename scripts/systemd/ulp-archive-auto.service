@@ -1,5 +1,5 @@
 [Unit]
-Description=Archive inbox/done when the ULP inbox is idle (never removes plaintext)
+Description=Archive inbox/done when the ULP inbox is idle, then remove the plaintext of archived files (only after each archive is decoded and compared)
 Documentation=file://%h/Desktop/ulp-suite/scripts/archive-when-idle.ts
 
 [Service]
@@ -9,6 +9,8 @@ WorkingDirectory=%h/Desktop/ulp-suite
 Environment=PATH=%h/.nvm/versions/node/v24.16.0/bin:/usr/local/bin:/usr/bin:/bin
 Environment=ULP_REPO=%h/Desktop/ulp-suite
 Environment=ULP_ARCHIVE_DIR=%h/Desktop/ulp-archive
+# 1 = after a clean archive and sample check, remove the plaintext of archived files (archive --replace, with its guards). Delete this line to leave the replace to the owner.
+Environment=ULP_AUTO_ARCHIVE_REPLACE=1
 ExecStart=%h/Desktop/ulp-suite/node_modules/.bin/tsx scripts/archive-when-idle.ts
 Nice=19
 IOSchedulingClass=idle

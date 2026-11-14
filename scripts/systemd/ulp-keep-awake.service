@@ -1,5 +1,5 @@
 [Unit]
-Description=Keep the laptop awake while the ULP inbox has work (sleep inhibitor, released when idle)
+Description=Keep the laptop awake while the ULP inbox has work or an archive run is due (sleep inhibitor, released when idle)
 Documentation=file://%h/Desktop/ulp-suite/scripts/keep-awake-while-busy.ts
 
 [Service]
@@ -8,6 +8,8 @@ WorkingDirectory=%h/Desktop/ulp-suite
 # node comes from nvm on this machine; a user service does not read the shell profile, so name it. Edit the version after a node upgrade.
 Environment=PATH=%h/.nvm/versions/node/v24.16.0/bin:/usr/local/bin:/usr/bin:/bin
 Environment=ULP_REPO=%h/Desktop/ulp-suite
+# the archive whose auto-archive-status.json says when the last archive run finished: the lock is also held until that run has happened
+Environment=ULP_ARCHIVE_DIR=%h/Desktop/ulp-archive
 ExecStart=%h/Desktop/ulp-suite/node_modules/.bin/tsx scripts/keep-awake-while-busy.ts
 Restart=on-failure
 RestartSec=30

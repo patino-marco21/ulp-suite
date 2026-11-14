@@ -1,7 +1,9 @@
 /**
  * Keeps the laptop awake while the inbox has work (ticket 06 of .scratch/ingest-yield-and-throughput). A suspended laptop freezes the connection to ClickHouse and an
  * import stalls (the stall watchdog then fails the file; ticket 03 retries it once); this takes a systemd sleep inhibitor while files wait or are processed and
- * releases it a few minutes after both are done.
+ * releases it a few minutes after both are done. The archive run that follows a batch is work too: it waits for 20 quiet minutes (scripts/archive-when-idle.ts), and a laptop
+ * with its lid shut would otherwise sleep five minutes after the last file and only archive when someone woke it. So the lock is also held while imported files in
+ * inbox/done wait for a run that has not yet finished (archivePending in lib/archive-auto.ts); the 12-hour ceiling and the battery guard apply to it as well.
  *
  *   tsx scripts/keep-awake-while-busy.ts
  *
@@ -9,20 +11,25 @@
  * suspend, and with `handle-lid-switch` held neither does shutting the lid, so a laptop in a bag keeps running and warm. Safeguards: the lock is never held for more than
  * 12 hours at a stretch, and is not held on battery power under 15%. If a user service may not block the lid switch on this system, it falls back to `sleep` only and says so.
  *
- * Environment: ULP_REPO (the checkout whose ./inbox is watched; default the current directory), ULP_KEEP_AWAKE_TICK_MS (check interval, default 30000),
+ * Environment: ULP_REPO (the checkout whose ./inbox is watched; default the current directory), ULP_ARCHIVE_DIR (the archive whose auto-archive-status.json says when the last
+ * run finished; default ~/ulp-archive), ULP_KEEP_AWAKE_TICK_MS (check interval, default 30000),
  * ULP_KEEP_AWAKE_GRACE_MS (idle time before release, default 5 minutes), ULP_KEEP_AWAKE_BATTERY_DIR (default /sys/class/power_supply, for tests).
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { archivePending, failureBackoff, inboxLastActivityMs, readStatus, readyToReplace } from '@/lib/archive-auto'
 import { inboxIsBusy } from '@/lib/archive-replace'
+import { defaultArchiveDir, latestByName, readManifest } from '@/lib/source-archive'
 import { GRACE_MS, MAX_HOLD_MS, batteryIsLow, keepAwakeAction, type BatteryReading } from '@/lib/keep-awake'
 
 const INBOX = join(process.env.ULP_REPO ?? process.cwd(), 'inbox')
+const ARCHIVE = defaultArchiveDir()
 const TICK_MS = Number(process.env.ULP_KEEP_AWAKE_TICK_MS ?? 30_000)
 const GRACE = Number(process.env.ULP_KEEP_AWAKE_GRACE_MS ?? GRACE_MS)
 const POWER_DIR = process.env.ULP_KEEP_AWAKE_BATTERY_DIR ?? '/sys/class/power_supply'
-const WHY = 'ULP inbox: files are waiting or being imported'
+const WHY_INBOX = 'ULP inbox: files are waiting or being imported'
+const WHY_ARCHIVE = 'ULP archive: imported files wait for the archive run'
 
 function say(message: string): void { console.log(`[keep-awake] ${message}`) }
 
@@ -49,9 +56,27 @@ let capped = false
 /** What the lock blocks. handle-lid-switch is dropped for good if the system refuses it to a user service. */
 let what = 'sleep:handle-lid-switch'
 
-function take(): void {
+/**
+ * True while imported files wait in inbox/done for an archive run that has not finished since the inbox last changed. The cheap checks come first (two stat calls and one
+ * small file), so an idle laptop pays for the directory scan only right after a batch. Any error reads as "nothing pending": the archive must never be the reason the
+ * laptop stays on by mistake.
+ */
+function archiveIsPending(): boolean {
+  try {
+    const lastActivityMs = inboxLastActivityMs(INBOX)
+    const status = readStatus(ARCHIVE)
+    const lastRunAtMs = status ? Date.parse(status.at) : null
+    if (lastActivityMs === null || (lastRunAtMs !== null && lastRunAtMs >= lastActivityMs)) return false
+    const unarchivedFiles = readyToReplace(join(INBOX, 'done'), ARCHIVE, latestByName(readManifest(ARCHIVE))).unarchived_files
+    return archivePending({ unarchivedFiles, lastActivityMs, lastRunAtMs, backingOff: failureBackoff(status, Date.now()) !== null })
+  } catch {
+    return false
+  }
+}
+
+function take(why: string): void {
   const blocks = what
-  const child = spawn('systemd-inhibit', [`--what=${blocks}`, '--who=ulp-suite', `--why=${WHY}`, '--mode=block', 'sleep', 'infinity'], { stdio: 'ignore' })
+  const child = spawn('systemd-inhibit', [`--what=${blocks}`, '--who=ulp-suite', `--why=${why}`, '--mode=block', 'sleep', 'infinity'], { stdio: 'ignore' })
   const startedAt = Date.now()
   child.on('error', err => { say(`could not start systemd-inhibit: ${err.message}`); if (holder === child) { holder = null; holdingSinceMs = null } })
   child.on('exit', code => {
@@ -67,7 +92,7 @@ function take(): void {
   })
   holder = child
   holdingSinceMs = startedAt
-  say(`holding a sleep inhibitor (${blocks}): ${WHY}`)
+  say(`holding a sleep inhibitor (${blocks}): ${why}`)
 }
 
 function release(reason: string): void {
@@ -80,14 +105,16 @@ function release(reason: string): void {
 }
 
 function tick(): void {
-  const busy = inboxIsBusy(INBOX)
+  const filesBusy = inboxIsBusy(INBOX)
+  const archiveBusy = !filesBusy && archiveIsPending()
+  const busy = filesBusy || archiveBusy
   const now = Date.now()
   if (busy) lastBusyMs = now
   const decision = keepAwakeAction({
     busy, holding: holder !== null, holdingSinceMs, lastBusyMs, nowMs: now, graceMs: GRACE, maxHoldMs: MAX_HOLD_MS, batteryLow: batteryIsLow(readBattery()), capped,
   })
   capped = decision.capped
-  if (decision.action === 'take') take()
+  if (decision.action === 'take') take(archiveBusy ? WHY_ARCHIVE : WHY_INBOX)
   else if (decision.action === 'release') release(decision.reason)
 }
 
