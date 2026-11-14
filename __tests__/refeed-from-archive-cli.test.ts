@@ -29,7 +29,8 @@ beforeEach(() => {
 })
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
-const args = (extra: string[]) => ['--no-refresh', '--inbox', inbox, '--ledger', ledger, '--archive', arc, '--poll-secs', '0.1', ...extra]
+// --floor-gib 0: the sandbox is under os.tmpdir(), and where that is a small tmpfs (16 GiB here) the script's own 60 GiB free-space floor would pause every --apply run for good
+const args = (extra: string[]) => ['--no-refresh', '--inbox', inbox, '--ledger', ledger, '--archive', arc, '--poll-secs', '0.1', '--floor-gib', '0', ...extra]
 const run = (extra: string[], env: NodeJS.Dict<string> = {}) =>
   spawnSync(TSX, [SCRIPT, ...args(extra)], { cwd: REPO, encoding: 'utf8', timeout: 60_000, env: { ...process.env, ...env } })
 
