@@ -12,9 +12,9 @@
  * `inFileDuplicates` how many rows repeated an earlier row of the same file (novelty-aware ingest; 0 when it is switched off).
  *
  * Uses the same processing pipeline as the other routes:
- *   - processTextFile  for .txt/.csv  (streams the spool file; also matches credentials against domain monitors
- *                       in-process and fires alerts via fireMonitorAlertsFromMatches — not a separate step)
- *   - processZipFile   for .zip       (yauzl lazy entry streaming from the spool file)
+ *   - processTextFile  for .txt only  (streams the spool file; also matches credentials against domain monitors
+ *                       in-process and fires alerts via fireMonitorAlertsFromMatches — not a separate step).
+ *                       Archives and .csv are refused (lib/txt-only.ts, owner rule 2026-11-14).
  *   - logJob           for observability (appears in /inbox monitor)
  *   - logUploadAction  for the audit log (who, which file, how it ended)
  */
@@ -22,10 +22,10 @@
 import { NextRequest, NextResponse } from "next/server"
 import { withApiKeyAuth, addRateLimitHeaders, logApiRequest } from "@/lib/api-key-auth"
 import { uploadQueue } from "@/lib/upload-queue"
-import { processTextFile, processZipFile, type ProcessResult } from "@/lib/upload-processor"
+import { processTextFile, type ProcessResult } from "@/lib/upload-processor"
+import { isTxtName, onlyTxtMessage } from "@/lib/txt-only"
 import { logJob } from "@/lib/processing-log"
-import { addToTally, jobAccounting, newJobTally, tallyOf } from "@/lib/import-summary"
-import { sumTimings } from "@/lib/phase-timings"
+import { jobAccounting, tallyOf } from "@/lib/import-summary"
 import { settingsManager } from "@/lib/settings"
 import { formatBytes } from "@/lib/utils"
 import { runImportJob } from '@/lib/import-runner'
@@ -65,11 +65,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: false, error: 'No file data received' }, { status: 400 })
   }
 
-  const name = originalFilename.toLowerCase()
-  const isText = name.endsWith('.txt') || name.endsWith('.csv')
-  const isZip  = name.endsWith('.zip')
-  if (!isText && !isZip) {
-    return NextResponse.json({ success: false, error: 'Unsupported file type. Use .txt, .csv, or .zip' }, { status: 400 })
+  if (!isTxtName(originalFilename)) {
+    return NextResponse.json({ success: false, error: onlyTxtMessage(originalFilename) }, { status: 400 })
   }
 
   const startAt = Date.now()
@@ -86,112 +83,52 @@ export async function POST(request: NextRequest) {
     const file = spool.path
     void logUploadAction(
       'upload.api.start', actor, null,
-      { ...keyDetails, filename: originalFilename, bytes: spool.bytes, kind: isZip ? 'zip' : 'text' },
+      { ...keyDetails, filename: originalFilename, bytes: spool.bytes, kind: 'text' },
       request,
     )
 
-    // ── Plain text / CSV ──────────────────────────────────────────────────────
+    // ── Plain text ────────────────────────────────────────────────────────────
     // Streaming: constant RAM regardless of file size.
     // Runs through the shared uploadQueue so it doesn't race with other uploads.
-    if (isText) {
-      // Definite assignment: uploadQueue always resolves the import or throws, so `result` is always assigned when we
-      // reach the next line.
-      // eslint-disable-next-line prefer-const
-      let result!: ProcessResult
-
-      await uploadQueue(async () => {
-        result = await runImportJob({
-          label: originalFilename,
-          work:  ctx => processTextFile(file, originalFilename, undefined, undefined, ctx),
-        })
-      })
-      const r = result
-      logJob({
-        source:      'http',
-        filename:    originalFilename,
-        status:      'done',
-        imported:    r.imported,
-        known:       r.known,
-        skipped:     r.skipped,
-        duration_ms: Date.now() - startAt,
-        breach_name: r.breach_name,
-        ...r.timings,
-        ...jobAccounting(tallyOf(r)),
-      })
-      void logUploadAction('upload.api.complete', actor, null, {
-        ...keyDetails, filename: originalFilename, imported: r.imported, known: r.known, skipped: r.skipped, duration_ms: Date.now() - startAt,
-      })
-
-      const response = NextResponse.json({
-        success:  true,
-        imported: r.imported,
-        known:    r.known,
-        inFileDuplicates: r.inFileDuplicates,
-        skipped:  r.skipped,
-        errors:   r.errors,
-        filename: r.filename,
-      })
-      return addRateLimitHeaders(response, authResult.rateLimit)
-    }
-
-    // ── ZIP archive ───────────────────────────────────────────────────────────
-    const results: ProcessResult[] = []
-    let totalErrors = 0
-    const failedEntries: string[] = []
-    const tally = newJobTally()
+    // Definite assignment: uploadQueue always resolves the import or throws, so `result` is always assigned when we
+    // reach the next line.
+    // eslint-disable-next-line prefer-const
+    let result!: ProcessResult
 
     await uploadQueue(async () => {
-      await runImportJob({
+      result = await runImportJob({
         label: originalFilename,
-        work:  ctx => processZipFile(file, result => {
-          addToTally(tally, result)
-          if (result.imported > 0 || result.known > 0) results.push(result)
-          if (result.errors > 0) {
-            totalErrors += result.errors
-            failedEntries.push(
-              result.error_reason ? `${result.filename} (${result.error_reason})` : result.filename
-            )
-          }
-        }, ctx),
+        work:  ctx => processTextFile(file, originalFilename, undefined, undefined, ctx),
       })
     })
-
-    let totalImported = 0
-    let totalKnown    = 0
-    let totalRepeated = 0
-    let totalSkipped  = 0
-    for (const r of results) { totalImported += r.imported; totalKnown += r.known; totalRepeated += r.inFileDuplicates; totalSkipped += r.skipped }
-
+    const r = result
     logJob({
       source:      'http',
       filename:    originalFilename,
       status:      'done',
-      imported:    totalImported,
-      known:       totalKnown,
-      skipped:     totalSkipped,
+      imported:    r.imported,
+      known:       r.known,
+      skipped:     r.skipped,
       duration_ms: Date.now() - startAt,
-      ...sumTimings(results),
-      ...jobAccounting(tally),
-      ...(failedEntries.length > 0
-        ? { error_message: `${failedEntries.length} entr${failedEntries.length === 1 ? 'y' : 'ies'} skipped: ${failedEntries.join(', ')}` }
-        : {}),
+      breach_name: r.breach_name,
+      ...r.timings,
+      ...jobAccounting(tallyOf(r)),
     })
     void logUploadAction('upload.api.complete', actor, null, {
-      ...keyDetails, filename: originalFilename, imported: totalImported, known: totalKnown, skipped: totalSkipped, errors: totalErrors,
-      duration_ms: Date.now() - startAt,
+      ...keyDetails, filename: originalFilename, imported: r.imported, known: r.known, skipped: r.skipped, duration_ms: Date.now() - startAt,
     })
 
     const response = NextResponse.json({
       success:  true,
-      imported: totalImported,
-      known:    totalKnown,
-      inFileDuplicates: totalRepeated,
-      skipped:  totalSkipped,
-      errors:   totalErrors,
-      files:    results.map(r => ({ filename: r.filename, imported: r.imported, known: r.known })),
-      filename: originalFilename,
+      imported: r.imported,
+      known:    r.known,
+      inFileDuplicates: r.inFileDuplicates,
+      skipped:  r.skipped,
+      errors:   r.errors,
+      filename: r.filename,
     })
     return addRateLimitHeaders(response, authResult.rateLimit)
+  
   } catch (error) {
     if (isIngestHeldError(error) && spool) {
       // The quality gate stopped the file before one row was stored. It is kept in inbox/held/; an admin can review it and release it in the Inbox.

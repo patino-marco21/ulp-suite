@@ -11,10 +11,10 @@ describe('inbox watcher: imports run under the stall watchdog', () => {
     expect(source).not.toContain('processTextStream')
   })
 
-  test('the text, the zip and the archive-reference import all run inside runImportJob', () => {
+  test('the text and the archive-reference import both run inside runImportJob, and there is no zip import', () => {
     const afterClaim = source.slice(source.indexOf('claimFileForProcessing(filePath, PROC)'))
-    expect(afterClaim.match(/runImportJob\(/g)?.length).toBe(3)
-    expect(afterClaim).toContain('processZipFile(claimedPath')
+    expect(afterClaim.match(/runImportJob\(/g)?.length).toBe(2)
+    expect(afterClaim).not.toContain('processZip')
     expect(afterClaim).toContain('processTextFile(claimedPath')
     expect(afterClaim).toContain('processArchiveRef(claimedPath')
   })

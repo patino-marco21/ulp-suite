@@ -4,7 +4,7 @@
  *
  * The unit tests use fakes. This uses real uploads, a real ClickHouse and a real process kill. Scenarios (keys for --only=):
  *   basic       a new file; the same content under a new name (0 new, the name remembered, a second upload of it skipped); a
- *               half-overlap file; a file with repeated lines; a ZIP with a new and a known entry; a file dropped in the inbox
+ *               half-overlap file; a file with repeated lines; an upload named .zip, refused; a file dropped in the inbox
  *   tags        Telegram channel tags on credential lines (space-separated, glued on, with an advert): the tag is cut off, a banner line
  *               and a watermark line are skipped, and a banner that starts with http does not swallow the lines after it
  *   positional  a credential line the field split rejects does not take the two lines after it for a login and a password (no merged
@@ -80,7 +80,7 @@
  *   REHEARSAL_JWT_SECRET=x REHEARSAL_ADMIN_EMAIL=x@x.test REHEARSAL_ADMIN_PASSWORD=x REHEARSAL_WEBHOOK_SECRET=x \
  *     docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v   # the compose file wants these set even to stop the stack
  *
- * Needs `zip` and `curl`, and about 40 GiB of free host disk for the gate scenario. Exit 0 when every check passes, 1 when one
+ * Needs `curl`, and about 40 GiB of free host disk for the gate scenario. Exit 0 when every check passes, 1 when one
  * fails, 2 when the stack is not ready or there is not enough room to run.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
@@ -365,21 +365,11 @@ async function basic(): Promise<void> {
   check('a file of 5000 lines repeated three times: 5000 new, 10000 repeats, none known', d.status === 'done' && d.imported === 5_000 && d.inFileDuplicates === 10_000 && d.known === 0, brief(d))
   check('...5000 rows stored', rowsFor(D) === 5_000, `rows ${rowsFor(D)}`)
 
+  // Plain text only: an upload named .zip is refused before a byte is read, and nothing is stored (owner rule 2026-11-14).
   const z1 = `e2e-nov-z1-${RUN}.txt`
-  const z2 = `e2e-nov-z2-${RUN}.txt`
-  const zipPath = join(work, `e2e-nov-${RUN}.zip`)
-  sh('zip', ['-j', '-q', zipPath, fixture(z1, lines('Z', 0, 3_000)), fixture(z2, lines('A', 0, 5_000))])
-  const zip = upload(`e2e-nov-${RUN}.zip`, zipPath)
-  let zipJson: any = null
-  try {
-    zipJson = JSON.parse(zip.body)
-  } catch {
-    /* reported below */
-  }
-  check('a ZIP with a new and a known entry: 3000 new, 5000 known', zip.status === 200 && zipJson?.imported === 3_000 && zipJson?.known === 5_000, zip.body.slice(0, 200))
-  check('...both entries are listed, the known one with 0 new rows',
-    zipJson?.files?.length === 2 && zipJson.files.some((f: any) => f.filename === z2 && f.imported === 0 && f.known === 5_000), JSON.stringify(zipJson?.files))
-  check('...and both entries are remembered', sourceLine(z1) === '3000' && sourceLine(z2) === '0', `[${sourceLine(z1)}] [${sourceLine(z2)}]`)
+  const zipName = `e2e-nov-${RUN}.zip`
+  const refused = upload(zipName, fixture(z1, lines('Z', 0, 3_000)))
+  check('a .zip upload is refused with 400 "Only .txt" and stores nothing', refused.status === 400 && /Only \.txt/.test(refused.body) && sourceLine(zipName) === '' && sourceLine(z1) === '', `${refused.status} ${refused.body.slice(0, 160)}`)
 
   const N = `e2e-nov-inbox-${RUN}.txt`
   sh('docker', ['exec', '-i', APP, 'sh', '-c', `cat > /app/inbox/${N}`], process.env, text([...lines('A', 0, 3_000), ...lines('N', 0, 5_000)]))

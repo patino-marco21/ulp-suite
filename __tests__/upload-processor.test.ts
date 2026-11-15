@@ -1,10 +1,8 @@
 import fs, { readFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
-import { EventEmitter } from 'events'
 import { Readable } from 'stream'
 import { beforeEach, describe, it, expect, vi } from 'vitest'
-import type yauzl from 'yauzl'
 
 // ─── Mocks for everything processTextStream touches downstream ──────────────
 
@@ -37,44 +35,6 @@ beforeEach(() => {
   dm.fireMonitorAlertsFromMatches.mockReset()
   dm.fireMonitorAlertsFromMatches.mockResolvedValue(undefined)
 })
-
-// ─── Fake yauzl ZipFile ───────────────────────────────────────────────────────
-
-interface FakeEntrySpec {
-  fileName: string
-  /** String content for a successful entry, or an Error to fail openReadStream. */
-  contentOrError: string | Error
-}
-
-class FakeZipFile extends EventEmitter {
-  private idx = 0
-  constructor(private specs: FakeEntrySpec[]) { super() }
-
-  readEntry(): void {
-    if (this.idx >= this.specs.length) {
-      process.nextTick(() => this.emit('end'))
-      return
-    }
-    const spec = this.specs[this.idx++]
-    process.nextTick(() => this.emit('entry', { fileName: spec.fileName } as yauzl.Entry))
-  }
-
-  openReadStream(entry: yauzl.Entry, cb: (err: Error | null, stream?: Readable) => void): void {
-    const spec = this.specs.find(s => s.fileName === entry.fileName)!
-    if (spec.contentOrError instanceof Error) {
-      process.nextTick(() => cb(spec.contentOrError as Error))
-    } else {
-      process.nextTick(() => cb(null, Readable.from([Buffer.from(spec.contentOrError as string)])))
-    }
-  }
-}
-
-vi.mock('yauzl', () => ({
-  default: {
-    fromBuffer: vi.fn(),
-    open: vi.fn(),
-  },
-}))
 
 describe('upload processor source contract', () => {
   it('exports the 100,000-row upload batch size and removes the import-time dedup hook', async () => {
@@ -249,181 +209,6 @@ describe('upload processor source contract', () => {
       warnSpy.mockRestore()
       vi.useRealTimers()
     }
-  })
-})
-
-describe('processZipBuffer', () => {
-  it('continues processing remaining entries after one entry fails to open (e.g. encrypted)', async () => {
-    const yauzl = (await import('yauzl')).default
-    const { processZipBuffer } = await import('@/lib/upload-processor')
-
-    const fake = new FakeZipFile([
-      { fileName: 'bad.txt', contentOrError: new Error('entry is encrypted') },
-      { fileName: 'good.txt', contentOrError: 'https://example.com/login:user@example.com:mypassword\n' },
-    ])
-
-    ;(yauzl.fromBuffer as any).mockImplementation(
-      (_buf: Buffer, _opts: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => {
-        cb(null, fake as unknown as yauzl.ZipFile)
-      }
-    )
-
-    const results: Array<{ filename: string; imported: number; errors: number }> = []
-    await processZipBuffer(Buffer.from('fake zip'), result => {
-      results.push({ filename: result.filename, imported: result.imported, errors: result.errors })
-    })
-
-    expect(results).toHaveLength(2)
-    expect(results[0]).toEqual({ filename: 'bad.txt', imported: 0, errors: 1 })
-    expect(results[1]).toEqual({ filename: 'good.txt', imported: 1, errors: 0 })
-  })
-
-  it('reads the .txt entry of a zip that also holds other files, and says in the log how many it did not read', async () => {
-    const yauzl = (await import('yauzl')).default
-    const { processZipBuffer } = await import('@/lib/upload-processor')
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const fake = new FakeZipFile([
-      { fileName: 'dir/', contentOrError: '' },
-      { fileName: 'dir/Passwords.log', contentOrError: 'x' },
-      { fileName: 'dir/Cookies', contentOrError: 'x' },
-      { fileName: 'good.txt', contentOrError: 'https://example.com/login:user@example.com:mypassword\n' },
-    ])
-    ;(yauzl.fromBuffer as any).mockImplementation((_b: Buffer, _o: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => { cb(null, fake as unknown as yauzl.ZipFile) })
-    try {
-      const results: Array<{ filename: string; imported: number }> = []
-      await processZipBuffer(Buffer.from('fake zip'), r => { results.push({ filename: r.filename, imported: r.imported }) })
-      expect(results).toEqual([{ filename: 'good.txt', imported: 1 }])
-      const said = warn.mock.calls.flat().join(' ')
-      expect(said).toMatch(/2 entries were not read/)
-      expect(said).toContain('.log x1')
-      expect(said).toContain('(no extension) x1')
-    } finally { warn.mockRestore() }
-  })
-
-  it('fails a zip with no .txt or .csv entry, with the reason, instead of finishing with nothing', async () => {
-    const yauzl = (await import('yauzl')).default
-    const { processZipBuffer } = await import('@/lib/upload-processor')
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const fake = new FakeZipFile([
-      { fileName: 'a/Passwords.log', contentOrError: 'x' },
-      { fileName: 'a/Passwords.dat', contentOrError: 'x' },
-      { fileName: 'b/Passwords.log', contentOrError: 'x' },
-    ])
-    ;(yauzl.fromBuffer as any).mockImplementation((_b: Buffer, _o: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => { cb(null, fake as unknown as yauzl.ZipFile) })
-    try {
-      await expect(processZipBuffer(Buffer.from('fake zip'), () => {})).rejects.toThrow(/no \.txt or \.csv entry; 3 entries have other names \(\.log x2, \.dat x1\)/)
-    } finally { warn.mockRestore() }
-  })
-
-  it('an empty zip, or one with only folders, finishes as before', async () => {
-    const yauzl = (await import('yauzl')).default
-    const { processZipBuffer } = await import('@/lib/upload-processor')
-    const fake = new FakeZipFile([{ fileName: 'only-a-folder/', contentOrError: '' }])
-    ;(yauzl.fromBuffer as any).mockImplementation((_b: Buffer, _o: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => { cb(null, fake as unknown as yauzl.ZipFile) })
-    await expect(processZipBuffer(Buffer.from('fake zip'), () => {})).resolves.toBeUndefined()
-  })
-
-  it('continues processing remaining entries after one entry stream errors mid-read', async () => {
-    const yauzl = (await import('yauzl')).default
-    const { processZipBuffer } = await import('@/lib/upload-processor')
-
-    class ErroringReadable extends Readable {
-      _read(): void {
-        process.nextTick(() => this.emit('error', new Error('CRC32 checksum mismatch')))
-      }
-    }
-
-    const fake = new FakeZipFile([
-      { fileName: 'good1.txt', contentOrError: 'https://example.com/login:user1@example.com:mypassword\n' },
-      { fileName: 'corrupt.txt', contentOrError: 'placeholder' },
-      { fileName: 'good2.txt', contentOrError: 'https://example.com/login:user2@example.com:mypassword\n' },
-    ])
-
-    // Override openReadStream for the corrupt entry to return a stream that errors.
-    const originalOpen = fake.openReadStream.bind(fake)
-    fake.openReadStream = (entry: yauzl.Entry, cb: (err: Error | null, stream?: Readable) => void) => {
-      if (entry.fileName === 'corrupt.txt') {
-        process.nextTick(() => cb(null, new ErroringReadable()))
-        return
-      }
-      originalOpen(entry, cb)
-    }
-
-    ;(yauzl.fromBuffer as any).mockImplementation(
-      (_buf: Buffer, _opts: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => {
-        cb(null, fake as unknown as yauzl.ZipFile)
-      }
-    )
-
-    const results: Array<{ filename: string; imported: number; errors: number }> = []
-    await processZipBuffer(Buffer.from('fake zip'), result => {
-      results.push({ filename: result.filename, imported: result.imported, errors: result.errors })
-    })
-
-    expect(results).toHaveLength(3)
-    expect(results.map(r => r.filename)).toEqual(['good1.txt', 'corrupt.txt', 'good2.txt'])
-    expect(results[1]).toEqual({ filename: 'corrupt.txt', imported: 0, errors: 1 })
-    expect(results[0].imported).toBe(1)
-    expect(results[2].imported).toBe(1)
-  })
-
-  it('rejects the archive when text processing fails in ClickHouse', async () => {
-    const yauzl = (await import('yauzl')).default
-    const { processZipBuffer } = await import('@/lib/upload-processor')
-    const databaseError = Object.assign(new Error('DB::Exception: bad query'), { code: '62' })
-    h.query.mockRejectedValue(databaseError)
-
-    const fake = new FakeZipFile([
-      { fileName: 'db-failure.txt', contentOrError: 'https://example.com/login:user@example.com:mypassword\n' },
-      { fileName: 'must-not-run.txt', contentOrError: 'https://example.com/login:user2@example.com:mypassword\n' },
-    ])
-    ;(yauzl.fromBuffer as any).mockImplementation(
-      (_buf: Buffer, _opts: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => {
-        cb(null, fake as unknown as yauzl.ZipFile)
-      }
-    )
-
-    const results: unknown[] = []
-    await expect(processZipBuffer(Buffer.from('fake zip'), result => results.push(result))).rejects.toBe(databaseError)
-    expect(results).toEqual([])
-  })
-
-  it('rejects the archive when text processing exhausts ClickHouse retries', async () => {
-    const yauzl = (await import('yauzl')).default
-    const { ClickHouseRetryExhaustedError } = await import('@/lib/clickhouse-retry')
-    const { processZipBuffer } = await import('@/lib/upload-processor')
-    const retryError = new ClickHouseRetryExhaustedError(3, Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }))
-    h.query.mockRejectedValue(retryError)
-
-    const fake = new FakeZipFile([
-      { fileName: 'retry-exhausted.txt', contentOrError: 'https://example.com/login:user@example.com:mypassword\n' },
-    ])
-    ;(yauzl.fromBuffer as any).mockImplementation(
-      (_buf: Buffer, _opts: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => {
-        cb(null, fake as unknown as yauzl.ZipFile)
-      }
-    )
-
-    await expect(processZipBuffer(Buffer.from('fake zip'), () => {})).rejects.toBe(retryError)
-  })
-
-  it('rejects the archive when a credential insert exhausts ClickHouse retries', async () => {
-    const yauzl = (await import('yauzl')).default
-    const { ClickHouseRetryExhaustedError } = await import('@/lib/clickhouse-retry')
-    const { processZipBuffer } = await import('@/lib/upload-processor')
-    const retryError = new ClickHouseRetryExhaustedError(2, Object.assign(new Error('refused'), { code: 'ECONNRESET' }))
-    h.insert.mockRejectedValue(retryError)
-
-    const fake = new FakeZipFile([
-      { fileName: 'insert-exhausted.txt', contentOrError: 'https://example.com/login:user@example.com:mypassword\n' },
-    ])
-    ;(yauzl.fromBuffer as any).mockImplementation(
-      (_buf: Buffer, _opts: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => {
-        cb(null, fake as unknown as yauzl.ZipFile)
-      }
-    )
-
-    await expect(processZipBuffer(Buffer.from('fake zip'), () => {})).rejects.toBe(retryError)
   })
 })
 
@@ -688,32 +473,5 @@ describe('processTextFile', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
-  })
-})
-
-describe('processZipFile: abort', () => {
-  it('stops at the next entry and rejects with the reason when the signal aborts', async () => {
-    const yauzl = (await import('yauzl')).default
-    const { processZipFile } = await import('@/lib/upload-processor')
-    const controller = new AbortController()
-    const reason = new Error('import stalled')
-    const fake = new FakeZipFile([
-      { fileName: 'one.txt', contentOrError: 'https://example.com/login:one@example.com:mypassword\n' },
-      { fileName: 'two.txt', contentOrError: 'https://example.com/login:two@example.com:mypassword\n' },
-    ])
-    ;(yauzl.open as any).mockImplementation(
-      (_path: string, _opts: unknown, cb: (err: Error | null, zipfile: yauzl.ZipFile) => void) => {
-        cb(null, fake as unknown as yauzl.ZipFile)
-      }
-    )
-
-    const seen: string[] = []
-    const promise = processZipFile('/spool/x.upload', result => {
-      seen.push(result.filename)
-      controller.abort(reason) // cancel right after the first entry
-    }, { signal: controller.signal })
-
-    await expect(promise).rejects.toBe(reason)
-    expect(seen).toEqual(['one.txt'])
   })
 })

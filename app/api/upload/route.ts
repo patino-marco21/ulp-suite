@@ -1,15 +1,14 @@
 import { type NextRequest, NextResponse } from 'next/server'
 import { validateRequest, requireAdminRole, type JWTPayload } from '@/lib/auth'
-import { makeRejectionMap, type RejectionReason } from '@/lib/ulp-parser'
 import { matchBreach } from '@/lib/breach-matcher'
 import { runClickHouseMigrations } from '@/lib/clickhouse-migrations'
 import { createJob, getJob, updateJob, pushEvent } from '@/lib/upload-jobs'
 import { uploadQueue, setCurrentJob } from '@/lib/upload-queue'
-import { processTextFile, processZipFile, type ProcessResult } from '@/lib/upload-processor'
+import { processTextFile, type ProcessResult } from '@/lib/upload-processor'
+import { isTxtName, onlyTxtMessage } from '@/lib/txt-only'
 import { checkLimit, getClientIP } from '@/lib/rate-limiter'
 import { logJob } from '@/lib/processing-log'
-import { addToTally, jobAccounting, newJobTally, tallyOf } from '@/lib/import-summary'
-import { sumTimings } from '@/lib/phase-timings'
+import { jobAccounting, tallyOf } from '@/lib/import-summary'
 import { settingsManager } from '@/lib/settings'
 import { formatBytes } from '@/lib/utils'
 import { runImportJob } from '@/lib/import-runner'
@@ -165,12 +164,10 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  const filename = originalFilename.toLowerCase()
-  const isText = filename.endsWith('.txt') || filename.endsWith('.csv')
-  const isZip  = filename.endsWith('.zip')
-  if (!isText && !isZip) {
+  // Plain text only (lib/txt-only.ts): archives and .csv are refused before a byte is spooled.
+  if (!isTxtName(originalFilename)) {
     return NextResponse.json(
-      { success: false, error: 'Unsupported file type. Upload a .txt, .csv, or .zip file.' },
+      { success: false, error: onlyTxtMessage(originalFilename) },
       { status: 400 },
     )
   }
@@ -200,153 +197,49 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  // For text the queue owns the spool file from here on; for ZIP this handler does until it responds.
+  // The queue owns the spool file from here on.
   const requestStartedAt = Date.now()
   let handedOff = false
   try {
-    // ── Plain text / CSV ──────────────────────────────────────────────────────
-    if (isText) {
-      const jobId       = crypto.randomUUID()
-      const breach_name = matchBreach(originalFilename)
-      createJob(jobId, Math.floor(spool.bytes / 60), breach_name)
-      void logUploadAction(
-        'upload.start', actor, jobId,
-        { filename: originalFilename, bytes: spool.bytes, via: 'ui' },
-        request,
-      )
-
-      runWithProgress(
-        jobId,
-        originalFilename,
-        actor,
-        () => uploadQueue(async () => {
-          setCurrentJob(originalFilename)
-          try {
-            return await runImportJob({
-              label: originalFilename,
-              work:  ctx => processTextFile(spool.path, originalFilename, jobId, undefined, ctx),
-            })
-          } catch (err) {
-            // Keep a file the quality gate held (the spool file moves to inbox/held/); everything else is discarded below, as before.
-            if (isIngestHeldError(err)) holdSpooledFile(spool.path, originalFilename)
-            throw err
-          } finally {
-            setCurrentJob(null)
-            await discardSpool(spool.path)
-          }
-        }),
-      ).catch(console.error)
-      handedOff = true
-
-      return NextResponse.json({
-        success:        true,
-        jobId,
-        streamUrl:      `/api/upload/progress/${jobId}`,
-        queue_position: uploadQueue.pendingCount,
-      })
-    }
-
-    // ── ZIP archive ───────────────────────────────────────────────────────────
-    const startAt = Date.now()
-    const results: ProcessResult[] = []
-    let totalErrors = 0
-    const failedEntries: string[] = []
-    const tally = newJobTally()
+    const jobId       = crypto.randomUUID()
+    const breach_name = matchBreach(originalFilename)
+    createJob(jobId, Math.floor(spool.bytes / 60), breach_name)
     void logUploadAction(
-      'upload.start', actor, null,
-      { filename: originalFilename, bytes: spool.bytes, via: 'ui', kind: 'zip' },
+      'upload.start', actor, jobId,
+      { filename: originalFilename, bytes: spool.bytes, via: 'ui' },
       request,
     )
 
-    try {
-      await uploadQueue(async () => {
+    runWithProgress(
+      jobId,
+      originalFilename,
+      actor,
+      () => uploadQueue(async () => {
         setCurrentJob(originalFilename)
         try {
-          await runImportJob({
+          return await runImportJob({
             label: originalFilename,
-            work:  ctx => processZipFile(spool.path, result => {
-              addToTally(tally, result)
-              if (result.imported > 0 || result.known > 0) results.push(result)
-              if (result.errors > 0) {
-                totalErrors += result.errors
-                failedEntries.push(
-                  result.error_reason ? `${result.filename} (${result.error_reason})` : result.filename
-                )
-              }
-            }, ctx),
+            work:  ctx => processTextFile(spool.path, originalFilename, jobId, undefined, ctx),
           })
+        } catch (err) {
+          // Keep a file the quality gate held (the spool file moves to inbox/held/); everything else is discarded below, as before.
+          if (isIngestHeldError(err)) holdSpooledFile(spool.path, originalFilename)
+          throw err
         } finally {
           setCurrentJob(null)
+          await discardSpool(spool.path)
         }
-      })
-    } catch (error) {
-      void logUploadAction('upload.fail', actor, null, {
-        filename: originalFilename,
-        error: error instanceof Error ? error.message : String(error),
-        duration_ms: Date.now() - startAt,
-      })
-      throw error
-    }
+      }),
+    ).catch(console.error)
+    handedOff = true
 
-    const totalBreakdown = makeRejectionMap()
-    let totalImported = 0
-    let totalKnown    = 0
-    let totalRepeated = 0
-    let totalSkipped  = 0
-    let totalTierDropped = 0
-
-    for (const r of results) {
-      totalImported += r.imported
-      totalKnown    += r.known
-      totalRepeated += r.inFileDuplicates
-      totalSkipped  += r.skipped
-      totalTierDropped += r.tierDropped
-      for (const [k, v] of Object.entries(r.rejection_breakdown)) {
-        totalBreakdown[k as RejectionReason] += v
-      }
-    }
-
-    logJob({
-      source:      'http',
-      filename:    originalFilename,
-      status:      'done',
-      imported:    totalImported,
-      known:       totalKnown,
-      skipped:     totalSkipped,
-      duration_ms: Date.now() - startAt,
-      ...sumTimings(results),
-      ...jobAccounting(tally),
-      ...(failedEntries.length > 0
-        ? { error_message: `${failedEntries.length} entr${failedEntries.length === 1 ? 'y' : 'ies'} skipped: ${failedEntries.join(', ')}` }
-        : {}),
-    })
-    void logUploadAction('upload.complete', actor, null, {
-      filename: originalFilename, imported: totalImported, known: totalKnown, skipped: totalSkipped, errors: totalErrors,
-      duration_ms: Date.now() - startAt,
-    })
-
-    // Lines the parser accepted: new rows, rows already in the database and rows repeated inside a file. (On the direct path the
-    // last two are 0, which makes this the same ratio as before.)
-    const kept  = totalImported + totalKnown + totalRepeated
-    const total = kept + totalSkipped
     return NextResponse.json({
-      success:             true,
-      imported:            totalImported,
-      known:               totalKnown,
-      inFileDuplicates:    totalRepeated,
-      skipped:             totalSkipped,
-      tierDropped:         totalTierDropped,
-      errors:              totalErrors,
-      import_pct:          total > 0 ? Math.round(kept / total * 1000) / 10 : 0,
-      rejection_breakdown: totalBreakdown,
-      files:               results.map(r => ({
-        filename:    r.filename,
-        breach_name: r.breach_name,
-        imported:    r.imported,
-        known:       r.known,
-      })),
-      filename: originalFilename,
+      success:        true,
+      jobId,
+      streamUrl:      `/api/upload/progress/${jobId}`,
+      queue_position: uploadQueue.pendingCount,
     })
+  
   } catch (error) {
     if (isIngestHeldError(error)) {
       // The quality gate stopped an entry of the archive. The archive is kept in inbox/held/; an admin can review it and release it in the Inbox.

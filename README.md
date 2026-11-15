@@ -26,7 +26,7 @@ ULP Suite ingests stealer log ULP (URL:Login:Password) credential lines, stores 
 - **Sources search** — the *Sources* tab has a search box: type part of a file name to see whether it was already ingested before you download it. A match shows *Ingested*, *Processed earlier* (the job log finished it before the file ledger existed), *Held* (the quality gate stopped it) or *Failed*, with the size (to compare with the size the chat client shows) and the date. It reads `ulp.sources` and the job log (a few milliseconds); the per-file credential count of the plain list is left out while searching
 
 ### Upload & Ingestion
-- Upload `.txt` / `.csv` ULP files or `.zip` archives via drag-and-drop
+- Upload `.txt` ULP files via drag-and-drop. **Plain text only**: archives (`.zip`, `.rar`, `.7z`, ...) and `.csv` are refused by the upload page, both upload APIs and the inbox (archives and similar containers carry a much higher risk of malware; no zip or csv job had ever run), and the app has no archive reader
 - **Live progress bar** — real-time import counter (lines imported, skipped, elapsed time) via Server-Sent Events
 - RFC 3986-correct ULP parser — handles ports, IPv4, colons in passwords, tab/semicolon/colon separators
 - CSV streaming insert into ClickHouse — peak heap ~2 MB per 500K-row batch (vs ~400 MB with JSON)
@@ -138,7 +138,7 @@ Open [http://localhost:3000](http://localhost:3000). Log in with `ADMIN_EMAIL` /
 
 ### Inbox folder (batch / automated uploads)
 
-Drop credential files directly into `./inbox/` from the host:
+Drop credential files directly into `./inbox/` from the host. Only `.txt` is imported: a `.zip`, `.rar`, `.7z`, `.gz`, `.csv` or similar goes to `./inbox/failed/` with the reason, and a name with no known extension (a Telegram date fragment such as `... ULP PRIVATE.08`) is imported only when its content is plain text:
 
 Imports run in 100,000-row synchronous batches, and temporary ClickHouse outages pause and retry the active batch for up to 30 minutes; permanent or semantic failures still move the file to `./inbox/failed/`.
 
@@ -296,8 +296,8 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   Parser v6.5 (`docs/superpowers/specs/2026-11-06-site-annotation-design.md`) reads `host/path:(host/path):login:password`, a parenthesised copy of the url's host between the
   url and the credential, as an annotation: the login and the password are the fields after it (a number or text that is not the host in parentheses stays as it was).
   Parser v6.6 (`docs/superpowers/specs/2026-11-07-parser-v6-6-design.md`) reads an Android app id behind a stray `https://` like any app-id line, accepts a host written with its
-  trailing dot, and accepts an underscore in a label in front of the last one (a package name or a file name behind `https://` is still not a host). A `.zip` with no `.txt`/`.csv`
-  entry now fails with the reason (and the log counts the entries it did not read) instead of finishing with 0 rows.
+  trailing dot, and accepts an underscore in a label in front of the last one (a package name or a file name behind `https://` is still not a host). (This release also handled a `.zip` with no
+  text entry; the intake no longer takes archives at all.)
   Parser v6.7 (`docs/superpowers/specs/2026-11-08-parser-v6-7-design.md`) reads `https|//host/path|login|password`, a pipe where the colon behind the scheme belongs, as
   `https://host/path|login|password` (it was stored as the url `https`, the login `//host/path` and the password `login|password`), and rejects four kinds of field that are no credential:
   the text a stealer tool writes when it could not decrypt a password, a login without a letter or a digit, a fragment of a JSON object in a field, and an advert that starts with emoji

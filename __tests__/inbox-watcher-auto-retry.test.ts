@@ -10,7 +10,6 @@ import { ImportStalledError } from '@/lib/import-runner'
 
 const h = vi.hoisted(() => ({
   processTextFile: vi.fn(),
-  processZipFile: vi.fn(),
   processArchiveRef: vi.fn(),
   logJob: vi.fn(),
   consume: vi.fn(),
@@ -18,7 +17,7 @@ const h = vi.hoisted(() => ({
   schedule: vi.fn(),
 }))
 
-vi.mock('@/lib/upload-processor', () => ({ processTextFile: h.processTextFile, processZipFile: h.processZipFile, processArchiveRef: h.processArchiveRef }))
+vi.mock('@/lib/upload-processor', () => ({ processTextFile: h.processTextFile, processArchiveRef: h.processArchiveRef }))
 vi.mock('@/lib/processing-log', () => ({ logJob: h.logJob }))
 vi.mock('@/lib/ingest-gate-store', () => ({ consumeGateOverride: h.consume }))
 vi.mock('@/lib/upload-queue', () => ({ uploadQueue: (fn: () => Promise<unknown>) => fn(), queueSize: () => 0, setCurrentJob: () => {} }))

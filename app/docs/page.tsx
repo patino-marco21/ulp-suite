@@ -1051,7 +1051,7 @@ curl "${baseUrl}/api/v1/summary?imported_after=2026-10-17T16:00:00Z" \\
                   <code className="text-lg font-mono text-foreground">/api/v1/upload</code>
                 </div>
                 <CardDescription className="text-muted-foreground mt-2">
-                  Upload a credential file (.txt, .csv, or .zip). The file is processed synchronously and returns import statistics when complete. Admin API key required.
+                  Upload a credential file (.txt only; archives and .csv are refused). The file is processed synchronously and returns import statistics when complete. Admin API key required.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
@@ -1059,16 +1059,16 @@ curl "${baseUrl}/api/v1/summary?imported_after=2026-10-17T16:00:00Z" \\
                 <div>
                   <h4 className="font-semibold mb-3 text-foreground">Query Parameters</h4>
                   <ParameterTable params={[
-                    { name: "filename", type: "string", required: true, description: "Original filename, used to determine .txt/.csv/.zip handling and breach-name matching. The request body is the raw file bytes." },
+                    { name: "filename", type: "string", required: true, description: "Original filename, which must end in .txt (anything else is refused with a 400), and which is used for breach-name matching. The request body is the raw file bytes." },
                   ]} />
                 </div>
 
                 {/* Example Request */}
                 <div>
                   <h4 className="font-semibold mb-3 text-foreground">Example Request</h4>
-                  <CodeBlock code={`curl -X POST "${baseUrl}/api/v1/upload?filename=stealer_logs.zip" \\
+                  <CodeBlock code={`curl -X POST "${baseUrl}/api/v1/upload?filename=credentials.txt" \\
   -H "X-API-Key: bv_admin_api_key" \\
-  -T stealer_logs.zip`} />
+  -T credentials.txt`} />
                 </div>
 
                 {/* Response */}
@@ -1094,8 +1094,7 @@ curl "${baseUrl}/api/v1/summary?imported_after=2026-10-17T16:00:00Z" \\
                     <code className="text-xs bg-muted px-1 rounded">imported</code> counts NEW rows only.{" "}
                     <code className="text-xs bg-muted px-1 rounded">known</code> is how many distinct credentials of the file the database
                     already held, and <code className="text-xs bg-muted px-1 rounded">inFileDuplicates</code> how many rows repeated an
-                    earlier row of the same file. A ZIP reply adds <code className="text-xs bg-muted px-1 rounded">known</code> to each
-                    entry of <code className="text-xs bg-muted px-1 rounded">files</code>.
+                    earlier row of the same file.
                   </p>
                 </div>
               </CardContent>
@@ -1111,9 +1110,9 @@ curl "${baseUrl}/api/v1/summary?imported_after=2026-10-17T16:00:00Z" \\
                   <div className="space-y-1">
                     <p className="text-sm font-medium text-foreground">Supported file formats</p>
                     <p className="text-sm text-muted-foreground">
-                      The upload endpoint accepts <code className="text-xs bg-muted px-1 rounded">.txt</code>,{" "}
-                      <code className="text-xs bg-muted px-1 rounded">.csv</code>, and{" "}
-                      <code className="text-xs bg-muted px-1 rounded">.zip</code> archives containing multiple credential files.
+                      The upload endpoint accepts plain <code className="text-xs bg-muted px-1 rounded">.txt</code> files only: archives
+                      (<code className="text-xs bg-muted px-1 rounded">.zip</code>, <code className="text-xs bg-muted px-1 rounded">.rar</code>,{" "}
+                      <code className="text-xs bg-muted px-1 rounded">.7z</code>) and <code className="text-xs bg-muted px-1 rounded">.csv</code> are refused.
                       Breach tagging, duplicate detection, and domain extraction happen automatically at ingest time.
                     </p>
                     <p className="text-sm text-muted-foreground mt-1">

@@ -75,9 +75,10 @@ describe('inbox watcher wiring', () => {
     expect(sniff).toBeGreaterThan(stable)
   })
 
-  test('only zip and text content are let through; everything else still goes to failed/', () => {
-    expect(fn).toMatch(/kind === 'zip'\) ext = '\.zip'/)
+  test('only text content is let through; a zip, any other binary and a container name still go to failed/', () => {
+    expect(fn).not.toMatch(/kind === 'zip'/)
     expect(fn).toMatch(/kind === 'text'\) ext = '\.txt'/)
+    expect(fn).toMatch(/!REFUSED_EXTS\.has\(ext\)/)
     expect(fn).toContain('moved to failed/')
     expect(fn).toMatch(/\.catch\(\(\) => 'binary' as const\)/)
   })

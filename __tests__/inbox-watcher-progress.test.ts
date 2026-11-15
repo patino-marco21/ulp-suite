@@ -7,9 +7,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const h = vi.hoisted(() => ({ processTextFile: vi.fn(), processZipFile: vi.fn(), processArchiveRef: vi.fn(), logJob: vi.fn() }))
+const h = vi.hoisted(() => ({ processTextFile: vi.fn(), processArchiveRef: vi.fn(), logJob: vi.fn() }))
 
-vi.mock('@/lib/upload-processor', () => ({ processTextFile: h.processTextFile, processZipFile: h.processZipFile, processArchiveRef: h.processArchiveRef }))
+vi.mock('@/lib/upload-processor', () => ({ processTextFile: h.processTextFile, processArchiveRef: h.processArchiveRef }))
 vi.mock('@/lib/processing-log', () => ({ logJob: h.logJob }))
 vi.mock('@/lib/ingest-gate-store', () => ({ consumeGateOverride: () => false }))
 vi.mock('@/lib/upload-queue', () => ({ uploadQueue: (fn: () => Promise<unknown>) => fn(), queueSize: () => 0, setCurrentJob: () => {} }))

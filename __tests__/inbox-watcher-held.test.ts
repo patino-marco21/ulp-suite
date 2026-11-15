@@ -10,13 +10,12 @@ import { IngestHeldError, type GateReport } from '@/lib/ingest-quality-gate'
 
 const h = vi.hoisted(() => ({
   processTextFile: vi.fn(),
-  processZipFile: vi.fn(),
   processArchiveRef: vi.fn(),
   logJob: vi.fn(),
   consume: vi.fn(),
 }))
 
-vi.mock('@/lib/upload-processor', () => ({ processTextFile: h.processTextFile, processZipFile: h.processZipFile, processArchiveRef: h.processArchiveRef }))
+vi.mock('@/lib/upload-processor', () => ({ processTextFile: h.processTextFile, processArchiveRef: h.processArchiveRef }))
 vi.mock('@/lib/processing-log', () => ({ logJob: h.logJob }))
 vi.mock('@/lib/ingest-gate-store', () => ({ consumeGateOverride: h.consume }))
 vi.mock('@/lib/upload-queue', () => ({ uploadQueue: (fn: () => Promise<unknown>) => fn(), queueSize: () => 0, setCurrentJob: () => {} }))
@@ -82,13 +81,6 @@ describe('inbox watcher: held files', () => {
     })])
   })
 
-  it('holds a ZIP the same way', async () => {
-    h.processZipFile.mockRejectedValue(new IngestHeldError(REPORT))
-    await run('held-b.zip')
-    expect(existsSync(dir('held', 'held-b.zip'))).toBe(true)
-    expect(logged('held-b.zip')[0]).toMatchObject({ status: 'held' })
-  })
-
   it('still sends an ordinary failure to inbox/failed/', async () => {
     h.processTextFile.mockRejectedValue(new Error('boom'))
     await run('failed-a.txt')
@@ -124,15 +116,6 @@ describe('inbox watcher: phase timings', () => {
     h.processTextFile.mockResolvedValue({ ...OK, timings: { parse_ms: 11, check_ms: 22, insert_ms: 33 } })
     await run('timed-a.txt')
     expect(logged('timed-a.txt')[0]).toMatchObject({ status: 'done', parse_ms: 11, check_ms: 22, insert_ms: 33 })
-  })
-
-  it('adds up the phase timings of the entries of a ZIP', async () => {
-    h.processZipFile.mockImplementation(async (_path: string, onEntry: (r: unknown) => void) => {
-      onEntry({ ...OK, filename: 'a.txt', timings: { parse_ms: 10, check_ms: 20, insert_ms: 30 } })
-      onEntry({ ...OK, filename: 'b.txt', timings: { parse_ms: 1, check_ms: 2, insert_ms: 3 } })
-    })
-    await run('timed-b.zip')
-    expect(logged('timed-b.zip')[0]).toMatchObject({ status: 'done', imported: 10, parse_ms: 11, check_ms: 22, insert_ms: 33 })
   })
 
   it('logs a file without timings (the direct path) as before, with none of the three', async () => {
@@ -217,31 +200,6 @@ describe('inbox watcher: what the job row says about the lines', () => {
     h.processTextFile.mockResolvedValue(SKIPPED)
     await run('lines-b.txt')
     expect(logged('lines-b.txt')[0]).toMatchObject({ status: 'done', imported: 0, repeats: 0, note: 'already-imported' })
-  })
-
-  it('adds up the repeats of the entries of a ZIP', async () => {
-    h.processZipFile.mockImplementation(async (_path: string, onEntry: (r: unknown) => void) => {
-      onEntry({ ...OK, filename: 'a.txt', inFileDuplicates: 3 })
-      onEntry({ ...OK, filename: 'b.txt', inFileDuplicates: 4 })
-    })
-    await run('lines-c.zip')
-    expect(logged('lines-c.zip')[0]).toMatchObject({ status: 'done', repeats: 7 })
-    expect(logged('lines-c.zip')[0].note).toBeUndefined()
-  })
-
-  it('labels a ZIP whose entries were all skipped, but not one where only some were', async () => {
-    h.processZipFile.mockImplementation(async (_path: string, onEntry: (r: unknown) => void) => {
-      onEntry({ ...SKIPPED, filename: 'a.txt' })
-      onEntry({ ...SKIPPED, filename: 'b.txt' })
-    })
-    await run('lines-d.zip')
-    expect(logged('lines-d.zip')[0]).toMatchObject({ status: 'done', note: 'already-imported' })
-    h.processZipFile.mockImplementation(async (_path: string, onEntry: (r: unknown) => void) => {
-      onEntry({ ...SKIPPED, filename: 'a.txt' })
-      onEntry({ ...OK, filename: 'b.txt' })
-    })
-    await run('lines-e.zip')
-    expect(logged('lines-e.zip')[0].note).toBeUndefined()
   })
 
   it('records the same for an import from the archive', async () => {

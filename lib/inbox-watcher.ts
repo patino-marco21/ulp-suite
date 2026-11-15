@@ -1,8 +1,8 @@
 /**
  * Inbox folder watcher.
  *
- * Drop .txt, .csv, or .zip files into ./inbox/ and they are processed
- * automatically through the same streaming pipeline as the HTTP upload API.
+ * Drop .txt files into ./inbox/ and they are processed automatically through the same streaming pipeline as the HTTP upload API.
+ * Only plain text is imported: archives (.zip, .rar, .7z, ...) and .csv are refused (owner rule 2026-11-14).
  *
  * Directory layout (auto-created on startup):
  *   ./inbox/            — place files here
@@ -39,10 +39,11 @@ import path from 'path'
 import fs from 'fs'
 import { uploadQueue, queueSize, setCurrentJob } from '@/lib/upload-queue'
 import { logJob } from '@/lib/processing-log'
-import { processTextFile, processZipFile, processArchiveRef } from '@/lib/upload-processor'
+import { processTextFile, processArchiveRef } from '@/lib/upload-processor'
 import { runImportJob } from '@/lib/import-runner'
 import { claimFileForProcessing, sweepProcessingToFailed, isFileSizeStable, moveFile } from '@/lib/inbox-claim'
 import { retryFiles, sniffFileKind } from '@/lib/inbox-helpers'
+import { REFUSED_EXTS, onlyTxtMessage } from '@/lib/txt-only'
 import { AUTO_RETRY_NOTE, isInterruption, latestJobRow, mayAutoRetry, scheduleAutoRetry } from '@/lib/inbox-auto-retry'
 import { isIngestHeldError } from '@/lib/ingest-quality-gate'
 import { consumeGateOverride } from '@/lib/ingest-gate-store'
@@ -52,7 +53,7 @@ import { waitForHeadroom } from '@/lib/clickhouse-memory-guard'
 import { waitForDiskSpace } from '@/lib/ingest-disk-gate'
 import { noveltyConfig } from '@/lib/ingest-novelty-config'
 import { applyImportProgress } from '@/lib/inbox-progress'
-import { sumTimings, type PhaseTimings } from '@/lib/phase-timings'
+import type { PhaseTimings } from '@/lib/phase-timings'
 import { addToTally, jobAccounting, newJobTally } from '@/lib/import-summary'
 import type { ImportPhase, ImportProgressEvent } from '@/lib/import-runner'
 
@@ -203,7 +204,7 @@ export function forceReconcile(): number {
   return queued
 }
 
-const SUPPORTED_EXTS = new Set(['.txt', '.csv', '.zip', ARCHIVE_REF_EXT])
+const SUPPORTED_EXTS = new Set(['.txt', ARCHIVE_REF_EXT])
 
 /**
  * Remove from done/ the files imported more than 7 days ago that the source archive also holds (lib/inbox-retention.ts). A file nobody archived stays, and the
@@ -234,11 +235,11 @@ async function enqueueFile(filePath: string): Promise<void> {
   // such as "... - 29.04.2026 - ULP PRIVATE.08" have a date fragment for an "extension". Look at the
   // content before giving up -- after the size has stopped changing, so a file still being copied in
   // is not judged by its first few bytes.
-  if (!SUPPORTED_EXTS.has(ext)) {
+  // A name that says "archive" or ".csv" is refused as it is; only plain text is rescued by its content.
+  if (!SUPPORTED_EXTS.has(ext) && !REFUSED_EXTS.has(ext)) {
     if (!(await isFileSizeStable(filePath, STABILITY_CHECK_WAIT_MS))) return
     const kind = await sniffFileKind(filePath).catch(() => 'binary' as const)
-    if (kind === 'zip') ext = '.zip'
-    else if (kind === 'text') ext = '.txt'
+    if (kind === 'text') ext = '.txt'
     if (SUPPORTED_EXTS.has(ext)) {
       console.warn(`[inbox-watcher] "${filename}" has no recognised extension; its content is ${kind}, importing it as ${ext}`)
     }
@@ -266,7 +267,7 @@ async function enqueueFile(filePath: string): Promise<void> {
       imported:      0,
       skipped:       0,
       duration_ms:   0,
-      error_message: `Unsupported file extension "${ext || '(none)'}" and the content is neither text nor a ZIP archive — supported: .txt, .csv, .zip, .archiveref`,
+      error_message: onlyTxtMessage(ext),
     })
     return
   }
@@ -351,28 +352,7 @@ async function enqueueFile(filePath: string): Promise<void> {
 
       // runImportJob fails the job, and frees this queue slot, if it stops making progress for IMPORT_STALL_TIMEOUT_MS:
       // one wedged import can no longer hold the shared queue until an app restart.
-      if (ext === '.zip') {
-        await runImportJob({
-          label: filename,
-          work:  ctx => processZipFile(claimedPath, result => {
-            imported += result.imported
-            known    += result.known
-            skipped  += result.skipped
-            timings = sumTimings([{ timings }, result])
-            addToTally(tally, result)
-            mine.rows_imported = imported
-            mine.rows_known = known
-            if (result.imported > 0 || result.known > 0) {
-              console.log(
-                `[inbox-watcher]   ${result.filename}: ` +
-                `imported=${result.imported} known=${result.known} skipped=${result.skipped}`
-              )
-            } else if (result.errors > 0) {
-              console.warn(`[inbox-watcher]   ${result.filename}: skipped (entry error)`)
-            }
-          }, { ...ctx, onImportProgress, gateOverride }),
-        })
-      } else if (ext === ARCHIVE_REF_EXT) {
+      if (ext === ARCHIVE_REF_EXT) {
         // The reference names a file in the source archive (lib/archive-ref.ts): the plaintext is read from there, never from the inbox.
         const result = await runImportJob({
           label: filename,

@@ -339,10 +339,9 @@ export default function InboxPage() {
             <Inbox className="h-6 w-6" /> Inbox Monitor
           </h1>
           <p className="text-muted-foreground mt-1 text-sm">
-            Drop <code className="text-xs bg-muted px-1 rounded">.txt</code>,{' '}
-            <code className="text-xs bg-muted px-1 rounded">.csv</code>, or{' '}
-            <code className="text-xs bg-muted px-1 rounded">.zip</code> files into{' '}
-            <code className="text-xs bg-muted px-1 rounded">./inbox/</code> to process them automatically.
+            Drop <code className="text-xs bg-muted px-1 rounded">.txt</code> files into{' '}
+            <code className="text-xs bg-muted px-1 rounded">./inbox/</code> to process them automatically. Archives and{' '}
+            <code className="text-xs bg-muted px-1 rounded">.csv</code> files are refused.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -437,9 +436,7 @@ export default function InboxPage() {
         <CardContent className="pt-0 pb-4">
           {!data || data.waiting.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No files waiting — drop <code className="text-xs bg-muted px-1 rounded">.txt</code>/
-              <code className="text-xs bg-muted px-1 rounded">.csv</code>/
-              <code className="text-xs bg-muted px-1 rounded">.zip</code> files into{' '}
+              No files waiting — drop <code className="text-xs bg-muted px-1 rounded">.txt</code> files into{' '}
               <code className="text-xs bg-muted px-1 rounded">./inbox/</code> to start.
             </p>
           ) : (

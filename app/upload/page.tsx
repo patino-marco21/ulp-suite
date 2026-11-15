@@ -2,7 +2,7 @@
 export const dynamic = "force-dynamic"
 
 import { useState, useRef, useCallback, useEffect } from "react"
-import { Upload, FileText, FileArchive, CheckCircle, AlertCircle, Loader2, X, TrendingDown, FlaskConical, CheckCheck, XCircle, ChevronDown, ChevronUp, Activity, Clock, Inbox } from "lucide-react"
+import { Upload, FileText, CheckCircle, AlertCircle, Loader2, X, TrendingDown, FlaskConical, CheckCheck, XCircle, ChevronDown, ChevronUp, Activity, Clock, Inbox } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
@@ -18,7 +18,7 @@ import { formatBytes } from "@/lib/utils"
 import Link from "next/link"
 import { JobViewLink } from "@/components/job-view-link"
 
-interface ZipFileEntry {
+interface FileEntry {
   filename: string
   breach_name: string
   imported: number
@@ -38,8 +38,8 @@ interface UploadResult {
   tierDropped?: number
   errors: number
   import_pct?: number
-  /** For ZIP uploads: per-file breakdown. */
-  files?: ZipFileEntry[]
+  /** Per-file breakdown. */
+  files?: FileEntry[]
   filename: string
   /** Breach tag resolved for single-file uploads. */
   breach_name?: string
@@ -102,7 +102,7 @@ export default function UploadPage() {
   const processFileSingle = useCallback((file: File): Promise<UploadResult | null> => {
     return new Promise<UploadResult | null>((resolve) => {
       const ext = file.name.toLowerCase()
-      if (!ext.endsWith('.txt') && !ext.endsWith('.csv') && !ext.endsWith('.zip')) {
+      if (!ext.endsWith('.txt')) {
         resolve(null)
         return
       }
@@ -122,7 +122,7 @@ export default function UploadPage() {
         (loaded, total) => {
           setSentBytes({ loaded, total })
           setProgress(transferPercent(loaded, total))
-          // Every byte is out: what follows is the server's work (for a .zip the reply only comes when it is done).
+          // Every byte is out: what follows is the server's work (the job's progress arrives on the stream).
           if (total > 0 && loaded >= total) setPhase('import')
         },
       )
@@ -185,7 +185,7 @@ export default function UploadPage() {
             // After settle() the es is already closed so double-fire is safe.
             es.onerror = () => { settle(null) }
           } else {
-            // Sync path (ZIP) — server already processed and returned results
+            // Synchronous reply — the server already processed the file and returned its results
             const r = data as UploadResult
             setAllResults(prev => [...prev, r])
             resolve(r)
@@ -204,9 +204,9 @@ export default function UploadPage() {
   /** Enqueue multiple files and process them one at a time. */
   const processQueue = useCallback(async (files: File[]) => {
     if (isProcessingRef.current) return
-    const valid = files.filter(f => f.name.match(/\.(txt|csv|zip)$/i))
+    const valid = files.filter(f => f.name.match(/\.txt$/i))
     if (valid.length === 0) {
-      toast({ title: 'No supported files selected (.txt, .csv, .zip)', variant: 'destructive' })
+      toast({ title: 'Only .txt files are accepted (archives and .csv are not)', variant: 'destructive' })
       return
     }
 
@@ -278,10 +278,10 @@ export default function UploadPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold">Upload Credentials</h1>
         <p className="text-muted-foreground mt-1">
-          Upload <code className="text-xs bg-muted px-1 rounded">.txt</code>,{' '}
-          <code className="text-xs bg-muted px-1 rounded">.csv</code>, or{' '}
-          <code className="text-xs bg-muted px-1 rounded">.zip</code> files containing ULP data
+          Upload <code className="text-xs bg-muted px-1 rounded">.txt</code> files containing ULP data
           in <code className="text-xs bg-muted px-1 rounded">url:email:password</code> format.
+          Archives (<code className="text-xs bg-muted px-1 rounded">.zip</code>, <code className="text-xs bg-muted px-1 rounded">.rar</code>, <code className="text-xs bg-muted px-1 rounded">.7z</code>)
+          and <code className="text-xs bg-muted px-1 rounded">.csv</code> files are not accepted.
         </p>
       </div>
 
@@ -302,17 +302,14 @@ export default function UploadPage() {
             </p>
             <div className="mt-4 flex gap-3 flex-wrap justify-center">
               <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                <FileText className="h-4 w-4" /> .txt / .csv — ULP text
-              </div>
-              <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                <FileArchive className="h-4 w-4" /> .zip — archive of .txt/.csv files
+                <FileText className="h-4 w-4" /> .txt — ULP text (plain text only)
               </div>
             </div>
             <input
               ref={inputRef}
               type="file"
               multiple
-              accept=".txt,.csv,.zip"
+              accept=".txt"
               className="hidden"
               onChange={handleFileInput}
             />

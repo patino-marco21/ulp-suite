@@ -189,9 +189,10 @@ export function classifyHead(head: Buffer): SniffedKind {
 }
 
 /**
- * Sniff a file by content. The inbox only trusts `.txt`, `.csv` and `.zip` names, but files arrive
- * from Telegram and similar sources with names like `... - 29.04.2026 - ULP PRIVATE.08`, whose
- * "extension" is a date fragment; one such 81 MB file sat in inbox/failed/ for that reason alone.
+ * Sniff a file by content. The inbox trusts only `.txt` names, but files arrive from Telegram and
+ * similar sources with names like `... - 29.04.2026 - ULP PRIVATE.08`, whose "extension" is a date
+ * fragment; one such 81 MB file sat in inbox/failed/ for that reason alone. Only a `text` answer
+ * rescues such a file: an archive or any other binary is refused.
  */
 export async function sniffFileKind(filePath: string): Promise<SniffedKind> {
   const handle = await fs.promises.open(filePath, 'r')

@@ -18,7 +18,7 @@
  *   REHEARSAL_JWT_SECRET=x REHEARSAL_ADMIN_EMAIL=x@x.test REHEARSAL_ADMIN_PASSWORD=x REHEARSAL_WEBHOOK_SECRET=x \
  *     docker compose -f docker-compose.rehearsal.yml -p ulp-rehearsal down -v   # the compose file wants these set even to stop the stack
  *
- * Needs the `zip` command. Exit 0 when every check passes, 1 when one fails, 2 when the stack is not ready.
+ * Exit 0 when every check passes, 1 when one fails, 2 when the stack is not ready.
  */
 import net from 'node:net'
 import { execFileSync } from 'node:child_process'
@@ -31,7 +31,7 @@ const CH = 'ulprehearsal_clickhouse'
 const HOST = '127.0.0.1'
 const PORT = 3101
 const BASE = `http://${HOST}:${PORT}`
-// --only=queue-wait,cut-fin runs just those scenarios (keys: happy cut-fin cut-rst zip-cut queue-wait freeze-8s freeze-stall slow);
+// --only=queue-wait,cut-fin runs just those scenarios (keys: happy cut-fin cut-rst queue-wait freeze-8s freeze-stall slow);
 // --slow adds the 300 s slow-client case to a full run; --only-slow is --only=slow.
 const onlyArg = process.argv.find(a => a.startsWith('--only='))?.slice('--only='.length).split(',')
 const only = process.argv.includes('--only-slow') ? ['slow'] : onlyArg
@@ -272,21 +272,6 @@ async function cutMidBody(how: 'fin' | 'rst'): Promise<void> {
   check('a following upload imports normally', await followUpImports(`e2e-after-cut-${how}-${RUN}.txt`))
 }
 
-async function zipCutMidBody(): Promise<void> {
-  console.log('\n3. The client disconnects while a .zip archive is still arriving')
-  const name = `e2e-cut-${RUN}.zip`
-  const entry = `e2e-zip-entry-${RUN}.txt`
-  fixture(entry, genLines(900_000, 'zc'))
-  sh('zip', ['-q', '-j', join(work, name), join(work, entry)])
-  const up = rawUpload(name, join(work, name), { bytesPerSec: 1_500_000 })
-  await waitFor(() => up.sent >= up.size * 0.4, 60_000, 100)
-  up.cut('fin')
-  await sleep(3000)
-  check('nothing was imported from the cut archive', rowsFor(entry) === 0)
-  check('no spool file is left', spoolCount() === 0)
-  await expectIdleQueue('cut zip')
-}
-
 async function queuedBehindABusySlot(): Promise<void> {
   console.log('\n4. A second upload arrives while the first is importing (the only queue slot is busy)')
   const a = `e2e-queue-a-${RUN}.txt`
@@ -381,12 +366,6 @@ async function main(): Promise<number> {
       return 2
     }
   }
-  try {
-    sh('zip', ['-v'])
-  } catch {
-    console.error('The `zip` command is required (apt install zip).')
-    return 2
-  }
   let stallMs = ''
   try {
     stallMs = sh('docker', ['exec', APP, 'printenv', 'IMPORT_STALL_TIMEOUT_MS'])
@@ -404,7 +383,6 @@ async function main(): Promise<number> {
       { key: 'happy', run: happyPath },
       { key: 'cut-fin', run: () => cutMidBody('fin') },
       { key: 'cut-rst', run: () => cutMidBody('rst') },
-      { key: 'zip-cut', run: zipCutMidBody },
       { key: 'queue-wait', run: queuedBehindABusySlot },
       { key: 'freeze-8s', run: () => clickHouseFrozen({ name: `e2e-freeze-8s-${RUN}.txt`, tag: 'f8', freezeSeconds: 8, expectStall: false }) },
       { key: 'freeze-stall', run: () => clickHouseFrozen({ name: `e2e-freeze-stall-${RUN}.txt`, tag: 'fs', freezeSeconds: 45, expectStall: true }) },

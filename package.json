@@ -31,7 +31,6 @@
     "@radix-ui/react-toast": "^1.2.15",
     "@radix-ui/react-tooltip": "^1.2.8",
     "@types/qrcode": "^1.5.6",
-    "@types/yauzl": "^2.10.3",
     "bcryptjs": "^3.0.2",
     "better-sqlite3": "^12.10.0",
     "chokidar": "^4.0.3",
@@ -47,7 +46,6 @@
     "react-dom": "^19.2.6",
     "tailwind-merge": "^2.5.5",
     "tailwindcss-animate": "^1.0.7",
-    "yauzl": "^3.2.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
