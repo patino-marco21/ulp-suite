@@ -11,6 +11,9 @@ Environment=ULP_REPO=%h/Desktop/ulp-suite
 Environment=ULP_ARCHIVE_DIR=%h/Desktop/ulp-archive
 # 1 = after a clean archive and sample check, remove the plaintext of archived files (archive --replace, with its guards). Delete this line to leave the replace to the owner.
 Environment=ULP_AUTO_ARCHIVE_REPLACE=1
+# shadow = also write a smaller "reduced" entry beside each new archive entry and prove it against the database (scripts/reduce-archive.ts, docs/superpowers/specs/2026-11-15-reduced-archive-design.md).
+# Nothing is removed or replaced on its account. Delete the line to turn it off.
+#Environment=ULP_REDUCED_ARCHIVE=shadow
 ExecStart=%h/Desktop/ulp-suite/node_modules/.bin/tsx scripts/archive-when-idle.ts
 Nice=19
 IOSchedulingClass=idle
