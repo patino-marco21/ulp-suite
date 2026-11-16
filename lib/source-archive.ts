@@ -321,7 +321,8 @@ export function fileSource(path: string): Source {
   }
 }
 
-function archiveSource(dir: string, entry: ManifestEntry): Source {
+/** The plaintext of one manifest entry as a Source, whichever directory its `<id>.zst` is in (the reduced archive's entries live in their own). */
+export function archiveSource(dir: string, entry: ManifestEntry): Source {
   const path = join(dir, `${entry.id}.zst`)
   const decode = (fd: number, i: number): Buffer => {
     const [, , co, cl] = entry.frames[i]
