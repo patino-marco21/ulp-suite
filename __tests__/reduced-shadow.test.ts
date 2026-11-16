@@ -15,7 +15,7 @@ import type { ManifestEntry } from '@/lib/source-archive'
 const whole = (name: string, created: string, size = 1000, sha = `sha-${name}`): ManifestEntry =>
   ({ name, id: `id-${name}`, size, sha256: sha, lines: 10, frames: [], archive_bytes: 300, archive_sha256: 'x', level: 12, created_at: created })
 const reducedOf = (e: ManifestEntry, size = 100): ReducedEntry =>
-  ({ ...e, id: `r-${e.name}`, size, archive_bytes: 30, of: { sha256: e.sha256, size: e.size, lines: e.lines }, credentials: 1, kept_lines: 1, absent: 0, extra_known: 0, db_rows: 1, db_keys: 1, verified_at: '2026-11-16T00:00:00Z' })
+  ({ ...e, id: `r-${e.name}`, size, archive_bytes: 30, of: { sha256: e.sha256, size: e.size, lines: e.lines }, credentials: 1, kept_lines: 1, absent: 0, extra_known: 0, db_rows: 1, db_keys: 1, db_drift: 0, verified_at: '2026-11-16T00:00:00Z' })
 const line = (name: string, ok: boolean, at: string, kind: 'new' | 'pilot' = 'new', sha = `sha-${name}`): ShadowLine =>
   ({ name, sha256: sha, at, kind, ok, ...(ok ? {} : { reason: 'mismatch' }) })
 
@@ -99,6 +99,11 @@ describe('the gate', () => {
     expect(GATE_FILES).toBe(200)
   })
 
+  test('a new file with drift (a stored row the parser no longer reads from it) is not exact, even though its entry was written', () => {
+    const log: ShadowLine[] = [line('a', true, '2026-11-16T01:00:00Z'), { ...line('b', true, '2026-11-16T02:00:00Z'), drift: 3 }, line('c', true, '2026-11-16T03:00:00Z')]
+    expect(consecutiveExact(log)).toBe(1)
+  })
+
   test('the same file tried again counts once, by its latest result', () => {
     const log = [line('a', false, '2026-11-16T01:00:00Z'), line('a', true, '2026-11-16T02:00:00Z'), line('b', true, '2026-11-16T03:00:00Z')]
     expect(consecutiveExact(log)).toBe(2)
@@ -115,6 +120,7 @@ describe('summarize', () => {
     expect(s.reducedBytes).toBe(700)
     expect(s.sharePct).toBeCloseTo(17.5, 5)
     expect(s.failuresByReason).toEqual({ mismatch: 1 })
+    expect(s.driftFiles).toBe(0)
   })
 })
 

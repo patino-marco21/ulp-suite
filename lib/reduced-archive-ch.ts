@@ -54,7 +54,7 @@ export const proofSql = (t: string, c: string, r: string, s: string) =>
   `(SELECT sum(c) FROM ${s}), ` +
   `(SELECT count() FROM ${s}), ` +
   `(SELECT count() FROM ${s} WHERE k NOT IN (SELECT k FROM ${t})), ` +
-  `(SELECT count() FROM ${s} WHERE k NOT IN (SELECT k FROM ${r})), ` +
+  `(SELECT count() FROM ${s} WHERE k IN (SELECT k FROM ${t}) AND k NOT IN (SELECT k FROM ${r})), ` +
   `(SELECT uniqExact(k) FROM ${r} WHERE k NOT IN (SELECT k FROM ${t})), ` +
   `(SELECT uniqExact(k) FROM ${r} WHERE k IN (SELECT k FROM ${c} WHERE mine = 0)), ` +
   `(SELECT uniqExact(k) FROM ${r}) FORMAT TSV`

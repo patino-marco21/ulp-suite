@@ -52,8 +52,10 @@ export function normalizeRanges(parts: ArrayLike<number>[]): Float64Array {
 
 /**
  * Copies the bytes of `ranges` (from normalizeRanges) out of a stream, in order. A range that does not end in a newline (the last line of a file, or a long line the parser
- * read in pieces) is closed with one, so the range after it cannot glue onto it. Returns the bytes written and the newlines among them. A range that reaches past the end
- * of the stream throws: a short copy would pass for a reduced file.
+ * read in pieces) is closed with one, so the range after it cannot glue onto it. A blank line goes between two ranges, because lines were left out there: the parser's
+ * state (a url waiting for its login, a block) must end at the gap, as it ended in the original at the line that closed it, or the lines on both sides would read as one
+ * record the original never had. Returns the bytes written and the newlines among them. A range that reaches past the end of the stream throws: a short copy would pass
+ * for a reduced file.
  */
 export async function copyRanges(
   chunks: AsyncIterable<Buffer | Uint8Array>,
@@ -67,6 +69,8 @@ export async function copyRanges(
   let bytes = 0
   let lines = 0
   let lastByte = 10
+  let wrote = false          // anything written yet
+  let rangeStarted = false   // something of the current range written
   for await (const piece of chunks) {
     const chunk = Buffer.isBuffer(piece) ? piece : Buffer.from(piece.buffer, piece.byteOffset, piece.length)
     const chunkEnd = offset + chunk.length
@@ -74,14 +78,20 @@ export async function copyRanges(
       const from = Math.max(ranges[2 * ri], offset)
       const to = Math.min(ranges[2 * ri + 1], chunkEnd)
       if (to > from) {
+        if (!rangeStarted) {
+          if (wrote) { write(NL); bytes++; lines++ }
+          rangeStarted = true
+        }
         const part = chunk.subarray(from - offset, to - offset)
         write(part)
         bytes += part.length
         lines += countNewlines(part)
         lastByte = part[part.length - 1]
+        wrote = true
       }
       if (ranges[2 * ri + 1] > chunkEnd) break   // the range goes on in the next chunk
       if (lastByte !== 10) { write(NL); bytes++; lines++; lastByte = 10 }
+      rangeStarted = false
       ri++
     }
     offset = chunkEnd
@@ -110,6 +120,8 @@ export interface ReducedEntry extends ManifestEntry {
   /** Rows, and distinct normalised keys among them, that ulp.credentials held for the file when the entry was proven. */
   db_rows: number
   db_keys: number
+  /** Of those keys, how many today's parser does not produce from the file (drift): their lines are kept or dropped by what today's parser makes of them. */
+  db_drift: number
   verified_at: string
 }
 
@@ -143,9 +155,12 @@ export interface ProofCounts {
   /** What ulp.credentials holds under the file's name. */
   dbRows: number
   dbKeys: number
-  /** Keys the database holds for the file that the current parser does not produce from it. */
+  /**
+   * Keys the database holds for the file that today's parser does not produce from it (an older parser version stored them; 0.15 to 0.22% of the rows in the first real
+   * files tried). Re-importing the whole file would not make them either, so they are reported as drift and are not a loss.
+   */
   notParsed: number
-  /** Keys the database holds for the file that the reduced entry does not produce: must be 0. */
+  /** Keys the file stored that today's parser produces from it and that the reduced entry does not: the loss a reduction can cause. Must be 0. */
   missing: number
   /** Keys the reduced entry produces that the original does not: must be 0. */
   spurious: number
@@ -314,7 +329,7 @@ export async function reduceSource(opts: ReduceOptions): Promise<ReduceOutcome> 
     if (proof.missing !== 0 || proof.spurious !== 0) {
       return {
         ok: false, reason: 'mismatch', stats,
-        detail: `${proof.missing} of ${proof.dbKeys} stored keys would be lost${proof.notParsed > 0 ? ` (${proof.notParsed} of them the parser no longer reads from the file)` : ''}, ${proof.spurious} keys appear that the original does not produce`,
+        detail: `${proof.missing} of ${proof.dbKeys} stored keys would be lost, ${proof.spurious} keys appear that the original does not produce`,
       }
     }
 
@@ -337,6 +352,7 @@ export async function reduceSource(opts: ReduceOptions): Promise<ReduceOutcome> 
       extra_known: proof.extraKnown,
       db_rows: proof.dbRows,
       db_keys: proof.dbKeys,
+      db_drift: proof.notParsed,
       verified_at: (opts.now?.() ?? new Date()).toISOString(),
     }
     appendReduced(archiveDir, reduced)

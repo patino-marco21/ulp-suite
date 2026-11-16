@@ -10,8 +10,9 @@
  *   D  50 look-alikes of A's that D itself stored (the state before the normalised check): both A and D hold the key
  *   E  20 new credentials in a file whose name needs escaping in SQL
  * and the reduced entry of each is written by reduceSource over the real ClickHouse and proven. Then: a row the database holds for B that no line of B produces makes B fail
- * its proof and leaves nothing behind; A reduced again after D stored look-alikes of its rows gives the same entry; a container that does not exist is a clean failure; and no
- * scratch table is left.
+ * is drift (reported, not a loss: today's parser never made it from the file); a writer that forgets a credential the file stored fails its proof and leaves nothing behind; A
+ * reduced again after D stored look-alikes of its rows gives the same entry; a container that does not exist is a clean failure; the command (scripts/reduce-archive.ts) runs
+ * over the same ClickHouse; and no scratch table is left.
  *
  *   npx tsx scripts/e2e-reduced-archive.ts [--keep]
  *
@@ -20,12 +21,12 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { dockerCh } from '@/lib/clickhouse-cli'
 import { chReduceDb, rowsToTsv, scratchDdl } from '@/lib/reduced-archive-ch'
-import { readReduced, reduceSource, reducedDir, type LoadRow, type ReduceOutcome } from '@/lib/reduced-archive'
+import { readReduced, reduceSource, reducedDir, type LoadRow, type ReduceDb, type ReduceOutcome } from '@/lib/reduced-archive'
 import { preflightHardDrop } from '@/lib/ingest-preflight'
 import { appendManifest, archiveFile, archiveSource, sqlQuote, type ManifestEntry } from '@/lib/source-archive'
 import { parseULPStream } from '@/lib/ulp-parser'
@@ -176,19 +177,21 @@ async function main(): Promise<number> {
     console.log(`     (${Date.now() - t0} ms)`)
     check('A reduces and proves', a.ok, a.ok ? '' : `${a.reason}: ${a.detail}`)
     const aText = await textOf(a)
-    check('A keeps its 1000 credentials and 30 banners and nothing else', aText.split('\n').length - 1 === 1030 && !aText.includes('user.br') && lineSet(aText).size === 1030, `${aText.split('\n').length - 1} lines`)
+    // 1000 credentials, a blank line where the 100 repeats were, 30 banners
+    check('A keeps its 1000 credentials and 30 banners, one blank line between them, and nothing else', aText.split('\n').length - 1 === 1031 && !aText.includes('user.br') && lineSet(aText).size === 1030, `${aText.split('\n').length - 1} lines`)
     if (a.ok) {
       check('A: counts', a.stats.parsed === 1100 && a.stats.distinct === 1000 && a.stats.mine === 1000 && a.stats.known === 0 && a.stats.absent === 0 && a.stats.repeats === 100, JSON.stringify(a.stats))
       check('A: proof counts', a.stats.proof?.dbRows === 1000 && a.stats.proof?.missing === 0 && a.stats.proof?.spurious === 0 && a.stats.proof?.notParsed === 0, JSON.stringify(a.stats.proof))
-      check('A: the entry records what it was reduced from', a.entry.of.sha256 === entries.A.sha256 && a.entry.credentials === 1000 && a.entry.kept_lines === 1030)
+      check('A: the entry records what it was reduced from', a.entry.of.sha256 === entries.A.sha256 && a.entry.credentials === 1000 && a.entry.kept_lines === 1031)
     }
 
     console.log('4. B: known lines and look-alikes are dropped, the new block and triple are kept whole, the known block is dropped')
     const b = await reduce('B')
     check('B reduces and proves', b.ok, b.ok ? '' : `${b.reason}: ${b.detail}`)
     const bText = await textOf(b)
-    const expectB = [...range(400).map(i => cred(TAGS.b, i)), ...block(TAGS.b, 1), ...triple(TAGS.b, 1), ...range(5).map(i => banner('b', i))]
-    check('B keeps exactly the 400 new credentials, the block with its separator, the triple and the banners', bText === expectB.join('\n') + '\n', `${bText.split('\n').length - 1} lines, expected ${expectB.length}`)
+    // a blank line stands where lines were left out (the 50 repeats; the known block); the new block and the triple touch
+    const expectB = [...range(400).map(i => cred(TAGS.b, i)), '', ...block(TAGS.b, 1), ...triple(TAGS.b, 1), '', ...range(5).map(i => banner('b', i))]
+    check('B keeps exactly the 400 new credentials, the block with its separator, the triple and the banners, with a blank line at each gap', bText === expectB.join('\n') + '\n', `${bText.split('\n').length - 1} lines, expected ${expectB.length}`)
     if (b.ok) {
       check('B: counts', b.stats.parsed === 1053 && b.stats.distinct === 1003 && b.stats.mine === 402 && b.stats.known === 601 && b.stats.absent === 0 && b.stats.repeats === 50, JSON.stringify(b.stats))
       check('B: no known credential came along', b.entry.extra_known === 0 && b.stats.proof?.reducedKeys === 402, JSON.stringify(b.stats.proof))
@@ -208,31 +211,43 @@ async function main(): Promise<number> {
     const e = await reduce('E')
     check('E (quote, backslash and tab in its name) reduces and keeps its 20 credentials', e.ok && e.entry.credentials === 20 && e.stats.proof?.dbRows === 20, e.ok ? '' : `${e.reason}: ${e.detail}`)
 
-    console.log('8. A row the database holds for B that no line of B produces')
-    const before = readReduced(archive).length
+    console.log('8. Drift, and a reduction that loses a credential')
+    // A row the database holds for B that no line of B produces: an older parser stored it. Re-importing B would not make it either, so it is drift, not a loss.
     await ch.run(`INSERT INTO ulp.credentials (url, email, password, domain, source_file, breach_name) VALUES ('https://ghost.example.test/', 'ghost-${RUN}@mail.test', 'GhostPw-${RUN}!', '', ${sqlQuote(NAMES.B)}, '')`)
     const ghost = await reduce('B')
-    check('B fails its proof, naming the row it would lose', !ghost.ok && ghost.reason === 'mismatch' && ghost.stats?.proof?.missing === 1 && ghost.stats?.proof?.notParsed === 1, ghost.ok ? 'it passed' : `${ghost.reason}: ${ghost.detail}`)
-    check('a failed proof writes no entry and no file', readReduced(archive).length === before && readdirSync(reducedDir(archive)).every(n => n === 'manifest.jsonl' || n.endsWith('.zst')) && readdirSync(join(work, 'tmp')).length === 0)
+    check('B still reduces: the extra row is reported as drift, nothing is lost', ghost.ok && ghost.entry.db_drift === 1 && ghost.entry.db_keys === 403 && ghost.stats.proof?.missing === 0 && ghost.stats.proof?.notParsed === 1, ghost.ok ? JSON.stringify(ghost.stats.proof) : `${ghost.reason}: ${ghost.detail}`)
+    // A writer that forgets the first credential it should keep.
+    const n1 = readReduced(archive).length
+    const lossy = await reduceSource({
+      entry: entries.E, archiveDir: archive, workDir: join(work, 'tmp'),
+      db: (real => ({ ...real, classify: async (name: string) => { const r = await real.classify(name); return { ...r, keep: r.keep.slice(2) } } }) as ReduceDb)(chReduceDb(ch)),
+    })
+    check('a reduction that would lose a credential the file stored fails its proof', !lossy.ok && lossy.reason === 'mismatch' && lossy.stats?.proof?.missing === 1, lossy.ok ? 'it passed' : `${lossy.reason}: ${lossy.detail}`)
+    check('a failed proof writes no entry and no file', readReduced(archive).length === n1 && readdirSync(reducedDir(archive)).every(n => n === 'manifest.jsonl' || n.endsWith('.zst')) && readdirSync(join(work, 'tmp')).length === 0)
     const onDisk = readdirSync(reducedDir(archive)).filter(n => n.endsWith('.zst')).sort().join(',')
     const listed = [...new Set(readReduced(archive).map(x => `${x.id}.zst`))].sort().join(',')
     check('the reduced files on disk are exactly those of the manifest', onDisk === listed)
 
     console.log('9. A ClickHouse that is not there')
     const gone = await reduce('E', dockerCh('ulprehearsal_no_such_container'))
-    check('a missing container is a clean failure that writes nothing', !gone.ok && gone.reason === 'error' && readReduced(archive).length === before)
+    check('a missing container is a clean failure that writes nothing', !gone.ok && gone.reason === 'error' && readReduced(archive).length === n1)
 
     console.log('10. The command (scripts/reduce-archive.ts) over the same ClickHouse')
-    // A second archive: A, B (which now has a row no line produces), C, and F, which is archived but was never imported.
+    // A second archive: A, B (with its drift row), C, F (archived, never imported) and G (imported, but its archive file is damaged).
     const archive2 = join(work, 'archive2')
     mkdirSync(archive2)
     const plainF = join(work, 'F.txt')
+    const plainG = join(work, 'G.txt')
     writeFileSync(plainF, text('E').replace(RUN, `${RUN}f`), 'latin1')
-    const cmdNames: Record<string, string> = { A: NAMES.A, B: NAMES.B, C: NAMES.C, F: `f-${RUN}.txt` }
-    for (const key of ['A', 'B', 'C', 'F']) {
-      appendManifest(archive2, archiveFile(key === 'F' ? plainF : join(work, `${key}.txt`), { archiveDir: archive2, name: cmdNames[key] }))
+    writeFileSync(plainG, text('E').replace(RUN, `${RUN}g`), 'latin1')
+    const cmdNames: Record<string, string> = { A: NAMES.A, B: NAMES.B, C: NAMES.C, F: `f-${RUN}.txt`, G: `g-${RUN}.txt` }
+    for (const key of ['A', 'B', 'C', 'F', 'G']) {
+      const src = key === 'F' ? plainF : key === 'G' ? plainG : join(work, `${key}.txt`)
+      const entry = archiveFile(src, { archiveDir: archive2, name: cmdNames[key] })
+      appendManifest(archive2, entry)
+      if (key === 'G') truncateSync(join(archive2, `${entry.id}.zst`), statSync(join(archive2, `${entry.id}.zst`)).size - 20)
     }
-    for (const key of ['A', 'B', 'C']) await ch.run(`INSERT INTO ulp.sources (filename, line_count) VALUES (${sqlQuote(cmdNames[key])}, ${stored[key]})`)
+    for (const key of ['A', 'B', 'C', 'G']) await ch.run(`INSERT INTO ulp.sources (filename, line_count) VALUES (${sqlQuote(cmdNames[key])}, ${stored[key] ?? 0})`)
     const cli = (args: string[]) => {
       const r = spawnSync('npx', ['tsx', 'scripts/reduce-archive.ts', ...args], { encoding: 'utf8', env: { ...process.env, CH_CONTAINER: CH, ULP_ARCHIVE_DIR: archive2 }, maxBuffer: 1 << 24 })
       return { code: r.status, out: r.stdout + r.stderr }
@@ -241,17 +256,18 @@ async function main(): Promise<number> {
     const floorRun = cli(['run', '--pilot', '10', '--floor-gib', '999999'])
     check('under the free-space floor nothing starts', floorRun.code === 0 && floorRun.out.includes('not starting') && readReduced(archive2).length === 0, floorRun.out.slice(0, 200))
     const run1 = cli(['run', '--pilot', '10', '--floor-gib', '0'])
-    check('run: A and C are reduced, B fails its proof, F (never imported) is not tried', run1.code === 1 && run1.out.includes('3 file(s) to reduce') && /reduced 2, failed 1/.test(run1.out) && readReduced(archive2).length === 2, run1.out.slice(-400))
-    check('run never prints a credential or a line of a file', !/Pw-|BlockPw|TriplePw|GhostPw|@mail\.test|free text banner/.test(run1.out + run3Out))
+    check('run: A, B (drift) and C are reduced, G (damaged archive) fails, F (never imported) is not tried', run1.code === 1 && run1.out.includes('4 file(s) to reduce') && /reduced 3, failed 1/.test(run1.out) && readReduced(archive2).length === 3, run1.out.slice(-500))
+    check('run says which file has drift', run1.out.includes('1 of 403 stored keys no longer read by the parser'), run1.out.slice(-500))
     const run2 = cli(['run', '--pilot', '10', '--floor-gib', '0'])
     check('a second run has nothing to do: done files are done, the failed one waits, F is not imported', run2.code === 0 && run2.out.includes('0 file(s) to reduce'), run2.out.slice(-300))
     const run3 = cli(['run', '--pilot', '10', '--floor-gib', '0', '--retry-failed'])
     run3Out = run3.out
-    check('--retry-failed tries B again, and it fails again', run3.code === 1 && /reduced 0, failed 1/.test(run3.out), run3.out.slice(-300))
+    check('--retry-failed tries G again, and it fails again', run3.code === 1 && /reduced 0, failed 1/.test(run3.out), run3.out.slice(-300))
+    check('run never prints a credential or a line of a file', !/Pw-|BlockPw|TriplePw|GhostPw|@mail\.test|free text banner/.test(run1.out + run2.out + run3Out))
     const status = cli(['status'])
-    check('status: 2 reduced of 4 names, the pilot tally by file, the failure by reason', status.out.includes('reduced entries 2 of 4') && status.out.includes('pilot: 2 exact, 1 failed of 3 tried') && status.out.includes('mismatch 1'), status.out.slice(0, 600))
+    check('status: 3 reduced of 5 names, the pilot tally by file, the failure by reason, the drift', status.out.includes('reduced entries 3 of 5') && status.out.includes('pilot: 3 exact, 1 failed of 4 tried') && status.out.includes('error 1') && status.out.includes('drift: 1 reduced file(s) hold 1 stored keys'), status.out.slice(0, 700))
     const verify = cli(['verify', '--all'])
-    check('verify: every reduced entry decodes and hashes', verify.code === 0 && verify.out.includes('verified 2, failed 0'), verify.out.slice(-200))
+    check('verify: every reduced entry decodes and hashes', verify.code === 0 && verify.out.includes('verified 3, failed 0'), verify.out.slice(-200))
 
     console.log('11. Nothing left behind')
     check('no scratch table is left in ClickHouse', (await q(`SELECT count() FROM system.tables WHERE database = 'default' AND (name LIKE 'zz_red_%' OR name LIKE 'zz_e2e_stage_%')`)) === '0')

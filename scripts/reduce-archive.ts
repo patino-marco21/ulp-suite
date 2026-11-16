@@ -108,8 +108,8 @@ async function cmdRun(): Promise<number> {
       if (out.ok) {
         ok++
         const pct = entry.size > 0 ? (100 * out.entry.size) / entry.size : 0
-        line = { ...base, ok: true, keptPct: Number(pct.toFixed(2)), parsed: out.stats.parsed, mine: out.stats.mine, known: out.stats.known, absent: out.stats.absent, extra_known: out.entry.extra_known }
-        console.log(`reduced ${entry.name}: ${pct.toFixed(1)}% of ${gib(entry.size)} GiB kept (${out.stats.mine} new, ${out.stats.absent} absent, ${out.stats.known} known dropped, ${out.stats.repeats} repeats, ${out.entry.extra_known} known inside records) in ${(ms / 1000).toFixed(0)} s`)
+        line = { ...base, ok: true, keptPct: Number(pct.toFixed(2)), parsed: out.stats.parsed, mine: out.stats.mine, known: out.stats.known, absent: out.stats.absent, extra_known: out.entry.extra_known, drift: out.entry.db_drift }
+        console.log(`reduced ${entry.name}: ${pct.toFixed(1)}% of ${gib(entry.size)} GiB kept (${out.stats.mine} new, ${out.stats.absent} absent, ${out.stats.known} known dropped, ${out.stats.repeats} repeats, ${out.entry.extra_known} known inside records${out.entry.db_drift > 0 ? `, ${out.entry.db_drift} of ${out.entry.db_keys} stored keys no longer read by the parser` : ''}) in ${(ms / 1000).toFixed(0)} s`)
       } else {
         failed++
         line = { ...base, ok: false, reason: out.reason, detail: out.detail.slice(0, 300), parsed: out.stats?.parsed }
@@ -138,6 +138,7 @@ function cmdStatus(): number {
   }
   const reasons = Object.entries(s.failuresByReason).map(([k, v]) => `${k} ${v}`).join(', ')
   console.log(`gate: ${consecutiveExact(log)} of ${GATE_FILES} new files exact in a row; failures now: ${reasons || 'none'}`)
+  if (s.driftFiles > 0) console.log(`drift: ${s.driftFiles} reduced file(s) hold ${s.driftKeys} stored keys that today's parser no longer reads from them (older parser versions stored them)`)
   // by file: the latest result of each (name, bytes)
   const latestPilot = new Map<string, ShadowLine>()
   for (const l of log) if (l.kind === 'pilot') latestPilot.set(`${l.name}\0${l.sha256}`, l)

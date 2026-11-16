@@ -44,6 +44,8 @@ export interface ShadowLine {
   known?: number
   absent?: number
   extra_known?: number
+  /** Stored rows today's parser does not read from the file (ReducedEntry.db_drift). A new file with drift is not counted as exact. */
+  drift?: number
 }
 
 const keyOf = (name: string, sha: string) => `${name}\0${sha}`
@@ -121,7 +123,7 @@ export function consecutiveExact(log: ShadowLine[]): number {
     const k = keyOf(l.name, l.sha256)
     if (seen.has(k)) continue
     seen.add(k)
-    if (!l.ok) break
+    if (!l.ok || (l.drift ?? 0) > 0) break
     n++
   }
   return n
@@ -136,18 +138,22 @@ export interface Summary {
   wholeArchiveBytes: number
   reducedArchiveBytes: number
   failuresByReason: Record<string, number>
+  /** Reduced files with at least one stored row today's parser does not read from them, and the rows. */
+  driftFiles: number
+  driftKeys: number
 }
 
 export function summarize(o: { entries: ManifestEntry[]; reduced: ReducedEntry[]; log: ShadowLine[] }): Summary {
   const latestReduced = new Map<string, ReducedEntry>()
   for (const r of o.reduced) latestReduced.set(keyOf(r.name, r.of.sha256), r)
-  let wholeBytes = 0, reducedBytes = 0, wholeArchiveBytes = 0, reducedArchiveBytes = 0, reducedFiles = 0
+  let wholeBytes = 0, reducedBytes = 0, wholeArchiveBytes = 0, reducedArchiveBytes = 0, reducedFiles = 0, driftFiles = 0, driftKeys = 0
   for (const e of o.entries) {
     const r = latestReduced.get(keyOf(e.name, e.sha256))
     if (!r) continue
     reducedFiles++
     wholeBytes += e.size; reducedBytes += r.size
     wholeArchiveBytes += e.archive_bytes; reducedArchiveBytes += r.archive_bytes
+    if ((r.db_drift ?? 0) > 0) { driftFiles++; driftKeys += r.db_drift }
   }
   const latest = new Map<string, ShadowLine>()
   for (const l of o.log) latest.set(keyOf(l.name, l.sha256), l)
@@ -155,6 +161,6 @@ export function summarize(o: { entries: ManifestEntry[]; reduced: ReducedEntry[]
   for (const l of latest.values()) if (!l.ok) failuresByReason[l.reason ?? 'unknown'] = (failuresByReason[l.reason ?? 'unknown'] ?? 0) + 1
   return {
     reducedFiles, wholeBytes, reducedBytes, sharePct: wholeBytes > 0 ? (100 * reducedBytes) / wholeBytes : 0,
-    wholeArchiveBytes, reducedArchiveBytes, failuresByReason,
+    wholeArchiveBytes, reducedArchiveBytes, failuresByReason, driftFiles, driftKeys,
   }
 }

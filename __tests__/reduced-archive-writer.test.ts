@@ -83,7 +83,7 @@ function memoryDb(holders: Holders, log: string[] = []): ReduceDb & { cleaned: n
         dbRows: dbKeys.length,
         dbKeys: dbKeys.length,
         notParsed: dbKeys.filter(k => !original.has(k)).length,
-        missing: dbKeys.filter(k => !reduced.has(k)).length,
+        missing: dbKeys.filter(k => original.has(k) && !reduced.has(k)).length,
         spurious: [...reduced].filter(k => !original.has(k)).length,
         extraKnown: [...reduced].filter(k => db.classes.get(k) === 'known').length,
         reducedKeys: reduced.size,
@@ -140,9 +140,10 @@ describe('reduceSource', () => {
     expect(out.ok).toBe(true)
     if (!out.ok) return
     const kept = await readAll(archive, out.entry)
+    // a blank line stands where lines were left out; the block and the triple touch, so nothing is between them
     expect(kept).toBe([
-      NEW1,
-      'free text that holds no credential',
+      NEW1, '',
+      'free text that holds no credential', '',
       'Host: https://blk.example.com', 'Login: blk@x.test', 'Password: blkpass1', '',
       'https://p.example.com', 'pos@x.test', 'pospass1',
     ].join('\n') + '\n')
@@ -191,16 +192,30 @@ describe('reduceSource', () => {
     expect(out.entry.extra_known).toBe(1)
   })
 
-  test('a row the database holds for this file that the reduced entry would lose fails the proof and leaves nothing behind', async () => {
+  test('a stored row that the parser no longer reads from the file is drift: reported, not a loss', async () => {
+    // The database holds a row of this file that today's parser does not make from any of its lines (an older parser stored it). Re-importing the whole file would not make it
+    // either, so reducing the file loses nothing the parser sees; the lines behind such a row are kept or dropped by what today's parser makes of them.
     const whole = archived('this.txt', MIXED)
     const holders = MIXED_HOLDERS()
-    holders.set(normKey('https://ghost.example.com', 'g@x.test', 'ghostpw1'), new Set(['this.txt']))   // stored once, but no line of the file produces it now
-    const db = memoryDb(holders)
+    holders.set(normKey('https://ghost.example.com', 'g@x.test', 'ghostpw1'), new Set(['this.txt']))
+    const out = await reduceSource({ entry: whole, archiveDir: archive, db: memoryDb(holders), workDir: work, hardDrop: T3 })
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    expect(out.entry.db_drift).toBe(1)
+    expect(out.entry.db_keys).toBe(4)
+    expect(out.stats.proof).toMatchObject({ missing: 0, notParsed: 1 })
+  })
+
+  test('a credential the file stored that the reduced entry would lose fails the proof and leaves nothing behind', async () => {
+    const whole = archived('this.txt', MIXED)
+    const db = memoryDb(MIXED_HOLDERS())
+    const classify = db.classify.bind(db)
+    db.classify = async name => { const r = await classify(name); return { ...r, keep: r.keep.slice(2) } }   // a writer that forgot the first credential it should keep
     const out = await reduceSource({ entry: whole, archiveDir: archive, db, workDir: work, hardDrop: T3 })
     expect(out.ok).toBe(false)
     if (out.ok) return
     expect(out.reason).toBe('mismatch')
-    expect(out.stats?.proof).toMatchObject({ missing: 1, notParsed: 1 })
+    expect(out.stats?.proof).toMatchObject({ missing: 1 })
     expect(readReduced(archive)).toEqual([])
     expect(existsSync(reducedDir(archive)) ? readdirSync(reducedDir(archive)).filter(n => n.endsWith('.zst') || n.endsWith('.part')) : []).toEqual([])
     expect(readdirSync(work)).toEqual([])
@@ -231,6 +246,20 @@ describe('reduceSource', () => {
     expect(readReduced(archive)).toEqual([])
     expect(db.cleaned).toBe(1)
     expect(readdirSync(work)).toEqual([])
+  })
+
+  test('lines kept on both sides of a dropped one do not join into a record the original never had', async () => {
+    // A lone url, a known credential, then two plain lines. In the original the url is rejected (the next line is a credential, not a login). With the known line gone, the
+    // url, the login-looking line and the word behind it would read as one url / login / password record.
+    const text = ['https://lone.example.com', OLD1, 'login-like@x.test', 'someword1', ''].join('\n') + '\n'
+    const whole = archived('this.txt', text)
+    const db = memoryDb(holdersOf(['https://old1.example.com', 'o1@x.test', 'pwold1', 'other.txt']))
+    const out = await reduceSource({ entry: whole, archiveDir: archive, db, workDir: work })
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    expect(out.stats.proof?.spurious).toBe(0)
+    expect(out.entry.credentials).toBe(0)
+    expect(await readAll(archive, out.entry)).toBe(['https://lone.example.com', '', 'login-like@x.test', 'someword1'].join('\n') + '\n')
   })
 
   test('the reduced entry is a real archive entry: it verifies, and its frames decode to what was kept', async () => {

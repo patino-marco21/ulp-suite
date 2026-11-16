@@ -42,15 +42,21 @@ describe('normalizeRanges', () => {
 })
 
 describe('copyRanges', () => {
-  test('copies exactly the ranges, across chunk boundaries of every size', async () => {
+  test('copies exactly the ranges, across chunk boundaries of every size, with a blank line where lines were left out', async () => {
     const text = 'aaa\nbbb\nccc\nddd\neee\n'
     const ranges = normalizeRanges([[4, 8, 12, 16]])
     for (const size of [1, 2, 3, 5, 7, 100]) {
       const out: Buffer[] = []
       const r = await copyRanges(chunksOf(text, size), ranges, b => out.push(Buffer.from(b)))
-      expect(Buffer.concat(out).toString('latin1')).toBe('bbb\nddd\n')
-      expect(r).toEqual({ bytes: 8, lines: 2 })
+      expect(Buffer.concat(out).toString('latin1')).toBe('bbb\n\nddd\n')
+      expect(r).toEqual({ bytes: 9, lines: 3 })
     }
+  })
+
+  test('ranges that touch are one range: no blank line between them, none in front of the first or behind the last', async () => {
+    const out: Buffer[] = []
+    await copyRanges(chunksOf('aaa\nbbb\nccc\nddd\n', 4), normalizeRanges([[0, 4, 4, 8, 12, 16]]), b => out.push(Buffer.from(b)))
+    expect(Buffer.concat(out).toString('latin1')).toBe('aaa\nbbb\n\nddd\n')
   })
 
   test('a kept range that ends the source without a newline gets one', async () => {
@@ -63,7 +69,7 @@ describe('copyRanges', () => {
   test('a range that stops inside a line is closed with a newline, so the next range cannot glue onto it', async () => {
     const out: Buffer[] = []
     await copyRanges(chunksOf('abcdef\nghi\n', 4), normalizeRanges([[0, 3, 7, 11]]), b => out.push(Buffer.from(b)))
-    expect(Buffer.concat(out).toString('latin1')).toBe('abc\nghi\n')
+    expect(Buffer.concat(out).toString('latin1')).toBe('abc\n\nghi\n')
   })
 
   test('no ranges copies nothing', async () => {
