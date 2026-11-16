@@ -6,8 +6,11 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { readStatus } from '@/lib/archive-auto'
+
+// Every test starts real tsx processes (the replace test starts three, about 3.8 s together): under a full parallel run they overran the 5 s default.
+vi.setConfig({ testTimeout: 60_000 })
 
 const REPO = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
 const TSX = join(REPO, 'node_modules', '.bin', 'tsx')
