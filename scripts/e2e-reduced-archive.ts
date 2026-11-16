@@ -9,9 +9,14 @@
  *   C  300 credentials of A and B, 20 blank lines: it adds nothing
  *   D  50 look-alikes of A's that D itself stored (the state before the normalised check): both A and D hold the key
  *   E  20 new credentials in a file whose name needs escaping in SQL
+ *   I  1 Android credential (a login and password under an app id)
+ *   H  the same Android line (known now), an unfinished labelled block with a repeat of that Android pair under another app id inside it (rule B of the parser drops the repeat),
+ *      and 1 new credential
+ *   L  2 new credentials around a line of more than 1 MiB (the parser cuts or reads whole such a line depending on how the bytes are chunked): left whole, not a failure
  * and the reduced entry of each is written by reduceSource over the real ClickHouse and proven. Then: a row the database holds for B that no line of B produces makes B fail
  * is drift (reported, not a loss: today's parser never made it from the file); a writer that forgets a credential the file stored fails its proof and leaves nothing behind; A
- * reduced again after D stored look-alikes of its rows gives the same entry; a container that does not exist is a clean failure; the command (scripts/reduce-archive.ts) runs
+ * reduced again after D stored look-alikes of its rows gives the same entry; H keeps the first Android line beside the copied repeat, or the repeat would read as a new
+ * credential; every file cut into slabs of a few dozen rows gives the same entry and the same proof as in one slab; a container that does not exist is a clean failure; the command (scripts/reduce-archive.ts) runs
  * over the same ClickHouse; and no scratch table is left.
  *
  *   npx tsx scripts/e2e-reduced-archive.ts [--keep]
@@ -74,7 +79,10 @@ const block = (tag: string, i: number) => [`Host: https://blk${i}.example.test/`
 const triple = (tag: string, i: number) => [`https://pos${i}.example.test/`, `triple-${tag}-${i}@mail.test`, `TriplePw-${tag}-${i}!`]
 const banner = (tag: string, i: number) => `free text banner ${tag} ${i} that holds no credential`
 
-const TAGS = { a: `${RUN}a`, b: `${RUN}b`, d: `${RUN}d`, e: `${RUN}e` }
+const TAGS = { a: `${RUN}a`, b: `${RUN}b`, d: `${RUN}d`, e: `${RUN}e`, h: `${RUN}h`, l: `${RUN}l` }
+const ANDROID_HASH = 'AbCdEfGhIjKlMnOpQrSt'
+const androidFirst = `${ANDROID_HASH}==@com.example.app/:andr-${RUN}@mail.test:AndrPw-${RUN}!`
+const androidRepeat = `${ANDROID_HASH}==@com.example.other/:andr-${RUN}@mail.test:AndrPw-${RUN}!`
 const lines: Record<string, string[]> = {
   A: [...range(1000).map(i => cred(TAGS.a, i)), ...range(100).map(i => cred(TAGS.a, i)), ...range(30).map(i => banner('a', i)), ...range(20).map(() => ''), ...range(10).map(credT3)],
   B: [
@@ -85,10 +93,13 @@ const lines: Record<string, string[]> = {
   C: [...range(150).map(i => cred(TAGS.a, 200 + i)), ...range(150).map(i => cred(TAGS.b, i)), ...range(20).map(() => '')],
   D: range(50).map(i => credWww(TAGS.a, 800 + i)),
   E: range(20).map(i => cred(TAGS.e, i)),
+  I: [androidFirst],
+  H: [androidFirst, `Login: orphan-${RUN}@mail.test`, androidRepeat, '', cred(TAGS.h, 0)],
+  L: [cred(TAGS.l, 0), 'y'.repeat((1 << 20) + 5000), cred(TAGS.l, 1)],
 }
 // The known block of B: the credential of A's line 700, written as a labelled block (its key is A's).
 lines.B.splice(lines.B.length - 5, 0, `Host: https://shop${700 % 50}.example.test/login`, `Login: user-${TAGS.a}-700@mail.test`, `Password: Pw-${TAGS.a}-700-Xy!`, '')
-const NAMES: Record<string, string> = { A: `a-${RUN}.txt`, B: `b-${RUN}.txt`, C: `c-${RUN}.txt`, D: `d-${RUN}.txt`, E: `ow\\ned\tq'uote-${RUN}.txt` }
+const NAMES: Record<string, string> = { A: `a-${RUN}.txt`, B: `b-${RUN}.txt`, C: `c-${RUN}.txt`, D: `d-${RUN}.txt`, E: `ow\\ned\tq'uote-${RUN}.txt`, I: `i-${RUN}.txt`, H: `h-${RUN}.txt`, L: `l-${RUN}.txt` }
 const text = (key: string) => lines[key].join('\n') + '\n'
 
 async function main(): Promise<number> {
@@ -152,14 +163,17 @@ async function main(): Promise<number> {
     }
     const entries: Record<string, ManifestEntry> = {}
     const stored: Record<string, number> = {}
-    for (const key of ['A', 'B', 'C', 'D', 'E']) {
+    const importAndArchive = async (key: string): Promise<void> => {
       const plain = join(work, `${key}.txt`)
       writeFileSync(plain, text(key), 'latin1')
       stored[key] = key === 'D' ? await importFile(NAMES[key], text(key), await parseFile(text(key))) : await importFile(NAMES[key], text(key))
       entries[key] = archiveFile(plain, { archiveDir: archive, name: NAMES[key] })
       appendManifest(archive, entries[key])
     }
+    for (const key of ['A', 'B', 'C', 'D', 'E']) await importAndArchive(key)
     check('the table holds what each import stored: A 1000, B 402, C 0, D 50, E 20', ['A', 'B', 'C', 'D', 'E'].map(k => stored[k]).join(',') === '1000,402,0,50,20', ['A', 'B', 'C', 'D', 'E'].map(k => stored[k]).join(','))
+    for (const key of ['I', 'H', 'L']) await importAndArchive(key)
+    check('the table holds I 1, H 1 (the Android line was known, its repeat is dropped by the parser) and L 2', stored.I === 1 && stored.H === 1 && stored.L === 2, `${stored.I},${stored.H},${stored.L}`)
 
     const reduce = async (key: string, chOverride = ch): Promise<ReduceOutcome> =>
       reduceSource({ entry: entries[key], archiveDir: archive, db: chReduceDb(chOverride), workDir: join(work, 'tmp') })
@@ -172,7 +186,7 @@ async function main(): Promise<number> {
     const lineSet = (body: string) => new Set(body.split('\n').filter(l => l !== ''))
 
     console.log('3. A: everything new is kept once, banners are kept, repeats, blanks and T3 are not')
-    let t0 = Date.now()
+    const t0 = Date.now()
     const a = await reduce('A')
     console.log(`     (${Date.now() - t0} ms)`)
     check('A reduces and proves', a.ok, a.ok ? '' : `${a.reason}: ${a.detail}`)
@@ -211,6 +225,17 @@ async function main(): Promise<number> {
     const e = await reduce('E')
     check('E (quote, backslash and tab in its name) reduces and keeps its 20 credentials', e.ok && e.entry.credentials === 20 && e.stats.proof?.dbRows === 20, e.ok ? '' : `${e.reason}: ${e.detail}`)
 
+    console.log('7a. H: a repeat of an Android pair copied inside an unfinished block brings the first line of its pair along')
+    const h = await reduce('H')
+    check('H reduces and proves: no credential appears that the original does not make', h.ok && h.stats.proof?.spurious === 0 && h.stats.proof?.missing === 0, h.ok ? JSON.stringify(h.stats.proof) : `${h.reason}: ${h.detail}`)
+    const hText = await textOf(h)
+    check('H keeps the first Android line, the block with the repeat inside it, and the new credential', hText.includes(androidFirst) && hText.includes(androidRepeat) && hText.includes(cred(TAGS.h, 0)) && h.ok && h.entry.extra_known === 1, hText.split('\n').length - 1 + ' lines')
+
+    console.log('7b. L: a line over 1 MiB leaves the file whole')
+    const nL = readReduced(archive).length
+    const l = await reduce('L')
+    check('L is left whole on purpose: reason long_line, no entry, no scratch table', !l.ok && l.reason === 'long_line' && readReduced(archive).length === nL, l.ok ? 'it was reduced' : `${l.reason}: ${l.detail}`)
+
     console.log('8. Drift, and a reduction that loses a credential')
     // A row the database holds for B that no line of B produces: an older parser stored it. Re-importing B would not make it either, so it is drift, not a loss.
     await ch.run(`INSERT INTO ulp.credentials (url, email, password, domain, source_file, breach_name) VALUES ('https://ghost.example.test/', 'ghost-${RUN}@mail.test', 'GhostPw-${RUN}!', '', ${sqlQuote(NAMES.B)}, '')`)
@@ -235,7 +260,25 @@ async function main(): Promise<number> {
     const gone = await reduce('E', dockerCh('ulprehearsal_no_such_container'))
     check('a missing container is a clean failure that writes nothing', !gone.ok && gone.reason === 'error' && readReduced(archive).length === n1)
 
-    console.log('10. The command (scripts/reduce-archive.ts) over the same ClickHouse')
+    console.log('10. Slabs: a file cut into many slabs gives the same entry and the same proof as one slab')
+    const passes = { n: 0 }
+    const counted: typeof ch = { run: sql => { if (sql.includes('norm_key_hash IN')) passes.n++; return ch.run(sql) }, insertTsv: (sql, rows) => ch.insertTsv(sql, rows), queryToFile: (sql, path) => ch.queryToFile(sql, path) }
+    const slabCases: Array<[string, ReduceOutcome, number, number]> = [['A', a2, 97, 12], ['B', ghost, 97, 11], ['D', d, 7, 8], ['E', e, 7, 3], ['H', h, 1, 2]]
+    for (const [key, base, rows, expectPasses] of slabCases) {
+      passes.n = 0
+      const sl = await reduceSource({ entry: entries[key], archiveDir: archive, db: chReduceDb(counted, { slabRows: rows }), workDir: join(work, 'tmp') })
+      check(`${key} in slabs of ${rows} rows (${expectPasses} passes over ulp.credentials) is the same entry and the same proof as in one slab`,
+        sl.ok && base.ok && passes.n === expectPasses && sl.entry.id === base.entry.id && JSON.stringify(sl.stats) === JSON.stringify(base.stats),
+        sl.ok ? `passes ${passes.n}, ${JSON.stringify(sl.stats)} vs ${base.ok ? JSON.stringify(base.stats) : base.detail}` : `${sl.reason}: ${sl.detail}`)
+    }
+    const n2 = readReduced(archive).length
+    const lossySlabs = await reduceSource({
+      entry: entries.E, archiveDir: archive, workDir: join(work, 'tmp'),
+      db: (real => ({ ...real, classify: async (name: string) => { const r = await real.classify(name); return { ...r, keep: r.keep.slice(2) } } }) as ReduceDb)(chReduceDb(ch, { slabRows: 7 })),
+    })
+    check('a reduction that would lose a credential still fails its proof when the proof runs in slabs, and writes nothing', !lossySlabs.ok && lossySlabs.reason === 'mismatch' && lossySlabs.stats?.proof?.missing === 1 && readReduced(archive).length === n2)
+
+    console.log('11. The command (scripts/reduce-archive.ts) over the same ClickHouse')
     // A second archive: A, B (with its drift row), C, F (archived, never imported) and G (imported, but its archive file is damaged).
     const archive2 = join(work, 'archive2')
     mkdirSync(archive2)
@@ -272,7 +315,7 @@ async function main(): Promise<number> {
     const verify = cli(['verify', '--all'])
     check('verify: every reduced entry decodes and hashes', verify.code === 0 && verify.out.includes('verified 3, failed 0'), verify.out.slice(-200))
 
-    console.log('11. Nothing left behind')
+    console.log('12. Nothing left behind')
     check('no scratch table is left in ClickHouse', (await q(`SELECT count() FROM system.tables WHERE database = 'default' AND (name LIKE 'zz_red_%' OR name LIKE 'zz_e2e_stage_%')`)) === '0')
   } finally {
     rmSync(work, { recursive: true, force: true })

@@ -3,7 +3,7 @@
  * ranges of the credentials the database says this file stored, and the copy of exactly those bytes out of a stream.
  */
 import { describe, expect, test } from 'vitest'
-import { copyRanges, normalizeRanges } from '@/lib/reduced-archive'
+import { androidFirstsToKeep, copyRanges, normalizeRanges } from '@/lib/reduced-archive'
 
 const pairs = (flat: Float64Array) => Array.from({ length: flat.length / 2 }, (_, i) => [flat[2 * i], flat[2 * i + 1]])
 
@@ -38,6 +38,37 @@ describe('normalizeRanges', () => {
     const expected: number[][] = []
     for (let i = 0; i < marked.length; i++) if (marked[i] && (i === 0 || !marked[i - 1])) { let j = i; while (marked[j]) j++; expected.push([i, j]) }
     expect(pairs(normalizeRanges([flat]))).toEqual(expected)
+  })
+})
+
+describe('androidFirstsToKeep', () => {
+  const ranges = normalizeRanges([[100, 200, 300, 400]])
+
+  test('a repeat inside a range asks for the first line of its pair; one outside every range asks for nothing', () => {
+    // quadruples: repeat start, repeat end, first start, first end
+    expect(androidFirstsToKeep(ranges, [[110, 150, 10, 40]])).toEqual([10, 40])
+    expect(androidFirstsToKeep(ranges, [[210, 250, 10, 40]])).toEqual([])
+    expect(androidFirstsToKeep(ranges, [[410, 450, 10, 40]])).toEqual([])
+    expect(androidFirstsToKeep(ranges, [[50, 90, 10, 40]])).toEqual([])
+  })
+
+  test('a repeat must lie wholly inside a range, edges included', () => {
+    expect(androidFirstsToKeep(ranges, [[100, 200, 1, 2]])).toEqual([1, 2])
+    expect(androidFirstsToKeep(ranges, [[300, 400, 1, 2]])).toEqual([1, 2])
+    expect(androidFirstsToKeep(ranges, [[190, 210, 1, 2]])).toEqual([])
+    expect(androidFirstsToKeep(ranges, [[90, 110, 1, 2]])).toEqual([])
+  })
+
+  test('several lists and several repeats of one pair', () => {
+    const out = androidFirstsToKeep(ranges, [[110, 120, 5, 9, 130, 140, 5, 9], [350, 360, 20, 30]])
+    expect(out).toEqual([5, 9, 5, 9, 20, 30])
+    expect(pairs(normalizeRanges([out]))).toEqual([[5, 9], [20, 30]])
+  })
+
+  test('no ranges or no repeats', () => {
+    expect(androidFirstsToKeep(new Float64Array(0), [[1, 2, 3, 4]])).toEqual([])
+    expect(androidFirstsToKeep(ranges, [])).toEqual([])
+    expect(androidFirstsToKeep(ranges, [[]])).toEqual([])
   })
 })
 

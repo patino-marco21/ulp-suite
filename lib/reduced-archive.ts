@@ -51,6 +51,27 @@ export function normalizeRanges(parts: ArrayLike<number>[]): Float64Array {
 }
 
 /**
+ * The lines to add to `ranges` (from normalizeRanges) because of rule B of the parser, which drops the repeats of an Android (login, password) pair per file. `repeats` are the
+ * parser's androidRepeats lists (repeat start, repeat end, first start, first end). A repeat that lies inside `ranges` is copied; read alone it is no repeat, so the line of its
+ * pair that came first must be copied with it. Returns those first lines as flat start/end pairs (not merged, not sorted).
+ */
+export function androidFirstsToKeep(ranges: Float64Array, repeats: ArrayLike<number>[]): number[] {
+  const n = ranges.length / 2
+  const out: number[] = []
+  for (const q of repeats) {
+    for (let i = 0; i + 3 < q.length; i += 4) {
+      let lo = 0, hi = n - 1, at = -1
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1
+        if (ranges[2 * mid] <= q[i]) { at = mid; lo = mid + 1 } else hi = mid - 1
+      }
+      if (at >= 0 && q[i + 1] <= ranges[2 * at + 1]) out.push(q[i + 2], q[i + 3])
+    }
+  }
+  return out
+}
+
+/**
  * Copies the bytes of `ranges` (from normalizeRanges) out of a stream, in order. A range that does not end in a newline (the last line of a file, or a long line the parser
  * read in pieces) is closed with one, so the range after it cannot glue onto it. A blank line goes between two ranges, because lines were left out there: the parser's
  * state (a url waiting for its login, a block) must end at the gap, as it ended in the original at the line that closed it, or the lines on both sides would read as one
@@ -222,7 +243,7 @@ export interface ReduceStats {
 
 export type ReduceOutcome =
   | { ok: true; entry: ReducedEntry; stats: ReduceStats }
-  | { ok: false; reason: 'mismatch' | 'source' | 'error'; detail: string; stats?: ReduceStats }
+  | { ok: false; reason: 'mismatch' | 'source' | 'long_line' | 'error'; detail: string; stats?: ReduceStats }
 
 function writeAll(fd: number, buf: Buffer): void {
   let done = 0
@@ -255,6 +276,10 @@ interface ParseContext {
   track: boolean
   /** The rejected units the parser says to keep, as flat start/end pairs; filled while the rows are read. */
   kept: number[]
+  /** Rule B repeats the parser reports (ParseStreamOptions.trackSpans), one list per batch. */
+  repeats: Float64Array[]
+  /** Lines over the parser's length limit, or pieces of one (StreamBatch.overlongLines). */
+  longLines: { n: number }
   parsed: { n: number }
 }
 
@@ -269,6 +294,8 @@ async function* credentialRows(stream: ReadableStream<Uint8Array>, ctx: ParseCon
       rows.push({ seq: seq++, s: ctx.track ? batch.spans![2 * i] : 0, e: ctx.track ? batch.spans![2 * i + 1] : 0, url: c.url, email: c.email, password: c.password })
     }
     if (ctx.track && batch.kept) for (let i = 0; i < batch.kept.length; i++) ctx.kept.push(batch.kept[i])
+    if (ctx.track && batch.androidRepeats) ctx.repeats.push(Float64Array.from(batch.androidRepeats))
+    if (ctx.track && batch.overlongLines) ctx.longLines.n += batch.overlongLines
     ctx.parsed.n += rows.length
     if (rows.length > 0) yield rows
   }
@@ -298,19 +325,32 @@ export async function reduceSource(opts: ReduceOptions): Promise<ReduceOutcome> 
 
     // 1. parse the original
     const kept: number[] = []
+    const repeats: Float64Array[] = []
     const parsed = { n: 0 }
+    const longLines = { n: 0 }
     const tee = hashedWebStream(source)
-    await db.loadOriginal(credentialRows(tee.stream, { name: entry.name, hard, soft, filterOn, track: true, kept, parsed }))
+    await db.loadOriginal(credentialRows(tee.stream, { name: entry.name, hard, soft, filterOn, track: true, kept, repeats, longLines, parsed }))
     const read = tee.result()
     if (read.bytes !== entry.size || read.sha256 !== entry.sha256) {
       return { ok: false, reason: 'source', detail: 'the archive entry does not hash to its manifest line; nothing was reduced' }
     }
     stats.parsed = parsed.n
+    // The parser cuts a line over 1 MiB where its buffer happens to stand, or reads it whole when its end arrives first, so what it makes of such a line changes with the chunking of
+    // the bytes: the rows the import stored for it are not reproducible from the file by any reader, the reduced entry's included. The file keeps its whole-file entry as the only copy.
+    if (longLines.n > 0) {
+      return {
+        ok: false, reason: 'long_line', stats,
+        detail: `the file has ${longLines.n} line(s) longer than 1 MiB, which the parser reads in pieces that depend on how the bytes are chunked; no reduced entry can reproduce them`,
+      }
+    }
 
     // 2. classify and copy
     const cls = await db.classify(entry.name)
     Object.assign(stats, { distinct: cls.distinct, mine: cls.mine, absent: cls.absent, known: cls.known, repeats: stats.parsed - cls.distinct })
-    const ranges = normalizeRanges([kept, cls.keep])
+    let ranges = normalizeRanges([kept, cls.keep])
+    // A rule B repeat that is copied needs the first line of its pair beside it (see androidFirstsToKeep).
+    const firsts = androidFirstsToKeep(ranges, repeats)
+    if (firsts.length > 0) ranges = normalizeRanges([ranges, firsts])
     mkdirSync(opts.workDir, { recursive: true })
     const fd = openSync(plainPath, 'wx')
     let copied: { bytes: number; lines: number }
@@ -326,7 +366,7 @@ export async function reduceSource(opts: ReduceOptions): Promise<ReduceOutcome> 
     // 3. prove
     const proofRows = credentialRows(
       Readable.toWeb(createReadStream(plainPath, { highWaterMark: 1 << 20 })) as ReadableStream<Uint8Array>,
-      { name: entry.name, hard, soft, filterOn, track: false, kept: [], parsed: { n: 0 } },
+      { name: entry.name, hard, soft, filterOn, track: false, kept: [], repeats: [], longLines: { n: 0 }, parsed: { n: 0 } },
     )
     const proof = await db.prove(entry.name, proofRows)
     stats.proof = proof

@@ -278,6 +278,50 @@ describe('reduceSource', () => {
     expect(await readAll(archive, out.entry)).toBe(['https://lone.example.com', '', 'login-like@x.test', 'someword1'].join('\n') + '\n')
   })
 
+  test('a repeat of an android pair that is copied inside a kept block brings the first line of its pair along, so it is still a repeat there', async () => {
+    // Rule B drops the repeats of a (login, password) pair per file. The first line is stored by another file (known, so it would be dropped); an unfinished block opens after it, the repeat sits
+    // inside the block, and a blank line closes the block: the block is kept whole. Without the first line the repeat would read as a new credential.
+    const HASH = 'AbCdEfGhIjKlMnOpQrSt'
+    const first = `${HASH}==@com.example.app/:alice@mail.test:Secret1`
+    const repeat = `${HASH}==@com.example.other/:alice@mail.test:Secret1`
+    const text = [first, 'Login: orphan@x.test', repeat, ''].join('\n') + '\n'
+    const whole = archived('this.txt', text)
+    const db = memoryDb(holdersOf([`android://${HASH}==@com.example.app/`, 'alice@mail.test', 'Secret1', 'other.txt']))
+    const out = await reduceSource({ entry: whole, archiveDir: archive, db, workDir: work })
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    expect(out.stats.proof).toMatchObject({ spurious: 0, missing: 0 })
+    const kept = await readAll(archive, out.entry)
+    expect(kept).toContain(first)
+    expect(kept).toContain(repeat)
+    expect(out.entry.extra_known).toBe(1)
+  })
+
+  test('a repeat that is not copied does not bring its first line along', async () => {
+    const HASH = 'AbCdEfGhIjKlMnOpQrSt'
+    const first = `${HASH}==@com.example.app/:alice@mail.test:Secret1`
+    const repeat = `${HASH}==@com.example.other/:alice@mail.test:Secret1`
+    const whole = archived('this.txt', [first, repeat, NEW1, ''].join('\n'))
+    const db = memoryDb(holdersOf([`android://${HASH}==@com.example.app/`, 'alice@mail.test', 'Secret1', 'other.txt'], ['https://new1.example.com', 'n1@x.test', 'pwnew1', 'this.txt']))
+    const out = await reduceSource({ entry: whole, archiveDir: archive, db, workDir: work })
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    expect(await readAll(archive, out.entry)).toBe(NEW1 + '\n')
+  })
+
+  test('a file with a line longer than the parser takes whole is not reduced: its pieces depend on how the bytes are chunked, so no reader can reproduce them', async () => {
+    const whole = archived('this.txt', NEW1 + '\n' + 'y'.repeat((1 << 20) + 5000) + '\n' + OLD1 + '\n')
+    const db = memoryDb(holdersOf(['https://new1.example.com', 'n1@x.test', 'pwnew1', 'this.txt']))
+    const out = await reduceSource({ entry: whole, archiveDir: archive, db, workDir: work })
+    expect(out.ok).toBe(false)
+    if (out.ok) return
+    expect(out.reason).toBe('long_line')
+    expect(out.detail).toContain('1 MiB')
+    expect(readReduced(archive)).toEqual([])
+    expect(db.cleaned).toBe(1)
+    expect(readdirSync(work)).toEqual([])
+  })
+
   test('the reduced entry is a real archive entry: it verifies, and its frames decode to what was kept', async () => {
     const whole = archived('this.txt', MIXED)
     const out = await reduceSource({ entry: whole, archiveDir: archive, db: memoryDb(MIXED_HOLDERS()), workDir: work, hardDrop: T3, frameBytes: 64, searchBytes: 64 })

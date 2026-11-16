@@ -22,10 +22,10 @@ function streamOf(text: string, chunk = Infinity): ReadableStream<Uint8Array> {
   })
 }
 
-interface Run { credentials: ULPCredential[]; spans: number[]; kept: number[]; breakdown: Record<string, number>; rejected: number; batches: number }
+interface Run { credentials: ULPCredential[]; spans: number[]; kept: number[]; androidRepeats: number[]; overlongLines: number; breakdown: Record<string, number>; rejected: number; batches: number }
 
 async function run(text: string, opts: { track: boolean; chunk?: number; batchSize?: number; hard?: (email: string, url: string) => boolean }): Promise<Run> {
-  const out: Run = { credentials: [], spans: [], kept: [], breakdown: {}, rejected: 0, batches: 0 }
+  const out: Run = { credentials: [], spans: [], kept: [], androidRepeats: [], overlongLines: 0, breakdown: {}, rejected: 0, batches: 0 }
   for await (const b of parseULPStream(streamOf(text, opts.chunk), FILE, opts.batchSize ?? 100_000, opts.hard, { dedupInFile: false, trackSpans: opts.track })) {
     out.batches++
     out.credentials.push(...b.credentials)
@@ -36,9 +36,13 @@ async function run(text: string, opts: { track: boolean; chunk?: number; batchSi
       expect(b.spans!.length).toBe(2 * b.credentials.length)
       out.spans.push(...b.spans!)
       out.kept.push(...(b.kept ?? []))
+      out.androidRepeats.push(...(b.androidRepeats ?? []))
+      out.overlongLines += b.overlongLines ?? 0
     } else {
       expect(b.spans).toBeUndefined()
       expect(b.kept).toBeUndefined()
+      expect(b.androidRepeats).toBeUndefined()
+      expect(b.overlongLines).toBeUndefined()
     }
   }
   return out
@@ -139,6 +143,43 @@ describe('parseULPStream trackSpans', () => {
     expect(r.credentials).toHaveLength(1)
   })
 
+  test('a repeat of an android pair is reported with the line of the pair it repeats, across batches', async () => {
+    const first = `${HASH}==@com.example.app/:alice@mail.test:Secret1\n`
+    const repeat1 = `${HASH}==@com.example.other/:alice@mail.test:Secret1\n`
+    const unrelated = `${HASH}==@com.example.app/:bob@mail.test:Secret2\n`
+    const repeat2 = `https://android://${HASH}==@com.example.third/:alice@mail.test:Secret1\n`
+    const text = 'free text that holds no credential\n' + first + unrelated + repeat1 + repeat2
+    for (const batchSize of [100_000, 1]) {
+      const r = await run(text, { track: true, batchSize })
+      expect(r.credentials.map(c => c.email)).toEqual(['alice@mail.test', 'bob@mail.test'])
+      const quads = Array.from({ length: r.androidRepeats.length / 4 }, (_, i) => r.androidRepeats.slice(4 * i, 4 * i + 4))
+      expect(quads.map(([rs, re, fs, fe]) => [slice(text, rs, re), slice(text, fs, fe)])).toEqual([[repeat1, first], [repeat2, first]])
+    }
+  })
+
+  test('a repeat that is dropped by something else than the android rule is not reported, and nothing is reported without trackSpans', async () => {
+    const first = `${HASH}==@com.example.app/:alice@mail.test:Secret1\n`
+    const text = first + `${HASH}==@com.example.other/:alice@mail.test:Secret1\n`
+    expect((await run(text, { track: true })).androidRepeats.length).toBe(4)
+    expect((await run('https://a.example.com:alice@x.test:pw1234\nhttps://a.example.com:alice@x.test:pw1234\n', { track: true })).androidRepeats).toEqual([])
+    expect((await run(text, { track: false })).androidRepeats).toEqual([])
+  })
+
+  test('a line over the parser\'s length limit is reported however the bytes arrive: cut into pieces by one chunking, read whole by another', async () => {
+    const text = 'https://a.example.com:alice@x.test:pw1234\n' + 'y'.repeat((1 << 20) + 5000) + '\nhttps://b.example.com:bob@y.test:pw5678\n'
+    expect((await run(text, { track: true })).overlongLines).toBe(1)                     // all in one chunk: the line is read whole
+    expect((await run(text, { track: true, chunk: 1 << 16 })).overlongLines).toBe(1)    // small chunks: still one line
+    const cut = 'https://a.example.com:alice@x.test:pw1234\n' + 'y'.repeat(3 << 20) + '\n'
+    expect((await run(cut, { track: true, chunk: 1 << 16 })).overlongLines).toBeGreaterThan(0)   // a 3 MiB line is cut into pieces where the buffer stands
+    expect((await run(text, { track: false })).overlongLines).toBe(0)
+  })
+
+  test('a line of exactly the limit, and ordinary lines, are not reported', async () => {
+    const atLimit = 'https://a.example.com:alice@x.test:pw1234\n' + 'y'.repeat(1 << 20) + '\n' + 'https://b.example.com:bob@y.test:pw5678\n'
+    expect((await run(atLimit, { track: true, chunk: 1 << 16 })).overlongLines).toBe(0)
+    expect((await run('https://a.example.com:alice@x.test:pw1234\n' + 'y'.repeat(5000) + '\n', { track: true })).overlongLines).toBe(0)
+  })
+
   test('differential: tracking changes nothing that is parsed, and every span holds its credential', async () => {
     const pool = [
       'https://a.example.com:alice@x.test:pw1234',
@@ -183,6 +224,12 @@ describe('parseULPStream trackSpans', () => {
         expect(slice(text, s, e)).toContain(c.password)
       })
       for (const [s, e] of pairs(tracked.kept)) expect(e).toBeGreaterThan(s)
+      const ar = tracked.androidRepeats
+      for (let i = 0; i < ar.length; i += 4) {
+        expect(ar[i + 2]).toBeLessThan(ar[i])
+        expect(slice(text, ar[i], ar[i + 1])).toContain('frank@mail.test:Secret1')
+        expect(slice(text, ar[i + 2], ar[i + 3])).toContain('frank@mail.test:Secret1')
+      }
     }
   })
 })

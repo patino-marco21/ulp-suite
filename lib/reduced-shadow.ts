@@ -17,6 +17,9 @@ export const PILOT_MAX_BYTES = 2 * 1024 ** 3
 const LOG_FILE = 'shadow-log.jsonl'
 const START_FILE = 'shadow.json'
 
+/** The reason of a file left whole on purpose (it holds a line over 1 MiB); not a failure of the writer, so neither the gate nor the failure counts take it. */
+export const SKIP_REASON = 'long_line'
+
 export interface ShadowLine {
   name: string
   /** The sha256 of the whole-file entry that was reduced: a name with other bytes is another file. */
@@ -88,11 +91,15 @@ export function pickCandidates(o: PickOptions): ManifestEntry[] {
   const done = new Set<string>()
   for (const r of o.reduced) done.add(keyOf(r.name, r.of.sha256))
   const lastOk = new Map<string, boolean>()
-  for (const l of o.log) lastOk.set(keyOf(l.name, l.sha256), l.ok)
+  const skipped = new Set<string>()   // reduced entries are not made for these bytes: they hold a line the parser reads differently from reader to reader
+  for (const l of o.log) {
+    lastOk.set(keyOf(l.name, l.sha256), l.ok)
+    if (!l.ok && l.reason === SKIP_REASON) skipped.add(keyOf(l.name, l.sha256))
+  }
   const maxBytes = o.maxBytes ?? PILOT_MAX_BYTES
   const eligible = o.entries.filter(e => {
     if (e.size === 0 || !o.inSources.has(e.name) || !o.archiveHolds(e)) return false
-    if (done.has(keyOf(e.name, e.sha256))) return false
+    if (done.has(keyOf(e.name, e.sha256)) || skipped.has(keyOf(e.name, e.sha256))) return false
     if (!o.retryFailed && lastOk.get(keyOf(e.name, e.sha256)) === false) return false
     if (o.mode === 'any') return true
     return o.mode === 'new' ? e.created_at >= o.startedAt : e.created_at < o.startedAt && e.size <= maxBytes
@@ -114,6 +121,7 @@ export function consecutiveExact(log: ShadowLine[]): number {
     const k = keyOf(l.name, l.sha256)
     if (seen.has(k)) continue
     seen.add(k)
+    if (!l.ok && l.reason === SKIP_REASON) continue
     if (!l.ok || (l.drift ?? 0) > 0) break
     n++
   }
@@ -129,6 +137,8 @@ export interface Summary {
   wholeArchiveBytes: number
   reducedArchiveBytes: number
   failuresByReason: Record<string, number>
+  /** Files left whole on purpose (SKIP_REASON), by their latest result. */
+  skippedLongLine: number
   /** Reduced files with at least one stored row today's parser does not read from them, and the rows. */
   driftFiles: number
   driftKeys: number
@@ -149,9 +159,14 @@ export function summarize(o: { entries: ManifestEntry[]; reduced: ReducedEntry[]
   const latest = new Map<string, ShadowLine>()
   for (const l of o.log) latest.set(keyOf(l.name, l.sha256), l)
   const failuresByReason: Record<string, number> = {}
-  for (const l of latest.values()) if (!l.ok) failuresByReason[l.reason ?? 'unknown'] = (failuresByReason[l.reason ?? 'unknown'] ?? 0) + 1
+  let skippedLongLine = 0
+  for (const l of latest.values()) {
+    if (l.ok) continue
+    if (l.reason === SKIP_REASON) skippedLongLine++
+    else failuresByReason[l.reason ?? 'unknown'] = (failuresByReason[l.reason ?? 'unknown'] ?? 0) + 1
+  }
   return {
     reducedFiles, wholeBytes, reducedBytes, sharePct: wholeBytes > 0 ? (100 * reducedBytes) / wholeBytes : 0,
-    wholeArchiveBytes, reducedArchiveBytes, failuresByReason, driftFiles, driftKeys,
+    wholeArchiveBytes, reducedArchiveBytes, failuresByReason, skippedLongLine, driftFiles, driftKeys,
   }
 }

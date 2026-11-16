@@ -17,8 +17,8 @@ const whole = (name: string, created: string, size = 1000, sha = `sha-${name}`):
   ({ name, id: `id-${name}`, size, sha256: sha, lines: 10, frames: [], archive_bytes: 300, archive_sha256: 'x', level: 12, created_at: created })
 const reducedOf = (e: ManifestEntry, size = 100): ReducedEntry =>
   ({ ...e, id: `r-${e.name}`, size, archive_bytes: 30, of: { sha256: e.sha256, size: e.size, lines: e.lines }, credentials: 1, kept_lines: 1, absent: 0, extra_known: 0, db_rows: 1, db_keys: 1, db_drift: 0, verified_at: '2026-11-16T00:00:00Z' })
-const line = (name: string, ok: boolean, at: string, kind: 'new' | 'pilot' = 'new', sha = `sha-${name}`): ShadowLine =>
-  ({ name, sha256: sha, at, kind, ok, ...(ok ? {} : { reason: 'mismatch' }) })
+const line = (name: string, ok: boolean, at: string, kind: 'new' | 'pilot' = 'new', sha = `sha-${name}`, reason = 'mismatch'): ShadowLine =>
+  ({ name, sha256: sha, at, kind, ok, ...(ok ? {} : { reason }) })
 
 const START = '2026-11-16T00:00:00.000Z'
 const names = (es: ManifestEntry[]) => es.map(e => e.name)
@@ -52,6 +52,12 @@ describe('pickCandidates', () => {
     const sources = new Set([...base.inSources, 'empty', 'gone'])
     const gone = whole('gone', '2026-11-16T06:00:00Z')
     expect(names(pickCandidates({ ...base, entries: [...e, gone], inSources: sources, archiveHolds: x => x.name !== 'gone' }))).toEqual(['a', 'b', 'c'])
+  })
+
+  test('a file skipped for a line over 1 MiB is never tried again, retry or not: its bytes will not change', () => {
+    const log = [line('a', false, '2026-11-16T01:30:00Z', 'new', 'sha-a', 'long_line'), line('b', false, '2026-11-16T02:30:00Z')]
+    expect(names(pickCandidates({ ...base, entries, log }))).toEqual(['c'])
+    expect(names(pickCandidates({ ...base, entries, log, retryFailed: true }))).toEqual(['b', 'c'])
   })
 
   test('a file that already has a reduced entry of the same bytes is done; the same name with other bytes is not', () => {
@@ -105,6 +111,13 @@ describe('the gate', () => {
     expect(consecutiveExact(log)).toBe(1)
   })
 
+  test('a file skipped for a line over 1 MiB neither counts nor ends the run: skipping it is the right result', () => {
+    const log: ShadowLine[] = [
+      line('a', true, '2026-11-16T01:00:00Z'), line('s', false, '2026-11-16T02:00:00Z', 'new', 'sha-s', 'long_line'), line('c', true, '2026-11-16T03:00:00Z'),
+    ]
+    expect(consecutiveExact(log)).toBe(2)
+  })
+
   test('the same file tried again counts once, by its latest result', () => {
     const log = [line('a', false, '2026-11-16T01:00:00Z'), line('a', true, '2026-11-16T02:00:00Z'), line('b', true, '2026-11-16T03:00:00Z')]
     expect(consecutiveExact(log)).toBe(2)
@@ -122,6 +135,16 @@ describe('summarize', () => {
     expect(s.sharePct).toBeCloseTo(17.5, 5)
     expect(s.failuresByReason).toEqual({ mismatch: 1 })
     expect(s.driftFiles).toBe(0)
+  })
+
+  test('files skipped for a line over 1 MiB are counted apart from the failures', () => {
+    const a = whole('a', '2026-11-16T01:00:00Z', 1000)
+    const s = summarize({
+      entries: [a, whole('c', '2026-11-16T03:00:00Z', 5000), whole('d', '2026-11-16T04:00:00Z', 5000)], reduced: [reducedOf(a, 100)],
+      log: [line('c', false, '2026-11-16T04:00:00Z'), line('d', false, '2026-11-16T05:00:00Z', 'new', 'sha-d', 'long_line')],
+    })
+    expect(s.failuresByReason).toEqual({ mismatch: 1 })
+    expect(s.skippedLongLine).toBe(1)
   })
 })
 

@@ -1132,6 +1132,18 @@ export interface StreamBatch {
    * (those are proven to carry nothing). Adjacent units are merged; the pairs are not sorted (a block's pair comes when the block closes).
    */
   kept?: number[]
+  /**
+   * Only with `trackSpans`: flat `[repeatStart, repeatEnd, firstStart, firstEnd, ...]`, one quadruple for each line that rule B dropped as a repeat of an Android (login, password) pair
+   * seen earlier in the file, with the span of the line of that pair that came first. Rule B keeps state across the file, so a reader that copies a repeat (inside a kept block, say)
+   * without the first line of its pair would read the repeat as a new credential; it keeps the first line too. Absent when there were none.
+   */
+  androidRepeats?: number[]
+  /**
+   * Only with `trackSpans`: how many lines longer than MAX_LINE_LENGTH (or pieces of one) were read in this batch. Such a line is cut into pieces where the buffer happens to stand
+   * when it passes the limit, or read whole when its end arrives first: what it makes depends on how the bytes arrive (chunk sizes), so it differs from reader to reader. The
+   * reduced archive writer leaves a file with such a line whole. Absent when there were none.
+   */
+  overlongLines?: number
 }
 
 /** Distinct unsplit-line shapes one batch keeps; the quality gate keeps SHAPE_CAP over the whole file. */
@@ -1200,6 +1212,9 @@ export async function* parseULPStream(
   let urlStart = 0       // the first line of the positional record that is open
   let parkedEnd = 0      // the end of the last line that record holds
   let blockStart = -1    // the first labelled line of the block that is open, -1 when none
+  let androidRepeats: number[] = []
+  let overlongLines = 0
+  const androidFirst = new Map<string, [number, number]>()   // pair -> the span of its first line; only filled while tracking
   /** A rejected unit a reader should keep; a unit that touches the previous range extends it. */
   function keepRange(s: number, e: number) {
     const n = kept.length
@@ -1212,9 +1227,9 @@ export async function* parseULPStream(
       credentials: batch, rejected: batchRejected, breakdown: batchBreakdown,
       ...(batchNoCredential > 0 ? { noCredential: batchNoCredential } : {}),
       ...(batchUnsplit.size > 0 ? { unsplitShapes: [...batchUnsplit] } : {}),
-      ...(track ? { spans, kept } : {}),
+      ...(track ? { spans, kept, ...(androidRepeats.length > 0 ? { androidRepeats } : {}), ...(overlongLines > 0 ? { overlongLines } : {}) } : {}),
     }
-    if (track) { spans = []; kept = [] }
+    if (track) { spans = []; kept = []; androidRepeats = []; overlongLines = 0 }
     batch = []; batchRejected = 0; batchNoCredential = 0; batchUnsplit = new Map()
     batchBreakdown = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0, tier_dropped: 0 }
     return out
@@ -1277,7 +1292,7 @@ export async function* parseULPStream(
   }
 
   function processLine(rawLine: string, start: number, end: number) {
-    if (track) { unitStart = start; unitEnd = end }
+    if (track) { unitStart = start; unitEnd = end; if (rawLine.length > MAX_LINE_LENGTH) overlongLines++ }
     // The file's bytes were read as Latin-1: a line that is valid UTF-8 is read as UTF-8 (lib/ulp-utf8.ts), any other line stays as it was.
     // Rule N (v6.3): a promotional signature at the end of the line is not part of it (lib/ulp-promo-signature.ts).
     const line = stripPromoSignature(repairUtf8Line(rawLine))
@@ -1350,8 +1365,15 @@ export async function* parseULPStream(
     if (credential) {
       if (androidRecovered) {
         const pair = `${credential.email}\0${credential.password}`
-        if (androidSeen.has(pair)) { batchRejected++; batchBreakdown.dedup++; return }
-        if (androidSeen.size < ANDROID_SEEN_CAP) androidSeen.add(pair)
+        if (androidSeen.has(pair)) {
+          const first = track ? androidFirst.get(pair) : undefined
+          if (first) androidRepeats.push(unitStart, unitEnd, first[0], first[1])
+          batchRejected++; batchBreakdown.dedup++; return
+        }
+        if (androidSeen.size < ANDROID_SEEN_CAP) {
+          androidSeen.add(pair)
+          if (track) androidFirst.set(pair, [unitStart, unitEnd])
+        }
       }
       const fp = `${credential.url}\0${credential.email}\0${credential.password}`
       if (streamSeenCheck(fp)) { batchRejected++; batchBreakdown.dedup++ }

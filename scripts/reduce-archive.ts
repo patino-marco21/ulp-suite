@@ -21,7 +21,7 @@ import { inboxIsBusy } from '@/lib/archive-replace'
 import { readReduced, reduceSource, reducedDir } from '@/lib/reduced-archive'
 import { chReduceDb } from '@/lib/reduced-archive-ch'
 import {
-  GATE_FILES, appendShadowLog, consecutiveExact, pickCandidates, readShadowLog, readShadowStart, summarize, type ShadowLine,
+  GATE_FILES, appendShadowLog, consecutiveExact, pickCandidates, readShadowLog, readShadowStart, summarize, type ShadowLine, SKIP_REASON,
 } from '@/lib/reduced-shadow'
 import { defaultArchiveDir, latestByName, readManifest, removeStaleParts, verifyEntry } from '@/lib/source-archive'
 
@@ -97,7 +97,7 @@ async function cmdRun(): Promise<number> {
     console.log(`${picks.length} file(s) to reduce (${only ? 'named' : pilot > 0 ? 'pilot' : 'new since the shadow began'})`)
     const inbox = flag('inbox')
     const deadline = Date.now() + Number(flag('max-minutes') ?? '90') * 60_000
-    let ok = 0, failed = 0
+    let ok = 0, failed = 0, skipped = 0
     for (const entry of picks) {
       if (Date.now() > deadline) { console.log('stopped: the time budget is used up'); break }
       if (free() < floor) { console.log(`stopped: free space fell under the ${gib(floor)} GiB floor`); break }
@@ -113,6 +113,10 @@ async function cmdRun(): Promise<number> {
         const pct = entry.size > 0 ? (100 * out.entry.size) / entry.size : 0
         line = { ...base, ok: true, keptPct: Number(pct.toFixed(2)), parsed: out.stats.parsed, mine: out.stats.mine, known: out.stats.known, absent: out.stats.absent, extra_known: out.entry.extra_known, drift: out.entry.db_drift }
         console.log(`reduced ${entry.name}: ${pct.toFixed(1)}% of ${gib(entry.size)} GiB kept (${out.stats.mine} new, ${out.stats.absent} absent, ${out.stats.known} known dropped, ${out.stats.repeats} repeats, ${out.entry.extra_known} known inside records${out.entry.db_drift > 0 ? `, ${out.entry.db_drift} of ${out.entry.db_keys} stored keys no longer read by the parser` : ''}) in ${(ms / 1000).toFixed(0)} s`)
+      } else if (out.reason === SKIP_REASON) {
+        skipped++   // left whole on purpose, not a failure of the writer
+        line = { ...base, ok: false, reason: out.reason, detail: out.detail.slice(0, 300), parsed: out.stats?.parsed }
+        console.log(`skipped ${entry.name}: ${out.detail}`)
       } else {
         failed++
         line = { ...base, ok: false, reason: out.reason, detail: out.detail.slice(0, 300), parsed: out.stats?.parsed }
@@ -120,7 +124,7 @@ async function cmdRun(): Promise<number> {
       }
       appendShadowLog(ARCHIVE, line)
     }
-    console.log(`reduced ${ok}, failed ${failed}`)
+    console.log(`reduced ${ok}, failed ${failed}${skipped > 0 ? `, skipped ${skipped}` : ''}`)
     return failed > 0 ? 1 : 0
   } finally {
     rmSync(work, { recursive: true, force: true })
@@ -141,12 +145,16 @@ function cmdStatus(): number {
   }
   const reasons = Object.entries(s.failuresByReason).map(([k, v]) => `${k} ${v}`).join(', ')
   console.log(`gate: ${consecutiveExact(log)} of ${GATE_FILES} new files exact in a row; failures now: ${reasons || 'none'}`)
+  if (s.skippedLongLine > 0) console.log(`left whole on purpose: ${s.skippedLongLine} file(s) hold a line over 1 MiB, which no reader parses the same way twice (neither counted nor a failure)`)
   if (s.driftFiles > 0) console.log(`drift: ${s.driftFiles} reduced file(s) hold ${s.driftKeys} stored keys that today's parser no longer reads from them (older parser versions stored them)`)
   // by file: the latest result of each (name, bytes)
   const latestPilot = new Map<string, ShadowLine>()
   for (const l of log) if (l.kind === 'pilot') latestPilot.set(`${l.name}\0${l.sha256}`, l)
   const pilot = [...latestPilot.values()]
-  if (pilot.length > 0) console.log(`pilot: ${pilot.filter(l => l.ok).length} exact, ${pilot.filter(l => !l.ok).length} failed of ${pilot.length} tried`)
+  if (pilot.length > 0) {
+    const skippedPilot = pilot.filter(l => !l.ok && l.reason === SKIP_REASON).length
+    console.log(`pilot: ${pilot.filter(l => l.ok).length} exact, ${pilot.filter(l => !l.ok).length - skippedPilot} failed${skippedPilot > 0 ? `, ${skippedPilot} left whole` : ''} of ${pilot.length} tried`)
+  }
   return 0
 }
 
