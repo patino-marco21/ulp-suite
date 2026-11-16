@@ -66,6 +66,10 @@ first window or two.
 `content_key_hash` and every part of the newest partition to have it. Not ready, a hand-off, or a window error that is not a timeout:
 the plain query answers. A timeout is a 408, not a second attempt. The response says which plan ran: `"plan": "windows" | "plain"`.
 
+## Considered and rejected: an offset-only projection (2026-11-16)
+
+`proj_imported_desc` is a full copy of 18 columns (about 55 B a row). A projection that stores only `_part_offset` under the same key `negate(toUnixTimestamp(imported_at))` costs 4.08 B a row (13 times less), but it cannot serve these windows. Measured on the 102.8M newest rows of one month on an isolated ClickHouse 26.3.17, in one merged part (the case the projection exists for): the newest minute takes 0.17 to 0.41 s on the full copy and 2.4 to 5.4 s on the offset-only projection, which is what the table gives with no projection at all; raising `max_projection_rows_to_use_projection_index` from its default of 1M makes the biggest window 3 to 4 times slower (12 to 17 s against 4 to 5 s). The reason: a part is sorted by `(domain, email, imported_at)`, so the offsets of a time window scatter over nearly every 65,536-row granule (79 to 87M of the 102.8M rows are still read) and a pointer-only index prunes nothing; the full copy wins by being physically sorted by time. In small unmerged parts, right after an import, the plain table is as fast as the full copy, because the part-level minimum and maximum already prune. The lever on this projection's space stays its scope (`PROJECTION_SCOPE_WINDOW_MONTHS`, `CLEAR PROJECTION`). Every variant returned the same rows (0 mismatches in the parity check).
+
 ## Schema changes
 
 - **DDL v27** re-creates `proj_imported_desc` with `is_noise, content_key_hash` added (`IMPORTED_DESC_PROJECTION_BODY`, shared by
