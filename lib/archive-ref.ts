@@ -22,6 +22,11 @@ export interface ArchiveRef {
   name: string
   size: number
   sha256: string
+  /**
+   * Stage D: the reference points at a REDUCED entry (reduced/manifest.jsonl); `size` and `sha256` are the reduced entry's, and this is the original file's size and sha256,
+   * which the importer records in ulp.sources so that the file ledger keeps knowing the original bytes.
+   */
+  of?: { size: number; sha256: string }
 }
 
 export class ArchiveRefError extends Error {
@@ -51,7 +56,15 @@ export function parseArchiveRef(text: string): ArchiveRef {
   if (!r.sha256.startsWith(r.id)) throw new ArchiveRefError('the archive reference id is not the start of its sha256')
   if (typeof r.name !== 'string' || r.name.length === 0 || r.name.length > 255 || /[/\\\0]/.test(r.name)) throw new ArchiveRefError('the archive reference has no valid file name')
   if (typeof r.size !== 'number' || !Number.isSafeInteger(r.size) || r.size < 0) throw new ArchiveRefError('the archive reference has no valid size')
-  return { v: 1, id: r.id, name: r.name, size: r.size, sha256: r.sha256 }
+  let of: ArchiveRef['of']
+  if (r.of !== undefined) {
+    const o = r.of as Record<string, unknown> | null
+    if (typeof o !== 'object' || o === null || Array.isArray(o) || typeof o.size !== 'number' || !Number.isSafeInteger(o.size) || o.size < 0 || typeof o.sha256 !== 'string' || !SHA_HEX.test(o.sha256)) {
+      throw new ArchiveRefError('the archive reference has an invalid "of" (the original size and sha256)')
+    }
+    of = { size: o.size, sha256: o.sha256 }
+  }
+  return { v: 1, id: r.id, name: r.name, size: r.size, sha256: r.sha256, ...(of ? { of } : {}) }
 }
 
 export function readArchiveRefFile(path: string): ArchiveRef {
@@ -60,8 +73,8 @@ export function readArchiveRefFile(path: string): ArchiveRef {
   return parseArchiveRef(readFileSync(path, 'utf8'))
 }
 
-export function serializeArchiveRef(entry: { id: string; name: string; size: number; sha256: string }): string {
-  return JSON.stringify({ v: 1, id: entry.id, name: entry.name, size: entry.size, sha256: entry.sha256 }) + '\n'
+export function serializeArchiveRef(entry: { id: string; name: string; size: number; sha256: string; of?: { size: number; sha256: string } }): string {
+  return JSON.stringify({ v: 1, id: entry.id, name: entry.name, size: entry.size, sha256: entry.sha256, ...(entry.of ? { of: { size: entry.of.size, sha256: entry.of.sha256 } } : {}) }) + '\n'
 }
 
 /**

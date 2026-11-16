@@ -63,6 +63,13 @@ export function standInHolder(manifest: ManifestEntry[]): (sha256: string) => Ma
   }
 }
 
+/** A reduced entry by its id, as a Source: what an archive reference with `of` points at. */
+export function openReducedEntry(id: string, archiveDir: string): Source {
+  const entry = [...readReduced(archiveDir)].reverse().find(e => e.id === id)
+  if (!entry) throw new Error(`not in the reduced archive manifest: ${id}`)
+  return archiveSource(reducedDir(archiveDir), entry)
+}
+
 export interface CandidateOptions {
   /** `latestByName` of the main manifest. */
   wholes: Map<string, ManifestEntry>

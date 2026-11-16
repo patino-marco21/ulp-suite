@@ -29,6 +29,8 @@ import {
 } from '@/lib/ingest-quality-gate'
 import type { PhaseTimings } from '@/lib/phase-timings'
 import { fileSource, openSource } from '@/lib/source-archive'
+import { openReducedEntry } from '@/lib/archive-swap'
+import type { ReducedEntry } from '@/lib/reduced-archive'
 import { sampleHold } from '@/lib/ingest-preflight'
 import { MIN_WORKER_FILE_BYTES, WorkerUnavailableError, parseWorkers, stageInWorker, type StageOutcome } from '@/lib/ingest-pool'
 import { ArchiveRefError, appArchiveDir, hashingStream, readArchiveRefFile } from '@/lib/archive-ref'
@@ -735,9 +737,16 @@ export async function processArchiveRef(
     throw new ArchiveRefError('importing from the archive needs the staged import (INGEST_NOVELTY_CHECK is off): its integrity check must run before any row is written')
   }
   const ref = readArchiveRefFile(refPath)
-  const source = openSource(ref.id, { archiveDir: appArchiveDir() })
+  // Stage D: a reference with `of` points at a reduced entry; its stream is checked against the reduced entry's sha256, and the original's identity is what ulp.sources records.
+  const source = ref.of ? openReducedEntry(ref.id, appArchiveDir()) : openSource(ref.id, { archiveDir: appArchiveDir() })
   if (source.origin.kind !== 'archive' || source.size !== ref.size || source.entry?.sha256 !== ref.sha256) {
     throw new ArchiveRefError(`the reference for ${ref.id} does not match the archive manifest (size or sha256 differ)`)
+  }
+  if (ref.of) {
+    const of = (source.entry as ReducedEntry).of
+    if (!of || of.sha256 !== ref.of.sha256 || of.size !== ref.of.size) {
+      throw new ArchiveRefError(`the reference for ${ref.id} does not match the reduced entry's origin (size or sha256 of the original differ)`)
+    }
   }
   const nodeStream = source.stream()
   const { stream, digest, bytes } = hashingStream(nodeStream)
@@ -745,7 +754,7 @@ export async function processArchiveRef(
   try {
     return await processTextStream(stream, ref.name, undefined, onBatch, {
       ...hooks,
-      source: { sha256: ref.sha256, size: ref.size, archiveId: ref.id },
+      source: { sha256: ref.of?.sha256 ?? ref.sha256, size: ref.of?.size ?? ref.size, archiveId: ref.id },
       sampleSource: source,
       beforeCommit: async () => {
         const got = digest()

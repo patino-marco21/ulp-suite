@@ -20,6 +20,7 @@ import { defaultLedgerFile, refreshLedgerIfStale } from '@/lib/ledger-export'
 import { readLedgerFile } from '@/lib/ledger-tools'
 import { planRefeeds, type RefeedItem } from '@/lib/refeed-plan'
 import { defaultArchiveDir, readManifest } from '@/lib/source-archive'
+import { readReduced } from '@/lib/reduced-archive'
 
 const argv = process.argv.slice(2)
 const flag = (name: string): string | undefined => { const i = argv.indexOf(`--${name}`); return i === -1 ? undefined : argv[i + 1] }
@@ -80,6 +81,7 @@ const plan = planRefeeds(readLedgerFile(LEDGER), readManifest(ARCHIVE), {
   maxRevision: flag('max-revision') !== undefined ? num('max-revision', 0) : undefined,
   only: ONLY,
   inboxNames: inboxNames(),
+  reduced: readReduced(ARCHIVE),
 })
 const items = plan.items.slice(0, LIMIT)
 const total = items.reduce((s, i) => s + i.entry.size, 0)
@@ -96,7 +98,9 @@ mkdirSync(WORK, { recursive: true })
 /** Written next to the inbox and renamed in, so the importer never sees half a reference. */
 function dropReference(i: RefeedItem): void {
   const tmp = join(WORK, `${process.pid}-${i.refFile}`)
-  writeFileSync(tmp, serializeArchiveRef({ id: i.entry.id, name: i.refName, size: i.entry.size, sha256: i.entry.sha256 }))
+  writeFileSync(tmp, serializeArchiveRef(i.reduced
+    ? { id: i.reduced.id, name: i.refName, size: i.reduced.size, sha256: i.reduced.sha256, of: { size: i.entry.size, sha256: i.entry.sha256 } }   // stage D: read from the reduced entry
+    : { id: i.entry.id, name: i.refName, size: i.entry.size, sha256: i.entry.sha256 }))
   renameSync(tmp, join(INBOX, i.refFile))
 }
 

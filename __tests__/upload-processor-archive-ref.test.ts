@@ -26,6 +26,7 @@ vi.mock('@/lib/ingest-stage', async () => {
 
 import { appendManifest, archiveFile } from '@/lib/source-archive'
 import { serializeArchiveRef } from '@/lib/archive-ref'
+import { appendReduced, reducedDir, type ReducedEntry } from '@/lib/reduced-archive'
 import { processArchiveRef } from '@/lib/upload-processor'
 import { PARSER_REVISION } from '@/lib/parser-version'
 
@@ -137,6 +138,49 @@ describe('processArchiveRef', () => {
     await expect(processArchiveRef(refPath)).rejects.toThrow()
     expect(h.commitStage).not.toHaveBeenCalled()
     expect(h.dropStage).toHaveBeenCalledTimes(1)
+    expect(sourcesInsert()).toBeUndefined()
+  })
+
+  /** Stage D: the whole entry was swapped; the reference points at the reduced entry and carries the original's size and sha256 as `of`. */
+  function reducedRef(name: string, whole: { sha256: string; size: number; lines: number }, text: string | Buffer) {
+    mkdirSync(reducedDir(archiveDir), { recursive: true })
+    const src = join(root, `red-${name}`)
+    writeFileSync(src, text)
+    const e = archiveFile(src, { archiveDir: reducedDir(archiveDir), name, frameBytes: 4096, searchBytes: 512 })
+    const reduced: ReducedEntry = {
+      ...e, of: { sha256: whole.sha256, size: whole.size, lines: whole.lines }, credentials: 300, kept_lines: e.lines, absent: 0, extra_known: 0, db_rows: 300, db_keys: 300, db_drift: 0,
+      verified_at: '2026-11-16T00:00:00.000Z',
+    }
+    appendReduced(archiveDir, reduced)
+    const refPath = join(root, `${name}.reduced.archiveref`)
+    writeFileSync(refPath, serializeArchiveRef({ id: reduced.id, name, size: reduced.size, sha256: reduced.sha256, of: { size: whole.size, sha256: whole.sha256 } }))
+    return { reduced, refPath }
+  }
+
+  it('reads a reduced entry: the stream is checked against the reduced sha256, and ulp.sources records the ORIGINAL size and sha256', async () => {
+    const original = { sha256: 'd'.repeat(64), size: 123_456, lines: 900 }
+    const { reduced, refPath } = reducedRef('arch-r.txt', original, textOf(300, cleanLine))
+    const out = await processArchiveRef(refPath)
+    expect(out).toMatchObject({ imported: 300, filename: 'arch-r.txt', alreadyImported: false })
+    expect(h.query.mock.calls[0][0].query_params).toEqual({ f: 'arch-r.txt', h: original.sha256 })
+    expect(sourcesInsert().values).toEqual([{ filename: 'arch-r.txt', line_count: 300, parser_revision: PARSER_REVISION, size: original.size, sha256: original.sha256, archive_id: reduced.id }])
+  })
+
+  it('refuses a reference whose `of` is not the reduced entry\'s origin, before it reads anything', async () => {
+    const { reduced, refPath } = reducedRef('arch-s.txt', { sha256: 'd'.repeat(64), size: 123_456, lines: 900 }, textOf(300, cleanLine))
+    writeFileSync(refPath, serializeArchiveRef({ id: reduced.id, name: 'arch-s.txt', size: reduced.size, sha256: reduced.sha256, of: { size: 1, sha256: 'e'.repeat(64) } }))
+    await expect(processArchiveRef(refPath)).rejects.toThrow(/origin/)
+    expect(h.createStage).not.toHaveBeenCalled()
+  })
+
+  it('fails before the commit when the reduced entry was damaged', async () => {
+    const { reduced, refPath } = reducedRef('arch-t.txt', { sha256: 'd'.repeat(64), size: 123_456, lines: 900 }, textOf(300, cleanLine))
+    const zst = join(reducedDir(archiveDir), `${reduced.id}.zst`)
+    const bytes = readFileSync(zst)
+    bytes[Math.floor(bytes.length / 2)] ^= 0xff
+    writeFileSync(zst, bytes)
+    await expect(processArchiveRef(refPath)).rejects.toThrow()
+    expect(h.commitStage).not.toHaveBeenCalled()
     expect(sourcesInsert()).toBeUndefined()
   })
 
