@@ -46,7 +46,8 @@
  *                 that breaks a rule on 1 line in 10 is held by the sample check before the import starts (report phase "sample"); a file where 1 line in 9 cannot be split is held and its
  *                 report lists the masked shape of those lines (no value in it). (The disk gate's scenario is called "gate".)
  *   archive-ref   a file imported from the source archive through an .archiveref: same counts as the plain import, identity in ulp.sources, a same-name file with other
- *                 content is a new file, a damaged archive fails before one row is committed, and no plaintext copy of the file appears in the inbox
+ *                 content is a new file, a damaged archive fails before one row is committed, and no plaintext copy of the file appears in the inbox; stage D: a reference to a REDUCED
+ *                 entry (the whole entry swapped, the reference carries the original's size and sha256 as `of`) imports the reduced rows and ulp.sources keeps the ORIGINAL's identity
  *   ledger        the file ledger (docs/superpowers/specs/2026-11-07-file-ledger-design.md): DDL v31 has parser_revision; a file is hashed and recorded with its hash, size and revision at once; the
  *                 same bytes under another name are skipped (job note "same-content", no row, no credential) while the parser that imported them is current; a name with "refeed" in it, and
  *                 bytes an older parser imported, are imported again (known, not skipped) and recorded at the current revision, after which a further copy is skipped; a file that yields no
@@ -85,9 +86,12 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { swapOne } from '../lib/archive-swap'
+import { appendReduced, readReduced, reducedDir } from '../lib/reduced-archive'
+import { archiveFile } from '../lib/source-archive'
 import { NORM_CONTENT_KEY, exactKeySql, normHostSql, normKeySql, normRestSql } from '../lib/url-content-key'
 import { assertRehearsalImage } from './rehearsal-image'
 
@@ -1143,6 +1147,39 @@ async function archiveRef(): Promise<void> {
   check('a damaged archive fails the job', !!d && d.status === 'failed', JSON.stringify(d ?? null))
   check('...not one row of it was committed, and no stage table is left', rowsFor(DAMAGED) === 0 && stageTableCount() === 0, `rows ${rowsFor(DAMAGED)}, tables ${stageTableCount()}`)
   check('...the reference waits in inbox/failed', inboxLs('failed').includes(`${DAMAGED}.archiveref`))
+
+  // Stage D: the whole entry of a name is swapped for its reduced entry (the library's own swap), and the reference points at the reduced entry with `of`.
+  const REDU = `e2e-ar-redu-${RUN}.txt`
+  const wholeLines = lines('W', 0, 30_000)
+  putOld(REDU, wholeLines)
+  sh('npx', ['tsx', 'scripts/archive-sources.ts', 'archive', '--src', srcDir, '--out', archiveDir, '--workers', '1', '--no-sources', '--only', REDU])
+  const whole = readFileSync(join(archiveDir, 'manifest.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l)).filter((e: any) => e.name === REDU).pop()
+  mkdirSync(reducedDir(archiveDir), { recursive: true })
+  const reducedSrc = join(work, 'redu.txt')
+  writeFileSync(reducedSrc, text(wholeLines.slice(0, 20_000)))
+  const reducedEntry = archiveFile(reducedSrc, { archiveDir: reducedDir(archiveDir), name: REDU })
+  appendReduced(archiveDir, {
+    ...reducedEntry, of: { sha256: whole.sha256, size: whole.size, lines: whole.lines }, credentials: 20_000, kept_lines: reducedEntry.lines, absent: 0, extra_known: 0, db_rows: 0, db_keys: 0, db_drift: 0,
+    verified_at: new Date().toISOString(),
+  })
+  const swapped = swapOne({ archiveDir, item: { whole, reduced: readReduced(archiveDir).pop()!, savedBytes: whole.archive_bytes - reducedEntry.archive_bytes } })
+  check('stage D: the whole entry was swapped: its file is gone and the manifest says so', swapped.ok && !existsSync(join(archiveDir, `${whole.id}.zst`)), JSON.stringify(swapped))
+  sh('docker', ['exec', APP, 'rm', '-rf', '/archive'])
+  sh('docker', ['cp', archiveDir, `${APP}:/archive`])
+  const reducedRef = JSON.stringify({ v: 1, id: reducedEntry.id, name: REDU, size: reducedEntry.size, sha256: reducedEntry.sha256, of: { size: whole.size, sha256: whole.sha256 } }) + '\n'
+  sh('docker', ['exec', '-i', APP, 'sh', '-c', `cat > /app/inbox/${REDU}.archiveref`], process.env, reducedRef)
+  const r = await finished(REDU)
+  check('stage D: a reference to a reduced entry imports the reduced rows (20000 new)', !!r && r.status === 'done' && r.imported === 20_000 && rowsFor(REDU) === 20_000, JSON.stringify(r ?? null))
+  check('...ulp.sources has the ORIGINAL size and sha256, the reduced entry as the archive id, and the rows the import stored',
+    chQuery(`SELECT concat(toString(size), '|', sha256, '|', archive_id, '|', toString(line_count)) FROM ulp.sources WHERE filename = '${REDU}'`) === `${whole.size}|${whole.sha256}|${reducedEntry.id}|20000`)
+  check('...the inbox holds the reference and no plaintext copy', inboxLs('done').includes(`${REDU}.archiveref`) && !inboxLs('done').includes(REDU) && !inboxLs('').includes(REDU))
+
+  // A reference whose `of` is not the reduced entry's origin fails before one row is committed.
+  const WRONG = `e2e-ar-wrongof-${RUN}.txt`
+  const wrongRef = JSON.stringify({ v: 1, id: reducedEntry.id, name: WRONG, size: reducedEntry.size, sha256: reducedEntry.sha256, of: { size: 1, sha256: 'e'.repeat(64) } }) + '\n'
+  sh('docker', ['exec', '-i', APP, 'sh', '-c', `cat > /app/inbox/${WRONG}.archiveref`], process.env, wrongRef)
+  const w = await finished(WRONG)
+  check('stage D: a reference whose `of` is not the reduced entry\'s origin fails the job and commits nothing', !!w && w.status === 'failed' && rowsFor(WRONG) === 0 && stageTableCount() === 0, JSON.stringify(w ?? null))
   scanLog('after the archive-ref scenario')
 }
 
