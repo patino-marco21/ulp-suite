@@ -3,11 +3,11 @@
  * the whole-file one, in `<archive>/reduced/`: only the lines that added something, proven by importing that entry again and comparing it with the rows the database holds
  * for the file. It removes nothing, replaces nothing and changes nothing the other archive tools read. It never prints a line of a file.
  *
- *   tsx scripts/reduce-archive.ts run [--limit 20] [--pilot 50] [--only a.txt,b.txt] [--retry-failed] [--floor-gib 80] [--max-minutes 90] [--inbox <dir>] [--out <archive dir>]
+ *   tsx scripts/reduce-archive.ts run [--limit 20] [--pilot 50] [--pilot-max-gib 2] [--only a.txt,b.txt] [--retry-failed] [--floor-gib 80] [--max-minutes 90] [--inbox <dir>] [--out <archive dir>]
  *   tsx scripts/reduce-archive.ts status [--out <archive dir>]
  *   tsx scripts/reduce-archive.ts verify [--sample 3 | --all] [--out <archive dir>]
  *
- * `run` takes the files archived since the shadow began (oldest first), up to --limit; --pilot N takes N older files instead (a seeded pick, none over 2 GiB); --only names
+ * `run` takes the files archived since the shadow began (oldest first), up to --limit; --pilot N takes N older files instead (a seeded pick, none over --pilot-max-gib, default 2); --only names
  * files, whatever their age. A file whose last attempt failed waits for --retry-failed. Nothing starts with less than --floor-gib free on the archive's filesystem, and the
  * run stops starting files after --max-minutes, and, with --inbox, as soon as a file is waiting or in flight there (the import comes first). Every result is a line in `reduced/shadow-log.jsonl`; `status` reads it and counts the exact results in a row (the gate).
  *
@@ -89,7 +89,7 @@ async function cmdRun(): Promise<number> {
     const entries = [...latestByName(readManifest(ARCHIVE)).values()].filter(e => !only || only.includes(e.name))
     const picks = pickCandidates({
       entries, reduced: readReduced(ARCHIVE), log: readShadowLog(ARCHIVE), inSources: new Set(importedRows.keys()), startedAt,
-      mode: only ? 'any' : pilot > 0 ? 'pilot' : 'new',
+      mode: only ? 'any' : pilot > 0 ? 'pilot' : 'new', maxBytes: flag('pilot-max-gib') ? Number(flag('pilot-max-gib')) * GiB : undefined,
       limit: pilot > 0 ? pilot : Number(flag('limit') ?? '20'),
       retryFailed: has('retry-failed'), seed: startedAt,
       archiveHolds: e => existsSync(join(ARCHIVE, `${e.id}.zst`)),
