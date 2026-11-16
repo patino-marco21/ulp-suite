@@ -51,8 +51,12 @@ export const keepSql = (t: string, c: string, slabs: number, slab: number) =>
   `SELECT f.s, f.e FROM (SELECT k, s, e FROM ${t} WHERE k % ${slabs} = ${slab} ORDER BY seq LIMIT 1 BY k) AS f ` +
   `LEFT JOIN (SELECT k, mine, present FROM ${c} WHERE k % ${slabs} = ${slab}) AS c ON f.k = c.k WHERE c.present = 0 OR c.mine = 1 ORDER BY f.s FORMAT TSV`
 
+/**
+ * The keys the database holds under the file's name, with their row counts. The aggregation spills to disk past 1 GB: a file with 36 million stored rows grew it to 3.7 GiB in one
+ * piece (the hash table doubles as it fills) and failed the 4 GB limit of a statement; with the spill it peaks at 1.0 GiB and takes 9 s.
+ */
 export const keysOfNameSql = (s: string, name: string) =>
-  `INSERT INTO ${s} SELECT norm_key_hash, count() FROM ulp.credentials WHERE source_file = ${sqlQuote(name)} GROUP BY norm_key_hash`
+  `INSERT INTO ${s} SELECT norm_key_hash, count() FROM ulp.credentials WHERE source_file = ${sqlQuote(name)} GROUP BY norm_key_hash SETTINGS max_bytes_before_external_group_by = 1000000000`
 
 /** What the database holds under the file's name: the rows and the distinct keys. One pass, no set in memory. */
 export const storedSql = (s: string) => `SELECT sum(c), count() FROM ${s} FORMAT TSV`

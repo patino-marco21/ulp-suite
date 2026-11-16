@@ -8,7 +8,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import type { Ch } from '@/lib/clickhouse-cli'
-import { chReduceDb, holdersSql, keepSql, proofSql, storedSql } from '@/lib/reduced-archive-ch'
+import { chReduceDb, holdersSql, keepSql, keysOfNameSql, proofSql, storedSql } from '@/lib/reduced-archive-ch'
 import type { LoadRow } from '@/lib/reduced-archive'
 
 /** A Ch that records every statement and answers the few questions the code asks. */
@@ -64,6 +64,13 @@ describe('the slab statements', () => {
     expect(subselects.length).toBeGreaterThanOrEqual(8)
     for (const part of subselects) expect(part, part).toContain('k % 6 = 4')
     expect(q.endsWith('FORMAT TSV')).toBe(true)
+  })
+
+  test('the keys the database holds under the name spill their aggregation to disk instead of growing to the statement limit', () => {
+    // Measured on the live table for a file with 36 million stored rows: 3.7 GiB and MEMORY_LIMIT_EXCEEDED against the 4 GB limit in one piece, 1.0 GiB and 9 s with the spill.
+    const q = keysOfNameSql('S', "a'b.txt")
+    expect(q).toContain("source_file = 'a\\'b.txt'")
+    expect(q).toMatch(/GROUP BY norm_key_hash SETTINGS max_bytes_before_external_group_by = 1000000000$/)
   })
 
   test('the rows and keys the database holds under the name are asked once, on the whole table', () => {
