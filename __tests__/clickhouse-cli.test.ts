@@ -2,7 +2,7 @@
  * lib/clickhouse-cli.ts (docs/superpowers/plans/2026-11-15-reduced-archive.md, task 3): `docker exec clickhouse-client` as a small async interface. A fake `docker` shell
  * script stands in for the container, so the arguments, the streaming insert with back-pressure, and the error text can be checked without ClickHouse.
  */
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
@@ -16,6 +16,7 @@ beforeAll(() => {
   bin = join(dir, 'docker')
   // The last argument is the query. FAIL: an error that quotes a row. INSERT: copy stdin to $FAKE_OUT. EARLY: die without reading stdin. Anything else: echo what was asked.
   writeFileSync(bin, `#!/bin/sh
+[ -n "$FAKE_LOG" ] && echo started >> "$FAKE_LOG"
 for last; do :; done
 case "$last" in
   FAIL*) echo "Code: 27. DB::Exception: Cannot parse input: expected tab before: 'secret-credential-value': (at row 1) (CANNOT_PARSE_INPUT_ASSERTION_FAILED)" >&2; exit 3;;
@@ -45,6 +46,23 @@ describe('dockerCh', () => {
     async function* rows() { for (let i = 0; i < 200; i++) yield row.repeat(1000) }   // 200 chunks of 100 KB: 20 MB through a pipe
     await ch.insertTsv('INSERT INTO t FORMAT TSV', rows())
     expect(readFileSync(process.env.FAKE_OUT).length).toBe(200 * 1000 * 100)
+  })
+
+  test('an insert of no rows does not start the client: ClickHouse refuses it (NO_DATA_TO_INSERT)', async () => {
+    process.env.FAKE_LOG = join(dir, 'started.log')
+    rmSync(process.env.FAKE_LOG, { force: true })
+    const ch = dockerCh('c', { bin })
+    async function* none() { /* no rows */ }
+    async function* blanks() { yield ''; yield '' }
+    await ch.insertTsv('INSERT INTO t FORMAT TSV', none())
+    await ch.insertTsv('INSERT INTO t FORMAT TSV', blanks())
+    expect(existsSync(process.env.FAKE_LOG)).toBe(false)
+    // and one real row still goes through, after an empty chunk in front of it
+    process.env.FAKE_OUT = join(dir, 'one.out')
+    async function* one() { yield ''; yield 'row\n' }
+    await ch.insertTsv('INSERT INTO t FORMAT TSV', one())
+    expect(readFileSync(process.env.FAKE_OUT, 'utf8')).toBe('row\n')
+    delete process.env.FAKE_LOG
   })
 
   test('queryToFile writes the answer to the file', async () => {

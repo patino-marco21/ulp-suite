@@ -39,6 +39,8 @@ export function dockerCh(container: string, opts: DockerChOptions = {}): Ch {
   const args = (sql: string) => [
     'exec', '-i', container, 'clickhouse-client',
     `--max_execution_time=${opts.maxSeconds ?? 1800}`, `--max_memory_usage=${opts.maxMemoryBytes ?? 6_000_000_000}`,
+    // The default profile may buffer inserts; the scratch tables are read straight after they are written.
+    '--async_insert=0',
     '--query', sql,
   ]
 
@@ -78,18 +80,24 @@ export function dockerCh(container: string, opts: DockerChOptions = {}): Ch {
     },
 
     async insertTsv(sql, rows) {
+      // ClickHouse answers an insert of no rows with NO_DATA_TO_INSERT (an empty reduced entry has none), so the client is started only when there is a row to give it.
+      const it = rows[Symbol.asyncIterator]()
+      let next = await it.next()
+      while (!next.done && next.value.length === 0) next = await it.next()
+      if (next.done) return
       const { child, exited } = start(sql, ['pipe', 'pipe', 'pipe'])
       const stdin = child.stdin!
       let pipeBroke = false
       stdin.on('error', () => { pipeBroke = true })   // the client died first: its exit status says why
       try {
-        for await (const chunk of rows) {
+        for (; !next.done; next = await it.next()) {
           if (pipeBroke || stdin.destroyed) break
           // `once` rejects on the pipe's own error (EPIPE); the exit status of the client, awaited below, is the better account of it.
-          if (!stdin.write(chunk)) await Promise.race([once(stdin, 'drain').catch(() => undefined), exited.then(() => undefined, () => undefined)])
+          if (!stdin.write(next.value)) await Promise.race([once(stdin, 'drain').catch(() => undefined), exited.then(() => undefined, () => undefined)])
         }
       } finally {
         if (!stdin.destroyed) stdin.end()
+        if (!next.done) await it.return?.(undefined)
       }
       await exited
     },

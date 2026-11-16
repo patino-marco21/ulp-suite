@@ -27,6 +27,7 @@ import {
   writeStatus, type AutoArchiveStatus,
 } from '@/lib/archive-auto'
 import { defaultArchiveDir, latestByName, readManifest } from '@/lib/source-archive'
+import { reducedArchiveMode } from '@/lib/reduced-shadow'
 
 const REPO = process.env.ULP_REPO ?? process.cwd()
 const INBOX = join(REPO, 'inbox')
@@ -34,6 +35,7 @@ const DONE = join(INBOX, 'done')
 const ARCHIVE = defaultArchiveDir()
 const HERE = fileURLToPath(new URL('.', import.meta.url))   // the tool and tsx are this checkout's, whichever inbox ULP_REPO points at
 const TOOL = join(HERE, 'archive-sources.ts')
+const REDUCE_TOOL = join(HERE, 'reduce-archive.ts')
 const TSX = join(HERE, '..', 'node_modules', '.bin', 'tsx')
 const IDLE_MS = process.env.ULP_AUTO_ARCHIVE_IDLE_MIN !== undefined ? Number(process.env.ULP_AUTO_ARCHIVE_IDLE_MIN) * 60_000 : DEFAULT_IDLE_MS
 const WORKERS = process.env.ULP_AUTO_ARCHIVE_WORKERS ?? '4'
@@ -84,6 +86,22 @@ function refreshLedgerCopy(): void {
   say(r.status === 0 ? out.split('\n').pop() ?? 'ledger copy written' : `the ledger copy could not be written (exit ${r.status}): ${out.split('\n').pop() ?? ''}`)
 }
 
+/**
+ * Stage B of the reduced archive (ULP_REDUCED_ARCHIVE=shadow): writes the reduced entries of the files archived since the shadow began, beside the whole-file ones. It removes
+ * and replaces nothing, stops starting files when the inbox gets busy, and its failure is a line in the log: it never fails the archive run.
+ */
+function reduceShadow(): void {
+  const { mode, note } = reducedArchiveMode()
+  if (note) say(note)
+  if (mode !== 'shadow') return
+  const r = spawnSync(TSX, [REDUCE_TOOL, 'run', '--limit', process.env.ULP_REDUCED_ARCHIVE_LIMIT ?? '20', '--inbox', INBOX], {
+    cwd: join(HERE, '..'), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 100 * 60_000,
+    env: { ...process.env, ULP_ARCHIVE_DIR: ARCHIVE },
+  })
+  for (const l of `${r.stdout ?? ''}${r.stderr ?? ''}`.split('\n').filter(l => l.trim() !== '')) say(`  reduced archive: ${l}`)
+  if (r.status !== 0) say(`the reduced archive (shadow) ended with exit ${r.status}; the archive run is not affected`)
+}
+
 function main(): number {
   refreshLedgerCopy()
   if (!existsSync(ARCHIVE)) { say(`the archive directory does not exist: ${ARCHIVE} (create it; this script never does)`); return 2 }
@@ -125,6 +143,7 @@ function main(): number {
       if (summary) { replaced = summary.replaced; failed += summary.failed }
       else say(`the replace did not run to the end (exit ${r.status}); the files stay and the next run tries again`)   // e.g. ClickHouse did not answer for ulp.sources: not a failed file
     }
+    reduceShadow()
     const after = readyToReplace(DONE, ARCHIVE, latestByName(readManifest(ARCHIVE)))
     const fs = statfsSync(REPO)
     const status: AutoArchiveStatus = {
