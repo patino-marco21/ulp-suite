@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
-import { isSwapped, reducedFor, swapCandidates, swapOne } from '@/lib/archive-swap'
+import { isSwapped, reducedFor, runSwap, swapCandidates, swapOne, swapReport } from '@/lib/archive-swap'
 import { appendReduced, reducedDir, type ReducedEntry } from '@/lib/reduced-archive'
 import type { ShadowLine } from '@/lib/reduced-shadow'
 import { SKIP_REASON } from '@/lib/reduced-shadow'
@@ -171,5 +171,118 @@ describe('swapOne', () => {
     const again = swapOne({ archiveDir: dir, item })
     expect(again.ok).toBe(true)
     expect(existsSync(join(dir, `${w.id}.zst`))).toBe(false)
+  })
+})
+
+describe('swapReport', () => {
+  const report = (log: ShadowLine[], extra: { barBytes?: number; verify?: boolean } = {}) => swapReport({
+    wholes: wholes(), reduced: readManifestReduced(), log, wholeOnDisk: e => existsSync(join(dir, `${e.id}.zst`)), archiveDir: dir, ...extra,
+  })
+
+  test('counts the names, the eligible and the left, and sums the bytes the removal frees', () => {
+    const a = addWhole('a', lines(400, 'a'))
+    const ra = addReduced(a, lines(40, 'a'))
+    const b = addWhole('b', lines(300, 'b'))
+    addReduced(b, lines(30, 'b'))
+    addWhole('c', lines(50, 'c'))   // no reduced entry
+    const r = report([okLine(a), okLine(b)])
+    expect(r).toMatchObject({ names: 3, swapped: 0, eligible: 2 })
+    expect(r.left['no-reduced']).toBe(1)
+    expect(r.wholeBytesFreed).toBe(a.archive_bytes + wholes().get('b')!.archive_bytes)
+    expect(r.reducedBytesKept).toBe(ra.archive_bytes + readManifestReduced().find(x => x.name === 'b')!.archive_bytes)
+  })
+
+  test('a file that a name outside the eligible set still uses frees nothing yet', () => {
+    const text = lines(400, 's')
+    const first = addWhole('first', text)
+    addWhole('second', text)   // shares the file, has no reduced entry
+    addReduced(first, lines(40, 's'))
+    const r = report([okLine(first)])
+    expect(r.eligible).toBe(1)
+    expect(r.wholeBytesFreed).toBe(0)
+  })
+
+  test('the go/no-go lines: all eligible entries verify, the freed bytes reach the bar, the restore proof is left to the end-to-end run', () => {
+    const a = addWhole('a', lines(400, 'a'))
+    addReduced(a, lines(40, 'a'))
+    const ok = report([okLine(a)], { barBytes: 1 })
+    expect(ok.checks.map(c => [c.id, c.ok])).toEqual([['exact', true], ['freed', true], ['restore', null]])
+    const low = report([okLine(a)], { barBytes: 10 ** 12 })
+    expect(low.checks.find(c => c.id === 'freed')!.ok).toBe(false)
+  })
+
+  test('a reduced entry that no longer verifies turns the "exact" line off and is listed by id', () => {
+    const a = addWhole('a', lines(400, 'a'))
+    const r = addReduced(a, lines(40, 'a'))
+    writeFileSync(join(reducedDir(dir), `${r.id}.zst`), 'damaged')
+    const rep = report([okLine(a)], { barBytes: 1 })
+    expect(rep.checks.find(c => c.id === 'exact')!.ok).toBe(false)
+    expect(rep.verifyFailed).toEqual([r.id])
+  })
+
+  test('sums the drift of the eligible entries', () => {
+    const a = addWhole('a', lines(400, 'a'))
+    addReduced(a, lines(40, 'a'))
+    const m = readManifestReduced()
+    writeFileSync(join(reducedDir(dir), 'manifest.jsonl'), m.map(e => JSON.stringify({ ...e, db_drift: 7 })).join('\n') + '\n')
+    const rep = report([okLine(a)], { barBytes: 1 })
+    expect(rep).toMatchObject({ driftFiles: 1, driftKeys: 7 })
+  })
+})
+
+describe('runSwap', () => {
+  const setup = () => {
+    const small = addWhole('small', lines(200, 'x'))
+    addReduced(small, lines(20, 'x'))
+    const big = addWhole('big', lines(600, 'y'))
+    addReduced(big, lines(60, 'y'))
+    const mid = addWhole('mid', lines(400, 'z'))
+    addReduced(mid, lines(40, 'z'))
+    const eligible = select([okLine(small), okLine(big), okLine(mid)]).eligible
+    return { small, big, mid, eligible }
+  }
+
+  test('a dry run plans the smallest first and removes nothing', () => {
+    const { small, eligible } = setup()
+    const out = runSwap({ archiveDir: dir, eligible, apply: false })
+    expect(out).toMatchObject({ planned: 3, swapped: 0, freedBytes: 0 })
+    expect(existsSync(join(dir, `${small.id}.zst`))).toBe(true)
+    expect(readManifest(dir)).toHaveLength(3)
+  })
+
+  test('--limit takes the smallest files; apply swaps them and checks each afterwards', () => {
+    const { small, mid, big, eligible } = setup()
+    const out = runSwap({ archiveDir: dir, eligible, apply: true, limit: 2 })
+    expect(out).toMatchObject({ planned: 2, swapped: 2, checked: 2, problems: [] })
+    expect(out.freedBytes).toBe(small.archive_bytes + mid.archive_bytes)
+    expect(existsSync(join(dir, `${big.id}.zst`))).toBe(true)
+    expect(isSwapped(wholes().get('small')!)).toBe(true)
+    expect(isSwapped(wholes().get('big')!)).toBe(false)
+  })
+
+  test('--only names the files to swap', () => {
+    const { big, eligible } = setup()
+    const out = runSwap({ archiveDir: dir, eligible, apply: true, only: ['big'] })
+    expect(out.swapped).toBe(1)
+    expect(existsSync(join(dir, `${big.id}.zst`))).toBe(false)
+  })
+
+  test('stops at the first failure: nothing after it is touched', () => {
+    const { small, mid, big, eligible } = setup()
+    const r = readManifestReduced().find(x => x.name === 'mid')!
+    writeFileSync(join(reducedDir(dir), `${r.id}.zst`), 'damaged')
+    const out = runSwap({ archiveDir: dir, eligible, apply: true })
+    expect(out.swapped).toBe(1)   // small was fine, mid failed, big was not tried
+    expect(out.failed).toMatchObject({ id: mid.id })
+    expect(existsSync(join(dir, `${small.id}.zst`))).toBe(false)
+    expect(existsSync(join(dir, `${mid.id}.zst`))).toBe(true)
+    expect(existsSync(join(dir, `${big.id}.zst`))).toBe(true)
+  })
+
+  test('a byte budget ends the run once enough was freed', () => {
+    const { small, eligible } = setup()
+    const out = runSwap({ archiveDir: dir, eligible, apply: true, batchBytes: 1 })
+    expect(out.swapped).toBe(1)
+    expect(out.freedBytes).toBe(small.archive_bytes)
   })
 })

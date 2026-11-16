@@ -6,6 +6,13 @@
  *   tsx scripts/reduce-archive.ts run [--limit 20] [--pilot 50] [--pilot-max-gib 2] [--only a.txt,b.txt] [--only-sha 1a2b3c,...] [--recompact-over 50] [--retry-failed] [--floor-gib 80] [--max-minutes 90] [--inbox <dir>] [--out <archive dir>]
  *   tsx scripts/reduce-archive.ts status [--out <archive dir>]
  *   tsx scripts/reduce-archive.ts verify [--sample 3 | --all] [--out <archive dir>]
+ *   tsx scripts/reduce-archive.ts report [--no-verify] [--out <archive dir>]
+ *   tsx scripts/reduce-archive.ts swap [--apply] [--limit N] [--only a.txt,b.txt] [--batch-gib G] [--out <archive dir>]
+ *
+ * Stage D (docs/superpowers/plans/2026-11-16-reduced-archive-stage-d.md): `report` prints, in numbers, what swapping the whole-file entries for their reduced entries would free and the
+ * go/no-go lines; it changes nothing. `swap` is a dry run unless `--apply`; with it, it swaps the smallest eligible entries first (an entry is eligible when its reduced entry is exact and at least
+ * 10% smaller on disk), stops at the first failure, and checks each swap it made. It takes the same lock as `run`, so it never runs beside a reduction, and nothing calls it on a timer: it is
+ * run by hand, after the owner's yes.
  *
  * `run` takes the files archived since the shadow began (oldest first), up to --limit; --pilot N takes N older files instead (a seeded pick, none over --pilot-max-gib, default 2); --only names
  * files, whatever their age (--only-sha names them by the start of their sha256, for a name with a comma in it); --recompact-over N makes the reduced entry again of the files whose
@@ -20,6 +27,7 @@ import { join } from 'node:path'
 import { dockerCh } from '@/lib/clickhouse-cli'
 import { inboxIsBusy } from '@/lib/archive-replace'
 import { readReduced, reduceSource, reducedDir } from '@/lib/reduced-archive'
+import { swapCandidates, swapReport, runSwap } from '@/lib/archive-swap'
 import { chReduceDb } from '@/lib/reduced-archive-ch'
 import {
   GATE_FILES, appendShadowLog, consecutiveExact, pickCandidates, readShadowLog, readShadowStart, summarize, type ShadowLine, SKIP_REASON,
@@ -186,12 +194,58 @@ function cmdVerify(): number {
   return bad > 0 ? 1 : 0
 }
 
+function swapInputs() {
+  const wholes = latestByName(readManifest(ARCHIVE))
+  return { wholes, reduced: readReduced(ARCHIVE), log: readShadowLog(ARCHIVE), wholeOnDisk: (e: { id: string }) => existsSync(join(ARCHIVE, `${e.id}.zst`)) }
+}
+
+function cmdReport(): number {
+  if (!existsSync(ARCHIVE)) die(`the archive directory does not exist: ${ARCHIVE}`)
+  const r = swapReport({ ...swapInputs(), archiveDir: ARCHIVE, verify: !has('no-verify') })
+  const left = Object.entries(r.left).filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n}`).join(', ')
+  console.log(`stage D report for ${ARCHIVE}`)
+  console.log(`names ${r.names}: ${r.swapped} already swapped, ${r.eligible} eligible, left whole: ${left || 'none'}`)
+  console.log(`freed by the removal of the eligible whole files: ${gib(r.wholeBytesFreed)} GiB (the reduced entries that stand in for them, ${gib(r.reducedBytesKept)} GiB, are already on disk)`)
+  console.log(`free now ${gib(free())} GiB; after the removal about ${gib(free() + r.wholeBytesFreed)} GiB`)
+  console.log(`drift: ${r.driftFiles} eligible file(s) hold ${r.driftKeys} stored keys that today's parser no longer reads from them`)
+  for (const c of r.checks) console.log(`${c.ok === null ? 'open' : c.ok ? 'ok  ' : 'NO  '} ${c.id}: ${c.text}`)
+  if (r.verifyFailed.length > 0) console.log(`reduced entries that do not decode: ${r.verifyFailed.join(', ')}`)
+  return 0
+}
+
+function cmdSwap(): number {
+  if (!existsSync(ARCHIVE)) die(`the archive directory does not exist: ${ARCHIVE}`)
+  const apply = has('apply')
+  const release = takeLock()
+  if (!release) die('another run holds the lock (a reduction reads the whole-file entries); nothing swapped', 2)
+  try {
+    const { eligible } = swapCandidates(swapInputs())
+    const only = flag('only')?.split(',')
+    const out = runSwap({
+      archiveDir: ARCHIVE, eligible, apply, only, limit: flag('limit') ? Number(flag('limit')) : undefined,
+      batchBytes: flag('batch-gib') ? Number(flag('batch-gib')) * GiB : undefined,
+    })
+    if (!apply) {
+      console.log(`dry run (nothing changed; --apply does it): ${out.planned} of ${eligible.length} eligible entries would be swapped, their whole files hold ${gib(out.plannedBytes)} GiB`)
+      return 0
+    }
+    console.log(`swapped ${out.swapped} of ${out.planned}, freed ${gib(out.freedBytes)} GiB; checked afterwards ${out.checked}, problems ${out.problems.length}`)
+    for (const p of out.problems) console.log(`PROBLEM ${p}`)
+    if (out.failed) console.log(`STOPPED at ${out.failed.id}: ${out.failed.reason}`)
+    return out.failed || out.problems.length > 0 ? 1 : 0
+  } finally {
+    release()
+  }
+}
+
 async function main(): Promise<number> {
   switch (argv[0]) {
     case 'run': return cmdRun()
     case 'status': return cmdStatus()
     case 'verify': return cmdVerify()
-    default: return die('usage: reduce-archive.ts run|status|verify (see the header of this file)')
+    case 'report': return cmdReport()
+    case 'swap': return cmdSwap()
+    default: return die('usage: reduce-archive.ts run|status|verify|report|swap (see the header of this file)')
   }
 }
 

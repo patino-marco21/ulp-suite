@@ -100,3 +100,118 @@ export function swapOne(o: { archiveDir: string; item: SwapItem; now?: () => Dat
   appendManifest(o.archiveDir, { ...latest, reduced_id: reduced.id, whole_removed_at: (o.now?.() ?? new Date()).toISOString() })
   return { ok: true, freedBytes: removeWholeFile(o.archiveDir, latest.id) }
 }
+
+// ── the report and the batch run ─────────────────────────────────────────────────────────────────────
+
+/** The owner's bar (2026-11-16): the report must show at least this much freed before the cut yes is asked for. */
+export const FREED_BAR_BYTES = 100 * 1024 ** 3
+
+export interface ReportCheck {
+  id: 'exact' | 'freed' | 'restore'
+  /** null = this report cannot know (the restore proof is shown by the end-to-end run). */
+  ok: boolean | null
+  text: string
+}
+
+export interface SwapReport {
+  names: number
+  swapped: number
+  eligible: number
+  left: Record<LeftReason, number>
+  /** Bytes on disk the removal of the eligible whole files frees (a file shared with a name that stays counts once every sharer is eligible). */
+  wholeBytesFreed: number
+  /** Bytes on disk of the reduced entries that stand in for them (already on disk, so not a cost). */
+  reducedBytesKept: number
+  driftFiles: number
+  driftKeys: number
+  /** Ids of eligible reduced entries that do not decode to their manifest. */
+  verifyFailed: string[]
+  checks: ReportCheck[]
+}
+
+const gib = (n: number): string => (n / 1024 ** 3).toFixed(2)
+
+export function swapReport(o: CandidateOptions & { archiveDir: string; barBytes?: number; verify?: boolean }): SwapReport {
+  const { eligible, left } = swapCandidates(o)
+  const eligibleNames = new Set(eligible.map(i => i.whole.name))
+  const wholeIds = new Set(eligible.map(i => i.whole.id))
+  let wholeBytesFreed = 0
+  for (const id of wholeIds) {
+    const users = [...o.wholes.values()].filter(e => e.id === id && !isSwapped(e))
+    if (users.every(u => eligibleNames.has(u.name))) wholeBytesFreed += users[0].archive_bytes
+  }
+  const reducedById = new Map(eligible.map(i => [i.reduced.id, i.reduced]))
+  const reducedBytesKept = [...reducedById.values()].reduce((n, r) => n + r.archive_bytes, 0)
+  const verifyFailed: string[] = []
+  if (o.verify !== false) for (const r of reducedById.values()) if (!verifyEntry(reducedDir(o.archiveDir), r).ok) verifyFailed.push(r.id)
+  const drifting = eligible.filter(i => i.reduced.db_drift > 0)
+  const bar = o.barBytes ?? FREED_BAR_BYTES
+  const checks: ReportCheck[] = [
+    {
+      id: 'exact',
+      ok: eligible.length > 0 && verifyFailed.length === 0,
+      text: o.verify === false ? `${eligible.length} eligible entries, not decoded again (--no-verify)` : `${reducedById.size - verifyFailed.length} of ${reducedById.size} eligible reduced entries decode to their manifest`,
+    },
+    { id: 'freed', ok: wholeBytesFreed >= bar, text: `${gib(wholeBytesFreed)} GiB freed against the ${gib(bar)} GiB bar` },
+    { id: 'restore', ok: null, text: 'shown by the end-to-end run of scripts/e2e-reduced-archive.ts (stage D scenario), not computed here' },
+  ]
+  return {
+    names: o.wholes.size, swapped: [...o.wholes.values()].filter(isSwapped).length, eligible: eligible.length, left, wholeBytesFreed, reducedBytesKept,
+    driftFiles: drifting.length, driftKeys: drifting.reduce((n, i) => n + i.reduced.db_drift, 0), verifyFailed, checks,
+  }
+}
+
+export interface SwapRunOptions {
+  archiveDir: string
+  eligible: SwapItem[]
+  apply: boolean
+  /** The smallest files first; at most this many. */
+  limit?: number
+  /** File names to swap; the rest of the eligible stay. */
+  only?: string[]
+  /** Stop once this many bytes were freed. */
+  batchBytes?: number
+  now?: () => Date
+}
+
+export interface SwapRunResult {
+  planned: number
+  /** Bytes on disk of the whole files of the planned entries (before any sharing is taken into account). */
+  plannedBytes: number
+  swapped: number
+  freedBytes: number
+  /** Swapped entries that passed the check afterwards: swapped in the manifest, the reduced entry resolves and decodes, the whole file is gone unless a name that stays shares it. */
+  checked: number
+  problems: string[]
+  /** The whole entry's id and the reason, when the run stopped on a failure. */
+  failed?: { id: string; reason: string }
+}
+
+/** Swaps the picked entries one by one, smallest first, stopping at the first failure, and checks every swap it made. Without `apply` it only counts what it would do. */
+export function runSwap(o: SwapRunOptions): SwapRunResult {
+  let picked = o.eligible.filter(i => !o.only || o.only.includes(i.whole.name)).sort((a, b) => a.whole.size - b.whole.size || (a.whole.name < b.whole.name ? -1 : 1))
+  if (o.limit !== undefined) picked = picked.slice(0, o.limit)
+  const result: SwapRunResult = { planned: picked.length, plannedBytes: picked.reduce((n, i) => n + i.whole.archive_bytes, 0), swapped: 0, freedBytes: 0, checked: 0, problems: [] }
+  if (!o.apply) return result
+  const done: SwapItem[] = []
+  for (const item of picked) {
+    const out = swapOne({ archiveDir: o.archiveDir, item, now: o.now })
+    if (!out.ok) { result.failed = { id: item.whole.id, reason: out.reason }; break }
+    result.swapped++
+    result.freedBytes += out.freedBytes
+    done.push(item)
+    if (o.batchBytes !== undefined && result.freedBytes >= o.batchBytes) break
+  }
+  const latest = latestByName(readManifest(o.archiveDir))
+  for (const item of done) {
+    const e = latest.get(item.whole.name)
+    const stillShared = [...latest.values()].some(x => x.id === item.whole.id && !isSwapped(x))
+    const r = e ? reducedFor(o.archiveDir, e) : undefined
+    if (!e || !isSwapped(e)) result.problems.push(`${item.whole.id}: the manifest does not show the entry as swapped`)
+    else if (!r) result.problems.push(`${item.whole.id}: the reduced entry does not resolve`)
+    else if (!verifyEntry(reducedDir(o.archiveDir), r).ok) result.problems.push(`${item.whole.id}: the reduced entry does not decode`)
+    else if (!stillShared && existsSync(join(o.archiveDir, `${item.whole.id}.zst`))) result.problems.push(`${item.whole.id}: the whole file is still on disk`)
+    else result.checked++
+  }
+  return result
+}
