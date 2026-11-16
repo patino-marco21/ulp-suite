@@ -8,7 +8,7 @@ import { existsSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { readReduced, reducedDir, type ReducedEntry } from '@/lib/reduced-archive'
 import { SKIP_REASON, type ShadowLine } from '@/lib/reduced-shadow'
-import { appendManifest, latestByName, readManifest, verifyEntry, type ManifestEntry } from '@/lib/source-archive'
+import { appendManifest, archiveSource, isSwapped, latestByName, readManifest, verifyEntry, type ManifestEntry, type Source } from '@/lib/source-archive'
 
 /** The owner's rule (2026-11-16): swap an entry whose reduced version is at least this many percent smaller on disk. */
 export const MIN_SAVING_PCT = 10
@@ -26,8 +26,7 @@ export type SwapOutcome = { ok: true; freedBytes: number } | { ok: false; reason
 
 const keyOf = (name: string, sha: string): string => `${name}\0${sha}`
 
-/** The whole-file entry's `<id>.zst` was removed and the reduced entry stands for it. */
-export const isSwapped = (e: ManifestEntry): boolean => e.whole_removed_at !== undefined
+export { isSwapped }
 
 /** The reduced entry is made from exactly this whole entry (same bytes, by hash and by size). */
 const stands = (r: ReducedEntry, w: ManifestEntry): boolean => r.of.sha256 === w.sha256 && r.of.size === w.size
@@ -37,6 +36,18 @@ export function reducedFor(archiveDir: string, e: ManifestEntry, reduced: Reduce
   if (!e.reduced_id) return undefined
   for (let i = reduced.length - 1; i >= 0; i--) if (reduced[i].id === e.reduced_id && stands(reduced[i], e)) return reduced[i]
   return undefined
+}
+
+/** The reduced text of a swapped name (by name or by id) as a Source. Refuses a name that is not swapped: its whole entry is the one to read. */
+export function openReducedSource(ref: string, archiveDir: string): Source {
+  const entries = readManifest(archiveDir)
+  const key = ref.slice(ref.lastIndexOf('/') + 1)
+  const entry = latestByName(entries).get(key) ?? [...entries].reverse().find(e => e.id === key && isSwapped(e))
+  if (!entry) throw new Error(`not in the archive manifest: ${key}`)
+  if (!isSwapped(entry)) throw new Error(`${entry.name} is not swapped: its whole entry is the one to read`)
+  const reduced = reducedFor(archiveDir, entry)
+  if (!reduced) throw new Error(`${entry.name} is swapped but its reduced entry (${entry.reduced_id}) is missing or was made from other bytes`)
+  return archiveSource(reducedDir(archiveDir), reduced)
 }
 
 export interface CandidateOptions {

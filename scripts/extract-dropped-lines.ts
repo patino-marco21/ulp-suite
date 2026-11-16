@@ -14,7 +14,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, write
 import { join } from 'node:path'
 import { setPriority } from 'node:os'
 import { extractDroppedLines } from '@/lib/dropped-lines'
-import { defaultArchiveDir, latestByName, openSource, readManifest } from '@/lib/source-archive'
+import { defaultArchiveDir, isSwapped, latestByName, openSource, readManifest } from '@/lib/source-archive'
 import { DEFAULT_HARD_KEEP_COUNTRIES, makeHardDropPredicate, parseIngestPolicy } from '@/lib/ingest-filter'
 
 const args = process.argv.slice(2)
@@ -42,7 +42,7 @@ async function main(): Promise<void> {
     if (!src || !out) { console.error('usage: extract-dropped-lines.ts --src <dir> --out <dir> [--workers 8] [--only a,b] [--limit N] [--from-archive]'); process.exit(2) }
     mkdirSync(out, { recursive: true })
     const only = flag('only')?.split(',')
-    const listed = fromArchive ? [...latestByName(readManifest(defaultArchiveDir())).keys()] : readdirSync(src)
+    const listed = fromArchive ? [...latestByName(readManifest(defaultArchiveDir())).values()].filter(e => !isSwapped(e)).map(e => e.name) : readdirSync(src)
     let names = listed.filter(n => n.toLowerCase().endsWith('.txt') && (!only || only.includes(n))).sort()
     const limit = Number(flag('limit', '0'))
     if (limit > 0) names = names.slice(0, limit)

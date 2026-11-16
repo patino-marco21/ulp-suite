@@ -4,7 +4,7 @@
  *   tsx scripts/archive-sources.ts archive --src <dir> [--out <archive dir>] [--workers 8] [--only a.txt,b.txt] [--replace] [--include-unimported] [--no-sources] [--dry-run]
  *   tsx scripts/archive-sources.ts status [--out <archive dir>]
  *   tsx scripts/archive-sources.ts verify [--out <archive dir>] [--all | --sample 3]
- *   tsx scripts/archive-sources.ts restore <name|id> --to <path> [--out <archive dir>]
+ *   tsx scripts/archive-sources.ts restore <name|id> --to <path> [--reduced] [--out <archive dir>]   (--reduced: a name swapped for its reduced entry; it writes the reduced text)
  *   tsx scripts/archive-sources.ts sources-sync [--out <archive dir>]
  *
  * Run it from the repository root. Environment: ULP_ARCHIVE_DIR (default ~/ulp-archive; the directory must exist, the tool never creates it), ULP_REPO (the checkout
@@ -19,8 +19,10 @@ import { closeSync, createWriteStream, existsSync, openSync, readdirSync, readSy
 import { join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import {
-  appendManifest, archiveFile, defaultArchiveDir, latestByName, openSource, readManifest, removeStaleParts, sourcesSyncSql, verifyEntry, type ManifestEntry,
+  appendManifest, archiveFile, defaultArchiveDir, isSwapped, latestByName, openSource, readManifest, removeStaleParts, sourcesSyncSql, verifyEntry, type ManifestEntry,
 } from '@/lib/source-archive'
+import { openReducedSource, reducedFor } from '@/lib/archive-swap'
+import { reducedDir } from '@/lib/reduced-archive'
 import { FREE_MARGIN_BYTES, MIN_AGE_MS, inboxIsBusy, replaceOriginal, replaceRefusals, spaceRefusal } from '@/lib/archive-replace'
 
 const argv = process.argv.slice(2)
@@ -83,7 +85,7 @@ function runJob(job: Job): Done {
     const entry = archiveFile(job.src, {
       archiveDir: ARCHIVE,
       name: job.name,
-      lookupById: id => [...readManifest(ARCHIVE)].reverse().find(e => e.id === id),
+      lookupById: id => [...readManifest(ARCHIVE)].reverse().find(e => e.id === id && !isSwapped(e)),
     })
     const v = verifyEntry(ARCHIVE, entry)
     return { name: job.name, ok: v.ok, fresh: true, entry, problems: v.problems }
@@ -148,6 +150,8 @@ async function cmdArchive(): Promise<void> {
     inodeOf.set(name, `${st.dev}:${st.ino}`)
     if (now - st.mtimeMs < MIN_AGE_MS) { young.push(name); continue }
     const prev = latest.get(name)
+    // stage D: a name swapped for its reduced entry is archived; the file stays where it is (a replace on a reduced entry would lose the original) and is not archived again
+    if (prev && isSwapped(prev) && prev.size === st.size) { already++; continue }
     const archivedBefore = !!prev && prev.size === st.size && existsSync(join(ARCHIVE, `${prev.id}.zst`))
     if (archivedBefore && !replace) { already++; continue }
     if (archivedBefore) {
@@ -224,18 +228,23 @@ async function cmdArchive(): Promise<void> {
 }
 
 function cmdStatus(): void {
-  const entries = [...latestByName(readManifest(ARCHIVE)).values()]
+  const all = [...latestByName(readManifest(ARCHIVE)).values()]
+  const swapped = all.filter(isSwapped)
+  const entries = all.filter(e => !isSwapped(e))   // a swapped entry's file is gone on purpose: it is no part of the archive's size
   const plain = entries.reduce((a, e) => a + e.size, 0)
   const unique = new Map(entries.map(e => [e.id, e.archive_bytes]))
   const comp = [...unique.values()].reduce((a, b) => a + b, 0)
   console.log(`archive ${ARCHIVE}`)
   console.log(
-    `names ${entries.length} (${entries.filter(e => e.replaced_at).length} replaced), archives ${unique.size}, plaintext ${(plain / GiB).toFixed(2)} GiB, ` +
+    `names ${all.length} (${entries.filter(e => e.replaced_at).length} replaced), archives ${unique.size}, plaintext ${(plain / GiB).toFixed(2)} GiB, ` +
     `archive ${(comp / GiB).toFixed(2)} GiB${comp > 0 ? `, ratio ${(plain / comp).toFixed(2)}x` : ''}`,
   )
+  if (swapped.length > 0) {
+    console.log(`${swapped.length} name(s) swapped for their reduced entry (${(swapped.reduce((a, e) => a + e.size, 0) / GiB).toFixed(2)} GiB of original plaintext no longer in the archive)`)
+  }
   try {
     const names = listSourceNames()
-    const have = new Set(entries.map(e => e.name))
+    const have = new Set(all.map(e => e.name))
     console.log(`in ulp.sources: ${names.size}, without an archive: ${[...names].filter(n => !have.has(n)).length}`)
   } catch {
     console.log('ulp.sources: not readable (no ClickHouse)')
@@ -248,7 +257,11 @@ function cmdVerify(): void {
   const picked = has('all') ? entries : [...entries].sort(() => Math.random() - 0.5).slice(0, count)
   let bad = 0
   picked.forEach((e, i) => {
-    const v = verifyEntry(ARCHIVE, e)
+    // a swapped name has no whole file: its reduced entry is what the archive holds for it
+    const reduced = isSwapped(e) ? reducedFor(ARCHIVE, e) : undefined
+    const v = isSwapped(e)
+      ? (reduced ? verifyEntry(reducedDir(ARCHIVE), reduced) : { ok: false, problems: [`swapped, but the reduced entry ${e.reduced_id} is missing or was made from other bytes`] })
+      : verifyEntry(ARCHIVE, e)
     if (v.ok) console.log(`ok   ${i + 1}/${picked.length} ${e.id.slice(0, 8)}`)
     else { bad++; console.log(`FAIL ${i + 1}/${picked.length} ${e.name}: ${v.problems.join('; ')}`) }
   })
@@ -259,9 +272,15 @@ function cmdVerify(): void {
 async function cmdRestore(): Promise<void> {
   const ref = argv[1]
   const to = flag('to')
-  if (!ref || ref.startsWith('--') || !to) die('usage: restore <name|id> --to <path> [--out <dir>]')
+  if (!ref || ref.startsWith('--') || !to) die('usage: restore <name|id> --to <path> [--reduced] [--out <dir>]')
   if (existsSync(to)) die(`refusing to overwrite ${to}`)
-  const s = openSource(ref, { archiveDir: ARCHIVE })
+  const reducedWanted = has('reduced')
+  let s: ReturnType<typeof openSource>
+  try {
+    s = reducedWanted ? openReducedSource(ref, ARCHIVE) : openSource(ref, { archiveDir: ARCHIVE })
+  } catch (e) {
+    die((e as Error).message)
+  }
   if (s.origin.kind !== 'archive' || !s.entry) die(`${ref} is a plain file, not an archived name`)
   const entry = s.entry as ManifestEntry
   const part = `${to}.part`
@@ -279,7 +298,7 @@ async function cmdRestore(): Promise<void> {
     die('the restored bytes do not match the manifest; nothing was written', 1)
   }
   renameSync(part, to)
-  console.log(`restored ${entry.size} bytes to ${to} (sha256 matches the manifest)`)
+  console.log(`restored ${entry.size} bytes to ${to} (sha256 matches the manifest)${reducedWanted ? ' - this is the REDUCED entry, not the original file' : ''}`)
 }
 
 function cmdSourcesSync(): void {

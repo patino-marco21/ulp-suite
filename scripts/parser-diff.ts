@@ -24,7 +24,7 @@ import { DEFAULT_HARD_KEEP_COUNTRIES, makeHardDropPredicate, parseIngestPolicy }
 import { parseInlineLine, parseULPStream } from '@/lib/ulp-parser'
 import { pipeJoinAll, stripLeadingColonBeforeScheme } from '@/lib/ulp-recover'
 import { repairUtf8Line } from '@/lib/ulp-utf8'
-import { defaultArchiveDir, latestByName, openSource, readManifest, type Source } from '@/lib/source-archive'
+import { defaultArchiveDir, isSwapped, latestByName, openSource, readManifest, type Source } from '@/lib/source-archive'
 
 const args = process.argv.slice(2)
 const flag = (name: string): string | undefined => { const i = args.indexOf(`--${name}`); return i === -1 ? undefined : args[i + 1] }
@@ -56,7 +56,7 @@ async function main(): Promise<void> {
     files = readdirSync(dir).filter(n => n.toLowerCase().endsWith('.txt')).sort().filter((_, i) => i % every === 0).map(n => join(dir, n))
   } else if (args.includes('--from-archive')) {
     const every = Number(flag('every') ?? '1')
-    files = [...latestByName(readManifest(defaultArchiveDir())).keys()].filter(n => n.toLowerCase().endsWith('.txt')).sort().filter((_, i) => i % every === 0)
+    files = [...latestByName(readManifest(defaultArchiveDir())).values()].filter(e => !isSwapped(e)).map(e => e.name).filter(n => n.toLowerCase().endsWith('.txt')).sort().filter((_, i) => i % every === 0)
   } else {
     files = args.slice(args.indexOf('--files') + 1).filter(a => !a.startsWith('--'))
   }

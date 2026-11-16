@@ -8,7 +8,7 @@
  */
 import { existsSync, lstatSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { ManifestEntry } from '@/lib/source-archive'
+import { isSwapped, type ManifestEntry } from '@/lib/source-archive'
 
 export const AUTO_STATUS_FILE = 'auto-archive-status.json'
 /** How long the inbox must have been still before a run starts. */
@@ -131,6 +131,7 @@ export function readyToReplace(doneDir: string, archiveDir: string, latest: Map<
     seen.add(inode)
     if (!name.toLowerCase().endsWith('.txt')) { r.other_files++; if (firstName) r.other_bytes += st.size; continue }
     const e = latest.get(name)
+    if (e && isSwapped(e)) continue   // stage D: a reduced entry stands for it; nothing of it to archive again, and a replace on a reduced entry would lose the original
     if (e && e.size === st.size && existsSync(join(archiveDir, `${e.id}.zst`))) {
       r.ready_files++
       if (firstName) r.ready_bytes += st.size

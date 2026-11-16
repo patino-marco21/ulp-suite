@@ -46,6 +46,9 @@ export interface ManifestEntry {
   whole_removed_at?: string
 }
 
+/** Stage D (lib/archive-swap.ts): the whole-file entry's `<id>.zst` was removed and a reduced entry stands for it. */
+export const isSwapped = (e: ManifestEntry): boolean => e.whole_removed_at !== undefined
+
 export function defaultArchiveDir(env: NodeJS.Dict<string> = process.env): string {
   const set = env.ULP_ARCHIVE_DIR?.trim()
   return set ? set : join(homedir(), 'ulp-archive')
@@ -380,8 +383,14 @@ export function openSource(ref: string, opts: { archiveDir?: string } = {}): Sou
   const dir = opts.archiveDir ?? defaultArchiveDir()
   const entries = readManifest(dir)
   const key = basename(ref)
-  const entry = latestByName(entries).get(key) ?? [...entries].reverse().find(e => e.id === key)
+  // an id that a swapped name and a name that stays whole share is read through the one that stays whole
+  const latest = latestByName(entries)
+  const byId = [...latest.values()].filter(e => e.id === key)
+  const entry = latest.get(key) ?? byId.find(e => !isSwapped(e)) ?? byId[0] ?? [...entries].reverse().find(e => e.id === key)
   if (!entry) throw new Error(`not a file and not in the archive manifest: ${key}`)
+  if (isSwapped(entry)) {
+    throw new Error(`${entry.name} was swapped for its reduced entry on ${entry.whole_removed_at}: the archive no longer holds the original file (its reduced text can be read with openReducedSource; the original is in the chat service)`)
+  }
   return archiveSource(dir, entry)
 }
 
