@@ -1121,6 +1121,17 @@ export interface StreamBatch {
    * rest together as "(other shapes)". Absent when there were none.
    */
   unsplitShapes?: Array<[string, number]>
+  /**
+   * Only with `trackSpans`: flat `[start0, end0, start1, end1, ...]` byte offsets into the file (end exclusive, after the line's newline when it has one), one pair for each
+   * entry of `credentials`, in the same order. A credential read from one line has that line; a labelled block has its first label through the separator that closed it; a
+   * url / login / password record has its three lines.
+   */
+  spans?: number[]
+  /**
+   * Only with `trackSpans`: flat start/end pairs of the rejected units a reader should keep, which are all of them except the blank, in-file repeat and tier-dropped ones
+   * (those are proven to carry nothing). Adjacent units are merged; the pairs are not sorted (a block's pair comes when the block closes).
+   */
+  kept?: number[]
 }
 
 /** Distinct unsplit-line shapes one batch keeps; the quality gate keeps SHAPE_CAP over the whole file. */
@@ -1132,6 +1143,12 @@ export interface ParseStreamOptions {
    * removes in-file repeats exactly, for a file of any size, where this per-file Set stops at STREAM_SEEN_CAP entries.
    */
   dedupInFile?: boolean
+  /**
+   * Report where each credential and each rejected unit worth keeping sits in the file (StreamBatch.spans and .kept), for the reduced archive writer
+   * (lib/reduced-archive.ts). Default false: the import path allocates and computes nothing for it. The parser reads the file as Latin-1, so an offset in the decoded
+   * text is a byte offset in the file. It changes nothing that is parsed.
+   */
+  trackSpans?: boolean
 }
 
 export async function* parseULPStream(
@@ -1174,12 +1191,30 @@ export async function* parseULPStream(
   const ANDROID_SEEN_CAP = 2_000_000
   const androidSeen = new Set<string>()
 
+  // Span tracking (options.trackSpans, for the reduced archive writer): where the unit being read sits in the file, and where the open records began. Every use is behind `track`.
+  const track = options.trackSpans === true
+  let spans: number[] = []
+  let kept: number[] = []
+  let unitStart = 0
+  let unitEnd = 0
+  let urlStart = 0       // the first line of the positional record that is open
+  let parkedEnd = 0      // the end of the last line that record holds
+  let blockStart = -1    // the first labelled line of the block that is open, -1 when none
+  /** A rejected unit a reader should keep; a unit that touches the previous range extends it. */
+  function keepRange(s: number, e: number) {
+    const n = kept.length
+    if (n > 0 && kept[n - 1] === s) kept[n - 1] = e
+    else kept.push(s, e)
+  }
+
   function flushBatch(): StreamBatch {
     const out: StreamBatch = {
       credentials: batch, rejected: batchRejected, breakdown: batchBreakdown,
       ...(batchNoCredential > 0 ? { noCredential: batchNoCredential } : {}),
       ...(batchUnsplit.size > 0 ? { unsplitShapes: [...batchUnsplit] } : {}),
+      ...(track ? { spans, kept } : {}),
     }
+    if (track) { spans = []; kept = [] }
     batch = []; batchRejected = 0; batchNoCredential = 0; batchUnsplit = new Map()
     batchBreakdown = { blank: 0, no_fields: 0, no_password: 0, dedup: 0, garbage: 0, tier_dropped: 0 }
     return out
@@ -1207,6 +1242,7 @@ export async function* parseULPStream(
   // A url alone is a no_fields line, like the one a line that is not a login counts below; a url with its login is a record that lacks its password.
   function dropParked() {
     if (!positionalUrl) return
+    if (track) keepRange(urlStart, parkedEnd)
     batchRejected++
     if (positionalLogin) {
       batchBreakdown.no_password++
@@ -1217,7 +1253,8 @@ export async function* parseULPStream(
     positionalUrl = positionalLogin = ''
   }
 
-  function tryFlushBlock() {
+  /** `end` is where the block closed: the end of its separator, or the end of the file. */
+  function tryFlushBlock(end: number) {
     const cred = flushBlockState(blockState, filename)
     if (cred) {
       if (shouldHardDrop?.(cred.email, cred.url)) {
@@ -1225,9 +1262,10 @@ export async function* parseULPStream(
       } else {
         const fp = `${cred.url}\0${cred.email}\0${cred.password}`
         if (streamSeenCheck(fp)) { batchRejected++; batchBreakdown.dedup++ }
-        else                     { batch.push(cred) }
+        else                     { batch.push(cred); if (track) spans.push(blockStart, end) }
       }
     } else if (blockState.url || blockState.login || blockState.password) {
+      if (track) keepRange(blockStart, end)
       batchRejected++
       // no login at all → no_fields; login present but password issue → no_password
       if (!blockState.login)                                            batchBreakdown.no_fields++
@@ -1235,9 +1273,11 @@ export async function* parseULPStream(
       else                                                              batchBreakdown.no_password++
     }
     blockState = makeBlockState()
+    blockStart = -1
   }
 
-  function processLine(rawLine: string) {
+  function processLine(rawLine: string, start: number, end: number) {
+    if (track) { unitStart = start; unitEnd = end }
     // The file's bytes were read as Latin-1: a line that is valid UTF-8 is read as UTF-8 (lib/ulp-utf8.ts), any other line stays as it was.
     // Rule N (v6.3): a promotional signature at the end of the line is not part of it (lib/ulp-promo-signature.ts).
     const line = stripPromoSignature(repairUtf8Line(rawLine))
@@ -1247,6 +1287,7 @@ export async function* parseULPStream(
     const labeled = classifyBlockLabel(trimmed)
     if (labeled) {
       dropParked()
+      if (track && blockStart < 0) blockStart = unitStart
       if (labeled.field === 'url')      blockState.url      = labeled.value
       if (labeled.field === 'login')    blockState.login    = labeled.value
       if (labeled.field === 'password') blockState.password = labeled.value
@@ -1257,10 +1298,11 @@ export async function* parseULPStream(
     if (isBlockSeparator(trimmed)) {
       dropParked()
       if (blockState.url || blockState.login || blockState.password) {
-        tryFlushBlock()
+        tryFlushBlock(unitEnd)
       } else {
         batchRejected++
         batchBreakdown.blank++
+        blockStart = -1
       }
       return
     }
@@ -1268,6 +1310,7 @@ export async function* parseULPStream(
     // Positional password: URL + login collected → emit credential
     if (positionalUrl && positionalLogin) {
       if (isJunkCredential(positionalLogin, trimmed)) {
+        if (track) keepRange(urlStart, unitEnd)
         batchRejected++; batchBreakdown.garbage++
         positionalUrl = positionalLogin = ''
         return
@@ -1283,6 +1326,7 @@ export async function* parseULPStream(
       } else {
         const domain = extractDomain(positionalUrl)
         batch.push({ url: positionalUrl, email: positionalLogin, password: trimmed, domain, source_file: filename })
+        if (track) spans.push(urlStart, unitEnd)
       }
       positionalUrl = positionalLogin = ''
       return
@@ -1292,9 +1336,11 @@ export async function* parseULPStream(
     if (positionalUrl) {
       if (canBeLoginLine(line, trimmed, filename)) {
         positionalLogin = trimmed
+        parkedEnd = unitEnd
         return
       }
       // Not a login: the "URL" line was a rejected credential line, not the start of a record. Count it and read this line on its own.
+      if (track) keepRange(urlStart, parkedEnd)
       batchRejected++; batchBreakdown.no_fields++
       if (cannotHoldCredential(positionalUrl)) batchNoCredential++
       positionalUrl = ''
@@ -1309,12 +1355,16 @@ export async function* parseULPStream(
       }
       const fp = `${credential.url}\0${credential.email}\0${credential.password}`
       if (streamSeenCheck(fp)) { batchRejected++; batchBreakdown.dedup++ }
-      else                     { batch.push(credential) }
+      else                     { batch.push(credential); if (track) spans.push(unitStart, unitEnd) }
     } else if (reason === 'no_fields' && trimmed.startsWith('http') && !hasTelegramLink(trimmed)) {
       // Bare URL → enter positional mode
       positionalUrl   = trimmed
       positionalLogin = ''
+      urlStart        = unitStart
+      parkedEnd       = unitEnd
     } else {
+      // Proven to carry nothing: a blank line, a repeat, a tier-dropped line. Everything else rejected is kept, because nobody has explained it.
+      if (track && reason !== 'blank' && reason !== 'dedup' && reason !== 'tier_dropped') keepRange(unitStart, unitEnd)
       batchRejected++
       if (reason) {
         batchBreakdown[reason]++
@@ -1330,6 +1380,7 @@ export async function* parseULPStream(
     }
   }
 
+  let base = 0   // the file offset of buffer[0]
   try {
     while (true) {
       const { done, value } = await reader.read()
@@ -1344,23 +1395,27 @@ export async function* parseULPStream(
         const lines = buffer.split('\n')
         buffer = lines.pop() ?? ''
 
+        let at = base
         for (const line of lines) {
-          processLine(line)
+          processLine(line, at, at + line.length + 1)
+          at += line.length + 1
           if (batch.length >= batchSize) yield flushBatch()
         }
+        base = at
 
         // No '\n' found (or a huge trailing partial line) — force-flush so
         // buffer can't grow unboundedly. See MAX_LINE_LENGTH.
         if (buffer.length > MAX_LINE_LENGTH) {
-          processLine(buffer)
+          processLine(buffer, base, base + buffer.length)
+          base += buffer.length
           buffer = ''
           if (batch.length >= batchSize) yield flushBatch()
         }
       }
     }
-    if (buffer) processLine(buffer)
+    if (buffer) processLine(buffer, base, base + buffer.length)
     dropParked()  // a trailing record that never got its login and password is a rejected line
-    tryFlushBlock()  // flush trailing labeled block at EOF
+    tryFlushBlock(base + buffer.length)  // flush trailing labeled block at EOF
     if (batch.length > 0 || batchRejected > 0) yield flushBatch()
   } finally {
     reader.releaseLock()
