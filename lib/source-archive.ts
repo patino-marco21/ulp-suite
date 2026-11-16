@@ -41,6 +41,9 @@ export interface ManifestEntry {
   level: number
   created_at: string
   replaced_at?: string
+  /** Stage D (lib/archive-swap.ts): the whole-file entry was swapped for the reduced entry with this id (in reduced/manifest.jsonl), and its `<id>.zst` was removed. */
+  reduced_id?: string
+  whole_removed_at?: string
 }
 
 export function defaultArchiveDir(env: NodeJS.Dict<string> = process.env): string {
