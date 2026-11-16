@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
-import { isSwapped, reducedFor, runSwap, swapCandidates, swapOne, swapReport } from '@/lib/archive-swap'
+import { isSwapped, reducedFor, runSwap, standInsLosingRestore, swapCandidates, swapOne, swapReport } from '@/lib/archive-swap'
 import { appendReduced, reducedDir, type ReducedEntry } from '@/lib/reduced-archive'
 import type { ShadowLine } from '@/lib/reduced-shadow'
 import { SKIP_REASON } from '@/lib/reduced-shadow'
@@ -284,5 +284,23 @@ describe('runSwap', () => {
     const out = runSwap({ archiveDir: dir, eligible, apply: true, batchBytes: 1 })
     expect(out.swapped).toBe(1)
     expect(out.freedBytes).toBe(small.archive_bytes)
+  })
+})
+
+describe('standInsLosingRestore', () => {
+  test('counts the stand-ins (and their original size) whose bytes the eligible entries would take out of the archive', () => {
+    const a = addWhole('a', lines(400, 'a'))
+    addReduced(a, lines(40, 'a'))
+    const b = addWhole('b', lines(300, 'b'))   // no reduced entry: not eligible
+    const eligible = select([okLine(a)]).eligible
+    const registry = [
+      '#path\tsize\tmtime_ns\tsha256\tcreated',
+      `/x/one.txt\t${a.size}\t1\t${a.sha256}\t2026-11-01`,
+      `/x/one again.txt\t${a.size}\t2\t${a.sha256}\t2026-11-02`,
+      `/x/two.txt\t${b.size}\t3\t${b.sha256}\t2026-11-03`,
+      '',
+    ].join('\n')
+    expect(standInsLosingRestore(registry, eligible)).toEqual({ count: 2, bytes: 2 * a.size })
+    expect(standInsLosingRestore('', eligible)).toEqual({ count: 0, bytes: 0 })
   })
 })

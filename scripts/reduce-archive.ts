@@ -27,7 +27,8 @@ import { join } from 'node:path'
 import { dockerCh } from '@/lib/clickhouse-cli'
 import { inboxIsBusy } from '@/lib/archive-replace'
 import { readReduced, reduceSource, reducedDir } from '@/lib/reduced-archive'
-import { swapCandidates, swapReport, runSwap } from '@/lib/archive-swap'
+import { runSwap, standInsLosingRestore, swapCandidates, swapReport } from '@/lib/archive-swap'
+import { defaultLedgerFile, standInRegistryFile } from '@/lib/ledger-export'
 import { chReduceDb } from '@/lib/reduced-archive-ch'
 import {
   GATE_FILES, appendShadowLog, consecutiveExact, pickCandidates, readShadowLog, readShadowStart, summarize, type ShadowLine, SKIP_REASON,
@@ -208,6 +209,13 @@ function cmdReport(): number {
   console.log(`freed by the removal of the eligible whole files: ${gib(r.wholeBytesFreed)} GiB (the reduced entries that stand in for them, ${gib(r.reducedBytesKept)} GiB, are already on disk)`)
   console.log(`free now ${gib(free())} GiB; after the removal about ${gib(free() + r.wholeBytesFreed)} GiB`)
   console.log(`drift: ${r.driftFiles} eligible file(s) hold ${r.driftKeys} stored keys that today's parser no longer reads from them`)
+  try {
+    const registry = standInRegistryFile(defaultLedgerFile())
+    const lost = standInsLosingRestore(existsSync(registry) ? readFileSync(registry, 'utf8') : '', swapCandidates(swapInputs()).eligible)
+    console.log(`stand-ins that could no longer be restored from the archive: ${lost.count} (${gib(lost.bytes)} GiB of original size); the chat service holds the originals`)
+  } catch (e) {
+    console.log(`stand-ins: the registry could not be read (${(e as Error).message})`)
+  }
   for (const c of r.checks) console.log(`${c.ok === null ? 'open' : c.ok ? 'ok  ' : 'NO  '} ${c.id}: ${c.text}`)
   if (r.verifyFailed.length > 0) console.log(`reduced entries that do not decode: ${r.verifyFailed.join(', ')}`)
   return 0

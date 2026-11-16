@@ -185,6 +185,19 @@ export function swapReport(o: CandidateOptions & { archiveDir: string; barBytes?
   }
 }
 
+/** The stand-ins in the registry (`path size mtime_ns sha256 created`, one per line) whose original the eligible entries would take out of the archive: they could no longer be restored from it. */
+export function standInsLosingRestore(registryText: string, eligible: SwapItem[]): { count: number; bytes: number } {
+  const swappedShas = new Set(eligible.map(i => i.whole.sha256))
+  let count = 0
+  let bytes = 0
+  for (const line of registryText.split('\n')) {
+    if (line === '' || line.startsWith('#')) continue
+    const f = line.split('\t')
+    if (f.length >= 4 && swappedShas.has(f[3])) { count++; bytes += Number(f[1]) || 0 }
+  }
+  return { count, bytes }
+}
+
 export interface SwapRunOptions {
   archiveDir: string
   eligible: SwapItem[]
