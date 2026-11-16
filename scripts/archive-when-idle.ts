@@ -23,11 +23,10 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { inboxIsBusy } from '@/lib/archive-replace'
 import {
-  DEFAULT_IDLE_MS, archiveNote, failureBackoff, idleRefusals, inboxLastActivityMs, parseArchiveSummary, parseVerifySummary, readStatus, readyToReplace, replaceWanted,
+  DEFAULT_IDLE_MS, archiveNote, failureBackoff, idleRefusals, inboxLastActivityMs, parseArchiveSummary, parseVerifySummary, readStatus, readyToReplace, reducedArchiveMode, replaceWanted,
   writeStatus, type AutoArchiveStatus,
 } from '@/lib/archive-auto'
 import { defaultArchiveDir, latestByName, readManifest } from '@/lib/source-archive'
-import { reducedArchiveMode } from '@/lib/reduced-shadow'
 
 const REPO = process.env.ULP_REPO ?? process.cwd()
 const INBOX = join(REPO, 'inbox')

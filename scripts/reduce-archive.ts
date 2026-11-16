@@ -72,10 +72,13 @@ async function cmdRun(): Promise<number> {
     removeStaleParts(reducedDir(ARCHIVE))
     rmSync(work, { recursive: true, force: true })   // leftovers of a run that was killed: the lock says no other run is alive
     const ch = dockerCh(CH, { maxMemoryBytes: 4_000_000_000 })
-    let inSources: Set<string>
+    const importedRows = new Map<string, number>()   // ulp.sources: file name -> the rows its import stored
     try {
-      const out = await ch.run('SELECT filename FROM ulp.sources FORMAT JSONEachRow')
-      inSources = new Set(out.split('\n').filter(l => l.trim() !== '').map(l => (JSON.parse(l) as { filename: string }).filename))
+      const out = await ch.run('SELECT filename, line_count FROM ulp.sources FORMAT JSONEachRow')
+      for (const l of out.split('\n').filter(l => l.trim() !== '')) {
+        const r = JSON.parse(l) as { filename: string; line_count: string | number }
+        importedRows.set(r.filename, Math.max(importedRows.get(r.filename) ?? 0, Number(r.line_count)))
+      }
     } catch (e) {
       console.log(`ClickHouse did not answer (${(e as Error).message}); nothing started`)
       return 0
@@ -85,7 +88,7 @@ async function cmdRun(): Promise<number> {
     const pilot = flag('pilot') ? Number(flag('pilot')) : 0
     const entries = [...latestByName(readManifest(ARCHIVE)).values()].filter(e => !only || only.includes(e.name))
     const picks = pickCandidates({
-      entries, reduced: readReduced(ARCHIVE), log: readShadowLog(ARCHIVE), inSources, startedAt,
+      entries, reduced: readReduced(ARCHIVE), log: readShadowLog(ARCHIVE), inSources: new Set(importedRows.keys()), startedAt,
       mode: only ? 'any' : pilot > 0 ? 'pilot' : 'new',
       limit: pilot > 0 ? pilot : Number(flag('limit') ?? '20'),
       retryFailed: has('retry-failed'), seed: startedAt,
@@ -100,7 +103,7 @@ async function cmdRun(): Promise<number> {
       if (free() < floor) { console.log(`stopped: free space fell under the ${gib(floor)} GiB floor`); break }
       if (inbox && inboxIsBusy(inbox)) { console.log('stopped: a file is waiting or in flight in the inbox'); break }
       const t0 = Date.now()
-      const out = await reduceSource({ entry, archiveDir: ARCHIVE, db: chReduceDb(ch), workDir: work })
+      const out = await reduceSource({ entry, archiveDir: ARCHIVE, db: chReduceDb(ch), workDir: work, imported: importedRows.get(entry.name) })
       const ms = Date.now() - t0
       const kind = entry.created_at >= startedAt ? 'new' : 'pilot'
       const base = { name: entry.name, sha256: entry.sha256, at: new Date().toISOString(), kind, ms } as const

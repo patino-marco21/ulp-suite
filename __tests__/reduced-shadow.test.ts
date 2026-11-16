@@ -7,8 +7,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import {
-  GATE_FILES, appendShadowLog, consecutiveExact, pickCandidates, readShadowLog, readShadowStart, reducedArchiveMode, summarize, type ShadowLine,
+  GATE_FILES, appendShadowLog, consecutiveExact, pickCandidates, readShadowLog, readShadowStart, summarize, type ShadowLine,
 } from '@/lib/reduced-shadow'
+import { reducedArchiveMode } from '@/lib/archive-auto'
 import type { ReducedEntry } from '@/lib/reduced-archive'
 import type { ManifestEntry } from '@/lib/source-archive'
 

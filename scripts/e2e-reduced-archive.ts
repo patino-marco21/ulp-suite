@@ -223,6 +223,9 @@ async function main(): Promise<number> {
       db: (real => ({ ...real, classify: async (name: string) => { const r = await real.classify(name); return { ...r, keep: r.keep.slice(2) } } }) as ReduceDb)(chReduceDb(ch)),
     })
     check('a reduction that would lose a credential the file stored fails its proof', !lossy.ok && lossy.reason === 'mismatch' && lossy.stats?.proof?.missing === 1, lossy.ok ? 'it passed' : `${lossy.reason}: ${lossy.detail}`)
+    // C stored nothing: with ulp.sources saying its import stored rows, the rows are under another name and no entry would keep its lines
+    const unrecorded = await reduceSource({ entry: entries.C, archiveDir: archive, workDir: join(work, 'tmp'), db: chReduceDb(ch), imported: 5 })
+    check('rows recorded as imported but none held under the file name: no entry', !unrecorded.ok && unrecorded.reason === 'mismatch' && unrecorded.detail.includes('ulp.sources'), unrecorded.ok ? 'it passed' : unrecorded.detail)
     check('a failed proof writes no entry and no file', readReduced(archive).length === n1 && readdirSync(reducedDir(archive)).every(n => n === 'manifest.jsonl' || n.endsWith('.zst')) && readdirSync(join(work, 'tmp')).length === 0)
     const onDisk = readdirSync(reducedDir(archive)).filter(n => n.endsWith('.zst')).sort().join(',')
     const listed = [...new Set(readReduced(archive).map(x => `${x.id}.zst`))].sort().join(',')

@@ -48,6 +48,15 @@ export function failureBackoff(prev: Pick<AutoArchiveStatus, 'at' | 'failed' | '
   return `the last run failed ${Math.round(ago / 60_000)} minutes ago and a run after a failure waits 6 hours (--now overrides)`
 }
 
+/** ULP_REDUCED_ARCHIVE: `shadow` writes reduced entries beside the whole-file ones and removes nothing. Anything else is off; `on` (reduced entries instead of whole ones) is stage C and is not built. */
+export function reducedArchiveMode(env: NodeJS.Dict<string> = process.env): { mode: 'off' | 'shadow'; note?: string } {
+  const raw = (env.ULP_REDUCED_ARCHIVE ?? '').trim().toLowerCase()
+  if (raw === '' || raw === 'off') return { mode: 'off' }
+  if (raw === 'shadow') return { mode: 'shadow' }
+  if (raw === 'on') return { mode: 'off', note: 'ULP_REDUCED_ARCHIVE=on is not built yet (stage C); the reduced archive stays off' }
+  return { mode: 'off', note: `ULP_REDUCED_ARCHIVE=${raw.slice(0, 20)} is not off or shadow; the reduced archive stays off` }
+}
+
 export interface ArchivePendingFacts {
   /** `*.txt` files in done/ the archive does not hold yet (readyToReplace().unarchived_files). */
   unarchivedFiles: number

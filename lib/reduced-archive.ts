@@ -122,6 +122,8 @@ export interface ReducedEntry extends ManifestEntry {
   db_keys: number
   /** Of those keys, how many today's parser does not produce from the file (drift): their lines are kept or dropped by what today's parser makes of them. */
   db_drift: number
+  /** ulp.sources.line_count when the entry was proven: the rows the import stored. */
+  imported?: number
   verified_at: string
 }
 
@@ -197,6 +199,8 @@ export interface ReduceOptions {
   /** The importer's hard drop (tier T3 with its keep-list of countries) by default; a test seam. */
   hardDrop?: (email: string, url: string) => boolean
   now?: () => Date
+  /** What ulp.sources says the import of this file stored (its line_count); 0 or absent when unknown. */
+  imported?: number
   /** Test seams: smaller frames for the reduced entry. */
   frameBytes?: number
   searchBytes?: number
@@ -333,6 +337,12 @@ export async function reduceSource(opts: ReduceOptions): Promise<ReduceOutcome> 
       }
     }
 
+    // The import says it stored rows and the database holds none under the name: they are under another name (a re-feed), every credential here looks "known", and no entry
+    // would keep the lines. Not a file to reduce.
+    if ((opts.imported ?? 0) > 0 && proof.dbRows === 0) {
+      return { ok: false, reason: 'mismatch', stats, detail: `ulp.sources says the import stored ${opts.imported} rows, and ulp.credentials holds none under the file's name` }
+    }
+
     // 4. archive, verify, record
     mkdirSync(rdir, { recursive: true })
     const known = readReduced(archiveDir)
@@ -353,6 +363,7 @@ export async function reduceSource(opts: ReduceOptions): Promise<ReduceOutcome> 
       db_rows: proof.dbRows,
       db_keys: proof.dbKeys,
       db_drift: proof.notParsed,
+      ...(opts.imported !== undefined ? { imported: opts.imported } : {}),
       verified_at: (opts.now?.() ?? new Date()).toISOString(),
     }
     appendReduced(archiveDir, reduced)

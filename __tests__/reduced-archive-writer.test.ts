@@ -222,6 +222,22 @@ describe('reduceSource', () => {
     expect(db.cleaned).toBe(1)
   })
 
+  test('ulp.sources says rows were imported but the database holds none under this name: the lines would have no keeper, so no entry', async () => {
+    // e.g. the rows were stored under another name (a re-feed): every credential would look "known", and neither entry would keep the lines
+    const text = NEW1 + '\n' + OLD1 + '\n'
+    const whole = archived('this.txt', text)
+    const holders = holdersOf(['https://new1.example.com', 'n1@x.test', 'pwnew1', 'other-name.txt'], ['https://old1.example.com', 'o1@x.test', 'pwold1', 'other.txt'])
+    const out = await reduceSource({ entry: whole, archiveDir: archive, db: memoryDb(holders), workDir: work, imported: 1 })
+    expect(out.ok).toBe(false)
+    if (out.ok) return
+    expect(out.reason).toBe('mismatch')
+    expect(out.detail).toContain('ulp.sources')
+    expect(readReduced(archive)).toEqual([])
+    // the same file, recorded as having imported nothing, is simply a file that added nothing
+    const none = await reduceSource({ entry: whole, archiveDir: archive, db: memoryDb(holders), workDir: work, imported: 0 })
+    expect(none.ok).toBe(true)
+  })
+
   test('an archive that no longer hashes to its manifest line is refused as a source', async () => {
     const whole = archived('this.txt', MIXED)
     const bad = { ...whole, sha256: 'f'.repeat(64) }
