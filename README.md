@@ -312,6 +312,12 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   tracker is at or above this share of its ceiling (default `0.75`).
 - `MEMORY_GUARD_MAX_WAIT_MS` — how long it waits before going ahead anyway (default `600000`, ten
   minutes). The guard paces imports; it never blocks one for good.
+- `PROJECTION_SCOPE_WINDOW_MONTHS` — how many calendar months of the most recent data keep
+  `proj_imported_desc`, the projection behind "Newest first" (default `2`). The daily scope job clears
+  it from every older partition and never from the newest one; no row is touched. "Newest first" only
+  reads the projection on the newest partition, so `1` is enough and frees about a month's copy
+  (roughly 55 bytes a row) one month earlier. A search that reaches back into a cleared month runs
+  on the table instead.
 
 Batch size stays a fixed 100,000 rows; inserts remain synchronous, in-order, and
 retryable (unchanged from the resilience work).

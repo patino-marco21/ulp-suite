@@ -25,9 +25,11 @@
          backfill merge behaviour after a deploy.
        - session_log: 30 days — low-volume auth audit trail, kept longer.
        - trace_log / metric_log / asynchronous_metric_log /
-         processors_profile_log: 3 days — extremely high-volume
-         (per-second or per-processor rows), not used by any monitoring
-         endpoint, kept short purely for emergency profiling. -->
+         processors_profile_log / text_log / query_metric_log: 3 days —
+         extremely high-volume (per-second, per-processor or per-message
+         rows), not used by any monitoring endpoint, kept short purely for
+         emergency profiling. text_log logs at trace level and reached
+         6.2 GiB (144M rows) in three months before it had a TTL. -->
 <clickhouse>
     <query_log>
         <ttl>event_date + INTERVAL 14 DAY DELETE</ttl>
@@ -56,4 +58,10 @@
     <processors_profile_log>
         <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
     </processors_profile_log>
+    <text_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </text_log>
+    <query_metric_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </query_metric_log>
 </clickhouse>
