@@ -40,6 +40,9 @@ export interface ShadowLine {
   extra_known?: number
   /** Stored rows today's parser does not read from the file (ReducedEntry.db_drift). A new file with drift is not counted as exact. */
   drift?: number
+  /** Placeholder lines in the reduced entry (ReducedEntry.placeholders); `fallback` when the compacted copy failed its proof and the spans were kept whole. */
+  placeholders?: number
+  fallback?: boolean
 }
 
 const keyOf = (name: string, sha: string) => `${name}\0${sha}`
@@ -81,6 +84,11 @@ export interface PickOptions {
   retryFailed?: boolean
   /** Pilot only. */
   maxBytes?: number
+  /**
+   * Make a reduced entry again: when set, only the files whose reduced entry (any line of the manifest for the bytes) satisfies it are picked, the biggest entry first, and a file
+   * whose manifest holds a line that does not satisfy it is done. Whatever the mode says about age and size is ignored.
+   */
+  redo?: (r: ReducedEntry) => boolean
   seed?: string
   /** True when the entry's archive file is on disk. */
   archiveHolds: (e: ManifestEntry) => boolean
@@ -89,7 +97,12 @@ export interface PickOptions {
 /** The files to reduce in this run. `new` (and `any`): archived since the shadow began (any time for `any`), oldest first. `pilot`: older and not too big, in a seeded order that is the same every time. */
 export function pickCandidates(o: PickOptions): ManifestEntry[] {
   const done = new Set<string>()
-  for (const r of o.reduced) done.add(keyOf(r.name, r.of.sha256))
+  const redoSize = new Map<string, number>()   // redo: the size of the entry that is to be made again
+  for (const r of o.reduced) {
+    const k = keyOf(r.name, r.of.sha256)
+    if (o.redo && o.redo(r)) redoSize.set(k, Math.max(redoSize.get(k) ?? 0, r.size))
+    else done.add(k)
+  }
   const lastOk = new Map<string, boolean>()
   const skipped = new Set<string>()   // reduced entries are not made for these bytes: they hold a line the parser reads differently from reader to reader
   for (const l of o.log) {
@@ -101,11 +114,13 @@ export function pickCandidates(o: PickOptions): ManifestEntry[] {
     if (e.size === 0 || !o.inSources.has(e.name) || !o.archiveHolds(e)) return false
     if (done.has(keyOf(e.name, e.sha256)) || skipped.has(keyOf(e.name, e.sha256))) return false
     if (!o.retryFailed && lastOk.get(keyOf(e.name, e.sha256)) === false) return false
+    if (o.redo) return redoSize.has(keyOf(e.name, e.sha256))
     if (o.mode === 'any') return true
     return o.mode === 'new' ? e.created_at >= o.startedAt : e.created_at < o.startedAt && e.size <= maxBytes
   })
   const rank = (e: ManifestEntry) => createHash('sha1').update(`${o.seed ?? ''}:${e.name}`).digest('hex')
-  eligible.sort(o.mode !== 'pilot'
+  if (o.redo) eligible.sort((a, b) => (redoSize.get(keyOf(b.name, b.sha256)) ?? 0) - (redoSize.get(keyOf(a.name, a.sha256)) ?? 0) || (a.name < b.name ? -1 : 1))
+  else eligible.sort(o.mode !== 'pilot'
     ? (a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.name < b.name ? -1 : 1)
     : (a, b) => (rank(a) < rank(b) ? -1 : 1))
   return eligible.slice(0, o.limit)
@@ -142,12 +157,16 @@ export interface Summary {
   /** Reduced files with at least one stored row today's parser does not read from them, and the rows. */
   driftFiles: number
   driftKeys: number
+  /** Reduced files whose entry carries placeholder lines, and how many lines; files whose latest result says the compacted copy fell back to whole spans. */
+  compactedFiles: number
+  placeholders: number
+  compactFallbacks: number
 }
 
 export function summarize(o: { entries: ManifestEntry[]; reduced: ReducedEntry[]; log: ShadowLine[] }): Summary {
   const latestReduced = new Map<string, ReducedEntry>()
   for (const r of o.reduced) latestReduced.set(keyOf(r.name, r.of.sha256), r)
-  let wholeBytes = 0, reducedBytes = 0, wholeArchiveBytes = 0, reducedArchiveBytes = 0, reducedFiles = 0, driftFiles = 0, driftKeys = 0
+  let wholeBytes = 0, reducedBytes = 0, wholeArchiveBytes = 0, reducedArchiveBytes = 0, reducedFiles = 0, driftFiles = 0, driftKeys = 0, compactedFiles = 0, placeholders = 0
   for (const e of o.entries) {
     const r = latestReduced.get(keyOf(e.name, e.sha256))
     if (!r) continue
@@ -155,18 +174,21 @@ export function summarize(o: { entries: ManifestEntry[]; reduced: ReducedEntry[]
     wholeBytes += e.size; reducedBytes += r.size
     wholeArchiveBytes += e.archive_bytes; reducedArchiveBytes += r.archive_bytes
     if ((r.db_drift ?? 0) > 0) { driftFiles++; driftKeys += r.db_drift }
+    if ((r.placeholders ?? 0) > 0) { compactedFiles++; placeholders += r.placeholders! }
   }
   const latest = new Map<string, ShadowLine>()
   for (const l of o.log) latest.set(keyOf(l.name, l.sha256), l)
   const failuresByReason: Record<string, number> = {}
   let skippedLongLine = 0
+  let compactFallbacks = 0
   for (const l of latest.values()) {
+    if (l.ok && l.fallback) compactFallbacks++
     if (l.ok) continue
     if (l.reason === SKIP_REASON) skippedLongLine++
     else failuresByReason[l.reason ?? 'unknown'] = (failuresByReason[l.reason ?? 'unknown'] ?? 0) + 1
   }
   return {
     reducedFiles, wholeBytes, reducedBytes, sharePct: wholeBytes > 0 ? (100 * reducedBytes) / wholeBytes : 0,
-    wholeArchiveBytes, reducedArchiveBytes, failuresByReason, skippedLongLine, driftFiles, driftKeys,
+    wholeArchiveBytes, reducedArchiveBytes, failuresByReason, skippedLongLine, driftFiles, driftKeys, compactedFiles, placeholders, compactFallbacks,
   }
 }

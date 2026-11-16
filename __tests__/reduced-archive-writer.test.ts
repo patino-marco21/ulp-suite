@@ -178,7 +178,7 @@ describe('reduceSource', () => {
     expect(await readAll(archive, out.entry)).toBe('')
   })
 
-  test('a known line inside a block comes along with the block and is counted, and the proof still holds', async () => {
+  test('a known credential nested in a kept record is cut out of it and a placeholder stands there; the record still reads the same', async () => {
     const text = ['Host: https://blk.example.com', OLD1, 'Login: blk@x.test', 'Password: blkpass1', ''].join('\n') + '\n'
     const whole = archived('this.txt', text)
     const db = memoryDb(holdersOf(
@@ -188,8 +188,10 @@ describe('reduceSource', () => {
     const out = await reduceSource({ entry: whole, archiveDir: archive, db, workDir: work })
     expect(out.ok).toBe(true)
     if (!out.ok) return
-    expect(await readAll(archive, out.entry)).toBe(text)
-    expect(out.entry.extra_known).toBe(1)
+    expect(await readAll(archive, out.entry)).toBe(['Host: https://blk.example.com', '#', 'Login: blk@x.test', 'Password: blkpass1', ''].join('\n') + '\n')
+    expect(out.entry.extra_known).toBe(0)
+    expect(out.entry.placeholders).toBe(1)
+    expect(out.stats.compactFallback).toBeUndefined()
   })
 
   test('a stored row that the parser no longer reads from the file is drift: reported, not a loss', async () => {
@@ -319,6 +321,88 @@ describe('reduceSource', () => {
     expect(out.detail).toContain('1 MiB')
     expect(readReduced(archive)).toEqual([])
     expect(db.cleaned).toBe(1)
+    expect(readdirSync(work)).toEqual([])
+  })
+
+  test('credentials another file stored, and repeats, inside a kept block are cut out and a placeholder line stands in their place; a kept credential beside them stays', async () => {
+    // An unfinished "Login:" line opens a block that only a blank line closes, so the whole span is kept as an unexplained unit; the credentials parsed inside it are
+    // each judged on their own: OLD1 is known, NEW1 is new here, and the repeats are repeats.
+    const OLD2 = 'https://old2.example.com:o2@x.test:pwold2'
+    const text = ['Login: orphan@x.test', OLD1, NEW1, OLD1, OLD2, NEW1, ''].join('\n') + '\n'
+    const whole = archived('this.txt', text)
+    const db = memoryDb(holdersOf(
+      ['https://old1.example.com', 'o1@x.test', 'pwold1', 'other.txt'], ['https://old2.example.com', 'o2@x.test', 'pwold2', 'other.txt'], ['https://new1.example.com', 'n1@x.test', 'pwnew1', 'this.txt'],
+    ))
+    const out = await reduceSource({ entry: whole, archiveDir: archive, db, workDir: work })
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    expect(await readAll(archive, out.entry)).toBe(['Login: orphan@x.test', '#', NEW1, '#', ''].join('\n') + '\n')
+    expect(out.stats.placeholders).toBe(2)
+    expect(out.entry.placeholders).toBe(2)
+    expect(out.entry.extra_known).toBe(0)
+    expect(out.entry.kept_lines).toBe(5)
+    expect(out.stats.proof).toMatchObject({ missing: 0, spurious: 0 })
+    expect(out.stats.compactFallback).toBeUndefined()
+  })
+
+  test('the first line of an android pair inside a kept block stays when its repeat is copied beside it', async () => {
+    const HASH = 'AbCdEfGhIjKlMnOpQrSt'
+    const first = `${HASH}==@com.example.app/:alice@mail.test:Secret1`
+    const repeat = `${HASH}==@com.example.other/:alice@mail.test:Secret1`
+    const text = ['Login: orphan@x.test', first, OLD1, repeat, ''].join('\n') + '\n'
+    const whole = archived('this.txt', text)
+    const db = memoryDb(holdersOf([`android://${HASH}==@com.example.app/`, 'alice@mail.test', 'Secret1', 'other.txt'], ['https://old1.example.com', 'o1@x.test', 'pwold1', 'other.txt']))
+    const out = await reduceSource({ entry: whole, archiveDir: archive, db, workDir: work })
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    expect(out.stats.proof).toMatchObject({ missing: 0, spurious: 0 })
+    expect(out.stats.compactFallback).toBeUndefined()
+    expect(await readAll(archive, out.entry)).toBe(['Login: orphan@x.test', first, '#', repeat, ''].join('\n') + '\n')
+  })
+
+  test('a placeholder never lets the lines on both sides of it read as one record: a lone url, a cut credential, two plain lines', async () => {
+    const text = ['Login: orphan@x.test', 'https://lone.example.com', OLD1, 'login-like@x.test', 'someword1', ''].join('\n') + '\n'
+    const whole = archived('this.txt', text)
+    const db = memoryDb(holdersOf(['https://old1.example.com', 'o1@x.test', 'pwold1', 'other.txt']))
+    const out = await reduceSource({ entry: whole, archiveDir: archive, db, workDir: work })
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    expect(out.stats.proof).toMatchObject({ missing: 0, spurious: 0 })
+    // the parser ends the pending url at the placeholder, as it did at the credential that stood there
+    expect(out.stats.placeholders).toBe(1)
+    expect(out.stats.compactFallback).toBeUndefined()
+  })
+
+  test('when the compacted copy fails its proof the entry is written the long way, whole records, and says so', async () => {
+    // a placeholder that the parser reads as a credential makes a key the original does not have
+    const text = ['Login: orphan@x.test', OLD1, NEW1, ''].join('\n') + '\n'
+    const whole = archived('this.txt', text)
+    const db = memoryDb(holdersOf(['https://old1.example.com', 'o1@x.test', 'pwold1', 'other.txt'], ['https://new1.example.com', 'n1@x.test', 'pwnew1', 'this.txt']))
+    const out = await reduceSource({ entry: whole, archiveDir: archive, db, workDir: work, placeholder: 'https://zz.example.com:zz@x.test:pwzz' })
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    expect(out.stats.compactFallback).toMatchObject({ spurious: 1, missing: 0, placeholders: 1 })
+    expect(out.entry.placeholders).toBe(0)
+    expect(out.stats.placeholders).toBe(0)
+    expect(await readAll(archive, out.entry)).toBe(text)
+    expect(out.stats.proof).toMatchObject({ missing: 0, spurious: 0 })
+    expect(readReduced(archive)).toHaveLength(1)
+    expect(readdirSync(work)).toEqual([])
+  })
+
+  test('when even the long way fails its proof nothing is written', async () => {
+    const text = ['Login: orphan@x.test', OLD1, NEW1, ''].join('\n') + '\n'
+    const whole = archived('this.txt', text)
+    const db = memoryDb(holdersOf(['https://old1.example.com', 'o1@x.test', 'pwold1', 'other.txt'], ['https://new1.example.com', 'n1@x.test', 'pwnew1', 'this.txt']))
+    const prove = db.prove.bind(db)
+    let proofs = 0
+    db.prove = async (name, rows) => { proofs++; return { ...(await prove(name, rows)), missing: 1 } }   // a database that finds a stored key missing every time
+    const out = await reduceSource({ entry: whole, archiveDir: archive, db, workDir: work })
+    expect(out.ok).toBe(false)
+    if (out.ok) return
+    expect(out.reason).toBe('mismatch')
+    expect(proofs).toBe(2)   // the compacted copy, then the long way
+    expect(readReduced(archive)).toEqual([])
     expect(readdirSync(work)).toEqual([])
   })
 

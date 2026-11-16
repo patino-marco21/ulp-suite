@@ -13,10 +13,13 @@
  *   H  the same Android line (known now), an unfinished labelled block with a repeat of that Android pair under another app id inside it (rule B of the parser drops the repeat),
  *      and 1 new credential
  *   L  2 new credentials around a line of more than 1 MiB (the parser cuts or reads whole such a line depending on how the bytes are chunked): left whole, not a failure
+ *   M  a labelled block that closes into a credential of its own (new) and holds 20 credentials A stored and 10 new ones: the record covers the whole file, as one does in a dense file
+ *   K  an unfinished labelled block (kept whole up to the blank line that closes it) holding 20 credentials A stored, 10 new ones among them, and repeats; then 1 new credential
  * and the reduced entry of each is written by reduceSource over the real ClickHouse and proven. Then: a row the database holds for B that no line of B produces makes B fail
  * is drift (reported, not a loss: today's parser never made it from the file); a writer that forgets a credential the file stored fails its proof and leaves nothing behind; A
  * reduced again after D stored look-alikes of its rows gives the same entry; H keeps the first Android line beside the copied repeat, or the repeat would read as a new
- * credential; every file cut into slabs of a few dozen rows gives the same entry and the same proof as in one slab; a container that does not exist is a clean failure; the command (scripts/reduce-archive.ts) runs
+ * credential; K is compacted, the credentials it did not add inside the block are cut out and a placeholder line stands where each run of them was, and a placeholder the parser reads
+ * as a credential makes the proof fail and the entry is written with the block whole (the proof is run twice on the real ClickHouse); every file cut into slabs of a few dozen rows gives the same entry and the same proof as in one slab; a container that does not exist is a clean failure; the command (scripts/reduce-archive.ts) runs
  * over the same ClickHouse; and no scratch table is left.
  *
  *   npx tsx scripts/e2e-reduced-archive.ts [--keep]
@@ -79,7 +82,7 @@ const block = (tag: string, i: number) => [`Host: https://blk${i}.example.test/`
 const triple = (tag: string, i: number) => [`https://pos${i}.example.test/`, `triple-${tag}-${i}@mail.test`, `TriplePw-${tag}-${i}!`]
 const banner = (tag: string, i: number) => `free text banner ${tag} ${i} that holds no credential`
 
-const TAGS = { a: `${RUN}a`, b: `${RUN}b`, d: `${RUN}d`, e: `${RUN}e`, h: `${RUN}h`, l: `${RUN}l` }
+const TAGS = { a: `${RUN}a`, b: `${RUN}b`, d: `${RUN}d`, e: `${RUN}e`, h: `${RUN}h`, k: `${RUN}k`, l: `${RUN}l`, m: `${RUN}m` }
 const ANDROID_HASH = 'AbCdEfGhIjKlMnOpQrSt'
 const androidFirst = `${ANDROID_HASH}==@com.example.app/:andr-${RUN}@mail.test:AndrPw-${RUN}!`
 const androidRepeat = `${ANDROID_HASH}==@com.example.other/:andr-${RUN}@mail.test:AndrPw-${RUN}!`
@@ -96,10 +99,20 @@ const lines: Record<string, string[]> = {
   I: [androidFirst],
   H: [androidFirst, `Login: orphan-${RUN}@mail.test`, androidRepeat, '', cred(TAGS.h, 0)],
   L: [cred(TAGS.l, 0), 'y'.repeat((1 << 20) + 5000), cred(TAGS.l, 1)],
+  M: [
+    'Host: https://shopm.example.test/',
+    ...range(10).flatMap(i => [cred(TAGS.a, 920 + 2 * i), cred(TAGS.a, 921 + 2 * i), cred(TAGS.m, i)]),
+    `Login: blk-${RUN}m@mail.test`, `Password: BlockPw-${RUN}m!`, '',
+  ],
+  K: [
+    `Login: orphan-${RUN}k@mail.test`,
+    ...range(10).flatMap(i => [cred(TAGS.a, 900 + 2 * i), cred(TAGS.a, 901 + 2 * i), cred(TAGS.k, i)]),
+    ...range(5).map(i => cred(TAGS.k, i)), '', cred(TAGS.k, 100),
+  ],
 }
 // The known block of B: the credential of A's line 700, written as a labelled block (its key is A's).
 lines.B.splice(lines.B.length - 5, 0, `Host: https://shop${700 % 50}.example.test/login`, `Login: user-${TAGS.a}-700@mail.test`, `Password: Pw-${TAGS.a}-700-Xy!`, '')
-const NAMES: Record<string, string> = { A: `a-${RUN}.txt`, B: `b-${RUN}.txt`, C: `c-${RUN}.txt`, D: `d-${RUN}.txt`, E: `ow\\ned\tq'uote-${RUN}.txt`, I: `i-${RUN}.txt`, H: `h-${RUN}.txt`, L: `l-${RUN}.txt` }
+const NAMES: Record<string, string> = { A: `a-${RUN}.txt`, B: `b-${RUN}.txt`, C: `c-${RUN}.txt`, D: `d-${RUN}.txt`, E: `ow\\ned\tq'uote-${RUN}.txt`, I: `i-${RUN}.txt`, H: `h-${RUN}.txt`, K: `k-${RUN}.txt`, M: `m-${RUN}.txt`, L: `l-${RUN}.txt` }
 const text = (key: string) => lines[key].join('\n') + '\n'
 
 async function main(): Promise<number> {
@@ -172,8 +185,8 @@ async function main(): Promise<number> {
     }
     for (const key of ['A', 'B', 'C', 'D', 'E']) await importAndArchive(key)
     check('the table holds what each import stored: A 1000, B 402, C 0, D 50, E 20', ['A', 'B', 'C', 'D', 'E'].map(k => stored[k]).join(',') === '1000,402,0,50,20', ['A', 'B', 'C', 'D', 'E'].map(k => stored[k]).join(','))
-    for (const key of ['I', 'H', 'L']) await importAndArchive(key)
-    check('the table holds I 1, H 1 (the Android line was known, its repeat is dropped by the parser) and L 2', stored.I === 1 && stored.H === 1 && stored.L === 2, `${stored.I},${stored.H},${stored.L}`)
+    for (const key of ['I', 'H', 'L', 'K', 'M']) await importAndArchive(key)
+    check('the table holds I 1, H 1 (the Android line was known, its repeat is dropped by the parser), L 2, K 11 and M 11', stored.I === 1 && stored.H === 1 && stored.L === 2 && stored.K === 11 && stored.M === 11, `${stored.I},${stored.H},${stored.L},${stored.K},${stored.M}`)
 
     const reduce = async (key: string, chOverride = ch): Promise<ReduceOutcome> =>
       reduceSource({ entry: entries[key], archiveDir: archive, db: chReduceDb(chOverride), workDir: join(work, 'tmp') })
@@ -231,7 +244,31 @@ async function main(): Promise<number> {
     const hText = await textOf(h)
     check('H keeps the first Android line, the block with the repeat inside it, and the new credential', hText.includes(androidFirst) && hText.includes(androidRepeat) && hText.includes(cred(TAGS.h, 0)) && h.ok && h.entry.extra_known === 1, hText.split('\n').length - 1 + ' lines')
 
-    console.log('7b. L: a line over 1 MiB leaves the file whole')
+    console.log('7c. K: credentials the file did not add, inside a block kept whole, are cut out and a placeholder line stands where each run of them was')
+    const k = await reduce('K')
+    check('K reduces and proves, without falling back', k.ok && k.stats.proof?.missing === 0 && k.stats.proof?.spurious === 0 && k.stats.compactFallback === undefined, k.ok ? JSON.stringify(k.stats) : `${k.reason}: ${k.detail}`)
+    const kText = await textOf(k)
+    const expectK = [`Login: orphan-${RUN}k@mail.test`, ...range(10).flatMap(i => ['#', cred(TAGS.k, i)]), '#', '', cred(TAGS.k, 100)]
+    check('K keeps the block line, its 10 new credentials and the one behind the blank line, with a placeholder for each run of known ones and repeats, and no known credential', kText === expectK.join('\n') + '\n', `${kText.split('\n').length - 1} lines, expected ${expectK.length}`)
+    if (k.ok) {
+      check('K: counts', k.stats.parsed === 36 && k.stats.mine === 11 && k.stats.known === 20 && k.stats.repeats === 5 && k.stats.placeholders === 11 && k.entry.placeholders === 11 && k.entry.extra_known === 0 && k.entry.kept_lines === 24, JSON.stringify(k.stats))
+    }
+    const kFall = await reduceSource({ entry: entries.K, archiveDir: archive, db: chReduceDb(ch), workDir: join(work, 'tmp'), placeholder: cred(TAGS.k, 999) })
+    check('a placeholder that the parser reads as a credential fails the compacted proof; the entry is written with the block whole after a second proof on the same ClickHouse',
+      kFall.ok && kFall.stats.compactFallback?.spurious === 1 && kFall.stats.compactFallback?.placeholders === 11 && kFall.entry.placeholders === 0 && kFall.stats.proof?.spurious === 0 && kFall.stats.proof?.missing === 0 && (await textOf(kFall)) === text('K'),
+      kFall.ok ? JSON.stringify(kFall.stats) : `${kFall.reason}: ${kFall.detail}`)
+
+    console.log('7c2. M: a record that covers the whole file keeps its own lines and loses the credentials nested in it that the file did not add')
+    const mm = await reduce('M')
+    check('M reduces and proves, without falling back', mm.ok && mm.stats.proof?.missing === 0 && mm.stats.proof?.spurious === 0 && mm.stats.compactFallback === undefined, mm.ok ? JSON.stringify(mm.stats) : `${mm.reason}: ${mm.detail}`)
+    const mText = await textOf(mm)
+    const expectM = ['Host: https://shopm.example.test/', ...range(10).flatMap(i => ['#', cred(TAGS.m, i)]), `Login: blk-${RUN}m@mail.test`, `Password: BlockPw-${RUN}m!`, '']
+    check('M keeps the three lines of the record and its 10 new credentials, with a placeholder for each run of known ones', mText === expectM.join('\n') + '\n', `${mText.split('\n').length - 1} lines, expected ${expectM.length}`)
+    if (mm.ok) {
+      check('M: counts', mm.stats.parsed === 31 && mm.stats.mine === 11 && mm.stats.known === 20 && mm.stats.placeholders === 10 && mm.entry.extra_known === 0 && mm.entry.kept_lines === 24, JSON.stringify(mm.stats))
+    }
+
+    console.log('7d. L: a line over 1 MiB leaves the file whole')
     const nL = readReduced(archive).length
     const l = await reduce('L')
     check('L is left whole on purpose: reason long_line, no entry, no scratch table', !l.ok && l.reason === 'long_line' && readReduced(archive).length === nL, l.ok ? 'it was reduced' : `${l.reason}: ${l.detail}`)
@@ -263,7 +300,7 @@ async function main(): Promise<number> {
     console.log('10. Slabs: a file cut into many slabs gives the same entry and the same proof as one slab')
     const passes = { n: 0 }
     const counted: typeof ch = { run: sql => { if (sql.includes('norm_key_hash IN')) passes.n++; return ch.run(sql) }, insertTsv: (sql, rows) => ch.insertTsv(sql, rows), queryToFile: (sql, path) => ch.queryToFile(sql, path) }
-    const slabCases: Array<[string, ReduceOutcome, number, number]> = [['A', a2, 97, 12], ['B', ghost, 97, 11], ['D', d, 7, 8], ['E', e, 7, 3], ['H', h, 1, 2]]
+    const slabCases: Array<[string, ReduceOutcome, number, number]> = [['A', a2, 97, 12], ['B', ghost, 97, 11], ['D', d, 7, 8], ['E', e, 7, 3], ['H', h, 1, 2], ['K', k, 13, 3], ['M', mm, 11, 3]]
     for (const [key, base, rows, expectPasses] of slabCases) {
       passes.n = 0
       const sl = await reduceSource({ entry: entries[key], archiveDir: archive, db: chReduceDb(counted, { slabRows: rows }), workDir: join(work, 'tmp') })
@@ -287,10 +324,12 @@ async function main(): Promise<number> {
     writeFileSync(plainF, text('E').replace(RUN, `${RUN}f`), 'latin1')
     writeFileSync(plainG, text('E').replace(RUN, `${RUN}g`), 'latin1')
     const cmdNames: Record<string, string> = { A: NAMES.A, B: NAMES.B, C: NAMES.C, F: `f-${RUN}.txt`, G: `g-${RUN}.txt` }
+    const shaOf: Record<string, string> = {}
     for (const key of ['A', 'B', 'C', 'F', 'G']) {
       const src = key === 'F' ? plainF : key === 'G' ? plainG : join(work, `${key}.txt`)
       const entry = archiveFile(src, { archiveDir: archive2, name: cmdNames[key] })
       appendManifest(archive2, entry)
+      shaOf[key] = entry.sha256
       if (key === 'G') truncateSync(join(archive2, `${entry.id}.zst`), statSync(join(archive2, `${entry.id}.zst`)).size - 20)
     }
     for (const key of ['A', 'B', 'C', 'G']) await ch.run(`INSERT INTO ulp.sources (filename, line_count) VALUES (${sqlQuote(cmdNames[key])}, ${stored[key] ?? 0})`)
@@ -309,9 +348,14 @@ async function main(): Promise<number> {
     const run3 = cli(['run', '--pilot', '10', '--floor-gib', '0', '--retry-failed'])
     run3Out = run3.out
     check('--retry-failed tries G again, and it fails again', run3.code === 1 && /reduced 0, failed 1/.test(run3.out), run3.out.slice(-300))
+    const named = cli(['run', '--only-sha', shaOf.G.slice(0, 12), '--floor-gib', '0', '--retry-failed'])
+    check('--only-sha names a file by its bytes (for a name that cannot be written on a command line), and a failed one is tried again with --retry-failed', named.code === 1 && named.out.includes('1 file(s) to reduce (named)') && /reduced 0, failed 1/.test(named.out), named.out.slice(-300))
+    const redo = cli(['run', '--recompact-over', '0', '--floor-gib', '0'])
+    check('--recompact-over finds nothing to do when every entry was written with the compaction', redo.code === 0 && redo.out.includes('0 file(s) to reduce (again, compacted: entries over 0%)'), redo.out.slice(-300))
     check('run never prints a credential or a line of a file', !/Pw-|BlockPw|TriplePw|GhostPw|@mail\.test|free text banner/.test(run1.out + run2.out + run3Out))
     const status = cli(['status'])
     check('status: 3 reduced of 5 names, the pilot tally by file, the failure by reason, the drift', status.out.includes('reduced entries 3 of 5') && status.out.includes('pilot: 3 exact, 1 failed of 4 tried') && status.out.includes('error 1') && status.out.includes('drift: 1 reduced file(s) hold 1 stored keys'), status.out.slice(0, 700))
+    check('status: no file here carries placeholder lines (A, B and C hold no block to cut)', status.out.includes('compaction: 0 of 3 reduced file(s) carry placeholder lines (0 lines)'), status.out.slice(0, 900))
     const verify = cli(['verify', '--all'])
     check('verify: every reduced entry decodes and hashes', verify.code === 0 && verify.out.includes('verified 3, failed 0'), verify.out.slice(-200))
 

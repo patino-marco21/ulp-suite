@@ -84,6 +84,36 @@ describe('pickCandidates', () => {
   })
 })
 
+describe('pickCandidates, redo', () => {
+  const e = [whole('a', '2026-10-01T00:00:00Z', 1000), whole('b', '2026-10-02T00:00:00Z', 1000), whole('c', '2026-10-03T00:00:00Z', 1000), whole('d', '2026-10-04T00:00:00Z', 1000)]
+  const opts = { entries: e, reduced: [] as ReducedEntry[], log: [] as ShadowLine[], inSources: new Set(['a', 'b', 'c', 'd']), startedAt: START, mode: 'any' as const, limit: 10, archiveHolds: () => true }
+  const old = (name: string, size: number) => reducedOf(e.find(x => x.name === name)!, size)
+  const compacted = (name: string, size: number) => ({ ...old(name, size), placeholders: 3 })
+  const redo = (r: ReducedEntry) => r.placeholders === undefined && r.size >= 500
+
+  test('takes only the files whose latest reduced entry the rule picks, the biggest entry first', () => {
+    const reduced = [old('a', 600), old('b', 900), old('c', 100), compacted('d', 900)]
+    expect(names(pickCandidates({ ...opts, reduced, redo }))).toEqual(['b', 'a'])
+  })
+
+  test('a file redone is done: the newer entry of the same bytes ends it; and one that is not reduced yet is not a redo', () => {
+    const reduced = [old('a', 600), compacted('a', 200), old('b', 900)]
+    expect(names(pickCandidates({ ...opts, reduced, redo }))).toEqual(['b'])
+    expect(names(pickCandidates({ ...opts, reduced: [], redo }))).toEqual([])
+  })
+
+  test('a redo that failed is not tried again each run, unless asked', () => {
+    const reduced = [old('a', 600)]
+    const log = [line('a', true, '2026-11-16T01:00:00Z', 'pilot'), line('a', false, '2026-11-16T02:00:00Z', 'pilot')]
+    expect(names(pickCandidates({ ...opts, reduced, log, redo }))).toEqual([])
+    expect(names(pickCandidates({ ...opts, reduced, log, redo, retryFailed: true }))).toEqual(['a'])
+  })
+
+  test('without a rule nothing changes: a reduced file is done', () => {
+    expect(names(pickCandidates({ ...opts, reduced: [old('a', 600)] }))).toEqual(['b', 'c', 'd'])
+  })
+})
+
 describe('pickCandidates, named files', () => {
   test('any mode ignores the shadow start and the size cap, and still skips what is done, empty or not imported', () => {
     const e = [whole('x', '2026-10-01T00:00:00Z', 5e9), whole('y', '2026-11-16T05:00:00Z'), whole('n', '2026-11-16T06:00:00Z')]
@@ -145,6 +175,21 @@ describe('summarize', () => {
     })
     expect(s.failuresByReason).toEqual({ mismatch: 1 })
     expect(s.skippedLongLine).toBe(1)
+  })
+})
+
+describe('summarize, compaction', () => {
+  test('counts the reduced files that carry placeholder lines, the placeholders, and the files whose compacted copy fell back to whole spans', () => {
+    const a = whole('a', '2026-11-16T01:00:00Z', 1000)
+    const b = whole('b', '2026-11-16T02:00:00Z', 1000)
+    const c = whole('c', '2026-11-16T03:00:00Z', 1000)
+    const s = summarize({
+      entries: [a, b, c], reduced: [{ ...reducedOf(a, 100), placeholders: 7 }, { ...reducedOf(b, 100), placeholders: 0 }, reducedOf(c, 100)],
+      log: [{ ...line('a', true, '2026-11-16T04:00:00Z'), placeholders: 7 }, { ...line('b', true, '2026-11-16T05:00:00Z'), placeholders: 0, fallback: true }, line('c', true, '2026-11-16T06:00:00Z')],
+    })
+    expect(s.compactedFiles).toBe(1)
+    expect(s.placeholders).toBe(7)
+    expect(s.compactFallbacks).toBe(1)
   })
 })
 

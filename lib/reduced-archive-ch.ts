@@ -136,10 +136,14 @@ export function chReduceDb(ch: Ch, opts: ChReduceDbOptions = {}): ReduceDb {
     },
 
     async prove(name, rows): Promise<ProofCounts> {
+      // The writer proves a second copy when the first (the compacted one) failed: the reduced rows start afresh, the keys the database holds under the name are the same.
+      if (made.includes(R)) { await ch.run(`DROP TABLE IF EXISTS ${R} SYNC`); made.splice(made.indexOf(R), 1) }
       await create(R, scratchDdl(R))
       await ch.insertTsv(`INSERT INTO ${R} (seq, s, e, url, email, password) FORMAT TSV`, tsv(rows, { n: 0 }))
-      await create(S, `CREATE TABLE ${S} (k UInt64, c UInt64) ENGINE = MergeTree ORDER BY k`)
-      await ch.run(keysOfNameSql(S, name))
+      if (!made.includes(S)) {
+        await create(S, `CREATE TABLE ${S} (k UInt64, c UInt64) ENGINE = MergeTree ORDER BY k`)
+        await ch.run(keysOfNameSql(S, name))
+      }
       const [dbRows, dbKeys] = (await ch.run(storedSql(S))).trim().split('\t').map(Number)
       const sum = { notParsed: 0, missing: 0, spurious: 0, extraKnown: 0, reducedKeys: 0 }
       const slabs = await slabsOf()

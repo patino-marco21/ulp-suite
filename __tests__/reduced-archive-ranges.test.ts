@@ -3,7 +3,7 @@
  * ranges of the credentials the database says this file stored, and the copy of exactly those bytes out of a stream.
  */
 import { describe, expect, test } from 'vitest'
-import { androidFirstsToKeep, copyRanges, normalizeRanges } from '@/lib/reduced-archive'
+import { androidFirstsToKeep, copyRanges, cutRanges, holesToCut, normalizeRanges } from '@/lib/reduced-archive'
 
 const pairs = (flat: Float64Array) => Array.from({ length: flat.length / 2 }, (_, i) => [flat[2 * i], flat[2 * i + 1]])
 
@@ -80,7 +80,7 @@ describe('copyRanges', () => {
       const out: Buffer[] = []
       const r = await copyRanges(chunksOf(text, size), ranges, b => out.push(Buffer.from(b)))
       expect(Buffer.concat(out).toString('latin1')).toBe('bbb\n\nddd\n')
-      expect(r).toEqual({ bytes: 9, lines: 3 })
+      expect(r).toEqual({ bytes: 9, lines: 3, placeholders: 0 })
     }
   })
 
@@ -94,7 +94,7 @@ describe('copyRanges', () => {
     const out: Buffer[] = []
     const r = await copyRanges(chunksOf('aaa\nbbb', 2), normalizeRanges([[4, 7]]), b => out.push(Buffer.from(b)))
     expect(Buffer.concat(out).toString('latin1')).toBe('bbb\n')
-    expect(r).toEqual({ bytes: 4, lines: 1 })
+    expect(r).toEqual({ bytes: 4, lines: 1, placeholders: 0 })
   })
 
   test('a range that stops inside a line is closed with a newline, so the next range cannot glue onto it', async () => {
@@ -107,10 +107,88 @@ describe('copyRanges', () => {
     const out: Buffer[] = []
     const r = await copyRanges(chunksOf('aaa\n', 2), normalizeRanges([]), b => out.push(Buffer.from(b)))
     expect(out).toEqual([])
-    expect(r).toEqual({ bytes: 0, lines: 0 })
+    expect(r).toEqual({ bytes: 0, lines: 0, placeholders: 0 })
   })
 
   test('a range past the end of the source is an error, not a short file', async () => {
     await expect(copyRanges(chunksOf('aaa\n', 2), normalizeRanges([[0, 99]]), () => {})).rejects.toThrow(/past the end/)
+  })
+
+  test('a piece that follows a hole inside its range gets a placeholder line, not a blank one; a piece that follows a gap between ranges still gets the blank line', async () => {
+    const text = 'aaaa\nbbbb\ncccc\ndddd\neeee\nffff\n'
+    for (const size of [1, 3, 7, 100]) {
+      const out: Buffer[] = []
+      // pieces: aaaa, cccc+dddd (after a hole), ffff (after a gap)
+      const r = await copyRanges(chunksOf(text, size), Float64Array.from([0, 5, 10, 20, 25, 30]), b => out.push(Buffer.from(b)), Uint8Array.from([0, 1, 0]), '#')
+      expect(Buffer.concat(out).toString('latin1')).toBe('aaaa\n#\ncccc\ndddd\n\nffff\n')
+      expect(r).toEqual({ bytes: 23, lines: 6, placeholders: 1 })
+    }
+  })
+
+  test('the placeholder follows a piece that stopped inside a line, after that line is closed', async () => {
+    const out: Buffer[] = []
+    await copyRanges(chunksOf('abcdef\nghi\n', 4), Float64Array.from([0, 3, 7, 11]), b => out.push(Buffer.from(b)), Uint8Array.from([0, 1]), '#')
+    expect(Buffer.concat(out).toString('latin1')).toBe('abc\n#\nghi\n')
+  })
+})
+
+describe('cutRanges', () => {
+  test('cuts the holes out of the ranges and marks the pieces that follow a hole inside the same range', () => {
+    const { pieces, holeBefore } = cutRanges(normalizeRanges([[0, 100, 200, 300]]), normalizeRanges([[10, 20, 30, 40, 250, 260]]))
+    expect(pairs(pieces)).toEqual([[0, 10], [20, 30], [40, 100], [200, 250], [260, 300]])
+    expect([...holeBefore]).toEqual([0, 1, 1, 0, 1])
+  })
+
+  test('a hole at the edge of a range only shortens it; a hole over a whole range removes it; a hole across a gap leaves a gap', () => {
+    const ranges = normalizeRanges([[0, 100, 200, 300, 400, 500]])
+    const { pieces, holeBefore } = cutRanges(ranges, normalizeRanges([[0, 10, 90, 100, 200, 300, 450, 460]]))
+    expect(pairs(pieces)).toEqual([[10, 90], [400, 450], [460, 500]])
+    expect([...holeBefore]).toEqual([0, 0, 1])
+    const across = cutRanges(normalizeRanges([[0, 100, 200, 300]]), normalizeRanges([[90, 210]]))
+    expect(pairs(across.pieces)).toEqual([[0, 90], [210, 300]])
+    expect([...across.holeBefore]).toEqual([0, 0])
+  })
+
+  test('no holes gives the ranges back; no ranges gives nothing', () => {
+    const ranges = normalizeRanges([[0, 100, 200, 300]])
+    expect(pairs(cutRanges(ranges, new Float64Array(0)).pieces)).toEqual([[0, 100], [200, 300]])
+    expect([...cutRanges(ranges, new Float64Array(0)).holeBefore]).toEqual([0, 0])
+    expect(cutRanges(new Float64Array(0), normalizeRanges([[1, 2]])).pieces.length).toBe(0)
+  })
+})
+
+describe('holesToCut', () => {
+  // The spans come in the order the parser emits them: a record is emitted after the credentials nested in it. Every byte belongs to the innermost credential that covers it.
+  test('a dropped credential is a hole, a kept one is not; touching holes are one hole', () => {
+    expect(pairs(holesToCut([[0, 10, 10, 20, 20, 30]], [0, 10], []))).toEqual([[10, 30]])
+    expect(pairs(holesToCut([[0, 10]], [0, 10], []))).toEqual([])
+    expect(pairs(holesToCut([], [0, 10], []))).toEqual([])
+  })
+
+  test('a dropped credential inside a kept record is a hole: the record keeps its own lines and loses what was nested in it', () => {
+    // 10-20 and 20-30 are dropped credentials; 0-100 is a kept record that holds them (it is emitted last)
+    expect(pairs(holesToCut([[10, 20, 20, 30, 0, 100]], [0, 100], []))).toEqual([[10, 30]])
+    // one level deeper: a dropped credential in a dropped one in a kept one
+    expect(pairs(holesToCut([[20, 30, 10, 40, 0, 100]], [0, 100], []))).toEqual([[10, 40]])
+  })
+
+  test('a kept credential inside a dropped record stays; the rest of the dropped record is a hole', () => {
+    expect(pairs(holesToCut([[45, 50, 40, 60]], [45, 50], []))).toEqual([[40, 45], [50, 60]])
+    expect(pairs(holesToCut([[0, 10, 45, 50, 40, 60]], [0, 10, 45, 50], []))).toEqual([[40, 45], [50, 60]])
+  })
+
+  test('an android first stays whatever it is nested in; so does a credential that shares its span with a kept one', () => {
+    expect(pairs(holesToCut([[10, 20, 30, 40, 0, 100]], [0, 100], [30, 40]))).toEqual([[10, 20]])
+    expect(pairs(holesToCut([[0, 10, 0, 10]], [0, 10], []))).toEqual([])
+    expect(pairs(holesToCut([[0, 10, 0, 10]], [], []))).toEqual([[0, 10]])
+  })
+
+  test('lists come one per batch, and a record can be emitted in a later batch than what is nested in it', () => {
+    expect(pairs(holesToCut([[10, 20], [20, 30], [0, 100, 200, 210]], [0, 100], []))).toEqual([[10, 30], [200, 210]])
+  })
+
+  test('spans that overlap without nesting, or arrive out of file order, are not understood: nothing is cut', () => {
+    expect(holesToCut([[0, 10, 5, 15]], [], []).length).toBe(0)
+    expect(holesToCut([[10, 20, 0, 5]], [], []).length).toBe(0)
   })
 })

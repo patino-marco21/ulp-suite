@@ -134,4 +134,22 @@ describe('chReduceDb slabs', () => {
     expect(proofStatements(ch.sql)).toHaveLength(1)
     expect(proof.dbKeys).toBe(5)
   })
+
+  test('a second proof (the compacted copy failed, the long way is proven next) starts from a fresh table of the reduced rows and does not read the stored keys again', async () => {
+    const ch = recordingCh({ rows: 5_000_000, distinct: 4_000_000 })
+    const db = chReduceDb(ch, { slabRows: 8_000_000 })
+    await db.loadOriginal(oneRow())
+    await db.classify('a.txt')
+    await db.prove('a.txt', oneRow())
+    await db.prove('a.txt', oneRow())
+    const creates = (role: string) => ch.sql.filter(q => new RegExp(`^CREATE TABLE default\\.zz_red_\\w+_${role} `).test(q)).length
+    expect(creates('r')).toBe(2)
+    expect(creates('s')).toBe(1)
+    expect(ch.sql.filter(q => /^INSERT INTO default\.zz_red_\w+_s SELECT/.test(q))).toHaveLength(1)
+    expect(ch.sql.filter(q => /^DROP TABLE IF EXISTS default\.zz_red_\w+_r SYNC/.test(q))).toHaveLength(1)   // the first one, before the second is made
+    expect(proofStatements(ch.sql)).toHaveLength(2)
+    await db.cleanup()
+    // every table is dropped once more at the end: t, c, r, s
+    expect(ch.sql.filter(q => q.startsWith('DROP TABLE IF EXISTS'))).toHaveLength(1 + 4)
+  })
 })

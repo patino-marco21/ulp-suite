@@ -3,12 +3,13 @@
  * the whole-file one, in `<archive>/reduced/`: only the lines that added something, proven by importing that entry again and comparing it with the rows the database holds
  * for the file. It removes nothing, replaces nothing and changes nothing the other archive tools read. It never prints a line of a file.
  *
- *   tsx scripts/reduce-archive.ts run [--limit 20] [--pilot 50] [--pilot-max-gib 2] [--only a.txt,b.txt] [--retry-failed] [--floor-gib 80] [--max-minutes 90] [--inbox <dir>] [--out <archive dir>]
+ *   tsx scripts/reduce-archive.ts run [--limit 20] [--pilot 50] [--pilot-max-gib 2] [--only a.txt,b.txt] [--only-sha 1a2b3c,...] [--recompact-over 50] [--retry-failed] [--floor-gib 80] [--max-minutes 90] [--inbox <dir>] [--out <archive dir>]
  *   tsx scripts/reduce-archive.ts status [--out <archive dir>]
  *   tsx scripts/reduce-archive.ts verify [--sample 3 | --all] [--out <archive dir>]
  *
  * `run` takes the files archived since the shadow began (oldest first), up to --limit; --pilot N takes N older files instead (a seeded pick, none over --pilot-max-gib, default 2); --only names
- * files, whatever their age. A file whose last attempt failed waits for --retry-failed. Nothing starts with less than --floor-gib free on the archive's filesystem, and the
+ * files, whatever their age (--only-sha names them by the start of their sha256, for a name with a comma in it); --recompact-over N makes the reduced entry again of the files whose
+ * entry was written before the compaction and kept N percent or more of the file, the biggest entry first. A file whose last attempt failed waits for --retry-failed. Nothing starts with less than --floor-gib free on the archive's filesystem, and the
  * run stops starting files after --max-minutes, and, with --inbox, as soon as a file is waiting or in flight there (the import comes first). Every result is a line in `reduced/shadow-log.jsonl`; `status` reads it and counts the exact results in a row (the gate).
  *
  * Environment: ULP_ARCHIVE_DIR (default ~/ulp-archive; must exist), CH_CONTAINER (ulpsuite_clickhouse). Exit 0 when nothing failed, 1 when a file failed, 2 on a usage or
@@ -85,16 +86,21 @@ async function cmdRun(): Promise<number> {
     }
     const startedAt = readShadowStart(ARCHIVE)
     const only = flag('only')?.split(',')
+    const onlySha = flag('only-sha')?.split(',').filter(p => p !== '')
+    const named = only !== undefined || onlySha !== undefined
     const pilot = flag('pilot') ? Number(flag('pilot')) : 0
-    const entries = [...latestByName(readManifest(ARCHIVE)).values()].filter(e => !only || only.includes(e.name))
+    const recompactOver = flag('recompact-over') ? Number(flag('recompact-over')) : undefined
+    if (recompactOver !== undefined && !(recompactOver >= 0 && recompactOver <= 100)) die('--recompact-over takes a percent between 0 and 100')
+    const entries = [...latestByName(readManifest(ARCHIVE)).values()].filter(e => (!only || only.includes(e.name)) && (!onlySha || onlySha.some(p => e.sha256.startsWith(p))))
     const picks = pickCandidates({
       entries, reduced: readReduced(ARCHIVE), log: readShadowLog(ARCHIVE), inSources: new Set(importedRows.keys()), startedAt,
-      mode: only ? 'any' : pilot > 0 ? 'pilot' : 'new', maxBytes: flag('pilot-max-gib') ? Number(flag('pilot-max-gib')) * GiB : undefined,
+      mode: named ? 'any' : pilot > 0 ? 'pilot' : 'new', maxBytes: flag('pilot-max-gib') ? Number(flag('pilot-max-gib')) * GiB : undefined,
+      redo: recompactOver === undefined ? undefined : r => r.placeholders === undefined && r.of.size > 0 && (100 * r.size) / r.of.size >= recompactOver,
       limit: pilot > 0 ? pilot : Number(flag('limit') ?? '20'),
       retryFailed: has('retry-failed'), seed: startedAt,
       archiveHolds: e => existsSync(join(ARCHIVE, `${e.id}.zst`)),
     })
-    console.log(`${picks.length} file(s) to reduce (${only ? 'named' : pilot > 0 ? 'pilot' : 'new since the shadow began'})`)
+    console.log(`${picks.length} file(s) to reduce (${recompactOver !== undefined ? `again, compacted: entries over ${recompactOver}%` : named ? 'named' : pilot > 0 ? 'pilot' : 'new since the shadow began'})`)
     const inbox = flag('inbox')
     const deadline = Date.now() + Number(flag('max-minutes') ?? '90') * 60_000
     let ok = 0, failed = 0, skipped = 0
@@ -111,8 +117,12 @@ async function cmdRun(): Promise<number> {
       if (out.ok) {
         ok++
         const pct = entry.size > 0 ? (100 * out.entry.size) / entry.size : 0
-        line = { ...base, ok: true, keptPct: Number(pct.toFixed(2)), parsed: out.stats.parsed, mine: out.stats.mine, known: out.stats.known, absent: out.stats.absent, extra_known: out.entry.extra_known, drift: out.entry.db_drift }
-        console.log(`reduced ${entry.name}: ${pct.toFixed(1)}% of ${gib(entry.size)} GiB kept (${out.stats.mine} new, ${out.stats.absent} absent, ${out.stats.known} known dropped, ${out.stats.repeats} repeats, ${out.entry.extra_known} known inside records${out.entry.db_drift > 0 ? `, ${out.entry.db_drift} of ${out.entry.db_keys} stored keys no longer read by the parser` : ''}) in ${(ms / 1000).toFixed(0)} s`)
+        const fallback = out.stats.compactFallback
+        line = {
+          ...base, ok: true, keptPct: Number(pct.toFixed(2)), parsed: out.stats.parsed, mine: out.stats.mine, known: out.stats.known, absent: out.stats.absent, extra_known: out.entry.extra_known,
+          drift: out.entry.db_drift, placeholders: out.stats.placeholders, ...(fallback ? { fallback: true } : {}),
+        }
+        console.log(`reduced ${entry.name}: ${pct.toFixed(1)}% of ${gib(entry.size)} GiB kept (${out.stats.mine} new, ${out.stats.absent} absent, ${out.stats.known} known dropped, ${out.stats.repeats} repeats, ${out.entry.extra_known} known inside records, ${out.stats.placeholders} placeholder lines${fallback ? `; the compacted copy failed its proof (${fallback.missing} missing, ${fallback.spurious} spurious) and the spans were kept whole` : ''}${out.entry.db_drift > 0 ? `, ${out.entry.db_drift} of ${out.entry.db_keys} stored keys no longer read by the parser` : ''}) in ${(ms / 1000).toFixed(0)} s`)
       } else if (out.reason === SKIP_REASON) {
         skipped++   // left whole on purpose, not a failure of the writer
         line = { ...base, ok: false, reason: out.reason, detail: out.detail.slice(0, 300), parsed: out.stats?.parsed }
@@ -146,6 +156,7 @@ function cmdStatus(): number {
   const reasons = Object.entries(s.failuresByReason).map(([k, v]) => `${k} ${v}`).join(', ')
   console.log(`gate: ${consecutiveExact(log)} of ${GATE_FILES} new files exact in a row; failures now: ${reasons || 'none'}`)
   if (s.skippedLongLine > 0) console.log(`left whole on purpose: ${s.skippedLongLine} file(s) hold a line over 1 MiB, which no reader parses the same way twice (neither counted nor a failure)`)
+  if (s.reducedFiles > 0) console.log(`compaction: ${s.compactedFiles} of ${s.reducedFiles} reduced file(s) carry placeholder lines (${s.placeholders} lines)${s.compactFallbacks > 0 ? `; ${s.compactFallbacks} fell back to whole spans after the compacted copy failed its proof` : ''}`)
   if (s.driftFiles > 0) console.log(`drift: ${s.driftFiles} reduced file(s) hold ${s.driftKeys} stored keys that today's parser no longer reads from them (older parser versions stored them)`)
   // by file: the latest result of each (name, bytes)
   const latestPilot = new Map<string, ShadowLine>()

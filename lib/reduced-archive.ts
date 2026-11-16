@@ -19,6 +19,9 @@ import {
 
 // ── byte ranges ─────────────────────────────────────────────────────────────────────────────────────
 
+/** The line that stands in the reduced entry where credentials the file did not add were cut out of the middle of a kept span. */
+export const PLACEHOLDER = '#'
+
 /**
  * The union of byte ranges given as flat `[start0, end0, start1, end1, ...]` lists, as sorted, disjoint, non-touching flat pairs. Empty ranges are dropped. The parser's kept
  * ranges are nearly sorted (a block's range comes when the block closes), so a list that is already sorted skips the sort.
@@ -72,18 +75,113 @@ export function androidFirstsToKeep(ranges: Float64Array, repeats: ArrayLike<num
 }
 
 /**
+ * `ranges` (from normalizeRanges) with `holes` (from normalizeRanges) cut out, as pieces, and for each piece whether it follows a hole inside the range it came from (1) or
+ * starts its range, or follows a gap between ranges (0). A hole at the edge of a range only shortens it, a hole over a whole range removes it, and a hole across the gap
+ * between two ranges leaves the gap as it was.
+ */
+export function cutRanges(ranges: Float64Array, holes: Float64Array): { pieces: Float64Array; holeBefore: Uint8Array } {
+  const n = ranges.length / 2
+  const m = holes.length / 2
+  const pieces = new Float64Array(2 * (n + m))
+  const holeBefore = new Uint8Array(n + m)
+  let count = 0
+  let h = 0
+  for (let i = 0; i < n; i++) {
+    const s = ranges[2 * i]
+    const e = ranges[2 * i + 1]
+    while (h < m && holes[2 * h + 1] <= s) h++
+    let cursor = s
+    let first = true
+    for (let k = h; k < m && holes[2 * k] < e; k++) {
+      if (holes[2 * k] > cursor) {
+        pieces[2 * count] = cursor; pieces[2 * count + 1] = holes[2 * k]; holeBefore[count] = first ? 0 : 1
+        count++; first = false
+      }
+      if (holes[2 * k + 1] > cursor) cursor = holes[2 * k + 1]
+    }
+    if (cursor < e) { pieces[2 * count] = cursor; pieces[2 * count + 1] = e; holeBefore[count] = first ? 0 : 1; count++ }
+  }
+  return { pieces: pieces.subarray(0, 2 * count), holeBefore: holeBefore.subarray(0, count) }
+}
+
+/**
+ * The bytes that can be cut out of the kept ranges because the credential they belong to is one the file did not add (another file stored it first, or it repeats one
+ * of the file): a hole. Every byte belongs to the innermost credential whose span covers it, because a record (a labelled block, a triple) covers the credentials the parser
+ * found inside it, and in a dense file one unfinished block covers nearly all of the file. Bytes of a kept credential (`keep`, the first line of an android pair `firsts`
+ * asks for) are never holes, and neither are bytes no credential covers (labels, text nobody explained). A credential that shares its start with a kept one counts as kept.
+ *
+ * `all` are the span lists of the whole parse in the order the parser emitted them (flat start/end pairs, one list per batch): a record comes after what is nested in it,
+ * so a stack of the spans seen so far holds, when a span arrives, exactly the spans nested in it on top. Spans that overlap without nesting, or that arrive out of file order,
+ * are not understood and nothing is cut: the answer is then the empty list. Sorted, disjoint, non-touching.
+ */
+export function holesToCut(all: ArrayLike<number>[], keep: ArrayLike<number>, firsts: ArrayLike<number>): Float64Array {
+  const keptStarts = new Float64Array(keep.length / 2 + firsts.length / 2)
+  let k = 0
+  for (let i = 0; i + 1 < keep.length; i += 2) keptStarts[k++] = keep[i]
+  for (let i = 0; i + 1 < firsts.length; i += 2) keptStarts[k++] = firsts[i]
+  keptStarts.sort()
+  const isKept = (start: number): boolean => {
+    let lo = 0, hi = keptStarts.length - 1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      if (keptStarts[mid] === start) return true
+      if (keptStarts[mid] < start) lo = mid + 1; else hi = mid - 1
+    }
+    return false
+  }
+  let n = 0
+  for (const list of all) n += list.length / 2
+  const stackStart = new Float64Array(n)
+  const stackEnd = new Float64Array(n)
+  let top = 0
+  let out = new Float64Array(1 << 16)
+  let m = 0
+  const push = (s: number, e: number) => {
+    if (m + 2 > out.length) { const bigger = new Float64Array(out.length * 2); bigger.set(out); out = bigger }
+    out[m++] = s; out[m++] = e
+  }
+  for (const list of all) {
+    for (let i = 0; i + 1 < list.length; i += 2) {
+      const s = list[i]
+      const e = list[i + 1]
+      if (e <= s) continue
+      let first = top
+      while (first > 0 && stackStart[first - 1] >= s && stackEnd[first - 1] <= e) first--
+      if (first > 0 && stackEnd[first - 1] > s) return new Float64Array(0)   // not nested, not before it
+      if (!isKept(s)) {
+        let cursor = s
+        for (let c = first; c < top; c++) {
+          if (stackStart[c] > cursor) push(cursor, stackStart[c])
+          cursor = stackEnd[c]
+        }
+        if (cursor < e) push(cursor, e)
+      }
+      top = first
+      stackStart[top] = s; stackEnd[top] = e; top++
+    }
+  }
+  return normalizeRanges([out.subarray(0, m)])
+}
+
+/**
  * Copies the bytes of `ranges` (from normalizeRanges) out of a stream, in order. A range that does not end in a newline (the last line of a file, or a long line the parser
  * read in pieces) is closed with one, so the range after it cannot glue onto it. A blank line goes between two ranges, because lines were left out there: the parser's
  * state (a url waiting for its login, a block) must end at the gap, as it ended in the original at the line that closed it, or the lines on both sides would read as one
- * record the original never had. Returns the bytes written and the newlines among them. A range that reaches past the end of the stream throws: a short copy would pass
- * for a reduced file.
+ * record the original never had. A piece that `holeBefore` marks (see cutRanges) follows credentials cut out of the middle of its range, where the original had no gap: a
+ * blank line would end a block the original still had open, so a line of `placeholder` stands there instead (one line, which no parser reads as a credential or a label).
+ * Returns the bytes written, the newlines among them and the placeholder lines. A range that reaches past the end of the stream throws: a short copy would pass for a
+ * reduced file.
  */
 export async function copyRanges(
   chunks: AsyncIterable<Buffer | Uint8Array>,
   ranges: Float64Array,
   write: (bytes: Buffer) => void,
-): Promise<{ bytes: number; lines: number }> {
+  holeBefore?: ArrayLike<number>,
+  placeholder = PLACEHOLDER,
+): Promise<{ bytes: number; lines: number; placeholders: number }> {
   const NL = Buffer.from('\n')
+  const HOLE = Buffer.from(`${placeholder}\n`)
+  let placeholders = 0
   const count = ranges.length / 2
   let offset = 0
   let ri = 0
@@ -100,7 +198,8 @@ export async function copyRanges(
       const to = Math.min(ranges[2 * ri + 1], chunkEnd)
       if (to > from) {
         if (!rangeStarted) {
-          if (wrote) { write(NL); bytes++; lines++ }
+          if (wrote && holeBefore?.[ri]) { write(HOLE); bytes += HOLE.length; lines++; placeholders++ }
+          else if (wrote) { write(NL); bytes++; lines++ }
           rangeStarted = true
         }
         const part = chunk.subarray(from - offset, to - offset)
@@ -119,7 +218,7 @@ export async function copyRanges(
     if (ri >= count) break
   }
   if (ri < count) throw new Error(`a kept range reaches past the end of the source (${ranges[2 * ri + 1]} > ${offset})`)
-  return { bytes, lines }
+  return { bytes, lines, placeholders }
 }
 
 // ── the entry and its manifest ──────────────────────────────────────────────────────────────────────
@@ -134,6 +233,11 @@ export interface ReducedEntry extends ManifestEntry {
   credentials: number
   /** Lines in the reduced plaintext. */
   kept_lines: number
+  /**
+   * Placeholder lines among them: each stands where credentials the file did not add (another file stored them first, or repeats) were cut out of the middle of a kept span.
+   * Absent on entries written before the compaction, 0 on one that kept its spans whole.
+   */
+  placeholders?: number
   /** Kept credentials that no row holds. */
   absent: number
   /** Credentials the reduced entry produces that another file stored first: they sit inside a kept record. */
@@ -219,6 +323,8 @@ export interface ReduceOptions {
   env?: NodeJS.Dict<string>
   /** The importer's hard drop (tier T3 with its keep-list of countries) by default; a test seam. */
   hardDrop?: (email: string, url: string) => boolean
+  /** The line that stands where credentials were cut out of a kept span (PLACEHOLDER); a test seam. */
+  placeholder?: string
   now?: () => Date
   /** What ulp.sources says the import of this file stored (its line_count); 0 or absent when unknown. */
   imported?: number
@@ -238,6 +344,10 @@ export interface ReduceStats {
   repeats: number
   keptBytes: number
   keptLines: number
+  /** Placeholder lines in the reduced plaintext (see ReducedEntry.placeholders). */
+  placeholders: number
+  /** Set when the compacted copy failed its proof and the entry was written with the spans whole instead: what the failed proof found. */
+  compactFallback?: { missing: number; spurious: number; placeholders: number }
   proof?: ProofCounts
 }
 
@@ -248,6 +358,22 @@ export type ReduceOutcome =
 function writeAll(fd: number, buf: Buffer): void {
   let done = 0
   while (done < buf.length) done += writeSync(fd, buf, done, buf.length - done)
+}
+
+/** Collects the many small writes of copyRanges (a placeholder line, a newline, a short credential) into 1 MiB writes. */
+function bufferedWriter(fd: number, size = 1 << 20): { write: (bytes: Buffer) => void; flush: () => void } {
+  const buf = Buffer.allocUnsafe(size)
+  let n = 0
+  const flush = () => { if (n > 0) { writeAll(fd, buf.subarray(0, n)); n = 0 } }
+  return {
+    write(bytes) {
+      if (bytes.length >= size) { flush(); writeAll(fd, bytes); return }
+      if (n + bytes.length > size) flush()
+      bytes.copy(buf, n)
+      n += bytes.length
+    },
+    flush,
+  }
 }
 
 /** A Node stream's bytes as a web stream, hashed and counted on the way. */
@@ -278,6 +404,8 @@ interface ParseContext {
   kept: number[]
   /** Rule B repeats the parser reports (ParseStreamOptions.trackSpans), one list per batch. */
   repeats: Float64Array[]
+  /** The span of every credential parsed (after the ingest policy), flat start/end pairs, one list per batch. */
+  spans: Float64Array[]
   /** Lines over the parser's length limit, or pieces of one (StreamBatch.overlongLines). */
   longLines: { n: number }
   parsed: { n: number }
@@ -292,6 +420,11 @@ async function* credentialRows(stream: ReadableStream<Uint8Array>, ctx: ParseCon
       const c = batch.credentials[i]
       if (ctx.filterOn && shouldDropAtIngest(c.email, c.url, c.domain, ctx.soft)) continue
       rows.push({ seq: seq++, s: ctx.track ? batch.spans![2 * i] : 0, e: ctx.track ? batch.spans![2 * i + 1] : 0, url: c.url, email: c.email, password: c.password })
+    }
+    if (ctx.track && rows.length > 0) {
+      const flat = new Float64Array(2 * rows.length)
+      for (let i = 0; i < rows.length; i++) { flat[2 * i] = rows[i].s; flat[2 * i + 1] = rows[i].e }
+      ctx.spans.push(flat)
     }
     if (ctx.track && batch.kept) for (let i = 0; i < batch.kept.length; i++) ctx.kept.push(batch.kept[i])
     if (ctx.track && batch.androidRepeats) ctx.repeats.push(Float64Array.from(batch.androidRepeats))
@@ -318,7 +451,7 @@ export async function reduceSource(opts: ReduceOptions): Promise<ReduceOutcome> 
   const filterOn = policyActive(soft)
   const rdir = reducedDir(archiveDir)
   const plainPath = join(opts.workDir, `${randomBytes(6).toString('hex')}.reduced`)
-  const stats: ReduceStats = { parsed: 0, distinct: 0, mine: 0, absent: 0, known: 0, repeats: 0, keptBytes: 0, keptLines: 0 }
+  const stats: ReduceStats = { parsed: 0, distinct: 0, mine: 0, absent: 0, known: 0, repeats: 0, keptBytes: 0, keptLines: 0, placeholders: 0 }
   let archivedId: string | null = null
   try {
     const source = archiveSource(archiveDir, entry)
@@ -326,10 +459,11 @@ export async function reduceSource(opts: ReduceOptions): Promise<ReduceOutcome> 
     // 1. parse the original
     const kept: number[] = []
     const repeats: Float64Array[] = []
+    const spans: Float64Array[] = []
     const parsed = { n: 0 }
     const longLines = { n: 0 }
     const tee = hashedWebStream(source)
-    await db.loadOriginal(credentialRows(tee.stream, { name: entry.name, hard, soft, filterOn, track: true, kept, repeats, longLines, parsed }))
+    await db.loadOriginal(credentialRows(tee.stream, { name: entry.name, hard, soft, filterOn, track: true, kept, repeats, spans, longLines, parsed }))
     const read = tee.result()
     if (read.bytes !== entry.size || read.sha256 !== entry.sha256) {
       return { ok: false, reason: 'source', detail: 'the archive entry does not hash to its manifest line; nothing was reduced' }
@@ -352,23 +486,42 @@ export async function reduceSource(opts: ReduceOptions): Promise<ReduceOutcome> 
     const firsts = androidFirstsToKeep(ranges, repeats)
     if (firsts.length > 0) ranges = normalizeRanges([ranges, firsts])
     mkdirSync(opts.workDir, { recursive: true })
-    const fd = openSync(plainPath, 'wx')
-    let copied: { bytes: number; lines: number }
-    try {
-      copied = await copyRanges(source.stream(), ranges, b => writeAll(fd, b))
-      fsyncSync(fd)
-    } finally {
-      closeSync(fd)
+
+    // Credentials the file did not add that lie inside a kept span (an unfinished block keeps everything up to the blank line that closes it, and in a dense file that is most of
+    // the file) are cut out and a placeholder line stands where they were. If the parser reads the compacted copy differently from the original, the proof says so and the
+    // entry is written with the spans whole, as before.
+    const holes = holesToCut(spans, cls.keep, firsts)
+    spans.length = 0
+    const cut = holes.length > 0 ? cutRanges(ranges, holes) : null
+
+    // 3. copy, then prove
+    const copyTo = async (pieces: Float64Array, holeBefore?: Uint8Array) => {
+      rmSync(plainPath, { force: true })
+      const fd = openSync(plainPath, 'wx')
+      try {
+        const out = bufferedWriter(fd)
+        const done = await copyRanges(source.stream(), pieces, out.write, holeBefore, opts.placeholder)
+        out.flush()
+        fsyncSync(fd)
+        return done
+      } finally {
+        closeSync(fd)
+      }
+    }
+    const proveCopy = () => db.prove(entry.name, credentialRows(
+      Readable.toWeb(createReadStream(plainPath, { highWaterMark: 1 << 20 })) as ReadableStream<Uint8Array>,
+      { name: entry.name, hard, soft, filterOn, track: false, kept: [], repeats: [], spans: [], longLines: { n: 0 }, parsed: { n: 0 } },
+    ))
+    let copied = cut ? await copyTo(cut.pieces, cut.holeBefore) : await copyTo(ranges)
+    let proof = await proveCopy()
+    if ((proof.missing !== 0 || proof.spurious !== 0) && copied.placeholders > 0) {
+      stats.compactFallback = { missing: proof.missing, spurious: proof.spurious, placeholders: copied.placeholders }
+      copied = await copyTo(ranges)
+      proof = await proveCopy()
     }
     stats.keptBytes = copied.bytes
     stats.keptLines = copied.lines
-
-    // 3. prove
-    const proofRows = credentialRows(
-      Readable.toWeb(createReadStream(plainPath, { highWaterMark: 1 << 20 })) as ReadableStream<Uint8Array>,
-      { name: entry.name, hard, soft, filterOn, track: false, kept: [], repeats: [], longLines: { n: 0 }, parsed: { n: 0 } },
-    )
-    const proof = await db.prove(entry.name, proofRows)
+    stats.placeholders = copied.placeholders
     stats.proof = proof
     if (proof.missing !== 0 || proof.spurious !== 0) {
       return {
@@ -398,6 +551,7 @@ export async function reduceSource(opts: ReduceOptions): Promise<ReduceOutcome> 
       of: { sha256: entry.sha256, size: entry.size, lines: entry.lines },
       credentials: cls.mine + cls.absent,
       kept_lines: copied.lines,
+      placeholders: copied.placeholders,
       absent: cls.absent,
       extra_known: proof.extraKnown,
       db_rows: proof.dbRows,
