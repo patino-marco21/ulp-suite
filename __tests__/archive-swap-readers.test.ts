@@ -9,7 +9,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import { readyToReplace } from '@/lib/archive-auto'
-import { openReducedSource, runSwap, swapCandidates } from '@/lib/archive-swap'
+import { openReducedSource, runSwap, standInHolder, swapCandidates } from '@/lib/archive-swap'
+import { createStandIn } from '@/lib/ledger-tools'
+import { restoreStandIn } from '@/lib/stand-in-sweep'
 import { appendReduced, reducedDir, type ReducedEntry } from '@/lib/reduced-archive'
 import { appendManifest, archiveFile, latestByName, openSource, readManifest, type ManifestEntry } from '@/lib/source-archive'
 
@@ -141,5 +143,32 @@ describe('archive-sources on a manifest with a swapped entry', () => {
     const ok = cli(['restore', 'whole.txt', '--to', to])
     expect(ok.status).toBe(0)
     expect(readFileSync(to, 'utf8')).toBe(lines(30, 'w'))
+  })
+})
+
+describe('the stand-in gate', () => {
+  test('standInHolder gives the whole entry of bytes the archive holds whole, and nothing for bytes only a reduced entry stands for', () => {
+    const { w, stays } = swappedBox()
+    const holds = standInHolder(readManifest(dir))
+    expect(holds(stays.sha256)?.id).toBe(stays.id)
+    expect(holds(w.sha256)).toBeUndefined()
+    expect(holds('0'.repeat(64))).toBeUndefined()
+  })
+
+  test('with nothing swapped it answers exactly as the plain sha map did', () => {
+    const a = addWhole('a.txt', lines(30, 'a'))
+    const b = addWhole('b.txt', lines(30, 'b'))
+    const holds = standInHolder(readManifest(dir))
+    expect(holds(a.sha256)).toEqual(a)
+    expect(holds(b.sha256)).toEqual(b)
+  })
+
+  test('restoreStandIn refuses a swapped entry before it touches anything, and says where the original is', () => {
+    const { w } = swappedBox()
+    const path = join(dir, 'stand-in.txt')
+    createStandIn(path, w.size, 1_700_000_000_000_000_000n)
+    const swapped = latestByName(readManifest(dir)).get('swapped.txt')!
+    expect(() => restoreStandIn(path, swapped, dir, 1_700_000_000_000_000_000n)).toThrow(/swapped for its reduced entry.*chat service/)
+    expect(existsSync(`${path}.restore-${process.pid}`)).toBe(false)
   })
 })

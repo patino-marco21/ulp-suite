@@ -50,6 +50,19 @@ export function openReducedSource(ref: string, archiveDir: string): Source {
   return archiveSource(reducedDir(archiveDir), reduced)
 }
 
+/**
+ * The stand-in gate's `holds`: the manifest entry that holds these bytes WHOLE. Bytes that only a reduced entry stands for give nothing, so a download of them stays a file
+ * (a stand-in on a reduced entry would replace the owner's only local copy by zeros that nothing can restore). With nothing swapped it is the plain map by sha256 that
+ * the callers used before: the last line of a sha wins.
+ */
+export function standInHolder(manifest: ManifestEntry[]): (sha256: string) => ManifestEntry | undefined {
+  const bySha = new Map(manifest.map(e => [e.sha256, e]))
+  return sha => {
+    const e = bySha.get(sha)
+    return e && !isSwapped(e) ? e : undefined
+  }
+}
+
 export interface CandidateOptions {
   /** `latestByName` of the main manifest. */
   wholes: Map<string, ManifestEntry>

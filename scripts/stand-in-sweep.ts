@@ -15,7 +15,8 @@ import { resolve } from 'node:path'
 import { defaultLedgerFile, refreshLedgerIfStale, standInRegistryFile } from '@/lib/ledger-export'
 import { indexLedger, readLedgerFile } from '@/lib/ledger-tools'
 import { defaultDownloadDir, hashCacheFile, registryEntryFor, restoreStandIn, sweepDownloads } from '@/lib/stand-in-sweep'
-import { defaultArchiveDir, readManifest, verifyEntry } from '@/lib/source-archive'
+import { defaultArchiveDir, isSwapped, readManifest, verifyEntry } from '@/lib/source-archive'
+import { standInHolder } from '@/lib/archive-swap'
 
 const argv = process.argv.slice(2)
 const flag = (name: string): string | undefined => { const i = argv.indexOf(`--${name}`); return i === -1 ? undefined : argv[i + 1] }
@@ -30,8 +31,14 @@ function restore(path: string): number {
   const abs = resolve(path)
   const fact = registryEntryFor(standInRegistryFile(LEDGER), abs)
   if (!fact) { console.error(`${abs} is not in the stand-in registry (${standInRegistryFile(LEDGER)}); nothing to restore`); return 2 }
-  const entry = readManifest(ARCHIVE).find(e => e.sha256 === fact.sha256)
+  const manifest = readManifest(ARCHIVE)
+  const entry = manifest.find(e => e.sha256 === fact.sha256)
   if (!entry) { console.error(`the archive holds no entry with sha256 ${fact.sha256}`); return 1 }
+  const latestForSha = [...manifest].reverse().find(e => e.sha256 === fact.sha256)
+  if (latestForSha && isSwapped(latestForSha)) {
+    console.error(`the archive no longer holds the original: it was swapped for its reduced entry on ${latestForSha.whole_removed_at}; download the file again from the chat service`)
+    return 1
+  }
   restoreStandIn(abs, entry, ARCHIVE, fact.mtimeNs)
   say(`restored ${abs} (${gib(entry.size)}) from archive ${entry.id}, modification time kept`)
   return 0
@@ -48,10 +55,10 @@ async function sweep(): Promise<number> {
     }
   }
   if (!existsSync(LEDGER)) { say(`no ledger copy at ${LEDGER}: nothing is known, nothing is swapped`); return 0 }
-  const byHash = new Map(readManifest(ARCHIVE).map(e => [e.sha256, e]))
+  const holds = standInHolder(readManifest(ARCHIVE))
   const apply = has('apply')
   const r = await sweepDownloads({
-    dir, index: indexLedger(readLedgerFile(LEDGER)), holds: sha => byHash.get(sha), verify: e => verifyEntry(ARCHIVE, e),
+    dir, index: indexLedger(readLedgerFile(LEDGER)), holds, verify: e => verifyEntry(ARCHIVE, e),
     registry: standInRegistryFile(LEDGER), hashCache: hashCacheFile(LEDGER),
     exts: (flag('ext') ?? 'txt').split(',').map(e => e.trim()).filter(Boolean),
     minSize: Number(flag('min-size') ?? 1_000_000),

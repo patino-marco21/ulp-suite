@@ -19,7 +19,7 @@ import { dirname, join } from 'node:path'
 import { MIN_AGE_MS } from '@/lib/archive-replace'
 import { openFilesUnder, readiness, type PendingState } from '@/lib/download-ready'
 import { appendStandIn, moveAndLeaveStandIn, planTake, replaceWithStandIn, sha256OfFile, writeFileAtomic, type LedgerIndex } from '@/lib/ledger-tools'
-import { decompressFrame, type ManifestEntry, type VerifyResult } from '@/lib/source-archive'
+import { decompressFrame, isSwapped, type ManifestEntry, type VerifyResult } from '@/lib/source-archive'
 
 /** The folder the chat client downloads into: ULP_DOWNLOAD_DIR, else ~/Downloads/AyuGram Desktop. */
 export function defaultDownloadDir(env: NodeJS.Dict<string> = process.env): string {
@@ -203,6 +203,9 @@ export function registryEntryFor(registry: string, path: string): { size: number
  * over the stand-in. Refuses a path that is not a stand-in. Needs the file's size in free disk.
  */
 export function restoreStandIn(path: string, entry: ManifestEntry, archiveDir: string, mtimeNs: bigint): void {
+  if (isSwapped(entry)) {
+    throw new Error(`${entry.name} was swapped for its reduced entry on ${entry.whole_removed_at}: the archive no longer holds the original file, so the stand-in cannot be restored from it (download the file again from the chat service)`)
+  }
   const st = statSync(path)
   if (!(st.size > 0 && st.blocks === 0)) throw new Error(`${path} is not a stand-in`)
   if (st.size !== entry.size) throw new Error(`the stand-in is ${st.size} bytes, the archive holds ${entry.size}`)
