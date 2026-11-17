@@ -11,7 +11,7 @@
  *
  * Stage D (docs/superpowers/plans/2026-11-16-reduced-archive-stage-d.md): `report` prints, in numbers, what swapping the whole-file entries for their reduced entries would free and the
  * go/no-go lines; it changes nothing. `swap` is a dry run unless `--apply`; with it, it swaps the smallest eligible entries first (an entry is eligible when its reduced entry is exact and at least
- * 10% smaller on disk), stops at the first failure, and checks each swap it made. It takes the same lock as `run`, so it never runs beside a reduction, and nothing calls it on a timer: it is
+ * 10% smaller on disk), stops at the first failure, and checks each swap it made. It takes the same lock as `run`, so it never runs beside a reduction, and with `--apply` the archive timer's lock too, so that run never finds a whole file missing; nothing calls it on a timer: it is
  * run by hand, after the owner's yes.
  *
  * `run` takes the files archived since the shadow began (oldest first), up to --limit; --pilot N takes N older files instead (a seeded pick, none over --pilot-max-gib, default 2); --only names
@@ -62,9 +62,8 @@ const MAX_WORKERS = 8
 /** `touch reduced/.stop`: no worker starts another file, and each finishes the one it has. The next `run` removes it when it starts. */
 const stopFile = () => join(reducedDir(ARCHIVE), '.stop')
 
-/** One run at a time: a lock file in reduced/ that names the process holding it; a lock whose process is gone is taken over. */
-function takeLock(): (() => void) | null {
-  const path = join(reducedDir(ARCHIVE), '.lock')
+/** One run at a time: a lock file (by default reduced/.lock) that names the process holding it; a lock whose process is gone is taken over. */
+function takeLock(path: string = join(reducedDir(ARCHIVE), '.lock')): (() => void) | null {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const fd = openSync(path, 'wx')
@@ -331,6 +330,9 @@ function cmdSwap(): number {
   const apply = has('apply')
   const release = takeLock()
   if (!release) die('another run holds the lock (a reduction reads the whole-file entries); nothing swapped', 2)
+  // A swap removes whole files: the archive timer's run (archive-when-idle.ts) would find one missing mid-check and report a failure, so it takes that run's lock too.
+  const releaseTimer = apply ? takeLock(join(ARCHIVE, '.auto-archive.lock')) : () => undefined
+  if (!releaseTimer) { release(); die('the archive timer\'s run is going (it reads the whole-file entries); try again in a few minutes; nothing swapped', 2) }
   try {
     const { eligible } = swapCandidates(swapInputs())
     const only = flag('only')?.split(',')
@@ -347,6 +349,7 @@ function cmdSwap(): number {
     if (out.failed) console.log(`STOPPED at ${out.failed.id}: ${out.failed.reason}`)
     return out.failed || out.problems.length > 0 ? 1 : 0
   } finally {
+    releaseTimer()
     release()
   }
 }
