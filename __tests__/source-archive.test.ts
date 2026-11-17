@@ -233,6 +233,38 @@ describe('sourcesSyncSql', () => {
     expect(sourcesSyncSql([])).not.toContain('UPDATE')
   })
 
+  // One statement for 1,110 names was about 277 KB; the server refused it ("Max query size exceeded", 256 KiB) and every file archived after that stayed unlinked.
+  test.each([20, 250])('a long archive goes out as several mutations, each far below the 256 KiB query limit (names of %i characters)', nameLen => {
+    const entries = Array.from({ length: 2500 }, (_, i) => ({
+      name: `${String(i).padStart(5, '0')}${'n'.repeat(nameLen)}.txt`, id: `id${String(i).padStart(22, '0')}`, size: 1_000_000 + i, sha256: String(i).padStart(64, '0'),
+    }) as ManifestEntry)
+    const statements = sourcesSyncSql(entries).split(';\n').filter(s => s.trim() !== '')
+    expect(statements[0]).toMatch(/^ALTER TABLE ulp\.sources ADD COLUMN IF NOT EXISTS/)
+    const updates = statements.filter(s => s.startsWith('ALTER TABLE ulp.sources UPDATE'))
+    expect(updates.length).toBeGreaterThan(1)
+    expect(statements.length).toBe(updates.length + 1)
+    for (const s of statements) expect(Buffer.byteLength(s)).toBeLessThan(128 * 1024)
+    for (const s of updates) expect(s.endsWith('SETTINGS mutations_sync = 2')).toBe(true)
+
+    // every name lands in exactly one mutation, and inside it the n-th name, size, sha256 and id belong together
+    const quoted = (list: string) => [...list.matchAll(/'([^']*)'/g)].map(m => m[1])
+    const seen: string[] = []
+    for (const s of updates) {
+      const names = quoted(/WHERE filename IN \[(.*)\] SETTINGS/s.exec(s)![1])
+      const ids = quoted(/archive_id = transform\(filename, \[.*?\], \[(.*?)\], archive_id\)/s.exec(s)![1])
+      const shas = quoted(/sha256 = transform\(filename, \[.*?\], \[(.*?)\], sha256\)/s.exec(s)![1])
+      const sizes = /size = transform\(filename, \[.*?\], \[(.*?)\], size\)/s.exec(s)![1].split(', ').map(Number)
+      expect(ids).toHaveLength(names.length); expect(shas).toHaveLength(names.length); expect(sizes).toHaveLength(names.length)
+      names.forEach((n, k) => {
+        const i = Number(n.slice(0, 5))
+        expect(ids[k]).toBe(entries[i].id); expect(shas[k]).toBe(entries[i].sha256); expect(sizes[k]).toBe(entries[i].size)
+      })
+      seen.push(...names)
+    }
+    expect(seen).toHaveLength(entries.length)
+    expect(new Set(seen).size).toBe(entries.length)
+  })
+
   test('sqlQuote escapes backslashes and quotes', () => {
     expect(sqlQuote("a'b\\c")).toBe("'a\\'b\\\\c'")
   })

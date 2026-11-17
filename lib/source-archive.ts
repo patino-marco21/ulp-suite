@@ -408,14 +408,30 @@ export function sqlQuote(s: string): string {
 }
 
 /**
- * The statements that give ulp.sources its identity columns and fill them for the archived names: ensure the columns, then ONE mutation that maps every name to its
- * size, sha256 and archive id (names that are not in the table are simply not touched). Safe to run again.
+ * One mutation carries at most about this many bytes of statement. The server refuses a query over max_query_size (256 KiB, "Max query size exceeded"), and a single
+ * mutation for all 1,110 archived names was already about 277 KB, so every file archived after that stayed unlinked in ulp.sources. A long name appears four times.
+ */
+export const SOURCES_SYNC_CHUNK_BYTES = 100_000
+
+/**
+ * The statements that give ulp.sources its identity columns and fill them for the archived names: ensure the columns, then the mutations that map every name to its
+ * size, sha256 and archive id, a few hundred names each (names that are not in the table are simply not touched). Safe to run again.
  */
 export function sourcesSyncSql(entries: ManifestEntry[]): string {
   const statements = [`${SOURCES_IDENTITY_ALTER};`]
-  if (entries.length > 0) {
-    const names = `[${entries.map(e => sqlQuote(e.name)).join(', ')}]`
-    const arr = (f: (e: ManifestEntry) => string) => `[${entries.map(f).join(', ')}]`
+  const chunks: ManifestEntry[][] = []
+  let chunk: ManifestEntry[] = []
+  let bytes = 0
+  for (const e of entries) {
+    const cost = 4 * Buffer.byteLength(sqlQuote(e.name)) + String(e.size).length + Buffer.byteLength(sqlQuote(e.sha256)) + Buffer.byteLength(sqlQuote(e.id)) + 24
+    if (chunk.length > 0 && bytes + cost > SOURCES_SYNC_CHUNK_BYTES) { chunks.push(chunk); chunk = []; bytes = 0 }
+    chunk.push(e)
+    bytes += cost
+  }
+  if (chunk.length > 0) chunks.push(chunk)
+  for (const part of chunks) {
+    const names = `[${part.map(e => sqlQuote(e.name)).join(', ')}]`
+    const arr = (f: (e: ManifestEntry) => string) => `[${part.map(f).join(', ')}]`
     statements.push(
       `ALTER TABLE ulp.sources UPDATE ` +
       `size = transform(filename, ${names}, ${arr(e => String(e.size))}, size), ` +
