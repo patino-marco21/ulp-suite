@@ -29,7 +29,7 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { dockerCh } from '@/lib/clickhouse-cli'
@@ -303,10 +303,18 @@ async function main(): Promise<number> {
     const slabCases: Array<[string, ReduceOutcome, number, number]> = [['A', a2, 97, 12], ['B', ghost, 97, 11], ['D', d, 7, 8], ['E', e, 7, 3], ['H', h, 1, 2], ['K', k, 13, 3], ['M', mm, 11, 3]]
     for (const [key, base, rows, expectPasses] of slabCases) {
       passes.n = 0
-      const sl = await reduceSource({ entry: entries[key], archiveDir: archive, db: chReduceDb(counted, { slabRows: rows }), workDir: join(work, 'tmp') })
-      check(`${key} in slabs of ${rows} rows (${expectPasses} passes over ulp.credentials) is the same entry and the same proof as in one slab`,
+      const sl = await reduceSource({ entry: entries[key], archiveDir: archive, db: chReduceDb(counted, { slabRows: rows, scanRows: rows }), workDir: join(work, 'tmp') })
+      check(`${key} in slabs and passes of ${rows} rows (${expectPasses} passes over ulp.credentials) is the same entry and the same proof as in one slab`,
         sl.ok && base.ok && passes.n === expectPasses && sl.entry.id === base.entry.id && JSON.stringify(sl.stats) === JSON.stringify(base.stats),
         sl.ok ? `passes ${passes.n}, ${JSON.stringify(sl.stats)} vs ${base.ok ? JSON.stringify(base.stats) : base.detail}` : `${sl.reason}: ${sl.detail}`)
+    }
+    // The passes over ulp.credentials are cut apart from the slabs: many small passes with big slabs, one pass with small slabs.
+    for (const [slabRows, scanRows, expectPasses] of [[1000, 13, 85], [97, 10_000, 1]] as const) {
+      passes.n = 0
+      const cut = await reduceSource({ entry: entries.A, archiveDir: archive, db: chReduceDb(counted, { slabRows, scanRows }), workDir: join(work, 'tmp') })
+      check(`A in slabs of ${slabRows} rows and passes of ${scanRows} (${expectPasses} pass(es) over ulp.credentials) is the same entry and the same proof`,
+        cut.ok && a2.ok && passes.n === expectPasses && cut.entry.id === a2.entry.id && JSON.stringify(cut.stats) === JSON.stringify(a2.stats),
+        cut.ok ? `passes ${passes.n}, ${JSON.stringify(cut.stats)}` : `${cut.reason}: ${cut.detail}`)
     }
     const n2 = readReduced(archive).length
     const lossySlabs = await reduceSource({
@@ -358,6 +366,48 @@ async function main(): Promise<number> {
     check('status: no file here carries placeholder lines (A, B and C hold no block to cut)', status.out.includes('compaction: 0 of 3 reduced file(s) carry placeholder lines (0 lines)'), status.out.slice(0, 900))
     const verify = cli(['verify', '--all'])
     check('verify: every reduced entry decodes and hashes', verify.code === 0 && verify.out.includes('verified 3, failed 0'), verify.out.slice(-200))
+
+    console.log('11b. Several workers on one archive')
+    const cliIn = (dir: string, args: string[], env: Record<string, string> = {}) => {
+      const r = spawnSync('npx', ['tsx', 'scripts/reduce-archive.ts', ...args], { encoding: 'utf8', env: { ...process.env, CH_CONTAINER: CH, ULP_ARCHIVE_DIR: dir, ...env }, maxBuffer: 1 << 24 })
+      return { code: r.status, out: r.stdout + r.stderr }
+    }
+    const makeArchive = (dir: string) => {
+      mkdirSync(dir)
+      for (const key of ['A', 'B', 'C', 'F', 'G']) {
+        const src = key === 'F' ? plainF : key === 'G' ? plainG : join(work, `${key}.txt`)
+        const entry = archiveFile(src, { archiveDir: dir, name: cmdNames[key] })
+        appendManifest(dir, entry)
+        if (key === 'G') truncateSync(join(dir, `${entry.id}.zst`), statSync(join(dir, `${entry.id}.zst`)).size - 20)
+      }
+    }
+    const archive3 = join(work, 'archive3')
+    makeArchive(archive3)
+    // what a run that was killed leaves: a scratch table, a claim and a stop request
+    await ch.run(`CREATE TABLE default.zz_red_99999_abcdef_t (x UInt8) ENGINE = Memory`)
+    mkdirSync(join(reducedDir(archive3), 'claims'), { recursive: true })
+    writeFileSync(join(reducedDir(archive3), 'claims', 'stale'), '1')
+    writeFileSync(join(reducedDir(archive3), '.stop'), '')
+    const w1 = cliIn(archive3, ['run', '--pilot', '10', '--floor-gib', '0', '--workers', '2'])
+    check('two workers: A, B and C are reduced once each, G fails, F is not tried; the summed line is the one a loop reads', w1.code === 1 && w1.out.includes('starting 2 workers') && /^reduced 3, failed 1$/m.test(w1.out) && readReduced(archive3).length === 3, w1.out.slice(-600))
+    check('two workers: each name has one entry and one result line (no file was done twice)', new Set(readReduced(archive3).map(r => r.name)).size === 3 && readFileSync(join(reducedDir(archive3), 'shadow-log.jsonl'), 'utf8').trim().split('\n').length === 4)
+    check('the coordinator dropped the scratch table a killed run left, cleared its claim and its stop request, and the workers removed their work directories',
+      w1.out.includes('dropped 1 scratch table(s)') && (await q(`SELECT count() FROM system.tables WHERE database = 'default' AND name = 'zz_red_99999_abcdef_t'`)) === '0'
+      && !existsSync(join(reducedDir(archive3), 'claims', 'stale')) && !existsSync(join(reducedDir(archive3), '.stop')) && !existsSync(join(reducedDir(archive3), 'work')), w1.out.slice(0, 300))
+    check('two workers: the entries are the same as one process makes (same ids as the single run on the same bytes)', readReduced(archive3).every(r => readReduced(archive2).some(s => s.name === r.name && s.id === r.id)))
+    const w2 = cliIn(archive3, ['run', '--pilot', '10', '--floor-gib', '0', '--workers', '2'])
+    check('two workers again: nothing is left to do, and no worker is started', w2.code === 0 && w2.out.includes('0 file(s) to reduce') && !w2.out.includes('starting'), w2.out.slice(-300))
+    check('--workers takes 1 to 8', cliIn(archive3, ['run', '--workers', '9']).code === 2 && cliIn(archive3, ['run', '--workers', '0']).code === 2)
+    check('workers never print a credential or a line of a file', !/Pw-|BlockPw|TriplePw|GhostPw|@mail\.test|free text banner/.test(w1.out + w2.out))
+    const archive5 = join(work, 'archive5')
+    makeArchive(archive5)
+    mkdirSync(reducedDir(archive5), { recursive: true })
+    writeFileSync(join(reducedDir(archive5), '.stop'), '')
+    const stopped = cliIn(archive5, ['run', '--pilot', '10', '--floor-gib', '0'], { REDUCE_WORKER: '9', REDUCE_LOCK_PID: String(process.pid) })
+    check('a worker finishes nothing new once reduced/.stop exists, and does not remove it', stopped.code === 0 && stopped.out.includes('[w9] stopped:') && readReduced(archive5).length === 0 && existsSync(join(reducedDir(archive5), '.stop')), stopped.out.slice(-300))
+    rmSync(join(reducedDir(archive5), '.stop'))
+    const orphan = cliIn(archive5, ['run', '--pilot', '10', '--floor-gib', '0'], { REDUCE_WORKER: '9', REDUCE_LOCK_PID: '999999999' })
+    check('a worker whose coordinator is gone starts nothing', orphan.code === 0 && orphan.out.includes('the coordinator is gone') && readReduced(archive5).length === 0, orphan.out.slice(-300))
 
     console.log('12. Nothing left behind')
     check('no scratch table is left in ClickHouse', (await q(`SELECT count() FROM system.tables WHERE database = 'default' AND (name LIKE 'zz_red_%' OR name LIKE 'zz_e2e_stage_%')`)) === '0')

@@ -3,7 +3,7 @@
  * the whole-file one, in `<archive>/reduced/`: only the lines that added something, proven by importing that entry again and comparing it with the rows the database holds
  * for the file. It removes nothing, replaces nothing and changes nothing the other archive tools read. It never prints a line of a file.
  *
- *   tsx scripts/reduce-archive.ts run [--limit 20] [--pilot 50] [--pilot-max-gib 2] [--only a.txt,b.txt] [--only-sha 1a2b3c,...] [--recompact-over 50] [--retry-failed] [--floor-gib 80] [--max-minutes 90] [--inbox <dir>] [--out <archive dir>]
+ *   tsx scripts/reduce-archive.ts run [--limit 20] [--pilot 50] [--pilot-max-gib 2] [--only a.txt,b.txt] [--only-sha 1a2b3c,...] [--recompact-over 50] [--retry-failed] [--floor-gib 80] [--max-minutes 90] [--workers 1] [--inbox <dir>] [--out <archive dir>]
  *   tsx scripts/reduce-archive.ts status [--out <archive dir>]
  *   tsx scripts/reduce-archive.ts verify [--sample 3 | --all] [--out <archive dir>]
  *   tsx scripts/reduce-archive.ts report [--no-verify] [--out <archive dir>]
@@ -19,9 +19,16 @@
  * entry was written before the compaction and kept N percent or more of the file, the biggest entry first. A file whose last attempt failed waits for --retry-failed. Nothing starts with less than --floor-gib free on the archive's filesystem, and the
  * run stops starting files after --max-minutes, and, with --inbox, as soon as a file is waiting or in flight there (the import comes first). Every result is a line in `reduced/shadow-log.jsonl`; `status` reads it and counts the exact results in a row (the gate).
  *
+ * --workers N (1 to 8, default 1) starts N copies of this command as workers on the same archive. The coordinator keeps the one lock; each worker takes a file by creating a claim for it
+ * (lib/reduced-claims.ts), has a work directory of its own and its own scratch tables, and looks again at the files and the log after it has the claim, so no file is done twice. The
+ * coordinator drops the scratch tables and the claims a killed run left behind when it starts, prints the summed `reduced N, failed M`, and stops its workers when it is stopped; a worker
+ * stops by itself when its coordinator is gone. `touch <archive>/reduced/.stop` asks every worker to finish the file it has and start no other. Measured: one worker uses one core for
+ * two thirds of its time (the parse is one thread) and the machine's other cores are idle.
+ *
  * Environment: ULP_ARCHIVE_DIR (default ~/ulp-archive; must exist), CH_CONTAINER (ulpsuite_clickhouse). Exit 0 when nothing failed, 1 when a file failed, 2 on a usage or
  * setup problem.
  */
+import { spawn, type ChildProcess } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, statfsSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import { dockerCh } from '@/lib/clickhouse-cli'
@@ -30,10 +37,11 @@ import { readReduced, reduceSource, reducedDir } from '@/lib/reduced-archive'
 import { runSwap, standInsLosingRestore, swapCandidates, swapReport } from '@/lib/archive-swap'
 import { defaultLedgerFile, standInRegistryFile } from '@/lib/ledger-export'
 import { chReduceDb } from '@/lib/reduced-archive-ch'
+import { claimKey, claimsDir, clearClaims, isAlive, releaseClaim, tryClaim, workerArgs } from '@/lib/reduced-claims'
 import {
   GATE_FILES, appendShadowLog, consecutiveExact, pickCandidates, readShadowLog, readShadowStart, summarize, type ShadowLine, SKIP_REASON,
 } from '@/lib/reduced-shadow'
-import { defaultArchiveDir, latestByName, readManifest, removeStaleParts, verifyEntry } from '@/lib/source-archive'
+import { defaultArchiveDir, latestByName, readManifest, removeStaleParts, verifyEntry, type ManifestEntry } from '@/lib/source-archive'
 
 const argv = process.argv.slice(2)
 const flag = (name: string): string | undefined => { const i = argv.indexOf(`--${name}`); return i === -1 ? undefined : argv[i + 1] }
@@ -45,6 +53,14 @@ const CH = process.env.CH_CONTAINER ?? 'ulpsuite_clickhouse'
 const GiB = 1024 ** 3
 const gib = (n: number) => (n / GiB).toFixed(2)
 const free = () => { const s = statfsSync(ARCHIVE); return Number(s.bavail) * Number(s.bsize) }
+
+/** Set on a worker that a coordinator (`run --workers N`) started: its number, and the pid of the coordinator, which holds the lock for all of them. */
+const WORKER = Number(process.env.REDUCE_WORKER ?? '0')
+const PARENT = Number(process.env.REDUCE_LOCK_PID ?? '0')
+const tag = WORKER > 0 ? `[w${WORKER}] ` : ''
+const MAX_WORKERS = 8
+/** `touch reduced/.stop`: no worker starts another file, and each finishes the one it has. The next `run` removes it when it starts. */
+const stopFile = () => join(reducedDir(ARCHIVE), '.stop')
 
 /** One run at a time: a lock file in reduced/ that names the process holding it; a lock whose process is gone is taken over. */
 function takeLock(): (() => void) | null {
@@ -67,20 +83,80 @@ function takeLock(): (() => void) | null {
   return null
 }
 
+/** The scratch tables of a run that was killed (reduceSource drops its own whatever happens, but not when the process is gone). Called under the lock, when no run is alive. */
+async function sweepScratch(ch: ReturnType<typeof dockerCh>): Promise<number> {
+  const out = await ch.run(`SELECT name FROM system.tables WHERE database = 'default' AND startsWith(name, 'zz_red_') FORMAT TSV`)
+  let n = 0
+  for (const name of out.split('\n').map(l => l.trim()).filter(l => /^zz_red_\d+_[0-9a-f]+_[a-z]$/.test(l))) {
+    await ch.run(`DROP TABLE IF EXISTS default.${name} SYNC`)
+    n++
+  }
+  return n
+}
+
+interface WorkerResult { ok: number; failed: number; skipped: number }
+
+/** Starts `count` copies of this command as workers and waits for them. Each reports its counts over the IPC channel; one that ends without a report counts as a failure. */
+function runWorkers(count: number, release: () => void): Promise<WorkerResult> {
+  const args = [...process.execArgv, process.argv[1], ...workerArgs(argv)]
+  const sum: WorkerResult = { ok: 0, failed: 0, skipped: 0 }
+  const children: ChildProcess[] = []
+  const stopAll = () => { for (const c of children) c.kill('SIGTERM') }
+  const onSignal = (sig: NodeJS.Signals) => { stopAll(); release(); process.exit(128 + (sig === 'SIGINT' ? 2 : 15)) }
+  process.once('SIGTERM', onSignal)
+  process.once('SIGINT', onSignal)
+  const done: Array<Promise<void>> = []
+  for (let i = 1; i <= count; i++) {
+    const child = spawn(process.execPath, args, {
+      env: { ...process.env, REDUCE_WORKER: String(i), REDUCE_LOCK_PID: String(process.pid) },
+      stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+    })
+    children.push(child)
+    let reported = false
+    child.on('message', m => {
+      const r = m as WorkerResult
+      reported = true
+      sum.ok += r.ok; sum.failed += r.failed; sum.skipped += r.skipped
+    })
+    done.push(new Promise(resolve => {
+      child.on('exit', (code, signal) => {
+        if (!reported) { sum.failed++; console.log(`worker ${i} ended without a result (${signal ? `signal ${signal}` : `exit code ${code}`})`) }
+        resolve()
+      })
+    }))
+  }
+  return Promise.all(done).then(() => {
+    process.removeListener('SIGTERM', onSignal)
+    process.removeListener('SIGINT', onSignal)
+    return sum
+  })
+}
+
 async function cmdRun(): Promise<number> {
   if (!existsSync(ARCHIVE)) die(`the archive directory does not exist: ${ARCHIVE} (create it yourself; the tool never creates it)`)
+  const workers = Number(flag('workers') ?? '1')
+  if (!Number.isInteger(workers) || workers < 1 || workers > MAX_WORKERS) die(`--workers takes a whole number from 1 to ${MAX_WORKERS}`)
   const floor = Number(flag('floor-gib') ?? '80') * GiB
   if (free() < floor) {
-    console.log(`not starting: ${gib(free())} GiB free on the archive's filesystem, under the ${gib(floor)} GiB floor`)
+    console.log(`${tag}not starting: ${gib(free())} GiB free on the archive's filesystem, under the ${gib(floor)} GiB floor`)
     return 0
   }
   mkdirSync(reducedDir(ARCHIVE), { recursive: true })
-  const release = takeLock()
+  // A worker started by a coordinator does not take the lock: the coordinator holds it for all of them, and a worker whose coordinator is gone stops.
+  const release = WORKER > 0 ? () => undefined : takeLock()
   if (!release) { console.log('another run holds the lock; nothing started'); return 0 }
-  const work = join(reducedDir(ARCHIVE), 'work')
+  const workRoot = join(reducedDir(ARCHIVE), 'work')
+  const work = WORKER > 0 ? join(workRoot, String(WORKER)) : workRoot
+  const claimDir = claimsDir(ARCHIVE)
   try {
-    removeStaleParts(reducedDir(ARCHIVE))
-    rmSync(work, { recursive: true, force: true })   // leftovers of a run that was killed: the lock says no other run is alive
+    if (WORKER === 0) {
+      removeStaleParts(reducedDir(ARCHIVE))
+      rmSync(workRoot, { recursive: true, force: true })   // leftovers of a run that was killed: the lock says no other run is alive
+      clearClaims(claimDir)
+      rmSync(stopFile(), { force: true })                   // a stop asked for a run that was going; this is a new one
+    } else {
+      setInterval(() => { if (!isAlive(PARENT)) process.exit(143) }, 5000).unref()
+    }
     const ch = dockerCh(CH, { maxMemoryBytes: 4_000_000_000 })
     const importedRows = new Map<string, number>()   // ulp.sources: file name -> the rows its import stored
     try {
@@ -90,8 +166,16 @@ async function cmdRun(): Promise<number> {
         importedRows.set(r.filename, Math.max(importedRows.get(r.filename) ?? 0, Number(r.line_count)))
       }
     } catch (e) {
-      console.log(`ClickHouse did not answer (${(e as Error).message}); nothing started`)
+      console.log(`${tag}ClickHouse did not answer (${(e as Error).message}); nothing started`)
       return 0
+    }
+    if (WORKER === 0) {
+      try {
+        const swept = await sweepScratch(ch)
+        if (swept > 0) console.log(`dropped ${swept} scratch table(s) left by a run that was killed`)
+      } catch (e) {
+        console.log(`the scratch tables of an earlier run could not be listed (${(e as Error).message}); going on`)
+      }
     }
     const startedAt = readShadowStart(ARCHIVE)
     const only = flag('only')?.split(',')
@@ -101,49 +185,70 @@ async function cmdRun(): Promise<number> {
     const recompactOver = flag('recompact-over') ? Number(flag('recompact-over')) : undefined
     if (recompactOver !== undefined && !(recompactOver >= 0 && recompactOver <= 100)) die('--recompact-over takes a percent between 0 and 100')
     const entries = [...latestByName(readManifest(ARCHIVE)).values()].filter(e => (!only || only.includes(e.name)) && (!onlySha || onlySha.some(p => e.sha256.startsWith(p))))
-    const picks = pickCandidates({
-      entries, reduced: readReduced(ARCHIVE), log: readShadowLog(ARCHIVE), inSources: new Set(importedRows.keys()), startedAt,
+    const pickWith = (list: ManifestEntry[], limit: number) => pickCandidates({
+      entries: list, reduced: readReduced(ARCHIVE), log: readShadowLog(ARCHIVE), inSources: new Set(importedRows.keys()), startedAt,
       mode: named ? 'any' : pilot > 0 ? 'pilot' : 'new', maxBytes: flag('pilot-max-gib') ? Number(flag('pilot-max-gib')) * GiB : undefined,
       redo: recompactOver === undefined ? undefined : r => r.placeholders === undefined && r.of.size > 0 && (100 * r.size) / r.of.size >= recompactOver,
-      limit: pilot > 0 ? pilot : Number(flag('limit') ?? '20'),
+      limit,
       retryFailed: has('retry-failed'), seed: startedAt,
       archiveHolds: e => existsSync(join(ARCHIVE, `${e.id}.zst`)),
     })
-    console.log(`${picks.length} file(s) to reduce (${recompactOver !== undefined ? `again, compacted: entries over ${recompactOver}%` : named ? 'named' : pilot > 0 ? 'pilot' : 'new since the shadow began'})`)
+    const picks = pickWith(entries, pilot > 0 ? pilot : Number(flag('limit') ?? '20'))
+    console.log(`${tag}${picks.length} file(s) to reduce (${recompactOver !== undefined ? `again, compacted: entries over ${recompactOver}%` : named ? 'named' : pilot > 0 ? 'pilot' : 'new since the shadow began'})`)
+    if (WORKER === 0 && workers > 1 && picks.length > 1) {
+      const n = Math.min(workers, picks.length)
+      console.log(`starting ${n} workers`)
+      const sum = await runWorkers(n, release)
+      console.log(`reduced ${sum.ok}, failed ${sum.failed}${sum.skipped > 0 ? `, skipped ${sum.skipped}` : ''}`)
+      return sum.failed > 0 ? 1 : 0
+    }
+    const claiming = WORKER > 0
     const inbox = flag('inbox')
     const deadline = Date.now() + Number(flag('max-minutes') ?? '90') * 60_000
     let ok = 0, failed = 0, skipped = 0
     for (const entry of picks) {
-      if (Date.now() > deadline) { console.log('stopped: the time budget is used up'); break }
-      if (free() < floor) { console.log(`stopped: free space fell under the ${gib(floor)} GiB floor`); break }
-      if (inbox && inboxIsBusy(inbox)) { console.log('stopped: a file is waiting or in flight in the inbox'); break }
-      const t0 = Date.now()
-      const out = await reduceSource({ entry, archiveDir: ARCHIVE, db: chReduceDb(ch), workDir: work, imported: importedRows.get(entry.name) })
-      const ms = Date.now() - t0
-      const kind = entry.created_at >= startedAt ? 'new' : 'pilot'
-      const base = { name: entry.name, sha256: entry.sha256, at: new Date().toISOString(), kind, ms } as const
-      let line: ShadowLine
-      if (out.ok) {
-        ok++
-        const pct = entry.size > 0 ? (100 * out.entry.size) / entry.size : 0
-        const fallback = out.stats.compactFallback
-        line = {
-          ...base, ok: true, keptPct: Number(pct.toFixed(2)), parsed: out.stats.parsed, mine: out.stats.mine, known: out.stats.known, absent: out.stats.absent, extra_known: out.entry.extra_known,
-          drift: out.entry.db_drift, placeholders: out.stats.placeholders, ...(fallback ? { fallback: true } : {}),
-        }
-        console.log(`reduced ${entry.name}: ${pct.toFixed(1)}% of ${gib(entry.size)} GiB kept (${out.stats.mine} new, ${out.stats.absent} absent, ${out.stats.known} known dropped, ${out.stats.repeats} repeats, ${out.entry.extra_known} known inside records, ${out.stats.placeholders} placeholder lines${fallback ? `; the compacted copy failed its proof (${fallback.missing} missing, ${fallback.spurious} spurious) and the spans were kept whole` : ''}${out.entry.db_drift > 0 ? `, ${out.entry.db_drift} of ${out.entry.db_keys} stored keys no longer read by the parser` : ''}) in ${(ms / 1000).toFixed(0)} s`)
-      } else if (out.reason === SKIP_REASON) {
-        skipped++   // left whole on purpose, not a failure of the writer
-        line = { ...base, ok: false, reason: out.reason, detail: out.detail.slice(0, 300), parsed: out.stats?.parsed }
-        console.log(`skipped ${entry.name}: ${out.detail}`)
-      } else {
-        failed++
-        line = { ...base, ok: false, reason: out.reason, detail: out.detail.slice(0, 300), parsed: out.stats?.parsed }
-        console.log(`FAILED ${entry.name}: ${out.reason}: ${out.detail}`)
+      if (Date.now() > deadline) { console.log(`${tag}stopped: the time budget is used up`); break }
+      if (free() < floor) { console.log(`${tag}stopped: free space fell under the ${gib(floor)} GiB floor`); break }
+      if (inbox && inboxIsBusy(inbox)) { console.log(`${tag}stopped: a file is waiting or in flight in the inbox`); break }
+      if (existsSync(stopFile())) { console.log(`${tag}stopped: ${stopFile()} exists`); break }
+      if (WORKER > 0 && !isAlive(PARENT)) { console.log(`${tag}stopped: the coordinator is gone`); break }
+      const key = claimKey(entry.name, entry.sha256)
+      if (claiming) {
+        if (!tryClaim(claimDir, key)) continue                 // another worker has it
+        if (pickWith([entry], 1).length === 0) { releaseClaim(claimDir, key); continue }   // another worker finished it since the list was made
       }
-      appendShadowLog(ARCHIVE, line)
+      try {
+        const t0 = Date.now()
+        const out = await reduceSource({ entry, archiveDir: ARCHIVE, db: chReduceDb(ch), workDir: work, imported: importedRows.get(entry.name) })
+        const ms = Date.now() - t0
+        const kind = entry.created_at >= startedAt ? 'new' : 'pilot'
+        const base = { name: entry.name, sha256: entry.sha256, at: new Date().toISOString(), kind, ms } as const
+        let line: ShadowLine
+        if (out.ok) {
+          ok++
+          const pct = entry.size > 0 ? (100 * out.entry.size) / entry.size : 0
+          const fallback = out.stats.compactFallback
+          line = {
+            ...base, ok: true, keptPct: Number(pct.toFixed(2)), parsed: out.stats.parsed, mine: out.stats.mine, known: out.stats.known, absent: out.stats.absent, extra_known: out.entry.extra_known,
+            drift: out.entry.db_drift, placeholders: out.stats.placeholders, ...(fallback ? { fallback: true } : {}),
+          }
+          console.log(`${tag}reduced ${entry.name}: ${pct.toFixed(1)}% of ${gib(entry.size)} GiB kept (${out.stats.mine} new, ${out.stats.absent} absent, ${out.stats.known} known dropped, ${out.stats.repeats} repeats, ${out.entry.extra_known} known inside records, ${out.stats.placeholders} placeholder lines${fallback ? `; the compacted copy failed its proof (${fallback.missing} missing, ${fallback.spurious} spurious) and the spans were kept whole` : ''}${out.entry.db_drift > 0 ? `, ${out.entry.db_drift} of ${out.entry.db_keys} stored keys no longer read by the parser` : ''}) in ${(ms / 1000).toFixed(0)} s`)
+        } else if (out.reason === SKIP_REASON) {
+          skipped++   // left whole on purpose, not a failure of the writer
+          line = { ...base, ok: false, reason: out.reason, detail: out.detail.slice(0, 300), parsed: out.stats?.parsed }
+          console.log(`${tag}skipped ${entry.name}: ${out.detail}`)
+        } else {
+          failed++
+          line = { ...base, ok: false, reason: out.reason, detail: out.detail.slice(0, 300), parsed: out.stats?.parsed }
+          console.log(`${tag}FAILED ${entry.name}: ${out.reason}: ${out.detail}`)
+        }
+        appendShadowLog(ARCHIVE, line)
+      } finally {
+        if (claiming) releaseClaim(claimDir, key)
+      }
     }
-    console.log(`reduced ${ok}, failed ${failed}${skipped > 0 ? `, skipped ${skipped}` : ''}`)
+    console.log(`${tag}reduced ${ok}, failed ${failed}${skipped > 0 ? `, skipped ${skipped}` : ''}`)
+    if (WORKER > 0 && process.send) await new Promise<void>(resolve => process.send!({ ok, failed, skipped } satisfies WorkerResult, () => resolve()))
     return failed > 0 ? 1 : 0
   } finally {
     rmSync(work, { recursive: true, force: true })

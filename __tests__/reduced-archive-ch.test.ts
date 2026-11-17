@@ -8,7 +8,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import type { Ch } from '@/lib/clickhouse-cli'
-import { chReduceDb, holdersSql, keepSql, keysOfNameSql, proofSql, storedSql } from '@/lib/reduced-archive-ch'
+import { chReduceDb, holdersSql, keepSql, keysOfNameSql, presentSql, proofSql, storedSql } from '@/lib/reduced-archive-ch'
 import type { LoadRow } from '@/lib/reduced-archive'
 
 /** A Ch that records every statement and answers the few questions the code asks. */
@@ -41,7 +41,10 @@ async function* oneRow(): AsyncGenerator<LoadRow[]> {
   yield [{ seq: 0, s: 0, e: 10, url: 'https://a.test', email: 'a@x.test', password: 'pw123456' }]
 }
 
-const holderStatements = (sql: string[]) => sql.filter(q => q.startsWith('INSERT INTO') && q.includes('norm_key_hash IN'))
+/** The passes over ulp.credentials: the only statements that read the big table's key column. */
+const scanStatements = (sql: string[]) => sql.filter(q => q.startsWith('INSERT INTO') && q.includes('norm_key_hash IN'))
+/** The fills of C, one for each slab. */
+const holderStatements = (sql: string[]) => sql.filter(q => /^INSERT INTO default\.zz_red_\w+_c SELECT/.test(q))
 const keepStatements = (sql: string[]) => sql.filter(q => q.startsWith('SELECT f.s, f.e'))
 const proofStatements = (sql: string[]) => sql.filter(q => q.startsWith('SELECT (SELECT'))
 
@@ -53,8 +56,23 @@ describe('the slab statements', () => {
     expect(q).not.toMatch(/LEFT JOIN C\b/)
   })
 
-  test('holdersSql reads only the keys of its own slab', () => {
-    expect(holdersSql('C', 'T', 'a.txt', 6, 4)).toContain('SELECT k FROM T WHERE k % 6 = 4')
+  test('presentSql reads the key column of the big table and nothing else, for the keys of its own scan', () => {
+    const q = presentSql('H', 'T', 3, 2)
+    expect(q).toBe('INSERT INTO H SELECT norm_key_hash FROM ulp.credentials WHERE norm_key_hash IN (SELECT k FROM T WHERE k % 3 = 2) GROUP BY norm_key_hash')
+    // asking each row for its file name made the old statement read four times as many bytes (91 GiB against 24) and use half as much CPU again
+    expect(q).not.toContain('source_file')
+  })
+
+  test('presentSql groups the keys: a plain INSERT ... SELECT of them used the whole 3.7 GiB of a statement on a set of one million keys', () => {
+    // Measured on the live table (threads, block size and prefetch changed in turn): it fails. The GROUP BY took the same set in 0.16 GiB.
+    expect(presentSql('H', 'T', 1, 0)).toMatch(/GROUP BY norm_key_hash$/)
+  })
+
+  test('holdersSql marks the keys of its own slab that the file holds, from the small tables only', () => {
+    const q = holdersSql('C', 'H', 'S', 6, 4)
+    expect(q).toContain('SELECT k FROM S WHERE k % 6 = 4')
+    expect(q).toContain('FROM H WHERE k % 6 = 4')
+    expect(q).not.toContain('ulp.credentials')
   })
 
   test('every set and every table of the proof is cut to its slab, and nothing is counted outside it', () => {
@@ -85,6 +103,7 @@ describe('chReduceDb slabs', () => {
     await db.loadOriginal(oneRow())
     await db.classify('a.txt')
     await db.prove('a.txt', oneRow())
+    expect(scanStatements(ch.sql)).toHaveLength(1)
     expect(holderStatements(ch.sql)).toHaveLength(1)
     expect(keepStatements(ch.sql)).toHaveLength(1)
     expect(proofStatements(ch.sql)).toHaveLength(1)
@@ -97,6 +116,8 @@ describe('chReduceDb slabs', () => {
     await db.loadOriginal(oneRow())
     await db.classify('a.txt')
     await db.prove('a.txt', oneRow())
+    expect(scanStatements(ch.sql)).toHaveLength(3)   // 48 million rows over the scan cut of 20 million: three passes over ulp.credentials, however many slabs
+    expect(scanStatements(ch.sql).map((q, i) => q.includes(`k % 3 = ${i}`))).toEqual([true, true, true])
     expect(holderStatements(ch.sql)).toHaveLength(6)
     expect(keepStatements(ch.sql)).toHaveLength(6)
     expect(proofStatements(ch.sql)).toHaveLength(6)
@@ -112,10 +133,12 @@ describe('chReduceDb slabs', () => {
     const dbA = chReduceDb(exact, { slabRows: 8_000_000 })
     await dbA.loadOriginal(oneRow()); await dbA.classify('a.txt')
     expect(holderStatements(exact.sql)).toHaveLength(2)
+    expect(scanStatements(exact.sql)).toHaveLength(1)
     const over = recordingCh({ rows: 16_000_001, distinct: 15_000_000 })
     const dbB = chReduceDb(over, { slabRows: 8_000_000 })
     await dbB.loadOriginal(oneRow()); await dbB.classify('a.txt')
     expect(holderStatements(over.sql)).toHaveLength(3)
+    expect(scanStatements(over.sql)).toHaveLength(1)
   })
 
   test('the counts of the slabs are added up, and what the database holds is read once', async () => {
@@ -156,7 +179,50 @@ describe('chReduceDb slabs', () => {
     expect(ch.sql.filter(q => /^DROP TABLE IF EXISTS default\.zz_red_\w+_r SYNC/.test(q))).toHaveLength(1)   // the first one, before the second is made
     expect(proofStatements(ch.sql)).toHaveLength(2)
     await db.cleanup()
-    // every table is dropped once more at the end: t, c, r, s
-    expect(ch.sql.filter(q => q.startsWith('DROP TABLE IF EXISTS'))).toHaveLength(1 + 4)
+    // every table is dropped once more at the end: t, c, h, s, r
+    expect(ch.sql.filter(q => q.startsWith('DROP TABLE IF EXISTS'))).toHaveLength(1 + 5)
+  })
+
+  test('the passes over ulp.credentials have their own cut, apart from the slabs of the other statements', async () => {
+    const ch = recordingCh({ rows: 24_000_000, distinct: 20_000_000 })
+    const db = chReduceDb(ch, { slabRows: 8_000_000, scanRows: 10_000_000 })
+    await db.loadOriginal(oneRow())
+    await db.classify('a.txt')
+    expect(scanStatements(ch.sql)).toHaveLength(3)      // 24 million rows over 10 million
+    expect(holderStatements(ch.sql)).toHaveLength(3)    // 24 million rows over 8 million
+    expect(scanStatements(ch.sql)[2]).toContain('k % 3 = 2')
+    expect(holderStatements(ch.sql)[2]).toContain('k % 3 = 2')
+    const big = recordingCh({ rows: 24_000_000, distinct: 20_000_000 })
+    const dbBig = chReduceDb(big, { slabRows: 8_000_000, scanRows: 100_000_000 })
+    await dbBig.loadOriginal(oneRow())
+    await dbBig.classify('a.txt')
+    expect(scanStatements(big.sql)).toHaveLength(1)
+    expect(scanStatements(big.sql)[0]).toContain('k % 1 = 0')
+    expect(holderStatements(big.sql)).toHaveLength(3)
+  })
+
+  test('the keys held under the name are read before the passes that need them, and only once even though the proof asks for them too', async () => {
+    const ch = recordingCh({ rows: 5_000_000, distinct: 4_000_000 })
+    const db = chReduceDb(ch)
+    await db.loadOriginal(oneRow())
+    await db.classify('a.txt')
+    const stored = ch.sql.findIndex(q => /^INSERT INTO default\.zz_red_\w+_s SELECT/.test(q))
+    const firstScan = ch.sql.findIndex(q => q.includes('norm_key_hash IN'))
+    const firstFill = ch.sql.findIndex(q => /^INSERT INTO default\.zz_red_\w+_c SELECT/.test(q))
+    expect(stored).toBeGreaterThan(-1)
+    expect(stored).toBeLessThan(firstScan)
+    expect(firstScan).toBeLessThan(firstFill)
+    await db.prove('a.txt', oneRow())
+    expect(ch.sql.filter(q => /^INSERT INTO default\.zz_red_\w+_s SELECT/.test(q))).toHaveLength(1)
+  })
+
+  test('a file with no key at all runs no pass and no fill, and makes no table of the keys held under the name until the proof', async () => {
+    const ch = recordingCh({ rows: 0, distinct: 0 })
+    const db = chReduceDb(ch)
+    await db.loadOriginal((async function* () { /* no rows */ })())
+    await db.classify('a.txt')
+    expect(scanStatements(ch.sql)).toHaveLength(0)
+    expect(holderStatements(ch.sql)).toHaveLength(0)
+    expect(ch.sql.filter(q => /^INSERT INTO default\.zz_red_\w+_s SELECT/.test(q))).toHaveLength(0)
   })
 })

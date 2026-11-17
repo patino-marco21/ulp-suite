@@ -1,11 +1,12 @@
 /**
- * The ClickHouse side of the reduced archive writer (lib/reduced-archive.ts, ReduceDb): four scratch tables in the `default` database, named with a random suffix and
+ * The ClickHouse side of the reduced archive writer (lib/reduced-archive.ts, ReduceDb): five scratch tables in the `default` database, named with a random suffix and
  * dropped again whatever happens, and a handful of statements. Nothing is written to `ulp`.
  *
  *   T  the credentials of the original file as the importer's parser reads them, with their byte span and the normalised key (`k`, the same expression as norm_key_hash)
- *   C  for each distinct key of T that some row holds: whether this file's name is among the holders (`mine`)
- *   R  the credentials of the reduced entry (same shape as T, no spans)
+ *   H  the keys of T that some stored row holds (once for each row that holds one: the scan streams them, nothing is aggregated in memory)
  *   S  the keys the database holds under the file's name, with their row counts
+ *   C  for each distinct key of T that some row holds: whether this file's name is among the holders (`mine`), made from H and S
+ *   R  the credentials of the reduced entry (same shape as T, no spans)
  *
  * A key of T is KEPT when it is `mine` (this file stored it) or in no row at all (`absent`); it is DROPPED when only other files hold it (`known`). Of a key that occurs
  * several times in the file only the first occurrence counts. A key can have several holders (look-alikes stored before the normalised check); it is mine when this file is
@@ -14,7 +15,8 @@
  * Memory: a file is cut into slabs of keys (`k % slabs = slab`), by the rows its parser read, and every statement that holds a set or a join in memory holds one slab of it.
  * Measured on a real ClickHouse: the keep statement joined the whole holders table in every slab and the proof built sets of every key, ~150 bytes a row, so a file of 20 million
  * rows used 3 GiB (the limit of 4 GB failed files over ~1.4 GiB, which hold two thirds of the archive) and a 4 GiB file would use 7 GiB. With slabs of 10 million rows no
- * statement passes ~1.6 GiB, whatever the size of the file; the price is one more pass over ulp.credentials (~50-85 s) for each slab.
+ * statement passes ~1.6 GiB, whatever the size of the file. The one statement that reads all of ulp.credentials (presentSql, ~30 s) has its own, larger cut (`scanRows`): a pass over
+ * the table costs the same for any number of keys, so a file is read in as few passes as fit the limit.
  */
 import { randomBytes } from 'node:crypto'
 import { createReadStream } from 'node:fs'
@@ -41,10 +43,19 @@ export function rowsToTsv(rows: LoadRow[]): string {
 export const scratchDdl = (table: string) =>
   `CREATE TABLE ${table} (seq UInt64, s UInt64, e UInt64, url String, email String, password String, k UInt64 MATERIALIZED ${normKeySql()}) ENGINE = MergeTree ORDER BY tuple()`
 
-/** Fills C with the holders of the keys of one slab of T (`k % slabs = slab`). */
-export const holdersSql = (c: string, t: string, name: string, slabs: number, slab: number) =>
-  `INSERT INTO ${c} SELECT norm_key_hash, max(source_file = ${sqlQuote(name)}), 1 FROM ulp.credentials ` +
-  `WHERE norm_key_hash IN (SELECT k FROM ${t} WHERE k % ${slabs} = ${slab}) GROUP BY norm_key_hash`
+/**
+ * Appends to H the keys of one scan of T (`k % scans = scan`) that some stored row holds, each once. It reads the key column of ulp.credentials and nothing else: the statement it
+ * replaces also asked each matching row for its file name, which read 91 GiB (uncompressed) and used 430 CPU-seconds where this reads 24 GiB and uses 280 (measured on the live
+ * table, 3.25 billion rows). The cost of a pass is the same for any number of keys; the memory is not: the GROUP BY holds a key for each distinct key found, ~90 bytes (37 million
+ * present keys: 3.47 GiB, one million: 0.16 GiB), which is why a scan holds 20 million keys at most. The GROUP BY must stay: the same statement without it, as a plain
+ * INSERT ... SELECT, used 3.7 GiB (the limit of a statement) on a set of one million keys whatever the threads, blocks and prefetch, and failed.
+ */
+export const presentSql = (h: string, t: string, scans: number, scan: number) =>
+  `INSERT INTO ${h} SELECT norm_key_hash FROM ulp.credentials WHERE norm_key_hash IN (SELECT k FROM ${t} WHERE k % ${scans} = ${scan}) GROUP BY norm_key_hash`
+
+/** Fills C for one slab of keys (`k % slabs = slab`): the keys of H (each once: the scans are disjoint in k), each marked `mine` when the database holds it under the file's name (S). */
+export const holdersSql = (c: string, h: string, s: string, slabs: number, slab: number) =>
+  `INSERT INTO ${c} SELECT k, k IN (SELECT k FROM ${s} WHERE k % ${slabs} = ${slab}), 1 FROM ${h} WHERE k % ${slabs} = ${slab}`
 
 /** The byte spans of the first occurrence of each key of one slab that is mine or absent, in file order: `start<TAB>end`. The holders joined are those of the slab only. */
 export const keepSql = (t: string, c: string, slabs: number, slab: number) =>
@@ -76,26 +87,37 @@ export const proofSql = (t: string, c: string, r: string, s: string, slabs: numb
 }
 
 export interface ChReduceDbOptions {
-  /** Rows of the file one slab covers: the keys of a slab are looked up in one pass over ulp.credentials, and a bigger file is done in several slabs. Default 10 million. */
+  /** Rows of the file one slab covers: the keep and proof statements hold one slab of the keys in memory, and a bigger file is done in several slabs. Default 10 million. */
   slabRows?: number
+  /** Rows of the file one pass over ulp.credentials looks up (presentSql): a bigger file is looked up in several passes. Default 20 million (about 1.9 GiB at the peak when every key is present, measured). */
+  scanRows?: number
 }
 
 export function chReduceDb(ch: Ch, opts: ChReduceDbOptions = {}): ReduceDb {
   const suffix = `${process.pid}_${randomBytes(3).toString('hex')}`
-  const table = (role: 't' | 'c' | 'r' | 's') => `default.zz_red_${suffix}_${role}`
-  const [T, C, R, S] = [table('t'), table('c'), table('r'), table('s')]
+  const table = (role: 't' | 'c' | 'h' | 'r' | 's') => `default.zz_red_${suffix}_${role}`
+  const [T, C, H, R, S] = [table('t'), table('c'), table('h'), table('r'), table('s')]
   const made: string[] = []
   const slabRows = opts.slabRows ?? 10_000_000
-  let slabCount = 0                     // cut by the rows T holds, asked once; classify and prove use the same slabs
-  const slabsOf = async (): Promise<number> => {
-    if (slabCount === 0) slabCount = Math.max(1, Math.ceil((await scalar(`SELECT count() FROM ${T}`)) / slabRows))
-    return slabCount
+  const scanRows = opts.scanRows ?? 20_000_000
+  let rowCount = -1                     // the rows T holds, asked once; the slabs and the scans are cut by it, and classify and prove use the same slabs
+  const rowsOf = async (): Promise<number> => {
+    if (rowCount < 0) rowCount = await scalar(`SELECT count() FROM ${T}`)
+    return rowCount
   }
+  const slabsOf = async (): Promise<number> => Math.max(1, Math.ceil((await rowsOf()) / slabRows))
   const scalar = async (sql: string): Promise<number> => Number((await ch.run(sql)).trim())
 
   async function create(name: string, ddl: string): Promise<void> {
     await ch.run(ddl)
     made.push(name)
+  }
+
+  /** S: the keys the database holds under the file's name. Made once, by whichever of classify and prove comes first. */
+  async function ensureStored(name: string): Promise<void> {
+    if (made.includes(S)) return
+    await create(S, `CREATE TABLE ${S} (k UInt64, c UInt64) ENGINE = MergeTree ORDER BY k`)
+    await ch.run(keysOfNameSql(S, name))
   }
 
   async function* tsv(rows: AsyncIterable<LoadRow[]>, count: { n: number }): AsyncGenerator<string> {
@@ -115,9 +137,15 @@ export function chReduceDb(ch: Ch, opts: ChReduceDbOptions = {}): ReduceDb {
 
     async classify(name): Promise<ClassifyResult> {
       await create(C, `CREATE TABLE ${C} (k UInt64, mine UInt8, present UInt8) ENGINE = MergeTree ORDER BY k`)
+      await create(H, `CREATE TABLE ${H} (k UInt64) ENGINE = MergeTree ORDER BY tuple()`)
       const distinct = await scalar(`SELECT uniqExact(k) FROM ${T}`)
       const slabs = await slabsOf()
-      for (let slab = 0; slab < slabs && distinct > 0; slab++) await ch.run(holdersSql(C, T, name, slabs, slab))
+      if (distinct > 0) {
+        await ensureStored(name)
+        const scans = Math.max(1, Math.ceil((await rowsOf()) / scanRows))
+        for (let scan = 0; scan < scans; scan++) await ch.run(presentSql(H, T, scans, scan))
+        for (let slab = 0; slab < slabs; slab++) await ch.run(holdersSql(C, H, S, slabs, slab))
+      }
       const mine = await scalar(`SELECT count() FROM ${C} WHERE mine = 1`)
       const known = await scalar(`SELECT count() FROM ${C} WHERE mine = 0`)
 
@@ -144,10 +172,7 @@ export function chReduceDb(ch: Ch, opts: ChReduceDbOptions = {}): ReduceDb {
       if (made.includes(R)) { await ch.run(`DROP TABLE IF EXISTS ${R} SYNC`); made.splice(made.indexOf(R), 1) }
       await create(R, scratchDdl(R))
       await ch.insertTsv(`INSERT INTO ${R} (seq, s, e, url, email, password) FORMAT TSV`, tsv(rows, { n: 0 }))
-      if (!made.includes(S)) {
-        await create(S, `CREATE TABLE ${S} (k UInt64, c UInt64) ENGINE = MergeTree ORDER BY k`)
-        await ch.run(keysOfNameSql(S, name))
-      }
+      await ensureStored(name)
       const [dbRows, dbKeys] = (await ch.run(storedSql(S))).trim().split('\t').map(Number)
       const sum = { notParsed: 0, missing: 0, spurious: 0, extraKnown: 0, reducedKeys: 0 }
       const slabs = await slabsOf()
