@@ -1,7 +1,7 @@
 /**
  * The reduced archive, shadow mode (docs/superpowers/plans/2026-11-15-reduced-archive.md, stage B). For an archived, imported file it writes a second, smaller entry beside
  * the whole-file one, in `<archive>/reduced/`: only the lines that added something, proven by importing that entry again and comparing it with the rows the database holds
- * for the file. It removes nothing, replaces nothing and changes nothing the other archive tools read. It never prints a line of a file.
+ * for the file. `run` removes nothing, replaces nothing and changes nothing the other archive tools read; `swap --apply` (stage D, below) is the one command that removes a whole-file entry. It never prints a line of a file.
  *
  *   tsx scripts/reduce-archive.ts run [--limit 20] [--pilot 50] [--pilot-max-gib 2] [--only a.txt,b.txt] [--only-sha 1a2b3c,...] [--recompact-over 50] [--retry-failed] [--floor-gib 80] [--max-minutes 90] [--workers 1] [--inbox <dir>] [--out <archive dir>]
  *   tsx scripts/reduce-archive.ts status [--out <archive dir>]

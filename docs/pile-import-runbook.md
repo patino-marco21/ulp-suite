@@ -97,7 +97,7 @@ everything else: it protects against a parser or policy change, not against losi
 | `archive ... --replace [--include-unimported]` | also remove the original and its hardlinks under `inbox/done`, after confirming the archive against the original again |
 | `status` | names, replaced, compression ratio, `ulp.sources` rows without an archive |
 | `verify [--all \| --sample 3]` | decode archives again and compare with the manifest |
-| `restore <name\|id> --to <path>` | write the original bytes back (never overwrites; checks the sha256) |
+| `restore <name\|id> --to <path>` | write the original bytes back (never overwrites; checks the sha256). Refuses a name swapped for its reduced entry; `--reduced` writes the reduced text instead ([below](#reduced-entries-and-the-swap)) |
 | `sources-sync` | (re)apply the `ulp.sources` identity columns for the archived names |
 
 `--replace` keeps an original (and says why) while a file is in flight in the inbox, when the file was modified in the last 10 minutes, or when the name is not in
@@ -127,6 +127,20 @@ journalctl --user -u ulp-archive-auto -n 20      # what the last runs said
 
 The service names node by its nvm path (a user service does not read the shell profile): edit `Environment=PATH=` after a node upgrade. Remove it with `systemctl --user disable --now ulp-archive-auto.timer`.
 `archive --src inbox/done --replace` works directly for files that exist only in `done/` (it used to need a hardlink stage directory); two names of one file are replaced together.
+
+### Reduced entries and the swap
+
+With `ULP_REDUCED_ARCHIVE=shadow` in the timer's service, a second and smaller entry is written beside each new whole-file entry in `<archive>/reduced/` and proven against the database (`scripts/reduce-archive.ts run|status|verify`; design: `docs/superpowers/specs/2026-11-15-reduced-archive-design.md`). Swapping an old whole-file entry for its reduced entry is the one step that cannot be undone, so it is run by hand, after the owner's yes:
+
+```bash
+npx tsx scripts/reduce-archive.ts report                  # read-only: what a swap would free, and a decode of every reduced entry (--no-verify skips it)
+npx tsx scripts/reduce-archive.ts swap --limit 20         # a dry run: the entries it would take, smallest first
+npx tsx scripts/reduce-archive.ts swap --batch-gib 10 --apply
+```
+
+An entry is eligible when its reduced entry is exact and at least 10% smaller on disk. `swap` stops at the first failure, checks every swap it made, and takes the reduction's lock and, with `--apply`, the archive timer's (the timer says "not now: another run holds the lock" meanwhile, which is the guard working). Never apply a swap while a reduction runs. Copy both manifests (`manifest.jsonl` and `reduced/manifest.jsonl`) before `--apply`: a swap only appends a line with `whole_removed_at`, so dropping those lines undoes the manifest side, but the removed whole file is gone for good (the reduced entry is exact, and lacks the lines other files stored first). Start with 20 files, prove one real restore (`restore --reduced`) and one re-feed of a swapped name through the importer, then go in batches (10, 40, 60 GiB); a 60 GiB batch took about 20 minutes because it decodes the reduced text before and after, so run it in the background. After each batch: `archive-sources.ts verify --sample 8` and `reduce-archive.ts verify --sample 30`.
+
+Applied on 2026-11-17 to 972 names in five steps (20 files, then 10, 40, 60 and 60 GiB): 170.49 GiB freed, 0 problems, every swapped entry decoded afterwards; 138 whole entries stay (a line over 1 MiB, a saving under 10%, or no reduced entry). What changes for a swapped name: `restore` refuses it (`--reduced` writes the reduced text); an archive reference to it carries the original's size and sha256 as `of`, and the importer checks the reduced entry's own hash; the replace gate counts it nowhere; and a download of the same bytes stays a real file instead of becoming a stand-in. The stand-ins that existed before the swap and whose original was swapped can no longer be restored from the archive (406 of 458 on that day).
 
 ## Keeping the laptop awake during a batch
 
