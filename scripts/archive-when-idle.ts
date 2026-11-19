@@ -8,7 +8,8 @@
  *
  * Run from the repository root by a systemd user timer (scripts/systemd/ulp-archive-auto.timer, installed by the owner). Environment: ULP_ARCHIVE_DIR (the archive,
  * which must exist), ULP_REPO (the checkout whose ./inbox is watched; default the current directory), CH_CONTAINER (ulpsuite_clickhouse), ULP_AUTO_ARCHIVE_IDLE_MIN
- * (minutes of quiet before a run; default 20), ULP_AUTO_ARCHIVE_WORKERS (default 4), ULP_AUTO_ARCHIVE_REPLACE (1 = remove the plaintext of archived files; default off).
+ * (minutes of quiet before a run; default 20), ULP_AUTO_ARCHIVE_WORKERS (default 4), ULP_AUTO_ARCHIVE_REPLACE (1 = remove the plaintext of archived files; default off),
+ * ULP_REDUCED_ARCHIVE_WORKERS (1 to 8, default 3) and ULP_REDUCED_ARCHIVE_LIMIT (files per run, default 20) for the reduced archive's shadow run.
  * --now skips the wait for quiet, not the check that nothing is in flight.
  *
  * A run starts only when nothing is waiting or in flight in the inbox (which also covers the disk gate holding the ingest) and no inbox folder has changed for the wait.
@@ -23,7 +24,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { inboxIsBusy } from '@/lib/archive-replace'
 import {
-  DEFAULT_IDLE_MS, archiveNote, failureBackoff, idleRefusals, inboxLastActivityMs, parseArchiveSummary, parseVerifySummary, readStatus, readyToReplace, reducedArchiveMode, replaceWanted,
+  DEFAULT_IDLE_MS, archiveNote, failureBackoff, idleRefusals, inboxLastActivityMs, parseArchiveSummary, parseVerifySummary, readStatus, readyToReplace, reducedArchiveMode, reducedRunArgs, replaceWanted,
   writeStatus, type AutoArchiveStatus,
 } from '@/lib/archive-auto'
 import { defaultArchiveDir, latestByName, readManifest } from '@/lib/source-archive'
@@ -87,13 +88,15 @@ function refreshLedgerCopy(): void {
 
 /**
  * Stage B of the reduced archive (ULP_REDUCED_ARCHIVE=shadow): writes the reduced entries of the files archived since the shadow began, beside the whole-file ones. It removes
- * and replaces nothing, stops starting files when the inbox gets busy, and its failure is a line in the log: it never fails the archive run.
+ * and replaces nothing, works on several files at once (ULP_REDUCED_ARCHIVE_WORKERS: the parse of one file is a single thread), stops starting files when the inbox gets busy, and its failure is a line in the log: it never fails the archive run.
  */
 function reduceShadow(): void {
   const { mode, note } = reducedArchiveMode()
   if (note) say(note)
   if (mode !== 'shadow') return
-  const r = spawnSync(TSX, [REDUCE_TOOL, 'run', '--limit', process.env.ULP_REDUCED_ARCHIVE_LIMIT ?? '20', '--inbox', INBOX], {
+  const run = reducedRunArgs(process.env, INBOX)
+  if (run.note) say(run.note)
+  const r = spawnSync(TSX, [REDUCE_TOOL, ...run.args], {
     cwd: join(HERE, '..'), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 100 * 60_000,
     env: { ...process.env, ULP_ARCHIVE_DIR: ARCHIVE },
   })

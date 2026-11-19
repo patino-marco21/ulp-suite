@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import {
   GATE_FILES, appendShadowLog, consecutiveExact, pickCandidates, readShadowLog, readShadowStart, summarize, type ShadowLine,
 } from '@/lib/reduced-shadow'
-import { reducedArchiveMode } from '@/lib/archive-auto'
+import { reducedArchiveMode, reducedRunArgs } from '@/lib/archive-auto'
 import type { ReducedEntry } from '@/lib/reduced-archive'
 import type { ManifestEntry } from '@/lib/source-archive'
 
@@ -30,6 +30,32 @@ describe('reducedArchiveMode', () => {
     expect(reducedArchiveMode({ ULP_REDUCED_ARCHIVE: ' Shadow ' })).toEqual({ mode: 'shadow' })
     expect(reducedArchiveMode({ ULP_REDUCED_ARCHIVE: 'on' })).toEqual({ mode: 'off', note: expect.stringContaining('not built') })
     expect(reducedArchiveMode({ ULP_REDUCED_ARCHIVE: 'typo' })).toEqual({ mode: 'off', note: expect.stringContaining('typo') })
+  })
+})
+
+describe('reducedRunArgs', () => {
+  const INBOX = '/repo/inbox'
+
+  test('the timer starts three workers and twenty files by default, and hands the inbox to the tool so it stops when a file arrives', () => {
+    expect(reducedRunArgs({}, INBOX)).toEqual({ args: ['run', '--limit', '20', '--workers', '3', '--inbox', INBOX] })
+  })
+
+  test('ULP_REDUCED_ARCHIVE_WORKERS and ULP_REDUCED_ARCHIVE_LIMIT set the two numbers', () => {
+    expect(reducedRunArgs({ ULP_REDUCED_ARCHIVE_WORKERS: '5', ULP_REDUCED_ARCHIVE_LIMIT: '40' }, INBOX))
+      .toEqual({ args: ['run', '--limit', '40', '--workers', '5', '--inbox', INBOX] })
+    expect(reducedRunArgs({ ULP_REDUCED_ARCHIVE_WORKERS: ' 1 ' }, INBOX).args).toContain('1')
+    expect(reducedRunArgs({ ULP_REDUCED_ARCHIVE_WORKERS: '8' }, INBOX).args.slice(3, 5)).toEqual(['--workers', '8'])
+  })
+
+  test('a value that is not a whole number from 1 to 8 falls back to three workers and says so, so a typo never reaches the tool as a usage error', () => {
+    for (const bad of ['0', '9', '-1', '2.5', 'many', '3 workers', '1e1']) {
+      const r = reducedRunArgs({ ULP_REDUCED_ARCHIVE_WORKERS: bad }, INBOX)
+      expect(r.args.slice(3, 5)).toEqual(['--workers', '3'])
+      expect(r.note).toContain('ULP_REDUCED_ARCHIVE_WORKERS')
+      expect(r.note).toContain('3 workers')
+    }
+    expect(reducedRunArgs({ ULP_REDUCED_ARCHIVE_WORKERS: '' }, INBOX).note).toBeUndefined()
+    expect(reducedRunArgs({ ULP_REDUCED_ARCHIVE_WORKERS: 'x'.repeat(500) }, INBOX).note!.length).toBeLessThan(200)
   })
 })
 

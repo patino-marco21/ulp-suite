@@ -57,6 +57,27 @@ export function reducedArchiveMode(env: NodeJS.Dict<string> = process.env): { mo
   return { mode: 'off', note: `ULP_REDUCED_ARCHIVE=${raw.slice(0, 20)} is not off or shadow; the reduced archive stays off` }
 }
 
+/** Workers the timer gives the reduction when ULP_REDUCED_ARCHIVE_WORKERS is not set. The parse is one Node thread (about two thirds of a file's time), so one worker leaves the other cores idle: measured 13.6 GiB/h with one, 36 GiB/h with four or five. Three leaves most of the machine to the import. */
+export const DEFAULT_REDUCED_WORKERS = 3
+/** The most `reduce-archive.ts run --workers` accepts. */
+export const MAX_REDUCED_WORKERS = 8
+
+/**
+ * The arguments of the timer's `reduce-archive.ts run` (stage B). ULP_REDUCED_ARCHIVE_LIMIT (files per run, default 20) is passed as it is; ULP_REDUCED_ARCHIVE_WORKERS must be a
+ * whole number from 1 to MAX_REDUCED_WORKERS, and anything else uses DEFAULT_REDUCED_WORKERS and says so in `note`: a typo in the service must not turn into a usage error of the tool.
+ */
+export function reducedRunArgs(env: NodeJS.Dict<string>, inbox: string): { args: string[]; note?: string } {
+  const raw = (env.ULP_REDUCED_ARCHIVE_WORKERS ?? '').trim()
+  let workers = DEFAULT_REDUCED_WORKERS
+  let note: string | undefined
+  if (raw !== '') {
+    const n = Number(raw)
+    if (/^\d+$/.test(raw) && n >= 1 && n <= MAX_REDUCED_WORKERS) workers = n
+    else note = `ULP_REDUCED_ARCHIVE_WORKERS=${raw.slice(0, 20)} is not a whole number from 1 to ${MAX_REDUCED_WORKERS}; ${DEFAULT_REDUCED_WORKERS} workers are used`
+  }
+  return { args: ['run', '--limit', env.ULP_REDUCED_ARCHIVE_LIMIT ?? '20', '--workers', String(workers), '--inbox', inbox], ...(note ? { note } : {}) }
+}
+
 export interface ArchivePendingFacts {
   /** `*.txt` files in done/ the archive does not hold yet (readyToReplace().unarchived_files). */
   unarchivedFiles: number

@@ -130,7 +130,7 @@ The service names node by its nvm path (a user service does not read the shell p
 
 ### Reduced entries and the swap
 
-With `ULP_REDUCED_ARCHIVE=shadow` in the timer's service, a second and smaller entry is written beside each new whole-file entry in `<archive>/reduced/` and proven against the database (`scripts/reduce-archive.ts run|status|verify`; design: `docs/superpowers/specs/2026-11-15-reduced-archive-design.md`). Swapping an old whole-file entry for its reduced entry is the one step that cannot be undone, so it is run by hand, after the owner's yes:
+With `ULP_REDUCED_ARCHIVE=shadow` in the timer's service, a second and smaller entry is written beside each new whole-file entry in `<archive>/reduced/` and proven against the database (`scripts/reduce-archive.ts run|status|verify`; design: `docs/superpowers/specs/2026-11-15-reduced-archive-design.md`). The timer runs it with three workers (`ULP_REDUCED_ARCHIVE_WORKERS`, 1 to 8) and at most 20 files a run (`ULP_REDUCED_ARCHIVE_LIMIT`): the parse is one Node thread, so one worker took about 2.5 hours for the 10 files of one batch while the other cores sat idle (13.6 GiB/h with one worker, 36 GiB/h with four or five). The workers run at the service's `Nice=19` and idle I/O class, stop starting files when a file arrives in the inbox, and a value outside 1 to 8 is logged and replaced by 3. Swapping an old whole-file entry for its reduced entry is the one step that cannot be undone, so it is run by hand, after the owner's yes:
 
 ```bash
 npx tsx scripts/reduce-archive.ts report                  # read-only: what a swap would free, and a decode of every reduced entry (--no-verify skips it)
