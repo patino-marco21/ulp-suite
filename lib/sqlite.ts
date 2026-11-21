@@ -339,6 +339,32 @@ function initSchema(db: Database.Database): void {
     )
   `)
 
+  // The Site Directory (lib/site-directory.ts): every site that was counted, under the host the counts name, with the numbers of its last all-time count,
+  // the fingerprint of the live table those numbers were made against (counted_fp: a site is out of date when it is not the present one) and, once asked
+  // for, the split of its logins by type. Additive, so an image that does not know the table ignores it.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS site_directory (
+      host            TEXT PRIMARY KEY,
+      first_added_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      last_counted_at TEXT,
+      times_counted   INTEGER NOT NULL DEFAULT 0,
+      row_count       INTEGER,
+      host_count      INTEGER,
+      subdomain_count INTEGER,
+      subdomains      INTEGER,
+      top_subdomains  TEXT,
+      counted_at      TEXT,
+      counted_fp      TEXT,
+      count_error     TEXT,
+      bd_email        INTEGER,
+      bd_phone        INTEGER,
+      bd_username     INTEGER,
+      bd_other        INTEGER,
+      bd_at           TEXT,
+      bd_fp           TEXT
+    )
+  `)
+
   // Add rescan columns to existing databases (idempotent — catch swallows "duplicate column" errors)
   try { db.exec(`ALTER TABLE domain_monitors ADD COLUMN rescan_mode TEXT NOT NULL DEFAULT 'dedup' CHECK(rescan_mode IN ('dedup','digest'))`) } catch {}
   try { db.exec(`ALTER TABLE domain_monitors ADD COLUMN rescan_interval_hours INTEGER NOT NULL DEFAULT 24`) } catch {}

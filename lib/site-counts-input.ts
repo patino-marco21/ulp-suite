@@ -24,6 +24,13 @@ const MAX_HOST_LENGTH = 253
 
 export const NOT_A_SITE = 'not a site address'
 
+/**
+ * Why a site has no number when the time limit stopped its count. The directory tells the two apart: a site too broad for the limit is not tried again
+ * until the table changes, a site the request never reached is tried at the next refresh.
+ */
+export const TOO_BROAD = 'too broad to count in the time allowed'
+export const OUT_OF_TIME = 'not counted: the time limit for one request was reached, send this site again'
+
 export interface SiteEntry {
   /** The string as pasted: the key of the answer. */
   original: string

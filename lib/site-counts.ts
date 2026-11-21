@@ -21,7 +21,7 @@ import { executeQuery } from '@/lib/clickhouse'
 import { searchedAsField, stringList } from '@/lib/batch-lookup'
 import { isDomainRevProjectionReady } from '@/lib/credentials-projections'
 import { importedRangeAndSql, importedRangeEchoIfSet, importedRangePlain, parseImportedRange, type ImportedRange } from '@/lib/imported-range'
-import { SITE_COUNTS_MAX_PER_REQUEST, planSites, splitRequests, type SiteCount, type SiteEntry } from '@/lib/site-counts-input'
+import { OUT_OF_TIME, SITE_COUNTS_MAX_PER_REQUEST, TOO_BROAD, planSites, splitRequests, type SiteCount, type SiteEntry } from '@/lib/site-counts-input'
 
 /** Sites counted by one ClickHouse query. */
 export const SITE_COUNTS_CHUNK = 20
@@ -33,8 +33,6 @@ export const SITE_COUNTS_TOP = 10
 export const SITE_COUNTS_QUERY_SECONDS = 20
 export const SITE_COUNTS_BUDGET_MS = 45_000
 
-const TOO_BROAD = 'too broad to count in the time allowed'
-const OUT_OF_TIME = 'not counted: the time limit for one request was reached, send this site again'
 
 export interface HostCounts {
   host_count: number
@@ -195,7 +193,7 @@ export function siteCountsResults(
 // ── Counting ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** A site too broad for the time or the memory one query has. Anything else (ClickHouse down, a bad query) is an error of the request. */
-function isTooBroad(err: unknown): boolean {
+export function isTooBroad(err: unknown): boolean {
   return /TIMEOUT_EXCEEDED|MEMORY_LIMIT_EXCEEDED|timeout exceeded|memory limit/i.test(err instanceof Error ? err.message : String(err))
 }
 
