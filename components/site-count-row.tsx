@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, type ReactNode } from "react"
 import { AlertTriangle, ChevronDown, ChevronUp } from "lucide-react"
 import { MARK_CELL, SiteMarkCell } from "@/components/site-mark-cell"
 import type { SiteCount } from "@/lib/site-counts-input"
@@ -16,7 +16,7 @@ export const fmt = (n: number | null) => (n === null ? "—" : n.toLocaleString(
 /**
  * The columns after the site name. The mark cell is on screen at every width. The breakdown columns need a wide window (xl); below it the same numbers are
  * in the row's detail. The headers of the number columns and of the mark column are sort buttons, and their widths leave room for the arrow in front of
- * the label.
+ * the label. `split` is the Site Directory's column for the bar of a stored split of logins by type.
  */
 export const COLS = {
   mark: MARK_CELL,
@@ -24,7 +24,18 @@ export const COLS = {
   host: "hidden xl:block w-24 text-right shrink-0",
   subs: "hidden xl:block w-28 text-right shrink-0",
   distinct: "hidden xl:block w-24 text-right shrink-0",
+  split: "hidden xl:flex w-28 items-center shrink-0",
   chevron: "w-3.5 shrink-0",
+}
+
+/**
+ * What the Site Directory adds to a row (the Site Counts page passes none): it opens every row, not only those with rows, shows `cell` in the row at
+ * wide widths and `body` under the numbers of the detail, and is told when the row is opened.
+ */
+export interface SiteRowDetail {
+  body: ReactNode
+  cell?: ReactNode
+  onOpen?: () => void
 }
 
 interface SiteRowProps {
@@ -33,15 +44,18 @@ interface SiteRowProps {
   mark: SiteMark | null
   availability: "loading" | "ready" | "failed"
   onMarkChange: (host: string, patch: SiteMarkPatch) => void
+  detail?: SiteRowDetail
 }
 
-export function SiteRow({ row, mark, availability, onMarkChange }: SiteRowProps) {
+export function SiteRow({ row, mark, availability, onMarkChange, detail }: SiteRowProps) {
   const [open, setOpen] = useState(false)
   const { site, result } = row
-  const expandable = (result.count ?? 0) > 0
+  const expandable = detail !== undefined || (result.count ?? 0) > 0
   const muted = !result.error && result.count === 0
   const toggle = () => {
-    if (expandable) setOpen(o => !o)
+    if (!expandable) return
+    if (!open) detail?.onOpen?.()
+    setOpen(o => !o)
   }
 
   return (
@@ -76,6 +90,7 @@ export function SiteRow({ row, mark, availability, onMarkChange }: SiteRowProps)
         <span className={`${COLS.host} text-xs tabular-nums text-muted-foreground`}>{fmt(result.host_count)}</span>
         <span className={`${COLS.subs} text-xs tabular-nums text-muted-foreground`}>{fmt(result.subdomain_count)}</span>
         <span className={`${COLS.distinct} text-xs tabular-nums text-muted-foreground`}>{fmt(result.subdomains)}</span>
+        {detail && <span className={COLS.split}>{detail.cell}</span>}
         <span className={COLS.chevron}>
           {expandable && (
             <button
@@ -96,12 +111,14 @@ export function SiteRow({ row, mark, availability, onMarkChange }: SiteRowProps)
 
       {open && expandable && (
         <div className="border-t bg-muted/20 px-4 py-2 space-y-2">
-          <p className="text-xs text-muted-foreground">
-            <span className="tabular-nums">{fmt(result.host_count)}</span> on the site itself
-            {result.subdomain_count === null
-              ? " · subdomains not counted"
-              : <>{" · "}<span className="tabular-nums">{fmt(result.subdomain_count)}</span> on {fmt(result.subdomains)} subdomain{result.subdomains === 1 ? "" : "s"}</>}
-          </p>
+          {result.count !== null && (
+            <p className="text-xs text-muted-foreground">
+              <span className="tabular-nums">{fmt(result.host_count)}</span> on the site itself
+              {result.subdomain_count === null
+                ? " · subdomains not counted"
+                : <>{" · "}<span className="tabular-nums">{fmt(result.subdomain_count)}</span> on {fmt(result.subdomains)} subdomain{result.subdomains === 1 ? "" : "s"}</>}
+            </p>
+          )}
           {result.top_subdomains.length > 0 && (
             <div>
               <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
@@ -118,6 +135,7 @@ export function SiteRow({ row, mark, availability, onMarkChange }: SiteRowProps)
               </ul>
             </div>
           )}
+          {detail?.body}
         </div>
       )}
     </div>
