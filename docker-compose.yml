@@ -228,6 +228,10 @@ services:
       SEARCH_DICT_MAX_EMAIL_DOMAINS: ${SEARCH_DICT_MAX_EMAIL_DOMAINS:-}
       SEARCH_DICT_CRON_MINUTES: ${SEARCH_DICT_CRON_MINUTES:-}
       SEARCH_DICT_SETTLE_SECONDS: ${SEARCH_DICT_SETTLE_SECONDS:-}
+      # Site Directory refresh (lib/site-directory-cron.ts) -- optional; forwarded explicitly (see above). Empty values use the defaults in code:
+      # a tick every 10 minutes (0 switches the refresh off), 120 s of quiet after the last import before it recounts.
+      SITE_DIRECTORY_CRON_MINUTES: ${SITE_DIRECTORY_CRON_MINUTES:-}
+      SITE_DIRECTORY_SETTLE_SECONDS: ${SITE_DIRECTORY_SETTLE_SECONDS:-}
       # Token plans (lib/search-plan-gate.ts) -- optional. Empty = on. SEARCH_TOKEN_PLANS=0 runs every search with the original query.
       SEARCH_TOKEN_PLANS: ${SEARCH_TOKEN_PLANS:-}
       # Word plan limits (lib/search-plan-gate.ts) -- optional, empty = the calibrated defaults in code.

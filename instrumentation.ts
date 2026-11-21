@@ -122,6 +122,15 @@ export async function register() {
       } catch (err) {
         console.error('[instrumentation] Search-dictionary cron failed to start:', err)
       }
+
+      // Site Directory: recounts the sites the table has outgrown once no import is running and the data has been quiet (settle wait, mutation check and
+      // backoff inside). See lib/site-directory-cron.ts.
+      try {
+        const { startSiteDirectoryCron } = await import('./lib/site-directory-cron')
+        startSiteDirectoryCron()
+      } catch (err) {
+        console.error('[instrumentation] Site-directory cron failed to start:', err)
+      }
     }
   }
 }
