@@ -252,3 +252,53 @@ describe('change', () => {
     expect(t.shown('a.example')).toEqual(mark('skip'))
   })
 })
+
+describe('adopt (a list that comes with its marks)', () => {
+  test('the store is ready at once and shows the marks it was handed', () => {
+    const store = createSiteMarksStore({ fetch: controlledFetch().fetch, onSaveFailed: () => {} })
+    store.adopt({ 'a.example': mark('done') })
+    expect(store.getSnapshot()).toEqual({ status: 'ready', marks: { 'a.example': mark('done') }, error: null })
+  })
+
+  test('the next page is added to what is held; a new list replaces it', () => {
+    const store = createSiteMarksStore({ fetch: controlledFetch().fetch, onSaveFailed: () => {} })
+    store.adopt({ 'a.example': mark('done') })
+    store.adopt({ 'b.example': mark('skip') })
+    expect(Object.keys(store.getSnapshot().marks).sort()).toEqual(['a.example', 'b.example'])
+    store.adopt({ 'c.example': mark('todo') }, true)
+    expect(Object.keys(store.getSnapshot().marks)).toEqual(['c.example'])
+  })
+
+  test('a site with a save on its way keeps what the page shows', async () => {
+    const net = controlledFetch()
+    const store = createSiteMarksStore({ fetch: net.fetch, onSaveFailed: () => {} })
+    store.adopt({ 'a.example': mark('todo') })
+    void store.change('a.example', { status: 'done' })
+    store.adopt({ 'a.example': mark('todo') }) // an older page's word about the same site
+    expect(store.getSnapshot().marks['a.example']?.status).toBe('done')
+  })
+
+  test('what was adopted is what a failed save goes back to', async () => {
+    const net = controlledFetch()
+    const failures: string[] = []
+    const store = createSiteMarksStore({ fetch: net.fetch, onSaveFailed: message => failures.push(message) })
+    store.adopt({ 'a.example': mark('todo') })
+    const saving = store.change('a.example', { status: 'done' })
+    expect(store.getSnapshot().marks['a.example']?.status).toBe('done')
+    await flush() // the request is made a microtask after change()
+    net.requests[0].fail(new Error('offline'))
+    await saving
+    expect(store.getSnapshot().marks['a.example']?.status).toBe('todo')
+    expect(failures).toHaveLength(1)
+  })
+
+  test('a load that was still in flight is dropped: the list\'s own marks win', async () => {
+    const net = controlledFetch()
+    const store = createSiteMarksStore({ fetch: net.fetch, onSaveFailed: () => {} })
+    const loading = store.load(['a.example'])
+    store.adopt({ 'b.example': mark('skip') }, true)
+    net.requests[0].answer(reply({ success: true, marks: { 'a.example': mark('done') } }))
+    await loading
+    expect(Object.keys(store.getSnapshot().marks)).toEqual(['b.example'])
+  })
+})

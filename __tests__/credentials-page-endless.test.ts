@@ -74,7 +74,9 @@ describe('Credentials page — one endless list instead of pages', () => {
   })
 
   test('the footer counts its seconds itself, so that the table does not render once a second', () => {
-    const footer = between('function ListFooterLine', '// ─── Main page')
+    // the line under the rows is a shared component now (the Site Directory uses it too); the page imports it
+    expect(source).toContain('import { ListFooterLine } from "@/components/list-footer-line"')
+    const footer = readFileSync(new URL('../components/list-footer-line.tsx', import.meta.url), 'utf8')
     expect(footer).toContain('setInterval(')
     expect(footer).toContain('clearInterval(id)')
     // not in the page component, whose state would re-render the whole table every second

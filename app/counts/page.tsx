@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic"
 
 import { useMemo, useRef, useState, useSyncExternalStore } from "react"
 import {
-  BarChart3, Loader2, X, Download, Upload, ChevronDown, ChevronUp, ArrowUpDown, AlertTriangle, Square,
+  BarChart3, Loader2, X, Download, Upload, AlertTriangle, Square,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -22,6 +22,7 @@ import { markFilterCounts, markRank, markStateOf, matchesMarkFilter, type MarkFi
 import { createSiteMarksStore } from "@/lib/site-marks-client"
 import { COLS, SiteRow, type CountRow } from "@/components/site-count-row"
 import { SiteMarkFilter } from "@/components/site-mark-filter"
+import { SortHeader } from "@/components/site-sort-header"
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -34,43 +35,6 @@ interface CountsResponse {
 
 /** The biggest list file the page reads: a list of sites is a few KB, this only stops a wrong file from freezing the tab. */
 const MAX_FILE_BYTES = 2 * 1024 * 1024
-
-// ── One column header ─────────────────────────────────────────────────────────
-
-/**
- * The header of a sortable column, as a button: its arrow says whether the table is sorted by the column and which way (the Credentials headers look the
- * same). Off while there is nothing to sort by (the Mark column before the marks are loaded).
- */
-function SortHeader({ label, sortKey, sort, onSort, className, disabled = false }: {
-  label: string
-  sortKey: SiteSortKey
-  sort: SiteSort | null
-  onSort: (key: SiteSortKey) => void
-  className: string
-  disabled?: boolean
-}) {
-  const current = sort !== null && sort.key === sortKey ? sort : null
-  const Arrow = current === null ? ArrowUpDown : current.direction === "desc" ? ChevronDown : ChevronUp
-  const state = current === null ? "" : current.direction === "desc" ? ", sorted biggest first" : ", sorted smallest first"
-  const hint = current === null ? `Sort by ${label.toLowerCase()}`
-    : current.direction === "desc" ? "Biggest first. Click for smallest first"
-    : "Smallest first. Click to go back to the default order"
-  return (
-    <button
-      type="button"
-      onClick={() => onSort(sortKey)}
-      disabled={disabled}
-      className={`${className} group/th cursor-pointer select-none uppercase transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 ${current ? "text-foreground" : ""}`}
-      aria-label={`${label}${state}`}
-      title={disabled ? "Not available until the marks are loaded" : hint}
-    >
-      <span className="inline-flex items-center">
-        <Arrow className={`mr-1 h-3 w-3 shrink-0 ${current ? "text-primary" : "opacity-20 transition-opacity group-hover/th:opacity-60"}`} />
-        {label}
-      </span>
-    </button>
-  )
-}
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 

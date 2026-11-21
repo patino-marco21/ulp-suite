@@ -2674,6 +2674,7 @@ describe('adopt (a list that comes with its marks)', () => {
     store.adopt({ 'a.example': mark('todo') })
     const saving = store.change('a.example', { status: 'done' })
     expect(store.getSnapshot().marks['a.example']?.status).toBe('done')
+    await flush() // the request is made a microtask after change()
     net.requests[0].fail(new Error('offline'))
     await saving
     expect(store.getSnapshot().marks['a.example']?.status).toBe('todo')

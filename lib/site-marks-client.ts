@@ -133,6 +133,26 @@ export function createSiteMarksStore(deps: SiteMarksStoreDeps) {
     return run
   }
 
+  /**
+   * For a page whose list comes with its marks (the Site Directory joins them on the server): the marks of a page of the list, taken as what the server
+   * last said. `replace` starts over (a new list); without it they are added to what is held (the next page). A site with a save on its way keeps what
+   * the page shows, and a load() still in flight is dropped: the list's marks are the newer word.
+   */
+  function adopt(marks: Readonly<Record<string, SiteMark>>, replace = false): void {
+    generation += 1
+    if (replace) confirmed.clear()
+    const next: Record<string, SiteMark> = replace ? {} : { ...snapshot.marks }
+    for (const [host, mark] of Object.entries(marks)) {
+      if (pending.has(host)) {
+        if (snapshot.marks[host]) next[host] = snapshot.marks[host]
+        continue
+      }
+      confirmed.set(host, mark)
+      next[host] = mark
+    }
+    publish({ status: 'ready', marks: next, error: null })
+  }
+
   return {
     subscribe(listener: () => void) {
       listeners.add(listener)
@@ -145,6 +165,7 @@ export function createSiteMarksStore(deps: SiteMarksStoreDeps) {
     /** Asks again for the hosts of the last load: the Retry of a failed one. */
     retry: () => load(lastHosts),
     change,
+    adopt,
   }
 }
 

@@ -29,7 +29,8 @@ import type { SortKey } from "@/lib/cursor-pagination"
 import { appliedViewOf, BROWSE_VIEW, matchingHint, matchingLabel, parseTotals, recordsLabel, totalsParams, withPendingTotals, withTotals, type AppliedView } from "@/lib/credential-totals"
 import { declutterByDefault } from "@/lib/declutter-default"
 import { effectiveLoginType } from "@/lib/login-type-default"
-import { appendPage, listFooter, scrollParentOf, shouldAutoLoad, LOAD_AHEAD_PX, type ListFooter } from "@/lib/credential-pages"
+import { appendPage, listFooter, scrollParentOf, shouldAutoLoad, LOAD_AHEAD_PX } from "@/lib/credential-pages"
+import { ListFooterLine } from "@/components/list-footer-line"
 import {
   epochSecondsToIso, utcIsoToDisplay,
   searchFingerprint, readMark, writeMark, markStorageKey, sinceLastExportWindow, markAfterExport, type ExportMark,
@@ -738,57 +739,6 @@ const CredentialRow = memo(function CredentialRow({ cred, selected, onOpen, onCo
     </tr>
   )
 })
-
-// ─── Line under the rows ──────────────────────────────────────────────────────
-
-/**
- * What the endless list says under its rows: that more comes by scrolling, that a page is loading (with the seconds it has taken: a page of a rare search
- * can take a minute, and a spinner alone does not say whether anything is happening) and a button to stop it, a retry after an error or a stop, a button
- * past the row cap, and the end. It owns the seconds counter, so that the table does not render once a second.
- */
-function ListFooterLine({ kind, rows, error, onLoadMore, onStop }: {
-  kind: ListFooter
-  rows: number
-  error: string | null
-  onLoadMore: () => void
-  onStop: () => void
-}) {
-  const [seconds, setSeconds] = useState(0)
-  const loading = kind === 'loading'
-  useEffect(() => {
-    if (!loading) { setSeconds(0); return }
-    const started = Date.now()
-    const id = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 1000)
-    return () => clearInterval(id)
-  }, [loading])
-
-  const count = rows.toLocaleString('en-US')
-  return (
-    <div className="flex items-center justify-center gap-3 border-t px-4 py-3 text-sm text-muted-foreground" role="status" aria-live="polite">
-      {kind === 'loading' && (
-        <>
-          <Loader2 className="h-4 w-4 animate-spin" />
-          <span className="tabular-nums">{count} rows loaded · loading the next rows… {seconds} s{seconds >= 15 ? ' (a rare search scans the whole table; a page can take a minute)' : ''}</span>
-          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={onStop}>Stop</Button>
-        </>
-      )}
-      {kind === 'error' && (
-        <>
-          <span className="text-amber-600 dark:text-amber-400">{error ?? 'The next rows could not be loaded.'}</span>
-          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={onLoadMore}>Retry</Button>
-        </>
-      )}
-      {kind === 'more' && <span className="tabular-nums">{count} rows loaded · scroll for more</span>}
-      {kind === 'capped' && (
-        <>
-          <span className="tabular-nums">{count} rows loaded</span>
-          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={onLoadMore}>Load the next rows</Button>
-        </>
-      )}
-      {kind === 'end' && <span className="tabular-nums">{count} rows · end of the results</span>}
-    </div>
-  )
-}
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
