@@ -1,7 +1,7 @@
 # Site directory: a running list of every site counted, with a login-type breakdown — Design
 
 Date: 2026-11-21
-Status: **design approved by the owner on 2026-11-21 and revised the same day twice: an endless list (see The page) and a directory that stays current after every ingest (see Staying current); the revisions await the owner's review; not built.** First release: the list, the recording, the page and the on-demand breakdown. The sites in this file are made up (`corp.example`): the owner's lists stay on the owner's machine.
+Status: **implemented, verified and deployed locally on 2026-11-21** (main `deee59b`; image `ulp-suite-app:latest` = `a4d63c25989a`; rollback tag `ulp-suite-app:rollback-20261121-1716z` = `acbb41db9c2a`). "As built" at the end. First release: the list, the recording, the endless page, the on-demand split and the refresh after an ingest. The sites in this file are made up (`corp.example`): the owner's lists stay on the owner's machine.
 Related: `2026-10-26-site-counts-design.md` (the counts this records), `2026-10-29-site-marks-design.md` (the marks this shows and the host key it shares).
 
 ## Why
@@ -116,3 +116,11 @@ The counts were identical in both (0 mismatches over the 20 hosts and the big on
 - A button that recounts the whole directory at once (one site has Recount in its detail), and recounting only the sites that occur in the new rows (needed only near 20,000 sites).
 - CSV export of the directory, a "count everything again" button, a history of runs, a view per person.
 - A breakdown in the Site Counts table or its CSV, a sort by a type's share, and a bulk breakdown. Asked for none; each is a small step on top.
+
+## As built (2026-11-21)
+
+- **Proof.** 5,665 unit tests; the order test holds the SQLite sort to `orderSiteRows` over 3 random directories x 11 sorts, walked page by page; a mutation pass broke 16 rules of the store, the tick, the breakdown and the recording hook on purpose and every one was caught. Live, read-only: the split equals a plain full scan on five sampled sites and on a 110 M-row site, and the existing site-counts parity test still passes with the recording hook in place. Rehearsal on the isolated stack (`scripts/e2e-batch-lookup.ts`, step 9): 116 of 116 checks, including the refresh by itself after new rows (recounted, and the stored split worked out again) on the production image.
+- **Found only in a browser.** A sort, search or chip changed while far down the list kept the old scroll position, so the end of the new first page stayed in range of the observer and every page was fetched again (1,105 rows in about 0.6 s). The list's own box is not what scrolls in this layout, the document is; `scrollListToTop` scrolls the real scroller. Checked after the fix: 1,104 rows loaded, view at the bottom, a sort click leaves 200 rows at the top. The endless list itself loads one page per scroll (200, 400, ... , 1,105; every host once; "end of the directory").
+- **The query is cheaper than estimated.** The split costs about 0.1 s on the broadest site, not the 6 s of the folded shape (see Measured).
+- **Not exercised:** the real page signed in as the owner (the rehearsal image and the live image are the same build), the first live refresh tick (due two minutes after the deploy), and Recount and Remove on the live directory.
+- **Known rough edge:** the shared footer says "1 sites" for one site, as the Credentials footer says "1 rows".
