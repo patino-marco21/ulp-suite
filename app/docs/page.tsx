@@ -937,7 +937,7 @@ curl "${baseUrl}/api/v1/summary?imported_after=2026-10-17T16:00:00Z" \\
                   <code className="text-lg font-mono text-foreground">/api/v1/lookup/counts</code>
                 </div>
                 <CardDescription className="text-muted-foreground mt-2">
-                  How many rows each of up to 100 sites has, without the rows (a lookup caps what it returns, so it cannot say how many there are). A site is the host you send and every subdomain of it, reported separately. A list of 100 takes about 2 s. The same counts are on the Site Counts page, which takes a pasted or uploaded list.
+                  How many rows each of up to 100 sites has, without the rows (a lookup caps what it returns, so it cannot say how many there are). A site is the host you send and every subdomain of it, reported separately. A list of 100 takes about 2 s. The same counts are on the Site Counts page, which takes a pasted or uploaded list. Every site counted here, by the page or by this route, is also kept in the Site Directory page for everyone who signs in (a count with an imported window adds the site but leaves its all-time numbers alone).
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">

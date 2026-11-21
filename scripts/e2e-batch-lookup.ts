@@ -16,6 +16,9 @@
  * fallback: with the projection cleared the answer says only hosts were counted, and after MATERIALIZE it counts subdomains again.
  * The site marks (docs/superpowers/specs/2026-10-29-site-marks-design.md) are checked on the same site: POST and PUT /api/lookup/marks with a session, one
  * mark for every spelling of the site, the refusals, and that a mark and its note survive recreating only the app (its data volume is kept).
+ * The site directory (docs/superpowers/specs/2026-11-21-site-directory-design.md) is checked after them: it is fed by the counts, the split by login type
+ * of a site seeded with 4 e-mail, 3 phone, 2 user name and 1 blank login is exactly that, a mark shows in it, new rows make it recount the site and work
+ * the stored split out again by itself (the rehearsal app ticks every minute with 5 s of quiet), and Remove takes a site out.
  *
  *   git archive <commit> | docker build -t ulp-suite-app:batch-candidate -
  *   npx tsx scripts/e2e-batch-lookup.ts            # about 4 minutes; --keep leaves the stack running (the session cookie goes to $COOKIE_FILE)
@@ -478,6 +481,72 @@ async function main(): Promise<number> {
       const gone = await marks.read([COUNTS_SITE])
       check('clearing both removes the mark', cleared.status === 200 && cleared.json?.mark === null && Object.keys(gone.json?.marks ?? {}).length === 0, JSON.stringify(cleared.json).slice(0, 160))
     }
+
+    console.log('9. Site directory: fed by the counts, the split by login type, kept current after new rows, GET and DELETE /api/lookup/directory')
+    const directory = {
+      list: (query = '') => asSession('GET', `/api/lookup/directory${query}`),
+      remove: (host: string) => asSession('DELETE', '/api/lookup/directory', { host }),
+      breakdown: (host: string) => asSession('POST', '/api/lookup/directory/breakdown', { host }),
+      status: () => asSession('GET', '/api/lookup/directory/status'),
+    }
+    const anonList = await call('GET', '/api/lookup/directory')
+    const anonSplit = await call('POST', '/api/lookup/directory/breakdown', { host: COUNTS_SITE })
+    check('the directory routes need a session (401 without one)', anonList.status === 401 && anonSplit.status === 401, `${anonList.status} / ${anonSplit.status}`)
+
+    const fed = (await directory.list(`?host=${COUNTS_SITE}`)).json?.sites?.[0]
+    check('the site the counts named is in the directory with the numbers of its last all-time count (23 rows: 7 on the site, 16 on 5 subdomains)',
+      fed?.host === COUNTS_SITE && fed.count === 23 && fed.host_count === 7 && fed.subdomain_count === 16 && fed.subdomains === 5, JSON.stringify(fed).slice(0, 260))
+    check('and it was counted more than once (every run of steps 7 and 8 carried it)', (fed?.times_counted ?? 0) >= 2, `times_counted ${fed?.times_counted}`)
+    const order = ((await directory.list('')).json?.sites ?? []).map((s: { count: number | null }) => s.count ?? -1)
+    check('the list is ordered by rows, biggest first, sites with no number last', order.length > 1 && order.every((c: number, i: number) => i === 0 || order[i - 1] >= c), order.slice(0, 8).join(','))
+
+    // A site with every kind of login: 4 e-mail addresses, 3 phone numbers, 2 user names and 1 blank login, all under the one host.
+    const SPLIT_SITE = `split-${RUN}.example.test`
+    const splitRows = (n: number, email: string) => `SELECT 'https://${SPLIT_SITE}/x', ${email}, 'pw', '${SPLIT_SITE}', 'seed-${RUN}', '' FROM numbers(${n})`
+    chQuery(`INSERT INTO ulp.credentials (url, email, password, domain, source_file, breach_name)
+      ${splitRows(4, `concat('m', toString(number), '-${RUN}@example.test')`)} UNION ALL ${splitRows(3, `concat('+4479111', lpad(toString(number), 5, '0'))`)}
+      UNION ALL ${splitRows(2, `concat('user', toString(number), '${RUN}')`)} UNION ALL ${splitRows(1, `''`)}`)
+    const splitCounted = await counts({ domains: [SPLIT_SITE] })
+    check('a new site is counted (10 rows) and lands in the directory', splitCounted.json?.results?.[SPLIT_SITE]?.count === 10 && (await directory.list(`?host=${SPLIT_SITE}`)).json?.sites?.[0]?.count === 10)
+    const split = await directory.breakdown(SPLIT_SITE)
+    const parts = split.json?.site?.breakdown
+    check('its split is 4 e-mail, 3 phone, 2 user name and 1 other, and it is stored on the site',
+      split.status === 200 && parts?.email === 4 && parts.phone === 3 && parts.username === 2 && parts.other === 1, JSON.stringify(split.json).slice(0, 240))
+    const kept = (await directory.list(`?host=${SPLIT_SITE}`)).json?.sites?.[0]?.breakdown
+    check('and the list gives it back', kept?.email === 4 && kept.other === 1, JSON.stringify(kept))
+    const ghost = await directory.breakdown(`ghost-${RUN}.example.test`)
+    const typed = await directory.breakdown(`https://www.${SPLIT_SITE}/x`)
+    check('a site that is not in the directory is 404 and a host as typed is 400', ghost.status === 404 && typed.status === 400, `${ghost.status} / ${typed.status}`)
+
+    await marks.change({ host: SPLIT_SITE, status: 'todo' })
+    const todo = await directory.list('?mark=todo')
+    check('a mark set on the Site Counts side shows in the directory, and the chip finds it', todo.json?.sites?.some((s: { host: string }) => s.host === SPLIT_SITE) && todo.json.marks?.todo >= 1, JSON.stringify(todo.json?.marks))
+    await marks.change({ host: SPLIT_SITE, status: null, note: null })
+    const found = await directory.list(`?q=${encodeURIComponent(SPLIT_SITE.slice(0, 12).toUpperCase())}`)
+    check('a search finds a site by a part of its host, whatever the case', found.json?.sites?.some((s: { host: string }) => s.host === SPLIT_SITE))
+
+    // New rows arrive. The table's fingerprint changes; within a tick (a minute) and the settle time (5 s) the directory recounts the site and works the stored split out again.
+    chQuery(`INSERT INTO ulp.credentials (url, email, password, domain, source_file, breach_name) ${splitRows(5, `concat('late', toString(number), '-${RUN}@example.test')`)}`)
+    const refreshed = await waitFor('the directory follows the new rows', async () => {
+      const site = (await directory.list(`?host=${SPLIT_SITE}`)).json?.sites?.[0]
+      return site?.count === 15 && site.breakdown?.email === 9 && site.breakdown.phone === 3 ? site : null
+    }, 300_000, 5000)
+    check('after new rows arrive the directory recounts the site (15 rows) and works its stored split out again (9 e-mail), by itself', !!refreshed)
+    const current = await waitFor('every site current', async () => {
+      const s = (await directory.status()).json
+      return s?.state === 'current' && s.out_of_date === 0 ? s : null
+    }, 180_000, 5000)
+    check('and the status line says every site is current', !!current)
+
+    const removed = await directory.remove(SPLIT_SITE)
+    const gone = await directory.list(`?host=${SPLIT_SITE}`)
+    const removedAgain = await directory.remove(SPLIT_SITE)
+    check('Remove takes the site out (a second time: 404)', removed.status === 200 && gone.json?.sites?.length === 0 && removedAgain.status === 404, `${removed.status} / ${removedAgain.status}`)
+    await counts({ domains: [SPLIT_SITE] })
+    const back = (await directory.list(`?host=${SPLIT_SITE}`)).json?.sites?.[0]
+    check('counted again, the site is back with its history reset (counted once, no split) and 15 rows', back?.times_counted === 1 && back.breakdown === null && back.count === 15, JSON.stringify(back).slice(0, 200))
+    const directoryPage = await asSession('GET', '/directory')
+    check('the Site Directory page is served', directoryPage.status === 200 && /Site Directory/.test(directoryPage.text), `status ${directoryPage.status}`)
 
     // Last, because it changes the table: without the reversed-domain projection on every part only hosts can be counted, and the answer says so.
     chQuery('ALTER TABLE ulp.credentials CLEAR PROJECTION proj_domain_rev SETTINGS mutations_sync = 2')

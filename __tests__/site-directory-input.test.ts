@@ -18,14 +18,14 @@ describe('formatShare', () => {
 
 describe('breakdownShares', () => {
   test('gives each part its count, its share and its label, in the order e-mail, phone, user name, other', () => {
-    const shares = breakdownShares({ email: 563, phone: 40, username: 397, other: 0, at: '2026-11-21 10:00:00' })
+    const shares = breakdownShares({ email: 563, phone: 40, username: 397, other: 0 })
     expect(shares.map(s => [s.key, s.label, s.count, s.text])).toEqual([
       ['email', 'E-mail', 563, '56.3%'], ['phone', 'Phone', 40, '4%'], ['username', 'User name', 397, '39.7%'], ['other', 'Other', 0, '0%'],
     ])
-    expect(breakdownTotal({ email: 563, phone: 40, username: 397, other: 0, at: 'x' })).toBe(1000)
+    expect(breakdownTotal({ email: 563, phone: 40, username: 397, other: 0 })).toBe(1000)
   })
   test('a split over no rows has no shares to divide by zero', () => {
-    expect(breakdownShares({ email: 0, phone: 0, username: 0, other: 0, at: 'x' }).every(s => s.percent === 0 && s.text === '0%')).toBe(true)
+    expect(breakdownShares({ email: 0, phone: 0, username: 0, other: 0 }).every(s => s.percent === 0 && s.text === '0%')).toBe(true)
   })
 })
 
