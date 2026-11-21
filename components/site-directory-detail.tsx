@@ -4,14 +4,10 @@ import { useEffect, useState } from "react"
 import { Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { BreakdownBar, BreakdownLegend } from "@/components/breakdown-bar"
-import { formatRelativeTime } from "@/lib/format-relative-time"
+import { formatRelativeTimeInline } from "@/lib/format-relative-time"
 import { breakdownNote, type DirectorySite } from "@/lib/site-directory-input"
 
-/** formatRelativeTime starts a sentence ("Just now"); inside one it must not. */
-const ago = (dateText: string) => {
-  const text = formatRelativeTime(dateText)
-  return text.charAt(0).toLowerCase() + text.slice(1)
-}
+const ago = formatRelativeTimeInline
 
 /** What the page knows about one row beyond the site: whether its split is being worked out or failed, and whether it is being counted again. */
 export interface RowUi {
@@ -82,10 +78,6 @@ export function SiteDirectoryDetail({ site, ui, onBreakdown, onRecount, onRemove
         Added {ago(site.first_added_at)} · counted {site.times_counted.toLocaleString()} time{site.times_counted === 1 ? "" : "s"}
         {site.last_counted_at ? ` · last ${ago(site.last_counted_at)}` : ""}
       </p>
-
-      {site.mark?.note && (
-        <p className="text-xs"><span className="text-muted-foreground">Note: </span>{site.mark.note}</p>
-      )}
 
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="outline" className="h-7 text-xs" disabled={ui.recounting} onClick={onRecount}>

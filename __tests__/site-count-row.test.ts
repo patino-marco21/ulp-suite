@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createElement, type ComponentProps } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, test, expect } from 'vitest'
+import { describe, test, expect, vi } from 'vitest'
 import { COLS, SiteRow, SiteRowBody, fmt } from '@/components/site-count-row'
 import { STATUS_STYLE } from '@/components/site-mark-cell'
 import type { SiteCount } from '@/lib/site-counts-input'
@@ -184,6 +184,16 @@ describe('SiteRowBody — what an opened row shows', () => {
     expect(out).toContain('first line\nsecond line')
     expect(out).toContain('a@example.test')
     expect(out.indexOf('first line')).toBeLessThan(out.indexOf('on the site itself'))
+  })
+
+  test('the time of the mark reads inside the line it is in: "just now", not "Just now"', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-29T10:00:20Z'))
+    try {
+      expect(body({ mark: mark('skip', 'x') })).toContain('a@example.test, just now')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   test('shows no note block without a note', () => {

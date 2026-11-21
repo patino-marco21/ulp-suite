@@ -5,7 +5,7 @@ import { AlertTriangle, Circle, CircleCheck, CircleDashed, CircleX, MessageSquar
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { SiteLink } from "@/components/site-link"
 import { Textarea } from "@/components/ui/textarea"
-import { formatRelativeTime } from "@/lib/format-relative-time"
+import { formatRelativeTimeInline } from "@/lib/format-relative-time"
 import {
   NO_MARK_LABEL, SITE_MARK_LABELS, SITE_MARK_NOTE_MAX, SITE_MARK_STATUSES, markAriaLabel, markTitle, normalizeNote,
   type SiteMark, type SiteMarkPatch, type SiteMarkStatus,
@@ -97,7 +97,7 @@ export function SiteMarkMenu({ host, mark, draft, onDraftChange, onChoose, onNot
         </p>
       </div>
       {mark?.updated_by && mark.updated_at && (
-        <p className="text-[10px] text-muted-foreground">Set by {mark.updated_by}, {formatRelativeTime(mark.updated_at)}</p>
+        <p className="text-[10px] text-muted-foreground">Set by {mark.updated_by}, {formatRelativeTimeInline(mark.updated_at)}</p>
       )}
     </div>
   )

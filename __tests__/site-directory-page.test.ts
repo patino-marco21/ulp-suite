@@ -131,3 +131,15 @@ describe('the row and its detail', () => {
     expect(detail).toContain('<BreakdownLegend')
   })
 })
+
+describe('the note of a mark in an opened row', () => {
+  test('the shared row body shows it (the whole note, first), so the Directory\'s own detail does not repeat it', () => {
+    expect(row).toContain('<SiteRowBody result={result} mark={mark} extra={detail?.body} />')
+    expect(detail).not.toContain('mark?.note')
+    expect(detail).not.toContain('Note: ')
+  })
+
+  test('its times read inside a sentence ("counted just now"), from the one shared helper', () => {
+    expect(detail).toContain('const ago = formatRelativeTimeInline')
+  })
+})

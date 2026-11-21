@@ -4,7 +4,7 @@ import { useState, type ReactNode } from "react"
 import { AlertTriangle, ChevronDown, ChevronUp, MessageSquare } from "lucide-react"
 import { SiteLink } from "@/components/site-link"
 import { MARK_CELL, STATUS_STYLE, SiteMarkCell } from "@/components/site-mark-cell"
-import { formatRelativeTime } from "@/lib/format-relative-time"
+import { formatRelativeTimeInline } from "@/lib/format-relative-time"
 import type { SiteCount } from "@/lib/site-counts-input"
 import { isMarkableHost, type SiteMark, type SiteMarkPatch } from "@/lib/site-marks-input"
 
@@ -56,7 +56,7 @@ export function SiteRowBody({ result, mark, extra }: SiteRowBodyProps) {
           <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Note</p>
           <p className="whitespace-pre-wrap break-words text-xs">{mark.note}</p>
           {mark.updated_by && mark.updated_at && (
-            <p className="mt-1 text-[10px] text-muted-foreground">{mark.updated_by}, {formatRelativeTime(mark.updated_at)}</p>
+            <p className="mt-1 text-[10px] text-muted-foreground">{mark.updated_by}, {formatRelativeTimeInline(mark.updated_at)}</p>
           )}
         </div>
       )}

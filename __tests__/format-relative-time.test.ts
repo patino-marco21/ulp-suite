@@ -9,7 +9,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest'
-import { formatRelativeTime } from '@/lib/format-relative-time'
+import { formatRelativeTime, formatRelativeTimeInline } from '@/lib/format-relative-time'
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -69,5 +69,14 @@ describe('formatRelativeTime', () => {
   test('clamps a timestamp that is in the future (clock skew) to "Just now" rather than negative', () => {
     vi.setSystemTime(new Date('2026-08-24T10:00:00Z'))
     expect(formatRelativeTime('2026-08-24 10:05:00')).toBe('Just now')
+  })
+})
+
+describe('formatRelativeTimeInline', () => {
+  test('is the same text, with the first letter lower-case, for use inside a sentence', () => {
+    vi.setSystemTime(new Date('2026-08-24T10:00:30Z'))
+    expect(formatRelativeTimeInline('2026-08-24 10:00:00')).toBe('just now')
+    vi.setSystemTime(new Date('2026-08-24T12:00:00Z'))
+    expect(formatRelativeTimeInline('2026-08-24 10:00:00')).toBe('2 hours ago')
   })
 })

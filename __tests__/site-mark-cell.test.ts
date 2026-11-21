@@ -170,6 +170,8 @@ describe('SiteMarkMenu — what the cell opens', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-10-29T12:00:00Z'))
     expect(menu({ mark: mark('done') })).toContain('Set by a@example.test, 2 hours ago')
+    vi.setSystemTime(new Date('2026-10-29T10:00:20Z'))
+    expect(menu({ mark: mark('done') })).toContain('Set by a@example.test, just now')
     expect(menu({ mark: mark('done', null, null, null) })).not.toContain('Set by')
     expect(menu()).not.toContain('Set by')
   })

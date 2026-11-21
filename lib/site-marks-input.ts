@@ -5,7 +5,7 @@
  * A mark is a status and a note, each optional, kept per site: the host the counts name. A change names only the fields it touches: a field left out
  * keeps its value, null clears it, and a site with neither left has no mark.
  */
-import { formatRelativeTime } from '@/lib/format-relative-time'
+import { formatRelativeTimeInline } from '@/lib/format-relative-time'
 import { SITE_COUNTS_MAX_PER_LIST, siteEntry } from '@/lib/site-counts-input'
 
 /** The statuses, in the order the menu lists them. A fourth is one entry here and one in SITE_MARK_LABELS: the column is text, so there is no migration. */
@@ -131,7 +131,7 @@ export function markFilterCounts(states: MarkState[]): Record<MarkFilter, number
 export function markTitle(mark: SiteMark | null): string {
   const lines = [mark?.status ? SITE_MARK_LABELS[mark.status] : NO_MARK_LABEL]
   if (mark?.note) lines.push(mark.note.length > TITLE_NOTE_MAX ? `${mark.note.slice(0, TITLE_NOTE_MAX)}…` : mark.note)
-  if (mark?.updated_by && mark.updated_at) lines.push(`${mark.updated_by}, ${formatRelativeTime(mark.updated_at)}`)
+  if (mark?.updated_by && mark.updated_at) lines.push(`${mark.updated_by}, ${formatRelativeTimeInline(mark.updated_at)}`)
   return lines.join('\n')
 }
 

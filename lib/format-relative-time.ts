@@ -16,3 +16,9 @@ export function formatRelativeTime(dateStr: string): string {
   const days = Math.floor(hours / 24)
   return `${days} day${days === 1 ? '' : 's'} ago`
 }
+
+/** formatRelativeTime starts a sentence ("Just now"); inside one ("Set by a, just now") it must not. */
+export function formatRelativeTimeInline(dateStr: string): string {
+  const text = formatRelativeTime(dateStr)
+  return text.charAt(0).toLowerCase() + text.slice(1)
+}
