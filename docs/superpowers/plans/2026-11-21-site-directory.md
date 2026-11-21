@@ -3088,7 +3088,9 @@ describe('the Site Directory page — one endless list', () => {
     expect(page).toContain('nextSiteSort(')
     expect(page).toContain('}, [sort, applied, markFilter, marksStore])')
     expect(page).toContain('setTimeout(() => setApplied(search.trim()), 300)')
-    expect(load).toContain("listBoxRef.current?.scrollTo({ top: 0 })")
+    expect(load).toContain('scrollListToTop(listBoxRef.current)')
+    // the document scrolls in this layout, not the list's box: found only by driving the page (a sort while far down fetched every page again)
+    expect(page).toContain('else window.scrollTo({ top: 0 })')
   })
 
   test('the marks come with the list: the store is handed each page\'s marks, and a changed mark reads the chips again', () => {
@@ -3132,6 +3134,9 @@ describe('the row and its detail', () => {
       expect(detail).toContain(text)
     }
     expect(detail).toContain('breakdownNote(site)')
+    // "Just now" inside a sentence reads "just now"
+    expect(detail).toContain('const ago = ')
+    expect(detail).not.toContain('Counted ${formatRelativeTime')
     expect(detail).toContain('<BreakdownLegend')
   })
 })
@@ -3352,6 +3357,12 @@ import { BreakdownBar, BreakdownLegend } from "@/components/breakdown-bar"
 import { formatRelativeTime } from "@/lib/format-relative-time"
 import { breakdownNote, type DirectorySite } from "@/lib/site-directory-input"
 
+/** formatRelativeTime starts a sentence ("Just now"); inside one it must not. */
+const ago = (dateText: string) => {
+  const text = formatRelativeTime(dateText)
+  return text.charAt(0).toLowerCase() + text.slice(1)
+}
+
 /** What the page knows about one row beyond the site: whether its split is being worked out or failed, and whether it is being counted again. */
 export interface RowUi {
   breakdown: "idle" | "working" | "failed"
@@ -3392,7 +3403,7 @@ export function SiteDirectoryDetail({ site, ui, onBreakdown, onRecount, onRemove
   return (
     <div className="space-y-3">
       <p className="text-[11px] text-muted-foreground">
-        {site.counted_at ? `Counted ${formatRelativeTime(site.counted_at)}` : "Not counted yet. The next refresh counts it."}
+        {site.counted_at ? `Counted ${ago(site.counted_at)}` : "Not counted yet. The next refresh counts it."}
         {site.count_error && !site.counted_at ? ` (${site.count_error})` : ""}
       </p>
 
@@ -3405,7 +3416,7 @@ export function SiteDirectoryDetail({ site, ui, onBreakdown, onRecount, onRemove
             <BreakdownBar breakdown={breakdown} className="h-2.5" />
             <BreakdownLegend breakdown={breakdown} />
             <p className="text-[11px] text-muted-foreground">
-              Worked out {formatRelativeTime(breakdown.at)}.{note ? ` ${note}` : ""}
+              Worked out {ago(breakdown.at)}.{note ? ` ${note}` : ""}
             </p>
           </div>
         )}
@@ -3418,8 +3429,8 @@ export function SiteDirectoryDetail({ site, ui, onBreakdown, onRecount, onRemove
       </div>
 
       <p className="text-[11px] text-muted-foreground">
-        Added {formatRelativeTime(site.first_added_at)} · counted {site.times_counted.toLocaleString()} time{site.times_counted === 1 ? "" : "s"}
-        {site.last_counted_at ? ` · last ${formatRelativeTime(site.last_counted_at)}` : ""}
+        Added {ago(site.first_added_at)} · counted {site.times_counted.toLocaleString()} time{site.times_counted === 1 ? "" : "s"}
+        {site.last_counted_at ? ` · last ${ago(site.last_counted_at)}` : ""}
       </p>
 
       {site.mark?.note && (
@@ -3484,6 +3495,17 @@ async function getJson<T>(url: string, init?: RequestInit): Promise<Answer<T>> {
 
 const marksOf = (sites: DirectorySite[]): Record<string, SiteMark> =>
   Object.fromEntries(sites.filter(s => s.mark !== null).map(s => [s.host, s.mark as SiteMark]))
+
+/**
+ * Back to the top of the list when it is replaced (a sort, a search, a chip, a reload). In this layout the whole document scrolls, so the list's own box is
+ * not what scrolls; a box that does scroll, or an ancestor that does, is honoured too. Without it a list replaced while the person is far down keeps the
+ * old scroll position, the end of the new first page is then in range of the observer, and every page is fetched again.
+ */
+function scrollListToTop(box: HTMLElement | null) {
+  const scroller = box && box.scrollHeight > box.clientHeight + 1 ? box : box ? scrollParentOf(box) : null
+  if (scroller) scroller.scrollTo({ top: 0 })
+  else window.scrollTo({ top: 0 })
+}
 
 // ── One row ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -3589,7 +3611,7 @@ export default function SiteDirectoryPage() {
       setChips(json.marks ?? null)
       setLoadedRefreshedAt(json.refreshed_at ?? null)
       marksStore.adopt(marksOf(json.sites), true)
-      listBoxRef.current?.scrollTo({ top: 0 })
+      scrollListToTop(listBoxRef.current)
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return
       if (id !== searchRef.current) return

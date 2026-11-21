@@ -79,7 +79,9 @@ describe('the Site Directory page — one endless list', () => {
     expect(page).toContain('nextSiteSort(')
     expect(page).toContain('}, [sort, applied, markFilter, marksStore])')
     expect(page).toContain('setTimeout(() => setApplied(search.trim()), 300)')
-    expect(load).toContain("listBoxRef.current?.scrollTo({ top: 0 })")
+    expect(load).toContain('scrollListToTop(listBoxRef.current)')
+    // the document scrolls in this layout, not the list's box: found only by driving the page (a sort while far down fetched every page again)
+    expect(page).toContain('else window.scrollTo({ top: 0 })')
   })
 
   test('the marks come with the list: the store is handed each page\'s marks, and a changed mark reads the chips again', () => {
@@ -123,6 +125,9 @@ describe('the row and its detail', () => {
       expect(detail).toContain(text)
     }
     expect(detail).toContain('breakdownNote(site)')
+    // "Just now" inside a sentence reads "just now"
+    expect(detail).toContain('const ago = ')
+    expect(detail).not.toContain('Counted ${formatRelativeTime')
     expect(detail).toContain('<BreakdownLegend')
   })
 })

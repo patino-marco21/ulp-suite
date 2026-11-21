@@ -7,6 +7,12 @@ import { BreakdownBar, BreakdownLegend } from "@/components/breakdown-bar"
 import { formatRelativeTime } from "@/lib/format-relative-time"
 import { breakdownNote, type DirectorySite } from "@/lib/site-directory-input"
 
+/** formatRelativeTime starts a sentence ("Just now"); inside one it must not. */
+const ago = (dateText: string) => {
+  const text = formatRelativeTime(dateText)
+  return text.charAt(0).toLowerCase() + text.slice(1)
+}
+
 /** What the page knows about one row beyond the site: whether its split is being worked out or failed, and whether it is being counted again. */
 export interface RowUi {
   breakdown: "idle" | "working" | "failed"
@@ -47,7 +53,7 @@ export function SiteDirectoryDetail({ site, ui, onBreakdown, onRecount, onRemove
   return (
     <div className="space-y-3">
       <p className="text-[11px] text-muted-foreground">
-        {site.counted_at ? `Counted ${formatRelativeTime(site.counted_at)}` : "Not counted yet. The next refresh counts it."}
+        {site.counted_at ? `Counted ${ago(site.counted_at)}` : "Not counted yet. The next refresh counts it."}
         {site.count_error && !site.counted_at ? ` (${site.count_error})` : ""}
       </p>
 
@@ -60,7 +66,7 @@ export function SiteDirectoryDetail({ site, ui, onBreakdown, onRecount, onRemove
             <BreakdownBar breakdown={breakdown} className="h-2.5" />
             <BreakdownLegend breakdown={breakdown} />
             <p className="text-[11px] text-muted-foreground">
-              Worked out {formatRelativeTime(breakdown.at)}.{note ? ` ${note}` : ""}
+              Worked out {ago(breakdown.at)}.{note ? ` ${note}` : ""}
             </p>
           </div>
         )}
@@ -73,8 +79,8 @@ export function SiteDirectoryDetail({ site, ui, onBreakdown, onRecount, onRemove
       </div>
 
       <p className="text-[11px] text-muted-foreground">
-        Added {formatRelativeTime(site.first_added_at)} · counted {site.times_counted.toLocaleString()} time{site.times_counted === 1 ? "" : "s"}
-        {site.last_counted_at ? ` · last ${formatRelativeTime(site.last_counted_at)}` : ""}
+        Added {ago(site.first_added_at)} · counted {site.times_counted.toLocaleString()} time{site.times_counted === 1 ? "" : "s"}
+        {site.last_counted_at ? ` · last ${ago(site.last_counted_at)}` : ""}
       </p>
 
       {site.mark?.note && (

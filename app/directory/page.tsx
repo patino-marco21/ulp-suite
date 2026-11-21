@@ -36,6 +36,17 @@ async function getJson<T>(url: string, init?: RequestInit): Promise<Answer<T>> {
 const marksOf = (sites: DirectorySite[]): Record<string, SiteMark> =>
   Object.fromEntries(sites.filter(s => s.mark !== null).map(s => [s.host, s.mark as SiteMark]))
 
+/**
+ * Back to the top of the list when it is replaced (a sort, a search, a chip, a reload). In this layout the whole document scrolls, so the list's own box is
+ * not what scrolls; a box that does scroll, or an ancestor that does, is honoured too. Without it a list replaced while the person is far down keeps the
+ * old scroll position, the end of the new first page is then in range of the observer, and every page is fetched again.
+ */
+function scrollListToTop(box: HTMLElement | null) {
+  const scroller = box && box.scrollHeight > box.clientHeight + 1 ? box : box ? scrollParentOf(box) : null
+  if (scroller) scroller.scrollTo({ top: 0 })
+  else window.scrollTo({ top: 0 })
+}
+
 // ── One row ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 interface DirectoryRowProps {
@@ -140,7 +151,7 @@ export default function SiteDirectoryPage() {
       setChips(json.marks ?? null)
       setLoadedRefreshedAt(json.refreshed_at ?? null)
       marksStore.adopt(marksOf(json.sites), true)
-      listBoxRef.current?.scrollTo({ top: 0 })
+      scrollListToTop(listBoxRef.current)
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return
       if (id !== searchRef.current) return
