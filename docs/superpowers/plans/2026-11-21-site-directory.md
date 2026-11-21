@@ -1235,7 +1235,7 @@ Expected: FAIL (`listSites is not a function` or an import error).
 
 - [ ] **Step 3: Add the listing and the answers to `lib/site-directory.ts`**
 
-Replace the import block at the top of `lib/site-directory.ts` (everything above `const SEED_FLAG`) with:
+Replace the five `import` lines at the top of `lib/site-directory.ts` (keep the header comment above them and `const SEED_FLAG` below them) with:
 
 ```ts
 import { dbGet, dbQuery, dbRun, dbTransaction } from '@/lib/sqlite'
