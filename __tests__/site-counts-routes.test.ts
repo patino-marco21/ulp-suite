@@ -29,7 +29,8 @@ import { POST as uiCounts } from '@/app/api/lookup/counts/route'
 import { POST as v1Counts } from '@/app/api/v1/lookup/counts/route'
 import { SITE_COUNTS_MAX_PER_REQUEST } from '@/lib/site-counts-input'
 
-const isReadiness = (sql: string) => sql.includes('system.projection_parts')
+// the projection check, and the read of the table's fingerprint that precedes the counting (the directory's marker): neither is a counting query
+const isReadiness = (sql: string) => sql.includes('system.projection_parts') || sql.includes('system.mutations')
 const countingCalls = () => calls.filter(c => !isReadiness(c.sql))
 
 const subRow = (host: string, host_count: number, sub: Array<[string, number]> = []) => ({

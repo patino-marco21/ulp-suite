@@ -20,8 +20,10 @@
 import { executeQuery } from '@/lib/clickhouse'
 import { searchedAsField, stringList } from '@/lib/batch-lookup'
 import { isDomainRevProjectionReady } from '@/lib/credentials-projections'
-import { importedRangeAndSql, importedRangeEchoIfSet, importedRangePlain, parseImportedRange, type ImportedRange } from '@/lib/imported-range'
+import { hasImportedRange, importedRangeAndSql, importedRangeEchoIfSet, importedRangePlain, parseImportedRange, type ImportedRange } from '@/lib/imported-range'
 import { OUT_OF_TIME, SITE_COUNTS_MAX_PER_REQUEST, TOO_BROAD, planSites, splitRequests, type SiteCount, type SiteEntry } from '@/lib/site-counts-input'
+import { readLiveState } from '@/lib/search-dictionary'
+import { recordSites } from '@/lib/site-directory'
 
 /** Sites counted by one ClickHouse query. */
 export const SITE_COUNTS_CHUNK = 20
@@ -290,7 +292,15 @@ export async function answerSiteCounts(rawBody: unknown): Promise<SiteCountsRepl
   }
 
   try {
+    // The Site Directory marks a count with the state of the table it was made against, read BEFORE counting: rows that arrive meanwhile leave the
+    // site out of date for the next refresh. readLiveState answers null instead of throwing.
+    const fingerprint = (await readLiveState())?.fingerprint ?? null
     const { results, subdomains_counted } = await countSites(domains, parsedRange.range)
+    try {
+      recordSites({ results, windowed: hasImportedRange(parsedRange.range), fingerprint })
+    } catch (error) {
+      console.error('site directory record error:', error)
+    }
     return {
       status: 200,
       json: {
