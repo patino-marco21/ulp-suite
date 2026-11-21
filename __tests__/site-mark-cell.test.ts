@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { createElement, type ComponentProps } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, test, expect, vi, afterEach } from 'vitest'
-import { MARK_CELL, MarkIcon, SiteMarkCell, SiteMarkMenu } from '@/components/site-mark-cell'
+import { MARK_CELL, MarkIcon, STATUS_STYLE, SiteMarkCell, SiteMarkMenu } from '@/components/site-mark-cell'
 import { SiteMarkFilter } from '@/components/site-mark-filter'
 import type { SiteMark } from '@/lib/site-marks-input'
 
@@ -35,45 +35,61 @@ describe('SiteMarkCell — what a row shows before anything is clicked', () => {
     expect(out).not.toContain('No mark')
   })
 
-  test('a site with no mark is a button with its words, and a faint outline that shows on hover, on focus and on touch screens', () => {
+  test('a site with no mark is a dashed "Mark" pill that shows on row hover, on focus, while its menu is open and on touch screens', () => {
     const out = cell()
     expect(out).toContain('<button')
     expect(out).toContain('aria-label="Mark for corp.example: No mark"')
     expect(out).toContain('title="No mark"')
     expect(out).toContain('aria-haspopup="dialog"')
-    expect(out).toContain('opacity-0')
-    expect(out).toContain('group-hover/mark:opacity-60')
-    expect(out).toContain('group-focus-visible/mark:opacity-60')
-    expect(out).toContain('[@media(hover:none)]:opacity-40')
+    expect(out).toContain('border-dashed')
+    expect(out).toContain('>Mark</span>')
+    for (const visible of ['opacity-0', 'group-hover/row:opacity-100', 'focus-visible:opacity-100', 'data-[state=open]:opacity-100', '[@media(hover:none)]:opacity-70']) {
+      expect(out).toContain(visible)
+    }
     expect(out).not.toContain('bg-primary')
   })
 
-  test('each status has its own shape and colour, and is not faint', () => {
+  test('each status is a tinted pill with its word, its own shape and its own colour, and is not faint', () => {
     const done = cell({ mark: mark('done') })
-    expect(done).toContain('text-green-600')
-    expect(done).toContain('aria-label="Mark for corp.example: Done"')
     const skip = cell({ mark: mark('skip') })
-    expect(skip).toContain('text-red-600')
-    expect(skip).toContain('aria-label="Mark for corp.example: Skip"')
     const todo = cell({ mark: mark('todo') })
+    expect(done).toContain('>Done</span>')
+    expect(done).toContain(STATUS_STYLE.done.pill)
+    expect(done).toContain('aria-label="Mark for corp.example: Done"')
+    expect(skip).toContain('>Skip</span>')
+    expect(skip).toContain(STATUS_STYLE.skip.pill)
+    expect(skip).toContain('aria-label="Mark for corp.example: Skip"')
+    expect(todo).toContain('>To look at</span>')
+    expect(todo).toContain(STATUS_STYLE.todo.pill)
     expect(todo).toContain('fill-current')
-    expect(todo).toContain('text-blue-600')
     expect(todo).toContain('aria-label="Mark for corp.example: To look at"')
     for (const out of [done, skip, todo]) expect(out).not.toContain('opacity-0')
+    expect(done).toContain('bg-green-500/15')
+    expect(skip).toContain('bg-red-500/15')
+    expect(todo).toContain('bg-blue-500/15')
     // three different shapes, not only three colours
     const shapes = [done, skip, todo].map(out => /lucide lucide-([a-z-]+)/.exec(out)?.[1])
     expect(new Set(shapes).size).toBe(3)
   })
 
-  test('a note puts a dot on the icon, and keeps the icon of a site with no status visible', () => {
+  test('the word is hidden below the sm width (the icon, the tooltip and the accessible name keep it) and shown from there on', () => {
+    expect(cell({ mark: mark('skip') })).toContain('<span class="hidden sm:inline">Skip</span>')
+    expect(cell()).toContain('<span class="hidden sm:inline">Mark</span>')
+  })
+
+  test('a note without a status is a neutral "Note" pill with a speech bubble, always visible', () => {
     const noteOnly = cell({ mark: mark(null, 'behind a captcha') })
-    expect(noteOnly).toContain('bg-primary')
-    expect(noteOnly).toContain('opacity-60')
+    expect(noteOnly).toContain('>Note</span>')
+    expect(noteOnly).toContain('lucide-message-square')
     expect(noteOnly).not.toContain('opacity-0')
+    expect(noteOnly).not.toContain('border-dashed')
     expect(noteOnly).toContain('aria-label="Mark for corp.example: No mark, has a note"')
     expect(noteOnly).toContain('behind a captcha')
-    expect(cell({ mark: mark('done', 'x') })).toContain('bg-primary')
-    expect(cell({ mark: mark('done') })).not.toContain('bg-primary')
+  })
+
+  test('a note no longer puts a dot on the pill: the row shows the note itself', () => {
+    expect(cell({ mark: mark('done', 'x') })).not.toContain('bg-primary')
+    expect(cell({ mark: mark('done', 'x') })).toContain('aria-label="Mark for corp.example: Done, has a note"')
   })
 
   test('the menu is not in the markup until it is opened', () => {
@@ -82,13 +98,28 @@ describe('SiteMarkCell — what a row shows before anything is clicked', () => {
     expect(out).not.toContain('Saved when this closes')
   })
 
-  test('every state is as wide as the header above it, so the columns line up', () => {
+  test('every state is as wide as the header above it, so the columns line up: an icon wide below sm, a pill wide from there on', () => {
     expect(MARK_CELL).toContain('w-12')
+    expect(MARK_CELL).toContain('sm:w-28')
     for (const availability of ['loading', 'ready', 'failed'] as const) expect(cell({ availability })).toContain(MARK_CELL)
   })
 
   test('its clicks stop at the cell: the menu is in a portal, whose clicks React would bubble to the row and open its detail', () => {
     expect(source('components/site-mark-cell.tsx')).toContain('onClick={event => event.stopPropagation()}')
+  })
+})
+
+describe('STATUS_STYLE', () => {
+  test('each status has a tint for its pill, a bar for the edge of its row and a look for its chosen button, all different from the other statuses', () => {
+    for (const part of ['pill', 'edge', 'chosen'] as const) {
+      const values = (['done', 'skip', 'todo'] as const).map(status => STATUS_STYLE[status][part])
+      expect(values.every(v => v.length > 0)).toBe(true)
+      expect(new Set(values).size).toBe(3)
+    }
+  })
+
+  test('every tint works on a dark page as well', () => {
+    for (const status of ['done', 'skip', 'todo'] as const) expect(STATUS_STYLE[status].pill).toContain('dark:')
   })
 })
 
@@ -143,8 +174,25 @@ describe('SiteMarkMenu — what the cell opens', () => {
     expect(menu()).not.toContain('Set by')
   })
 
-  test('names the site it is for', () => {
-    expect(menu({ host: 'app.corp.example' })).toContain('title="app.corp.example"')
+  test('names the site it is for, with a link that opens it in another tab', () => {
+    const out = menu({ host: 'app.corp.example' })
+    expect(out).toContain('title="app.corp.example"')
+    expect(out).toContain('href="https://app.corp.example/"')
+    expect(out).toContain('target="_blank"')
+    expect(out).toContain('Open site')
+  })
+
+  test('the choice that is on is tinted in its own colour, and No mark is only outlined', () => {
+    const chosen = (out: string) => /<button[^>]*aria-pressed="true"[^>]*class="([^"]*)"|<button[^>]*class="([^"]*)"[^>]*aria-pressed="true"/.exec(out)
+    const classOf = (out: string) => { const m = chosen(out); return m ? (m[1] ?? m[2]) : '' }
+    expect(classOf(menu({ mark: mark('skip') }))).toContain(STATUS_STYLE.skip.chosen)
+    expect(classOf(menu({ mark: mark('done') }))).toContain(STATUS_STYLE.done.chosen)
+    expect(classOf(menu({ mark: mark('todo') }))).toContain(STATUS_STYLE.todo.chosen)
+    expect(classOf(menu())).toContain('border-primary')
+  })
+
+  test('the note box is tall enough to read a note of a few lines without scrolling', () => {
+    expect(menu()).toContain('min-h-[7rem]')
   })
 })
 

@@ -1,8 +1,9 @@
 "use client"
 
 import { useId, useRef, useState, type KeyboardEvent } from "react"
-import { AlertTriangle, Circle, CircleCheck, CircleDashed, CircleX } from "lucide-react"
+import { AlertTriangle, Circle, CircleCheck, CircleDashed, CircleX, MessageSquare, Plus } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { SiteLink } from "@/components/site-link"
 import { Textarea } from "@/components/ui/textarea"
 import { formatRelativeTime } from "@/lib/format-relative-time"
 import {
@@ -10,8 +11,21 @@ import {
   type SiteMark, type SiteMarkPatch, type SiteMarkStatus,
 } from "@/lib/site-marks-input"
 
-/** The cell's box: one width for the header, the loading and failed states and the cell itself, so the columns line up. */
-export const MARK_CELL = "w-12 shrink-0 flex items-center justify-center"
+/**
+ * The cell's box: one width for the header, the loading and failed states and the cell itself, so the columns line up. Wide enough for the pill with its
+ * word from the sm width on; below it the pill is its icon alone.
+ */
+export const MARK_CELL = "w-12 sm:w-28 shrink-0 flex items-center justify-start"
+
+/**
+ * How each status looks wherever it is shown (design: docs/superpowers/specs/2026-11-21-mark-display-and-open-link-design.md): `pill` tints the cell's
+ * pill, `edge` is the bar on the left of its row, `chosen` marks the button that is on in the editor. Every tint works on a light and a dark page.
+ */
+export const STATUS_STYLE: Record<SiteMarkStatus, { pill: string; edge: string; chosen: string }> = {
+  done: { pill: "bg-green-500/15 text-green-700 dark:text-green-300", edge: "bg-green-500/70", chosen: "border-green-600/60 bg-green-500/15" },
+  skip: { pill: "bg-red-500/15 text-red-700 dark:text-red-300", edge: "bg-red-500/70", chosen: "border-red-600/60 bg-red-500/15" },
+  todo: { pill: "bg-blue-500/15 text-blue-700 dark:text-blue-300", edge: "bg-blue-500/70", chosen: "border-blue-600/60 bg-blue-500/15" },
+}
 
 /** The note box shows its counter from here to the limit. */
 const COUNTER_FROM = SITE_MARK_NOTE_MAX - 100
@@ -46,7 +60,10 @@ export function SiteMarkMenu({ host, mark, draft, onDraftChange, onChoose, onNot
   const current = mark?.status ?? null
   return (
     <div className="space-y-3">
-      <p className="truncate font-mono text-xs" title={host}>{host}</p>
+      <div className="flex items-center justify-between gap-2">
+        <p className="min-w-0 truncate font-mono text-xs" title={host}>{host}</p>
+        <SiteLink host={host} label="Open site" />
+      </div>
       <div className="grid grid-cols-2 gap-1" role="group" aria-label="Mark">
         {MENU_OPTIONS.map(({ status, label }) => (
           <button
@@ -55,7 +72,7 @@ export function SiteMarkMenu({ host, mark, draft, onDraftChange, onChoose, onNot
             aria-pressed={current === status}
             onClick={() => onChoose(status)}
             className={`flex items-center gap-2 rounded-md border px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted ${
-              current === status ? "border-primary bg-muted font-medium" : ""
+              current !== status ? "" : status === null ? "border-primary bg-muted font-medium" : `${STATUS_STYLE[status].chosen} font-medium`
             }`}
           >
             <MarkIcon status={status} className="h-3.5 w-3.5 shrink-0" />
@@ -72,7 +89,7 @@ export function SiteMarkMenu({ host, mark, draft, onDraftChange, onChoose, onNot
           onChange={event => onDraftChange(event.target.value)}
           onKeyDown={onNoteKeyDown}
           placeholder="Optional: why, or what you found"
-          className="min-h-[72px] resize-none text-xs"
+          className="min-h-[7rem] resize-y text-xs"
         />
         <p className="flex justify-between gap-2 text-[10px] text-muted-foreground">
           <span>Saved when this closes. Ctrl+Enter closes it.</span>
@@ -95,7 +112,7 @@ interface SiteMarkCellProps {
   onChange: (patch: SiteMarkPatch) => void
 }
 
-/** The cell between a site's name and its Rows: the icon of its status, a dot when it has a note, and a menu to change both. */
+/** The cell between a site's name and its Rows: a pill with the word of its status (or "Note", or a dashed "Mark" when there is none), and a menu to change both. */
 export function SiteMarkCell({ host, mark, availability, onChange }: SiteMarkCellProps) {
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState("")
@@ -118,10 +135,12 @@ export function SiteMarkCell({ host, mark, availability, onChange }: SiteMarkCel
   }
 
   const status = mark?.status ?? null
-  // With no status the icon is a faint outline that shows on hover and keyboard focus, and always on a touch screen; a note keeps it on.
-  const iconVisibility = status !== null ? ""
-    : mark?.note ? "opacity-60"
-    : "opacity-0 group-hover/mark:opacity-60 group-focus-visible/mark:opacity-60 [@media(hover:none)]:opacity-40"
+  const note = mark?.note ?? null
+  // A site with no mark at all shows a dashed pill only when the row is hovered, a key puts the focus on it or its menu is open, and always on a touch screen.
+  const tone = status !== null ? STATUS_STYLE[status].pill
+    : note ? "border text-muted-foreground"
+    : "border border-dashed text-muted-foreground opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 [@media(hover:none)]:opacity-70"
+  const word = status !== null ? SITE_MARK_LABELS[status] : note ? "Note" : "Mark"
 
   const noteChanged = () => normalizeNote(draft) !== normalizeNote(savedNote.current)
 
@@ -167,15 +186,15 @@ export function SiteMarkCell({ host, mark, availability, onChange }: SiteMarkCel
             type="button"
             title={markTitle(mark)}
             aria-label={markAriaLabel(host, mark)}
-            className="group/mark relative flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className={`inline-flex h-6 items-center gap-1 whitespace-nowrap rounded-full px-1.5 text-xs font-medium transition-colors hover:ring-1 hover:ring-foreground/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:px-2 ${tone}`}
           >
-            <span className={`flex transition-opacity ${iconVisibility}`}>
-              <MarkIcon status={status} />
-            </span>
-            {mark?.note && <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-primary" aria-hidden />}
+            {status !== null ? <MarkIcon status={status} className="h-3.5 w-3.5" />
+              : note ? <MessageSquare className="h-3.5 w-3.5" aria-hidden />
+              : <Plus className="h-3.5 w-3.5" aria-hidden />}
+            <span className="hidden sm:inline">{word}</span>
           </button>
         </PopoverTrigger>
-        <PopoverContent align="end" className="w-72 p-3">
+        <PopoverContent align="end" className="w-80 p-3">
           <SiteMarkMenu host={host} mark={mark} draft={draft} onDraftChange={setDraft} onChoose={choose} onNoteKeyDown={onNoteKeyDown} />
         </PopoverContent>
       </Popover>

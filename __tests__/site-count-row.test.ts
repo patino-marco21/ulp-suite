@@ -3,7 +3,8 @@ import { join } from 'node:path'
 import { createElement, type ComponentProps } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, test, expect } from 'vitest'
-import { COLS, SiteRow, fmt } from '@/components/site-count-row'
+import { COLS, SiteRow, SiteRowBody, fmt } from '@/components/site-count-row'
+import { STATUS_STYLE } from '@/components/site-mark-cell'
 import type { SiteCount } from '@/lib/site-counts-input'
 import type { SiteMark } from '@/lib/site-marks-input'
 
@@ -15,6 +16,7 @@ const notASite: SiteCount = {
   host: '', found: false, count: null, host_count: null, subdomain_count: null, subdomains: null, top_subdomains: [], error: 'not a site address',
 }
 const mark = (status: SiteMark['status'], note: string | null = null): SiteMark => ({ status, note, updated_by: 'a@example.test', updated_at: '2026-10-29 10:00:00' })
+const noRows = () => counted({ count: 0, found: false, host_count: 0, subdomain_count: 0, subdomains: 0, top_subdomains: [] })
 
 const row = (props: Partial<ComponentProps<typeof SiteRow>> & { result?: SiteCount; site?: string } = {}) => {
   const { result = counted(), site = 'https://www.corp.example/login', ...rest } = props
@@ -107,6 +109,100 @@ describe('SiteRow — the row of a counted site', () => {
     expect(out).toContain('>20</span>')
     expect(out).toContain('>10</span>')
     expect(out).not.toContain('Subdomains with the most rows')
+  })
+})
+
+describe('SiteRow — the arrow, the note and the edge', () => {
+  test('the arrow sits right after the site text, before the mark, and opens the host the counts name, not what was pasted', () => {
+    const out = row()
+    const name = out.indexOf('title="https://www.corp.example/login"')
+    const arrow = out.indexOf('aria-label="Open corp.example in a new tab"')
+    const markButton = out.indexOf('aria-label="Mark for')
+    expect(name).toBeGreaterThan(0)
+    expect(arrow).toBeGreaterThan(name)
+    expect(markButton).toBeGreaterThan(arrow)
+    expect(out).toContain('href="https://corp.example/"')
+    expect(out).not.toContain('href="https://www.corp.example/login"')
+    expect(out).toContain('target="_blank"')
+  })
+
+  test('the arrow is a link, not a button: the number of buttons and how they nest are as they were', () => {
+    const out = row()
+    expect(buttons(out)).toBe(2)
+    expect(buttonDepth(out)).toBe(1)
+  })
+
+  test('an entry that is not a site has no arrow', () => {
+    expect(row({ site: 'localhost', result: notASite })).not.toContain('in a new tab')
+  })
+
+  test('a note shows under the site, two lines at most, with a speech bubble; no note, no line', () => {
+    const out = row({ mark: mark('skip', 'Invite wall, no signup form') })
+    expect(out).toMatch(/<span class="[^"]*line-clamp-2[^"]*">Invite wall, no signup form<\/span>/)
+    expect(out).toContain('lucide-message-square')
+    expect(row({ mark: mark('skip') })).not.toContain('line-clamp-2')
+    expect(row()).not.toContain('line-clamp-2')
+    expect(row({ mark: mark(null, 'a note and no status') })).toContain('a note and no status</span>')
+  })
+
+  test('a row with a status has an edge in the status colour; a row with only a note, or with nothing, has none', () => {
+    for (const status of ['done', 'skip', 'todo'] as const) {
+      expect(row({ mark: mark(status) })).toContain(`absolute inset-y-0 left-0 w-1 ${STATUS_STYLE[status].edge}`)
+    }
+    expect(row({ mark: mark(null, 'only a note') })).not.toContain('absolute inset-y-0 left-0')
+    expect(row()).not.toContain('absolute inset-y-0 left-0')
+  })
+
+  test('the edge is clipped by the rounded corners of the row, and does not take a click', () => {
+    const out = row({ mark: mark('skip') })
+    expect(out).toMatch(/^<div class="[^"]*relative[^"]*overflow-hidden/)
+    expect(out).toContain('aria-hidden="true" class="absolute inset-y-0 left-0 w-1')
+  })
+
+  test('the row is the group the dashed Mark pill shows on when hovered', () => {
+    expect(row()).toMatch(/^<div class="[^"]*group\/row/)
+  })
+
+  test('a site with no rows can be opened when it has a note, to read all of it; with no note there is still nothing to open', () => {
+    const withNote = row({ result: noRows(), mark: mark('skip', 'why') })
+    expect(buttons(withNote)).toBe(2)
+    expect(withNote).toContain('aria-label="Show the details of https://www.corp.example/login"')
+    expect(withNote).toContain('cursor-pointer')
+    const without = row({ result: noRows() })
+    expect(buttons(without)).toBe(1)
+    expect(without).not.toContain('Show the details of')
+  })
+})
+
+describe('SiteRowBody — what an opened row shows', () => {
+  const body = (props: Partial<ComponentProps<typeof SiteRowBody>> = {}) =>
+    renderToStaticMarkup(createElement(SiteRowBody, { result: counted(), mark: null, ...props }))
+
+  test('starts with the whole note, line breaks kept, and who set the mark and when', () => {
+    const out = body({ mark: mark('skip', 'first line\nsecond line') })
+    expect(out).toContain('whitespace-pre-wrap')
+    expect(out).toContain('first line\nsecond line')
+    expect(out).toContain('a@example.test')
+    expect(out.indexOf('first line')).toBeLessThan(out.indexOf('on the site itself'))
+  })
+
+  test('shows no note block without a note', () => {
+    expect(body()).not.toContain('whitespace-pre-wrap')
+    expect(body({ mark: mark('done') })).not.toContain('whitespace-pre-wrap')
+  })
+
+  test('each of the top subdomains has an arrow that opens it', () => {
+    const out = body({ result: counted({ top_subdomains: [{ domain: 'app.corp.example', count: 10 }, { domain: 'vpn.corp.example', count: 4 }] }) })
+    expect(out).toContain('href="https://app.corp.example/"')
+    expect(out).toContain('href="https://vpn.corp.example/"')
+    expect(out).toContain('aria-label="Open vpn.corp.example in a new tab"')
+  })
+
+  test('keeps the numbers and what the Site Directory adds under them', () => {
+    const out = body({ extra: createElement('p', null, 'directory part') })
+    expect(out).toContain('on the site itself')
+    expect(out).toContain('Subdomains with the most rows')
+    expect(out).toContain('directory part')
   })
 })
 
