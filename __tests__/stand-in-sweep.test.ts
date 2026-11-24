@@ -316,6 +316,21 @@ describe('moving a finished new download into the inbox', () => {
     expect(readdirSync(inbox).filter(n => n.endsWith('.txt'))).toEqual([])
   })
 
+  it('a name the ledger knows only from before sizes and hashes were recorded moves under a re-feed name, and the stand-in keeps the old name', async () => {
+    const body = 'bytes under a legacy name\n'
+    const p = download('legacy.txt', body)
+    const before = statSync(p, { bigint: true })
+    const r = await sweepDownloads(withInbox([ledgerRow('legacy.txt', body, { size: 0, sha256: '', revision: 50 })], []))
+    const dest = readdirSync(inbox).filter(n => n.endsWith('.txt'))
+    expect(dest).toHaveLength(1)
+    expect(dest[0]).toMatch(/^legacy \(refeed v\d\.\d\)\.txt$/)
+    expect(r.moved).toEqual(['legacy.txt'])
+    expect(readFileSync(join(inbox, dest[0]), 'utf8')).toBe(body)
+    const after = statSync(p, { bigint: true })
+    expect([after.size, after.mtimeNs, after.blocks]).toEqual([before.size, before.mtimeNs, 0n])   // the client still sees its download
+    expect((await sweepDownloads(withInbox([ledgerRow('legacy.txt', body, { size: 0, sha256: '', revision: 50 })], []))).moved).toEqual([])
+  })
+
   it('without an inbox nothing is moved: a new file is left and counted as not ingested (the by-hand sweep)', async () => {
     const p = download('lonely.txt', 'x\n')
     const r = await sweepDownloads(options([], [], { openFiles: () => new Map() }))

@@ -9,11 +9,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import { readyToReplace } from '@/lib/archive-auto'
-import { openReducedSource, runSwap, standInHolder, swapCandidates } from '@/lib/archive-swap'
+import { openReducedSource, runSwap, standInHolder, swapCandidates, verifyStandInHolder } from '@/lib/archive-swap'
 import { createStandIn } from '@/lib/ledger-tools'
 import { restoreStandIn } from '@/lib/stand-in-sweep'
 import { appendReduced, reducedDir, type ReducedEntry } from '@/lib/reduced-archive'
-import { appendManifest, archiveFile, latestByName, openSource, readManifest, type ManifestEntry } from '@/lib/source-archive'
+import { appendManifest, archiveFile, isSwapped, latestByName, openSource, readManifest, type ManifestEntry } from '@/lib/source-archive'
 
 const REPO = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
 const TSX = join(REPO, 'node_modules', '.bin', 'tsx')
@@ -147,12 +147,35 @@ describe('archive-sources on a manifest with a swapped entry', () => {
 })
 
 describe('the stand-in gate', () => {
-  test('standInHolder gives the whole entry of bytes the archive holds whole, and nothing for bytes only a reduced entry stands for', () => {
-    const { w, stays } = swappedBox()
+  test('standInHolder gives the entry of bytes the archive holds, whole or swapped for a reduced entry (the swapped one says which), and nothing for unknown bytes', () => {
+    const { w, r, stays } = swappedBox()
     const holds = standInHolder(readManifest(dir))
     expect(holds(stays.sha256)?.id).toBe(stays.id)
-    expect(holds(w.sha256)).toBeUndefined()
+    expect(isSwapped(holds(stays.sha256)!)).toBe(false)
+    expect(holds(w.sha256)).toMatchObject({ name: 'swapped.txt', reduced_id: r.id })
+    expect(isSwapped(holds(w.sha256)!)).toBe(true)
     expect(holds('0'.repeat(64))).toBeUndefined()
+  })
+
+  test('verifyStandInHolder decodes the whole entry of a whole name, and the reduced entry of a swapped one', () => {
+    const { w, stays } = swappedBox()
+    const holds = standInHolder(readManifest(dir))
+    expect(verifyStandInHolder(dir, holds(stays.sha256)!)).toEqual({ ok: true, problems: [] })
+    expect(verifyStandInHolder(dir, holds(w.sha256)!)).toEqual({ ok: true, problems: [] })
+  })
+
+  test('verifyStandInHolder refuses a swapped entry whose reduced file is gone, damaged, or was made from other bytes', () => {
+    const { w, r } = swappedBox()
+    const swapped = standInHolder(readManifest(dir))(w.sha256)!
+    expect(verifyStandInHolder(dir, { ...swapped, reduced_id: 'f'.repeat(24) })).toMatchObject({ ok: false, problems: [expect.stringMatching(/reduced entry.*missing or was made from other bytes/)] })
+    expect(verifyStandInHolder(dir, { ...swapped, sha256: 'e'.repeat(64) })).toMatchObject({ ok: false, problems: [expect.stringMatching(/other bytes/)] })
+    const file = join(reducedDir(dir), `${r.id}.zst`)
+    const bytes = readFileSync(file)
+    bytes[Math.floor(bytes.length / 2)] ^= 0xff
+    writeFileSync(file, bytes)
+    expect(verifyStandInHolder(dir, swapped).ok).toBe(false)
+    rmSync(file)
+    expect(verifyStandInHolder(dir, swapped)).toMatchObject({ ok: false, problems: [expect.stringMatching(/archive file missing/)] })
   })
 
   test('with nothing swapped it answers exactly as the plain sha map did', () => {

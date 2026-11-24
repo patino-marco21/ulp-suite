@@ -20,8 +20,8 @@ import { defaultLedgerFile, refreshLedgerIfStale, standInRegistryFile } from '@/
 import { indexLedger, readLedgerFile } from '@/lib/ledger-tools'
 import { gatherFacts, writeMoverRun, writeStatusFiles, type MoverRun } from '@/lib/pipeline-status'
 import { defaultDownloadDir, hashCacheFile, sweepDownloads, sweepEnabled } from '@/lib/stand-in-sweep'
-import { defaultArchiveDir, readManifest, verifyEntry } from '@/lib/source-archive'
-import { standInHolder } from '@/lib/archive-swap'
+import { defaultArchiveDir, readManifest } from '@/lib/source-archive'
+import { standInHolder, verifyStandInHolder } from '@/lib/archive-swap'
 
 const argv = process.argv.slice(2)
 const flag = (name: string): string | undefined => { const i = argv.indexOf(`--${name}`); return i === -1 ? undefined : argv[i + 1] }
@@ -81,7 +81,7 @@ async function main(): Promise<number> {
       if (run.ok) {
         const holds = standInHolder(existsSync(ARCHIVE) ? readManifest(ARCHIVE) : [])
         const r = await sweepDownloads({
-          dir: DIR, inbox: INBOX, index: indexLedger(readLedgerFile(LEDGER)), holds, verify: e => verifyEntry(ARCHIVE, e),
+          dir: DIR, inbox: INBOX, index: indexLedger(readLedgerFile(LEDGER)), holds, verify: e => verifyStandInHolder(ARCHIVE, e),
           registry: standInRegistryFile(LEDGER), hashCache: hashCacheFile(LEDGER),
           exts: (flag('ext') ?? 'txt').split(',').map(e => e.trim()).filter(Boolean),
           minSize: Number(flag('min-size') ?? 1_000_000), minAgeMs: QUIET_MIN * 60_000, apply: APPLY,

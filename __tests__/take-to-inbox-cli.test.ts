@@ -1,6 +1,7 @@
 /**
- * scripts/take-to-inbox.ts run for real in a sandbox (a download folder, an inbox, a ledger copy and a real source archive built with archiveFile): the stand-in gate must
- * give no holder for bytes that only a reduced entry stands for (stage D), because a stand-in there would replace the only local copy by zeros nothing could restore.
+ * scripts/take-to-inbox.ts run for real in a sandbox (a download folder, an inbox, a ledger copy and a real source archive built with archiveFile): bytes the archive holds
+ * only as a reduced entry (stage D) are swapped for a stand-in too, once that reduced entry decodes (the owner's call of 2026-11-24: the chat service keeps the original,
+ * and a re-download that stayed a file cost 28.7 GB); a reduced entry that no longer decodes leaves the download alone.
  * Nothing here touches the owner's folders, archive or ClickHouse (--no-refresh keeps it off docker). Synthetic content only.
  */
 import { spawnSync } from 'node:child_process'
@@ -46,7 +47,7 @@ function ingested(name: string, body: string): { path: string; whole: ManifestEn
 }
 
 /** The reduced twin of `whole`, then the swap itself (the manifest line, the whole file removed). */
-function swap(whole: ManifestEntry, reducedText: string): void {
+function swap(whole: ManifestEntry, reducedText: string): ReducedEntry {
   const src = join(root, `red-${whole.name}`)
   writeFileSync(src, reducedText)
   const e = archiveFile(src, { archiveDir: reducedDir(arc), name: whole.name })
@@ -58,6 +59,7 @@ function swap(whole: ManifestEntry, reducedText: string): void {
   appendReduced(arc, reduced)
   const out = swapOne({ archiveDir: arc, item: { whole, reduced, savedBytes: whole.archive_bytes - reduced.archive_bytes } })
   expect(out.ok).toBe(true)
+  return reduced
 }
 
 describe('scripts/take-to-inbox.ts', () => {
@@ -70,17 +72,29 @@ describe('scripts/take-to-inbox.ts', () => {
     expect(isStandIn(path)).toBe(true)
   })
 
-  test('a download of bytes that were swapped for a reduced entry stays a real file: a stand-in would be the only local copy turned into zeros', () => {
+  test('a download of bytes that were swapped for a reduced entry becomes a stand-in once the reduced entry decodes: same size and time, no disk', () => {
     const body = lines(300, 's')
     const { path, whole } = ingested('swapped.txt', body)
     swap(whole, lines(30, 's'))
     const before = statSync(path, { bigint: true })
     const r = run([path, '--apply'])
     expect(r.status).toBe(0)
-    expect(r.stdout).toMatch(/keep\s+swapped\.txt/)
-    expect(r.stdout).toMatch(/0 swapped for a stand-in, 1 kept/)
+    expect(r.stdout).toMatch(/stand-in swapped\.txt/)
+    expect(r.stdout).toMatch(/1 swapped for a stand-in, 0 kept/)
+    expect(isStandIn(path)).toBe(true)
+    const after = statSync(path, { bigint: true })
+    expect([after.size, after.mtimeNs, after.blocks]).toEqual([before.size, before.mtimeNs, 0n])
+  })
+
+  test('a download of swapped bytes stays a real file when the reduced entry no longer decodes: nothing is zeroed on a record that cannot be read', () => {
+    const body = lines(300, 'd')
+    const { path, whole } = ingested('damaged.txt', body)
+    const reduced = swap(whole, lines(30, 'd'))
+    rmSync(join(reducedDir(arc), `${reduced.id}.zst`))
+    const r = run([path, '--apply'])
+    expect(r.status).toBe(1)
+    expect(r.stdout).toMatch(/FAILED\s+damaged\.txt.*archive file missing/)
     expect(isStandIn(path)).toBe(false)
     expect(readFileSync(path, 'utf8')).toBe(body)
-    expect(statSync(path, { bigint: true }).mtimeNs).toBe(before.mtimeNs)
   })
 })

@@ -15,8 +15,8 @@ import { resolve } from 'node:path'
 import { defaultLedgerFile, refreshLedgerIfStale, standInRegistryFile } from '@/lib/ledger-export'
 import { indexLedger, readLedgerFile } from '@/lib/ledger-tools'
 import { defaultDownloadDir, hashCacheFile, registryEntryFor, restoreStandIn, sweepDownloads } from '@/lib/stand-in-sweep'
-import { defaultArchiveDir, isSwapped, readManifest, verifyEntry } from '@/lib/source-archive'
-import { standInHolder } from '@/lib/archive-swap'
+import { defaultArchiveDir, isSwapped, readManifest } from '@/lib/source-archive'
+import { standInHolder, verifyStandInHolder } from '@/lib/archive-swap'
 
 const argv = process.argv.slice(2)
 const flag = (name: string): string | undefined => { const i = argv.indexOf(`--${name}`); return i === -1 ? undefined : argv[i + 1] }
@@ -58,7 +58,7 @@ async function sweep(): Promise<number> {
   const holds = standInHolder(readManifest(ARCHIVE))
   const apply = has('apply')
   const r = await sweepDownloads({
-    dir, index: indexLedger(readLedgerFile(LEDGER)), holds, verify: e => verifyEntry(ARCHIVE, e),
+    dir, index: indexLedger(readLedgerFile(LEDGER)), holds, verify: e => verifyStandInHolder(ARCHIVE, e),
     registry: standInRegistryFile(LEDGER), hashCache: hashCacheFile(LEDGER),
     exts: (flag('ext') ?? 'txt').split(',').map(e => e.trim()).filter(Boolean),
     minSize: Number(flag('min-size') ?? 1_000_000),

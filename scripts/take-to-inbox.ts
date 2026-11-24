@@ -7,8 +7,11 @@
  *
  * Without --apply it only says what it would do. For each file it computes the sha256 and asks the ledger (the plain-text copy of ulp.sources, refreshed when older than 5 min):
  *   new                            move into the inbox, leave a stand-in
- *   ingested, bytes in the archive swap the download for a stand-in (frees the disk); nothing is moved (bytes that were swapped for a reduced entry: the file stays)
+ *   ingested, bytes in the archive swap the download for a stand-in (frees the disk); nothing is moved (bytes the archive holds only as a reduced entry too, once that
+ *                                  entry decodes: the stand-in cannot be restored from the archive, the chat service keeps the original)
  *   ingested, not archived yet     leave the file where it is
+ *   the name is in the ledger from before sizes and hashes were recorded
+ *                                  move it under a name that says "refeed": the importer blocks the plain name, and decides by content on the copy
  *   ingested by an older parser    with --refeed: move it under a name that says "refeed", so the importer takes it again
  *   the name is taken in the inbox refuse (nothing is overwritten)
  * A folder is read one level deep, for the extensions of --ext (default txt) and the files of --min-size bytes or more; a file named on the command line is always looked at.
@@ -21,8 +24,8 @@ import { defaultLedgerFile, refreshLedgerIfStale, standInRegistryFile } from '@/
 import {
   appendStandIn, indexLedger, isStandIn, moveAndLeaveStandIn, planTake, readLedgerFile, replaceWithStandIn, sha256OfFile, type TakeAction,
 } from '@/lib/ledger-tools'
-import { standInHolder } from '@/lib/archive-swap'
-import { defaultArchiveDir, readManifest } from '@/lib/source-archive'
+import { standInHolder, verifyStandInHolder } from '@/lib/archive-swap'
+import { defaultArchiveDir, isSwapped, readManifest } from '@/lib/source-archive'
 
 const argv = process.argv.slice(2)
 const flag = (name: string): string | undefined => { const i = argv.indexOf(`--${name}`); return i === -1 ? undefined : argv[i + 1] }
@@ -68,7 +71,7 @@ if (!has('no-refresh')) {
 const index = indexLedger(readLedgerFile(LEDGER))
 
 const archiveDir = flag('archive') ?? process.env.ULP_ARCHIVE_DIR ?? defaultArchiveDir()
-// Bytes that only a reduced entry stands for (stage D) give no holder: a stand-in there would replace the only local copy by zeros nothing could restore.
+// Bytes that only a reduced entry stands for (stage D) have a holder too (the swapped entry); it is verified through its reduced entry before the download is zeroed.
 const holds = standInHolder(existsSync(archiveDir) ? readManifest(archiveDir) : [])
 
 /** Names already in the inbox or one of its folders: a file moved onto one of them would replace it or be skipped by the same-name guard. */
@@ -100,6 +103,11 @@ async function main(): Promise<void> {
         inboxNames.add(action.destName)
         moved++
       } else if (action.kind === 'standin-only') {
+        const holder = holds(sha256)
+        if (holder && isSwapped(holder)) {
+          const v = verifyStandInHolder(archiveDir, holder)
+          if (!v.ok) { failed++; console.log(`FAILED   ${name}: the archive does not verify: ${v.problems.join('; ')}`); continue }
+        }
         const r = replaceWithStandIn(src)
         appendStandIn(REGISTRY, src, r.size, r.mtimeNs, sha256, new Date().toISOString())
         swapped++

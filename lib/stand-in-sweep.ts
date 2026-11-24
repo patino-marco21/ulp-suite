@@ -1,11 +1,13 @@
 /**
  * The download-folder pass (docs/superpowers/specs/2026-11-07-file-ledger-design.md, "The sweep", and 2026-11-07-download-mover-design.md). For each finished download in the
  * chat client's folder it asks the ledger what the file is, and then:
- *   - exact bytes ingested AND held by the source archive (the archive decodes back to the same sha256, the standard of `archive --replace`): the download becomes a STAND-IN,
+ *   - exact bytes ingested AND held by the source archive (the archive decodes back to the same sha256, the standard of `archive --replace`; for bytes the archive holds only
+ *     as a reduced entry, the reduced entry decodes and stands for exactly these bytes): the download becomes a STAND-IN,
  *     the same name, size and modification time with no disk, so the client keeps showing it as downloaded and the plaintext's disk comes back;
  *   - new, and an inbox is given: the file MOVES into the inbox (a rename) and a stand-in takes its place, so the importer takes the file and the client still shows it as
  *     downloaded;
- *   - anything else (ingested but not archived yet, a name the ledger knows without a hash): left alone.
+ *   - a name the ledger knows from before sizes and hashes were recorded (no size, no hash): the file moves under a "refeed" name, so the importer decides by content;
+ *   - anything else (ingested but not archived yet, a name and size the ledger knows without a hash yet): left alone.
  * A file is only looked at once it is FINISHED (lib/download-ready.ts): nobody has it open, it has been quiet for a while, and no part of it was left unwritten. A file moved
  * while the client was still writing it would keep growing in its new place and the importer would miss the lines that came after. A partial download cannot match an archived
  * sha256, so the stand-in swap needs no "finished" signal of its own; the move does. Hashes are remembered by name, size and modification time (a JSON file next to the ledger

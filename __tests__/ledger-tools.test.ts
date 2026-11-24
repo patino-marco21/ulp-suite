@@ -258,6 +258,21 @@ describe('planTake', () => {
     expect(planTake(indexLedger([row({ filename: 'dump.txt', size: 5000 })]), base)).toMatchObject({ kind: 'keep' })
   })
 
+  it('moves a name the ledger holds with no size and no hash (a row from before both were recorded) under a re-feed name: the importer blocks the plain name, and nothing says whether the bytes are known', () => {
+    const index = indexLedger([row({ filename: 'dump.txt', size: 0, revision: 50 })])
+    expect(planTake(index, base)).toMatchObject({ kind: 'move', destName: `dump (refeed v${(PARSER_REVISION / 10).toFixed(1)}).txt`, note: expect.stringContaining('importer decides') })
+  })
+
+  it('refuses that re-feed when its name is already in the inbox or one of its folders', () => {
+    const index = indexLedger([row({ filename: 'dump.txt', size: 0, revision: 50 })])
+    const dest = `dump (refeed v${(PARSER_REVISION / 10).toFixed(1)}).txt`
+    expect(planTake(index, { ...base, inboxNames: new Set([dest]) })).toMatchObject({ kind: 'refuse' })
+  })
+
+  it('a row with a size but no hash is still the same file under the same name: the archive timer fills the hash in, so it stays', () => {
+    expect(planTake(indexLedger([row({ filename: 'dump.txt', size: 5000 })]), base).kind).toBe('keep')
+  })
+
   it('moves a name only the job log knows: the importer does not block on it, so it decides', () => {
     expect(planTake(indexLedger([row({ kind: 'jobs', filename: 'dump.txt', size: 0, revision: 0 })]), base)).toMatchObject({ kind: 'move' })
   })

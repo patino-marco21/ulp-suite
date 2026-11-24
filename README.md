@@ -260,7 +260,9 @@ without raising peak memory beyond one extra batch. Two environment knobs:
   downloads into the inbox by hand and leaves a same-size, same-time stand-in (a sparse file, no disk) so the chat app keeps the message "downloaded", and
   `scripts/ledger-backfill.ts` sets the revision of the rows that existed before DDL v31. **`scripts/pull-downloads.ts` does it all by itself:** a systemd user timer
   (`scripts/systemd/ulp-pull-downloads.timer`, every minute) moves each FINISHED new download of the chat client's folder into the inbox and leaves the stand-in, and swaps a
-  download whose bytes are already ingested and archived for a stand-in. "Finished" means nobody has the file open (the client holds a download open until its last part is in;
+  download whose bytes are already ingested and archived for a stand-in, also when the archive holds those bytes only as a reduced entry (it must decode and stand for exactly
+  these bytes; such a stand-in cannot be restored, the chat service keeps the original). A name the ledger holds from before sizes and hashes were recorded (no size, no hash)
+  moves under a `(refeed v<revision>)` name instead of staying: the importer blocks the plain name, and decides by content on the copy. "Finished" means nobody has the file open (the client holds a download open until its last part is in;
   `lib/download-ready.ts`), it has not changed for `ULP_MOVER_QUIET_MIN` minutes (default 3) and no part of it is missing; a file moved earlier would keep growing in the inbox and the
   importer would miss the lines written after it read the file. It looks at `*.txt` of 1 MB or more, one level deep. Settings: `ULP_DOWNLOAD_DIR` (default
   `~/Downloads/AyuGram Desktop`), `ULP_PIPELINE_DIR` (default `~/Desktop/ulp-pipeline`: the ledger copy, the stand-in registry, the hash cache and the status pages),

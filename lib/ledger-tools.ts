@@ -254,7 +254,7 @@ export async function sha256OfFile(path: string): Promise<string> {
 
 export type TakeAction =
   | { kind: 'standin-only'; reason: string }                // already ingested and archived: swap the download for a stand-in, move nothing
-  | { kind: 'keep'; reason: string }                         // already ingested but not archived (or only by name): leave the file where it is
+  | { kind: 'keep'; reason: string }                         // already ingested but not archived (or by name and size with no hash yet): leave the file where it is
   | { kind: 'move'; destName: string; note: string }       // new: move it into the inbox under destName, leave a stand-in
   | { kind: 'refuse'; reason: string }                       // something is in the way
 
@@ -298,6 +298,16 @@ export function planTake(index: LedgerIndex, f: TakeInput): TakeAction {
     if (known.row.kind === 'jobs') {
       if (f.inboxNames.has(f.name)) return { kind: 'refuse', reason: `"${f.name}" is already in the inbox or one of its folders` }
       return { kind: 'move', destName: f.name, note: 'the job log has this name from before the ledger; its content is unknown, so the importer decides' }
+    }
+    // A row from before sizes and hashes were recorded (size 0, no hash) says only that a file of this NAME was imported. The importer's same-name guard blocks the plain name
+    // on it, so a file moved under its own name would be skipped, and nothing here can tell whether the bytes are the ones it imported. A re-feed copy gets past the guard and
+    // lets the importer decide by content: it writes only the credentials it does not hold, and the new row records the hash, so the next download of these bytes is a plain
+    // duplicate. (A row with a size and no hash is the file itself, imported moments ago, its hash not filled in yet: that one stays.)
+    if (!known.row.sha256 && known.row.size === 0) {
+      const dest = refeedName(f.name)
+      return f.inboxNames.has(dest)
+        ? { kind: 'refuse', reason: `"${dest}" is already in the inbox or one of its folders` }
+        : { kind: 'move', destName: dest, note: `the ledger has this name from ${known.row.when.slice(0, 10)} with no size and no hash, so the bytes are unknown; moved as a re-feed copy and the importer decides` }
     }
     return { kind: 'keep', reason: `the ledger has this name and size (imported ${known.row.when.slice(0, 10)}) with no hash to compare; the file stays` }
   }

@@ -8,7 +8,7 @@ import { existsSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { readReduced, reducedDir, type ReducedEntry } from '@/lib/reduced-archive'
 import { SKIP_REASON, type ShadowLine } from '@/lib/reduced-shadow'
-import { appendManifest, archiveSource, isSwapped, latestByName, readManifest, verifyEntry, type ManifestEntry, type Source } from '@/lib/source-archive'
+import { appendManifest, archiveSource, isSwapped, latestByName, readManifest, verifyEntry, type ManifestEntry, type Source, type VerifyResult } from '@/lib/source-archive'
 
 /** The owner's rule (2026-11-16): swap an entry whose reduced version is at least this many percent smaller on disk. */
 export const MIN_SAVING_PCT = 10
@@ -51,16 +51,25 @@ export function openReducedSource(ref: string, archiveDir: string): Source {
 }
 
 /**
- * The stand-in gate's `holds`: the manifest entry that holds these bytes WHOLE. Bytes that only a reduced entry stands for give nothing, so a download of them stays a file
- * (a stand-in on a reduced entry would replace the owner's only local copy by zeros that nothing can restore). With nothing swapped it is the plain map by sha256 that
- * the callers used before: the last line of a sha wins.
+ * The stand-in gate's `holds`: the manifest entry that holds these bytes, whole or swapped for a reduced entry (`isSwapped`). The last line of a sha wins, as it always did.
+ * A swapped entry counts since the owner's call of 2026-11-24: the chat service keeps the original, and a re-download of swapped bytes that stayed a file cost 28.7 GB. The
+ * stand-in that replaces such a download cannot be restored from the archive (`restoreStandIn` says where the original is), exactly like the 406 that were made before
+ * the swap; `verifyStandInHolder` is the check the gate runs first, and it reads the reduced entry for a swapped one.
  */
 export function standInHolder(manifest: ManifestEntry[]): (sha256: string) => ManifestEntry | undefined {
   const bySha = new Map(manifest.map(e => [e.sha256, e]))
-  return sha => {
-    const e = bySha.get(sha)
-    return e && !isSwapped(e) ? e : undefined
-  }
+  return sha => bySha.get(sha)
+}
+
+/**
+ * The stand-in gate's `verify` for the entry `standInHolder` gave: a whole entry decodes back to its manifest line (the standard of `archive --replace`); a swapped entry
+ * has no whole file, so its reduced entry must exist, stand for exactly these bytes (hash and size) and decode back to its own manifest line.
+ */
+export function verifyStandInHolder(archiveDir: string, e: ManifestEntry): VerifyResult {
+  if (!isSwapped(e)) return verifyEntry(archiveDir, e)
+  const reduced = reducedFor(archiveDir, e)
+  if (!reduced) return { ok: false, problems: [`${e.name} is swapped but its reduced entry (${e.reduced_id ?? 'none'}) is missing or was made from other bytes`] }
+  return verifyEntry(reducedDir(archiveDir), reduced)
 }
 
 /** A reduced entry by its id, as a Source: what an archive reference with `of` points at. */
