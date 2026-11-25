@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { dbGet, dbRun } from '@/lib/sqlite'
 import bcrypt from 'bcryptjs'
 import { validateRequest } from '@/lib/auth'
-import { passwordSchema } from '@/lib/validation'
+import { passwordProblems } from '@/lib/validation'
 
 export const dynamic = 'force-dynamic'
 
@@ -12,9 +12,9 @@ export async function POST(request: NextRequest) {
 
   const { currentPassword, newPassword } = await request.json()
 
-  const validation = passwordSchema.safeParse(newPassword)
-  if (!validation.success) {
-    return NextResponse.json({ success: false, error: validation.error.errors.map(e => e.message).join(', ') }, { status: 400 })
+  const problems = passwordProblems(newPassword)
+  if (problems.length > 0) {
+    return NextResponse.json({ success: false, error: problems.join(', ') }, { status: 400 })
   }
 
   try {
